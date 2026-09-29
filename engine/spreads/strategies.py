@@ -63,6 +63,29 @@ Book and the P&L tab put a trade in the same bucket. Every open lot of the book 
 trade's id is listed once, on the pair or residual its lots were allocated to (by trade date),
 and ``contract_trade_ids`` on a leg lists every trade of the contract.
 
+**One spread per trade name, sized by value (user, 2026-09-29).** An RV commodity spread is
+sized by VALUE, not by weight, and a trade name that holds two commodities is ONE spread across
+months (``_one_spread``, ``rule`` 'one_spread'): when a named strategy's open futures / LME legs
+(hedges apart) cover exactly two roots (or two subsectors, each held one way), each nets to
+something, the two are held opposite ways, they fit a cross type (same subsector on two
+exchanges: cross exchange; same sector or a template naming them: cross product) and a label, if
+any, agrees, side A is every leg of one and side B every leg of the other, whatever their months
+(Jason's CATTLE: FC Oct +120 / Nov -29 against LC Oct -112 / Dec -55 is FC +91 : LC -167, about
+USD 15.09m : 14.93m). Otherwise (one commodity, three or more, a commodity netting to zero such
+as SCO1's calendars, a label that does not fit) the pairing rules above run, ``rule`` 'pairs',
+and ``rule_note`` says why. A cross pair of the pairing rules is sized by value too
+(``_sizing``), unless a template sets a quantity ratio of its own (``sets_quantity_ratio``: a
+crack, an oil share), which wins; with a value not known (no USD spot of a trade date) it falls
+back to weight and says so. The value of a side at the fill is its net lots at their entries
+(``_entry_value``: day by day, a day that nets to zero on the commodity, a roll, keeps the
+entry). Every pair and one-spread carries the ratio (net lots per side, 1 : x), the value per
+side at the fill and at the mark, the balance B / A, ``balanced`` within ``VALUE_TOLERANCE``,
+each side's physical units, and the leftover (what the sides do not share: USD, and its lots
+on the heavier side's front leg, ``leftover_legs``). The level of a multi-month spread is that
+of its front pair (the largest lots on each side, named in ``level_label``); two legs quoting
+in one unit (feeder and live cattle, USD/cwt) read A - B in it; a template keeps its unit and a
+China-against-West ``ratio_screen`` template its ratio.
+
 Nothing here re-marks or changes a P&L figure: the P&L keys are the strategy spread's own
 (``value_book`` rows summed), and the split is an identity over them.
 """
@@ -82,8 +105,8 @@ from engine.pnl.valuation import usd_per_quote
 from engine.spreads.grouping import LEFTOVER_FLOOR, Leg, calendar_shape, template_shape
 from engine.spreads.hedges import FX_HEDGE_PRODUCTS, fx_non_hedge_why, is_hedge
 from engine.spreads.levels import LevelLeg, LevelSpec, converted, spec_for, spec_to_dict, usd_per_level_unit
-from engine.spreads.templates import Template, lot_in_quote_units
-from engine.spreads.trade_type import CROSS_EXCHANGE, CROSS_PRODUCT, TERM_STRUCTURE, type_fields
+from engine.spreads.templates import Template, lot_in_quote_units, quote_quantity_unit
+from engine.spreads.trade_type import CROSS_EXCHANGE, CROSS_PRODUCT, SOURCE_LABEL, TERM_STRUCTURE, type_fields
 
 PAIRABLE_PRODUCTS = ("FUTURE", "LME_FWD")
 FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")     # the FX products whose hedge row is per pair and value date
@@ -96,6 +119,15 @@ SOURCE_FALLBACK = "fallback"
 RATIO_UNIT = "ratio"
 KIND_PAIR = "pair"                                         # a level spec with no template: USD per common unit
 _EPS = 1e-9
+
+# Sizing (user, 2026-09-29): an RV commodity spread is sized by VALUE, not by weight.
+VALUE_TOLERANCE = 0.10          # two sides "balance" when their values at the fill agree within this share
+SIZING_VALUE = "value"          # USD at the fill: lots x multiplier x fill x the USD spot of the trade date
+SIZING_WEIGHT = "weight"        # physical units: a value not known (no USD spot of a trade date), said so
+SIZING_TEMPLATE = "template"    # a config/spreads/ template that sets a quantity ratio of its own (3:2:1)
+SIZING_LOTS = "lots"            # a term structure: lots of one root (an LME prompt: tonnes)
+RULE_ONE_SPREAD = "one_spread"  # a trade name over exactly two commodities: one spread across months
+RULE_PAIRS = "pairs"            # the pairing rules (one commodity, three or more, or a label that does not fit)
 
 
 def _num(x) -> Optional[float]:
@@ -133,6 +165,8 @@ class PLeg:
     trade_date: str         # the earliest
     currency: str
     trade_lots: Dict[str, float]   # each trade's signed lots (for the allocation of ids to pairs)
+    usd_per_lot: Optional[float] = None   # USD value of one open lot at its entries (``_entry_value``)
+    value_why: str = ""                   # why ``usd_per_lot`` is None
 
     def physical(self, lots: float, unit: str) -> float:
         """``lots`` in ``unit`` through the contract size and contract-master's unit table."""
@@ -193,10 +227,66 @@ def _build_legs(book, tids: Sequence[str]) -> Tuple[List[PLeg], List[str], List[
             continue
         ordered = tuple(sorted(ids, key=lambda i: (book.by_id[i]["trade_date"], i)))
         scale = 1.0 / root.contract_size if t["product"] == "LME_FWD" else 1.0
+        per_qty, _net, why = _entry_value(book, ordered)
         legs.append(PLeg(contract_id, inst, root.root_id, root, t["product"], month, prompt, lots, whole,
                          ordered, str(t["account"]), min(str(book.by_id[i]["trade_date"]) for i in ids),
-                         root.currency, {i: (book.lots(i) or 0.0) * scale for i in ordered}))
+                         root.currency, {i: (book.lots(i) or 0.0) * scale for i in ordered},
+                         None if per_qty is None else abs(per_qty) / scale, why))
     return legs, sorted(hedges), options, sorted(closed)
+
+
+# ------------------------------------------------------------------ value at the fill
+def _spot_on(book, ccy: str, day: str) -> Tuple[Optional[float], str]:
+    """(USD per unit of ``ccy`` on ``day``, why when None): the valuation's own conversion
+    (``usd_per_quote``), used here for sizing only, never for a P&L figure."""
+    if ccy == "USD":
+        return 1.0, ""
+    try:
+        s = _num(usd_per_quote(book.conn, ccy, day)[0])
+    except Exception as exc:  # noqa: BLE001 -- a stored spot that is not a number: named, not raised
+        return None, f"the {ccy} USD spot of {day} could not be read ({exc})"
+    return (s, "") if s else (None, f"no USD spot for {ccy} on {day}, the trade date")
+
+
+def _entry_value(book, tids: Sequence[str]) -> Tuple[Optional[float], float, str]:
+    """(USD per unit of ``trades.quantity`` of the open net at its entries, that net, why when None).
+
+    Each trade is worth quantity x multiplier x fill x the USD spot of its trade date. The trades
+    are taken day by day: a day that adds to the net (or opens it) averages its lots in at that
+    day's price (the day's trades in the direction of the day's net change); a day that takes lots
+    off leaves the average; a day that nets to zero (a roll from one month into another) changes
+    nothing; a day that crosses zero opens the excess at its price. So a spread rolled a month
+    nearer keeps the value it was put on at (Jason's CATTLE, 2026-09-29)."""
+    by_day: Dict[str, List[Tuple[float, float]]] = defaultdict(list)
+    for tid in tids:
+        t = book.by_id[tid]
+        q, f, m = book.lots(tid), _num(t["price"]), _num(t["multiplier"])
+        if q is None or f is None or m is None:
+            return None, 0.0, f"{tid}: its quantity, fill or multiplier is not a number, so its value at the fill is not known"
+        if abs(q) < _EPS:
+            continue
+        s, why = _spot_on(book, str(t["quote_ccy"] or "USD"), str(t["trade_date"]))
+        if s is None:
+            return None, 0.0, f"{tid}: {why}, so its value at the fill is not known"
+        by_day[str(t["trade_date"])].append((q, q * m * f * s))
+    net = avg = 0.0
+    for day in sorted(by_day):
+        d = sum(q for q, _v in by_day[day])
+        if abs(d) < _EPS:
+            continue
+        adds = [(q, v) for q, v in by_day[day] if _sign(q) == _sign(d)]
+        px = sum(v for _q, v in adds) / sum(q for q, _v in adds)
+        if abs(net) < _EPS or _sign(d) == _sign(net):
+            avg, net = (net * avg + d * px) / (net + d), net + d
+        elif abs(d) <= abs(net) + _EPS:
+            net += d
+            if abs(net) < _EPS:
+                net = avg = 0.0
+        else:
+            net, avg = net + d, px
+    if abs(net) < _EPS:
+        return None, 0.0, "its trades net to zero, so it has no open value at the fill"
+    return avg, net, ""
 
 
 # ------------------------------------------------------------------ the pairing rules
@@ -230,10 +320,16 @@ def _templates_for(book, a: PLeg, b: PLeg) -> List[Template]:
     return sorted(out, key=lambda t: t.order)
 
 
-def _common(book, a: PLeg, b: PLeg) -> Tuple[Optional[str], float, float, Optional[Template], List[Template], str]:
+def _same_quote_unit(a: PLeg, b: PLeg) -> bool:
+    """Both roots quote their price in the same unit and currency (feeder and live cattle, USD/cwt)."""
+    return a.root.quote_unit.strip().lower() == b.root.quote_unit.strip().lower()
+
+
+def _level_basis(book, a: PLeg, b: PLeg) -> Tuple[Optional[str], float, float, Optional[Template], List[Template], str]:
     """(unit, units per lot of a, of b, the template used, other templates, why when None): the
-    quantity both legs are sized in. A term structure counts lots; a cross pair a template's
-    quantity unit, else the first common physical unit of contract-master's unit table."""
+    physical quantity the pair's level and weight are read in. A term structure counts lots; a
+    cross pair a template's quantity unit, else the roots' shared quote quantity (cwt for two
+    cattle contracts), else the first common physical unit of contract-master's unit table."""
     if a.root_id == b.root_id:
         if a.whole_lots:
             return "lots", 1.0, 1.0, None, [], ""
@@ -243,6 +339,11 @@ def _common(book, a: PLeg, b: PLeg) -> Tuple[Optional[str], float, float, Option
         t = templates[0]
         upl = {leg.root_id: float(leg.units_per_lot) for leg in t.legs}
         return t.quantity_unit, upl[a.root_id], upl[b.root_id], t, templates[1:], ""
+    if _same_quote_unit(a, b):
+        try:
+            return quote_quantity_unit(a.root), lot_in_quote_units(a.root), lot_in_quote_units(b.root), None, [], ""
+        except ValueError:
+            pass
     for unit in COMMON_UNITS:
         try:
             return unit, a.physical(1.0, unit), b.physical(1.0, unit), None, [], ""
@@ -250,6 +351,28 @@ def _common(book, a: PLeg, b: PLeg) -> Tuple[Optional[str], float, float, Option
             continue
     return None, 0.0, 0.0, None, [], (f"{a.root_id} ({a.size_unit}) and {b.root_id} ({b.size_unit}) share no unit in "
                                       f"contract-master's table and no config/spreads/ template sizes them")
+
+
+def _sizing(a: PLeg, b: PLeg, template: Optional[Template], level_unit: Optional[str], lupl_a: float,
+            lupl_b: float, level_why: str) -> Tuple[str, Optional[str], float, float, str]:
+    """(sizing, unit, units per lot of a, of b, note): what the pair is sized in (user,
+    2026-09-29: an RV spread is sized by value, not by weight). A term structure counts lots of
+    its one root; a template that sets a quantity ratio of its own (``sets_quantity_ratio``) sizes
+    its legs itself; any other cross pair is sized by USD value at the fill (each leg's
+    ``usd_per_lot``); with that value not known it falls back to weight and says why. ``unit``
+    None: the pair cannot be sized, the note says why."""
+    if a.root_id == b.root_id:
+        return SIZING_LOTS, level_unit, lupl_a, lupl_b, ""
+    if template is not None and template.sets_quantity_ratio:
+        return (SIZING_TEMPLATE, level_unit, lupl_a, lupl_b,
+                f"sized by template {template.template_id}'s own quantities (it sets a ratio of its own)")
+    if a.usd_per_lot and b.usd_per_lot:
+        return SIZING_VALUE, "USD", a.usd_per_lot, b.usd_per_lot, ""
+    why = "; ".join(w for w in (a.value_why, b.value_why) if w) or "the value at the fill is not known"
+    if level_unit is None:
+        return SIZING_WEIGHT, None, 0.0, 0.0, f"{why}, and by weight: {level_why}"
+    return (SIZING_WEIGHT, level_unit, lupl_a, lupl_b,
+            f"sized by weight ({level_unit}) until its value at the fill is known ({why})")
 
 
 def _whole(x: float, leg: PLeg, cap: float) -> float:
@@ -284,7 +407,10 @@ def _order(rule: str, a: PLeg, b: PLeg, template: Optional[Template]) -> Tuple[P
 def _pair_all(book, legs: List[PLeg], labelled: str, need_template: bool = False
               ) -> Tuple[List[dict], Dict[str, float], List[str]]:
     """The greedy pairing: ``(raw pairs, remaining lots per contract, notes)``. A raw pair is
-    ``{rule, source, a, b, lots_a, lots_b, unit, upl_a, upl_b, template, also, note}``."""
+    ``{rule, source, a, b, lots_a, lots_b, unit, upl_a, upl_b, sizing, template, also, level_unit,
+    lupl_a, lupl_b, level_why, note}``: ``unit`` / ``upl_*`` what the pair is sized in (``_sizing``:
+    USD at the fill for a cross pair), ``level_unit`` / ``lupl_*`` the physical quantity its level
+    and weight are read in (``_level_basis``)."""
     rem = {leg.contract_id: leg.lots for leg in legs}
     rules = ([labelled] if labelled in RULES else []) + [r for r in RULES if r != labelled]
     pairs: List[dict] = []
@@ -302,12 +428,13 @@ def _pair_all(book, legs: List[PLeg], labelled: str, need_template: bool = False
             if not live:
                 break
             a, b = live[0]
-            unit, upl_a, upl_b, template, also, why = _common(book, a, b)
+            level_unit, lupl_a, lupl_b, template, also, level_why = _level_basis(book, a, b)
+            sizing, unit, upl_a, upl_b, sizing_note = _sizing(a, b, template, level_unit, lupl_a, lupl_b, level_why)
             if unit is None:
-                notes.append(f"{a.contract_id} and {b.contract_id} cannot be paired: {why}")
+                notes.append(f"{a.contract_id} and {b.contract_id} cannot be paired: {sizing_note}")
                 dead.add((a.contract_id, b.contract_id))
                 continue
-            note_parts = []
+            note_parts = [sizing_note] if sizing_note else []
             if rule != labelled:
                 note_parts.append(f"paired as {rule.lower().replace('_', ' ')}, which is not the strategy's "
                                   f"{'type ' + labelled.lower().replace('_', ' ') if labelled else 'type (none read)'}"
@@ -322,10 +449,11 @@ def _pair_all(book, legs: List[PLeg], labelled: str, need_template: bool = False
             rem[b.contract_id] -= lb
             first, second = _order(rule, a, b, template)
             if first is b:
-                la, lb, upl_a, upl_b = lb, la, upl_b, upl_a
+                la, lb, upl_a, upl_b, lupl_a, lupl_b = lb, la, upl_b, upl_a, lupl_b, lupl_a
             pairs.append({"rule": rule, "source": "label" if rule == labelled else SOURCE_FALLBACK,
                           "a": first, "b": second, "lots_a": la, "lots_b": lb, "unit": unit,
-                          "upl_a": upl_a, "upl_b": upl_b, "template": template, "also": also,
+                          "upl_a": upl_a, "upl_b": upl_b, "sizing": sizing, "template": template, "also": also,
+                          "level_unit": level_unit, "lupl_a": lupl_a, "lupl_b": lupl_b, "level_why": level_why,
                           "note": "; ".join(note_parts)})
     for k, v in rem.items():
         if abs(v) < LEFTOVER_FLOOR:
@@ -355,13 +483,24 @@ def _spec(book, p: dict) -> Tuple[Optional[LevelSpec], str]:
         return spec_for(shape, [leg_a, leg_b], book.roots, book.templates)
     if p["template"] is not None:
         return spec_for(template_shape(p["template"]), [leg_a, leg_b], book.roots, book.templates)
+    if p.get("level_unit") is None:
+        return None, p.get("level_why") or "the legs share no unit, so the pair has no level"
     legs = []
-    for pleg, w, upl in ((a, 1.0, p["upl_a"]), (b, -1.0, p["upl_b"])):
+    if _same_quote_unit(a, b):
+        # both legs quote in one unit (feeder and live cattle, USD/cwt): the level is A - B in it,
+        # after each root's price_scale, no conversion (user, 2026-09-29)
+        for pleg, w in ((a, 1.0), (b, -1.0)):
+            lot_units = lot_in_quote_units(pleg.root)
+            legs.append(LevelLeg(pleg.instrument_id, pleg.root_id, w, pleg.currency, float(pleg.root.price_scale),
+                                 1.0, None, lot_units, pleg.trade_ids, pleg.month))
+        return LevelSpec(KIND_PAIR, a.root.quote_unit, a.currency, 0.0, tuple(legs), (1.0, -1.0),
+                         (p["lupl_a"], p["lupl_b"])), ""
+    for pleg, w, upl in ((a, 1.0, p["lupl_a"]), (b, -1.0, p["lupl_b"])):
         lot_units = lot_in_quote_units(pleg.root)
         legs.append(LevelLeg(pleg.instrument_id, pleg.root_id, w, pleg.currency, float(pleg.root.price_scale),
                              lot_units / upl, None, lot_units, pleg.trade_ids, pleg.month))
-    return LevelSpec(KIND_PAIR, f"USD/{p['unit']}", "USD", 0.0, tuple(legs), (1.0, -1.0),
-                     (p["upl_a"], p["upl_b"])), ""
+    return LevelSpec(KIND_PAIR, f"USD/{p['level_unit']}", "USD", 0.0, tuple(legs), (1.0, -1.0),
+                     (p["lupl_a"], p["lupl_b"])), ""
 
 
 def _leg_prices(book, spec: LevelSpec, day: str, rows: Dict[str, dict], fallback: bool
@@ -487,7 +626,7 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
                                                                   spec.legs, spec.weights, spec.units_per_lot))
             cn_lots = p["lots_a"] if cn == 0 else p["lots_b"]
             out["usd_per_unit"] = _sign(cn_lots) * size * p_for * s_cn
-            out["level_sources"]["usd_per_unit"] = (f"paired {size:g} {p['unit']} x the foreign price {p_for:.6g} "
+            out["level_sources"]["usd_per_unit"] = (f"paired {size:g} {p['level_unit']} x the foreign price {p_for:.6g} "
                                                     f"x {cn_leg.currency} spot {s_cn:.6g}")
         return out
     out.update(unit=spec.unit, level_entry=diff["entry"], level_prev=diff["prev"], level_now=diff["now"],
@@ -499,7 +638,7 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
         out["usd_per_unit_reason"] = s_why
     else:
         out["usd_per_unit"] = usd_per_level_unit(direction * size, spec, s_unit)
-        out["level_sources"]["usd_per_unit"] = (f"paired size {size:g} {p['unit']}"
+        out["level_sources"]["usd_per_unit"] = (f"paired size {size:g} {p['level_unit']}"
                                                 + ("" if spec.currency == "USD" else
                                                    f", {spec.currency} at the {book.as_of} USD spot {s_unit:.6g}"))
     if spec.is_calendar:
@@ -513,6 +652,9 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
                                                   if ratio[k + "_reason"]))
         else:
             out["level_alt_reason"] = "neither leg is on a Chinese exchange, so there is no China-over-foreign ratio"
+    elif _same_quote_unit(a, b):
+        out["level_alt_reason"] = (f"both legs quote in {a.root.quote_unit} and no config/spreads/ template matches "
+                                   f"them: the level is their difference in that unit")
     else:
         out["level_alt_reason"] = "no config/spreads/ template matches these two roots: only USD per unit"
     return out
@@ -558,49 +700,308 @@ def _next_event(book, a: PLeg, b: PLeg) -> dict:
 
 
 # ------------------------------------------------------------------ output rows
-def _leg_row(book, leg: PLeg, lots: float, unit: str, upl: float, trade_ids: Sequence[str], weight: float) -> dict:
+@dataclass
+class _SideLeg:
+    """One contract's lots in a position's side, with what the side's figures read of it."""
+
+    leg: PLeg
+    lots: float                      # the lots the position holds of the contract
+    trade_ids: List[str]             # the trade ids listed on it (a trade is listed once per strategy)
+    usd_per_lot: Optional[float]     # USD value of one lot at its entries (None: ``value_why``)
+    value_why: str
+    weight_per_lot: Optional[float]  # one lot in the position's weight unit
+
+
+def _qty(leg: PLeg, lots: float) -> float:
+    """``lots`` in ``trades.quantity`` units (an LME ticket: tonnes)."""
+    return lots if leg.whole_lots else lots * leg.root.contract_size
+
+
+def _front(sls: Sequence[_SideLeg]) -> _SideLeg:
+    """The side's front leg: the contract with the largest |lots|, the earlier month on a tie."""
+    return sorted(sls, key=lambda sl: (-abs(sl.lots), sl.leg.month, sl.leg.contract_id))[0]
+
+
+def _total(values: Sequence[Optional[float]]) -> Optional[float]:
+    return None if any(v is None for v in values) else float(sum(values))
+
+
+def _agree(x: float, y: float) -> bool:
+    """Two opposite sides balance when what they do not share is within ``VALUE_TOLERANCE`` of the larger."""
+    return abs(x + y) <= VALUE_TOLERANCE * max(abs(x), abs(y))
+
+
+def _balance(x: Optional[float], y: Optional[float]) -> Optional[float]:
+    return None if x is None or y is None or abs(x) < _EPS else abs(y) / abs(x)
+
+
+def _leg_row(book, sl: _SideLeg, side: str, weight: float, unit: str, upl: Optional[float],
+             weight_unit: str) -> dict:
+    leg, lots = sl.leg, sl.lots
+    mark, mark_why = book.notional(leg.as_leg(lots, leg.trade_ids), _qty(leg, lots))
     return {
         "contract_id": leg.contract_id, "instrument_id": leg.instrument_id, "root_id": leg.root_id,
         "product": leg.product, "contract_month": leg.month, "prompt": leg.prompt, "lots": lots,
-        "whole_lots": leg.whole_lots, "units": lots * upl, "unit": unit, "weight": weight,
-        "currency": leg.currency, "trade_ids": list(trade_ids), "contract_trade_ids": list(leg.trade_ids),
+        "whole_lots": leg.whole_lots, "units": None if upl is None else lots * upl, "unit": unit, "weight": weight,
+        "side": side, "currency": leg.currency, "trade_ids": list(sl.trade_ids),
+        "contract_trade_ids": list(leg.trade_ids),
+        "usd_per_lot_fill": sl.usd_per_lot,
+        "value_fill_usd": None if sl.usd_per_lot is None else lots * sl.usd_per_lot,
+        "value_fill_reason": "" if sl.usd_per_lot is not None else (sl.value_why or "its value at the fill is not known"),
+        "value_mark_usd": mark, "value_mark_reason": mark_why,
+        "physical": None if sl.weight_per_lot is None else lots * sl.weight_per_lot, "physical_unit": weight_unit,
     }
+
+
+def _side_row(key: str, rows: List[dict], sls: Sequence[_SideLeg]) -> dict:
+    roots = sorted({sl.leg.root_id for sl in sls})
+    front = _front(sls)
+
+    def why(k: str) -> str:
+        return "; ".join(dict.fromkeys(r[k + "_reason"] for r in rows if r[k + "_usd"] is None and r[k + "_reason"]))
+    return {
+        "key": key, "root_ids": roots,
+        "net_lots": float(sum(sl.lots for sl in sls)) if len(roots) == 1 else None,
+        "contracts": [{"contract_id": r["contract_id"], "contract_month": r["contract_month"], "lots": r["lots"]}
+                      for r in rows],
+        "front_contract_id": front.leg.contract_id,
+        "value_fill_usd": _total([r["value_fill_usd"] for r in rows]), "value_fill_reason": why("value_fill"),
+        "value_mark_usd": _total([r["value_mark_usd"] for r in rows]), "value_mark_reason": why("value_mark"),
+        "physical": _total([r["physical"] for r in rows]), "physical_unit": rows[0]["physical_unit"] if rows else "",
+        "units": _total([r["units"] for r in rows]),
+    }
+
+
+def _position_row(book, name: str, n: int, pair_id: str, rule_kind: str, p: dict, sides: List[List[_SideLeg]],
+                  upl_of: Dict[str, Optional[float]], weight_unit: str, prev_day: str,
+                  prev_rows: Dict[str, dict]) -> dict:
+    """A pair or a one-spread position: its legs by side, sizes, the ratio, value and balance, the
+    leftover, the notional, the level (of ``p['a']`` against ``p['b']``) and the next event."""
+    a, b = p["a"], p["b"]
+    unit = str(p.get("unit") or "")
+    leg_rows: List[dict] = []
+    side_rows: List[dict] = []
+    for key, side, w, sls in ((p["side_keys"][0], "A", 1.0, sides[0]), (p["side_keys"][1], "B", -1.0, sides[1])):
+        rows = [_leg_row(book, sl, side, w, unit, upl_of.get(sl.leg.contract_id), weight_unit) for sl in sls]
+        leg_rows += rows
+        side_rows.append(_side_row(key, rows, sls))
+    su = [s["units"] for s in side_rows]
+    residual = _total(su)
+    out = {
+        "pair_id": pair_id, "strategy": name, "n": n, "rule": rule_kind,
+        "type": p["rule"], "type_source": p["source"], "note": p["note"],
+        "template": p["template"].template_id if p["template"] else "",
+        "template_name": p["template"].name if p["template"] else "",
+        "also_matches": [t.template_id for t in p["also"]],
+        "sizing": p["sizing"], "legs": leg_rows,
+        "trade_ids": sorted({t for r in leg_rows for t in r["trade_ids"]}),
+        "size": None if residual is None else min(abs(su[0]), abs(su[1])), "size_unit": unit,
+        "direction": "long" if (su[0] if su[0] is not None else p["lots_a"]) > 0 else "short",
+        "residual_units": residual, "residual_unit": unit,
+        "sides": side_rows,
+    }
+    # the ratio: net lots per side, normalised to side A
+    la, lb = side_rows[0]["net_lots"], side_rows[1]["net_lots"]
+    ratio = abs(lb / la) if la is not None and lb is not None and abs(la) > _EPS else None
+    out.update(lots_a=la, lots_b=lb, lots_ratio=ratio,
+               ratio_text=(f"{la:+g} : {lb:+g} (1 : {ratio:.2f})" if ratio is not None else ""))
+    # value per side at the fill and at the mark, and the balance B / A
+    va, vb = side_rows[0]["value_fill_usd"], side_rows[1]["value_fill_usd"]
+    ma, mb = side_rows[0]["value_mark_usd"], side_rows[1]["value_mark_usd"]
+    wa, wb = side_rows[0]["physical"], side_rows[1]["physical"]
+    out.update(value_a_usd=va, value_b_usd=vb, value_balance=_balance(va, vb),
+               value_reason="; ".join(s["value_fill_reason"] for s in side_rows if s["value_fill_reason"]),
+               value_mark_a_usd=ma, value_mark_b_usd=mb, value_balance_mark=_balance(ma, mb),
+               value_mark_reason="; ".join(s["value_mark_reason"] for s in side_rows if s["value_mark_reason"]),
+               physical_a=wa, physical_b=wb, physical_unit=weight_unit, weight_balance=_balance(wa, wb),
+               balance_tolerance=VALUE_TOLERANCE)
+    if p["sizing"] == SIZING_LOTS and residual is not None:
+        basis, x, y = SIZING_LOTS, su[0], su[1]
+    elif va is not None and vb is not None:
+        basis, x, y = SIZING_VALUE, va, vb
+    elif wa is not None and wb is not None:
+        basis, x, y = SIZING_WEIGHT, wa, wb
+    else:
+        basis, x, y = "", None, None
+    out.update(balanced=None if x is None else _agree(x, y), balance_basis=basis)
+    # the leftover: what the two sides do not share, put on the heavier side's front leg
+    out.update(leftover_usd=(va + vb) if va is not None and vb is not None else None, leftover_units=residual,
+               leftover_lots=None, leftover_contract_id="", leftover_legs=[], leftover_reason="")
+    if residual is None:
+        out["leftover_reason"] = (f"the sides' sizes in {unit or 'a common unit'} are not known"
+                                  + (f" ({out['value_reason']})" if out["value_reason"] else ""))
+    elif abs(residual) <= _EPS:
+        out["leftover_lots"] = 0.0
+    else:
+        heavy = _front(sides[0] if abs(su[0]) >= abs(su[1]) else sides[1])
+        per = upl_of.get(heavy.leg.contract_id)
+        if not per:
+            out["leftover_reason"] = f"{heavy.leg.contract_id}: its size per lot in {unit} is not known"
+        else:
+            lots = residual / per
+            out.update(leftover_lots=lots, leftover_contract_id=heavy.leg.contract_id,
+                       leftover_legs=[{"root_id": heavy.leg.root_id, "contract_id": heavy.leg.contract_id,
+                                       "instrument_id": heavy.leg.instrument_id, "product": heavy.leg.product,
+                                       "contract_month": heavy.leg.month, "prompt": heavy.leg.prompt,
+                                       "lots": lots}])
+    # the notional at the mark: every leg's lots x mark x spot
+    marks = [r["value_mark_usd"] for r in leg_rows]
+    if any(m is None for m in marks):
+        out.update(gross_usd=None, net_usd=None, residual_usd=None, notional_reason=out["value_mark_reason"])
+    else:
+        net = float(sum(marks))
+        out.update(gross_usd=float(sum(abs(m) for m in marks)), net_usd=net, residual_usd=net, notional_reason="")
+    out.update(_levels(book, p, prev_day, prev_rows))
+    if out["unit"] == RATIO_UNIT:
+        cn, fo = (a, b) if a.root.country == CHINA else (b, a)
+        label = f"{cn.contract_id} / {fo.contract_id}"
+    else:
+        label = f"{a.contract_id} - {b.contract_id}"
+    if rule_kind == RULE_ONE_SPREAD:
+        label += " (the front months: the largest lots on each side)"
+    out.update(level_label=label, level_contracts=[a.contract_id, b.contract_id])
+    out.update(_next_event(book, a, b))
+    if rule_kind == RULE_ONE_SPREAD:
+        events = [_event_of(book, sl.leg) for s in sides for sl in s]
+        dated = sorted((e for e in events if e and e.get("date")), key=lambda e: str(e["date"]))
+        out["leg_events"] = events
+        if dated:
+            out["next_event"] = dated[0]
+    return out
 
 
 def _pair_row(book, name: str, n: int, p: dict, alloc: Dict[str, Dict[str, List[str]]], prev_day: str,
               prev_rows: Dict[str, dict]) -> dict:
     a, b = p["a"], p["b"]
     ids_a, ids_b = alloc[a.contract_id].get(f"pair{n}", []), alloc[b.contract_id].get(f"pair{n}", [])
-    out = {
-        "pair_id": f"{name}|{a.contract_id}|{b.contract_id}", "strategy": name, "n": n,
-        "type": p["rule"], "type_source": p["source"], "note": p["note"],
-        "template": p["template"].template_id if p["template"] else "",
-        "template_name": p["template"].name if p["template"] else "",
-        "also_matches": [t.template_id for t in p["also"]],
-        "legs": [_leg_row(book, a, p["lots_a"], p["unit"], p["upl_a"], ids_a, 1.0),
-                 _leg_row(book, b, p["lots_b"], p["unit"], p["upl_b"], ids_b, -1.0)],
-        "trade_ids": sorted(ids_a + ids_b),
-        "size": min(abs(p["lots_a"]) * p["upl_a"], abs(p["lots_b"]) * p["upl_b"]), "size_unit": p["unit"],
-        "direction": "long" if p["lots_a"] > 0 else "short",
-        "residual_units": p["lots_a"] * p["upl_a"] + p["lots_b"] * p["upl_b"], "residual_unit": p["unit"],
-    }
-    gross = net = 0.0
-    whys = []
-    for leg, lots in ((a, p["lots_a"]), (b, p["lots_b"])):
-        figure, why = book.notional(leg.as_leg(lots, leg.trade_ids), lots if leg.whole_lots
-                                    else lots * leg.root.contract_size)
-        if figure is None:
-            whys.append(why)
-        else:
-            gross += abs(figure)
-            net += figure
-    if whys:
-        out.update(gross_usd=None, net_usd=None, residual_usd=None, notional_reason="; ".join(whys))
+    if p["rule"] == TERM_STRUCTURE:
+        weight_unit, wa, wb = a.size_unit, a.physical(1.0, a.size_unit), b.physical(1.0, b.size_unit)
     else:
-        out.update(gross_usd=gross, net_usd=net, residual_usd=net, notional_reason="")
-    out.update(_levels(book, p, prev_day, prev_rows))
-    out.update(_next_event(book, a, b))
-    return out
+        weight_unit = p["level_unit"] or ""
+        wa, wb = (p["lupl_a"], p["lupl_b"]) if p["level_unit"] else (None, None)
+    sides = [[_SideLeg(a, p["lots_a"], list(ids_a), a.usd_per_lot, a.value_why, wa)],
+             [_SideLeg(b, p["lots_b"], list(ids_b), b.usd_per_lot, b.value_why, wb)]]
+    p = {**p, "side_keys": (a.contract_id, b.contract_id)}
+    return _position_row(book, name, n, f"{name}|{a.contract_id}|{b.contract_id}", RULE_PAIRS, p, sides,
+                         {a.contract_id: p["upl_a"], b.contract_id: p["upl_b"]}, weight_unit, prev_day, prev_rows)
+
+
+# ------------------------------------------------------------------ one spread per trade name
+def _words(code: str) -> str:
+    return code.lower().replace("_", " ") if code else "no type"
+
+
+def _root_value(book, tids: Sequence[str], root: ContractRoot) -> Tuple[Optional[float], str]:
+    """(USD value of one lot of ``root`` at its entries over the strategy's open trades on it,
+    flat months included so a roll keeps the entry, why when None)."""
+    ids = [t for t in tids if book.is_open(t) and book.by_id[t]["product"] in PAIRABLE_PRODUCTS
+           and str(book.by_id[t]["base_ccy"] or "") == root.root_id and book.lots(t) is not None]
+    per_qty, _net, why = _entry_value(book, sorted(ids, key=lambda i: (str(book.by_id[i]["trade_date"]), i)))
+    if per_qty is None:
+        return None, f"{root.root_id}: {why}"
+    lme = any(book.by_id[t]["product"] == "LME_FWD" for t in ids)
+    return abs(per_qty) * (root.contract_size if lme else 1.0), ""
+
+
+def _one_spread(book, name: str, legs: List[PLeg], tids: Sequence[str], stype: str, tsource: str
+                ) -> Tuple[Optional[dict], str]:
+    """(the strategy as ONE spread across months, or None with why not). User, 2026-09-29: a trade
+    name whose open futures / LME legs (hedges apart) cover exactly two commodities (two roots, or
+    two subsectors each held one way) is one spread: side A every leg of one, side B every leg of
+    the other, whatever their months. Not for the unlabelled trades, one commodity, three or
+    more, a commodity that nets to zero (its months are calendars: Jason's SCO1), two commodities
+    held the same way, two sectors no template joins, or a label the two commodities do not fit."""
+    if not name or not legs:
+        return None, ""
+    roots = sorted({leg.root_id for leg in legs})
+    if len(roots) < 2:
+        return None, ""
+    if len(roots) == 2:
+        groups = {r: [leg for leg in legs if leg.root_id == r] for r in roots}
+    else:
+        subs = sorted({leg.root.subsector for leg in legs})
+        if len(subs) != 2:
+            return None, f"its legs cover {len(roots)} commodities, not two, so they are paired by the pair rules"
+        groups = {s: [leg for leg in legs if leg.root.subsector == s] for s in subs}
+        for key, gl in groups.items():
+            nets = [sum(leg.lots for leg in gl if leg.root_id == r) for r in sorted({leg.root_id for leg in gl})]
+            if any(abs(x) < _EPS for x in nets) or len({_sign(x) for x in nets}) != 1:
+                return None, (f"its {key} roots are not all held the same way, so the two subsectors are not two "
+                              f"sides: paired by the pair rules")
+    keys = list(groups)
+    nets = {k: sum(leg.lots for leg in groups[k]) for k in keys}
+    flat = [k for k in keys if abs(nets[k]) < _EPS]
+    if flat:
+        return None, (f"{' and '.join(flat)} net{'s' if len(flat) == 1 else ''} to zero lots: its months are "
+                      f"calendars, not a side of one spread, so the legs are paired by the pair rules")
+    if _sign(nets[keys[0]]) == _sign(nets[keys[1]]):
+        return None, (f"{keys[0]} and {keys[1]} are both held {'long' if nets[keys[0]] > 0 else 'short'}, so they "
+                      f"are not one spread: paired by the pair rules")
+    fronts = {k: _front([_SideLeg(leg, leg.lots, [], None, "", None) for leg in groups[k]]).leg for k in keys}
+    fa, fb = fronts[keys[0]], fronts[keys[1]]
+    if fa.root.subsector == fb.root.subsector and fa.root.exchange != fb.root.exchange:
+        pair_type = CROSS_EXCHANGE
+    elif fa.root.sector == fb.root.sector or _templates_for(book, fa, fb):
+        pair_type = CROSS_PRODUCT
+    else:
+        return None, (f"{fa.root_id} and {fb.root_id} are in different sectors and no config/spreads/ template "
+                      f"names them: paired by the pair rules")
+    if tsource == SOURCE_LABEL and stype and stype != pair_type:
+        return None, (f"labelled {_words(stype)}, and its two commodities make a {_words(pair_type)}: the "
+                      f"labelled pair rule applies")
+    # side order: a template's own, else China first, else the long side first
+    templates = _templates_for(book, fa, fb) if len(roots) == 2 else []
+    if templates:
+        first = keys[0] if templates[0].legs[0].root_id == fa.root_id else keys[1]
+    elif (fa.root.country == CHINA) != (fb.root.country == CHINA):
+        first = keys[0] if fa.root.country == CHINA else keys[1]
+    else:
+        first = keys[0] if nets[keys[0]] > 0 else keys[1]
+    ka, kb = (first, keys[1] if first == keys[0] else keys[0])
+    fa, fb = fronts[ka], fronts[kb]
+    level_unit, lupl_a, lupl_b, template, also, level_why = _level_basis(book, fa, fb)
+
+    def wpl(leg: PLeg) -> Optional[float]:
+        for front, upl in ((fa, lupl_a), (fb, lupl_b)):
+            if leg.root_id == front.root_id:
+                return upl if level_unit else None
+        try:
+            return leg.physical(1.0, level_unit) if level_unit else None
+        except ValueError:
+            return None
+
+    values = {r: _root_value(book, tids, book.roots[r]) for r in roots}
+    value_whys = [why for _v, why in values.values() if why]
+    if template is not None and template.sets_quantity_ratio:
+        sizing, unit = SIZING_TEMPLATE, level_unit
+        upl_of = {leg.contract_id: wpl(leg) for leg in legs}
+        sizing_note = f"sized by template {template.template_id}'s own quantities (it sets a ratio of its own)"
+    elif not value_whys:
+        sizing, unit = SIZING_VALUE, "USD"
+        upl_of = {leg.contract_id: values[leg.root_id][0] for leg in legs}
+        sizing_note = "sized by value at the fill (user, 2026-09-29)"
+    else:
+        sizing, unit = SIZING_WEIGHT, level_unit
+        upl_of = {leg.contract_id: wpl(leg) for leg in legs}
+        sizing_note = (f"sized by weight ({level_unit}) until its value at the fill is known ({'; '.join(value_whys)})"
+                       if level_unit else f"not sized: its value at the fill is not known ({'; '.join(value_whys)}) "
+                                          f"and {level_why}")
+
+    def side(k: str) -> List[_SideLeg]:
+        return [_SideLeg(leg, leg.lots, list(leg.trade_ids), values[leg.root_id][0], values[leg.root_id][1], wpl(leg))
+                for leg in sorted(groups[k], key=lambda x: (x.root_id, x.month, x.contract_id))]
+    single = len(roots) == 2
+    note = (f"one spread across months (user, 2026-09-29): {name} holds two commodities, {ka} and {kb}; every open "
+            f"leg of each is a leg of this spread, whatever its month; {sizing_note}; its level is the front months "
+            f"{fa.contract_id} against {fb.contract_id}, the largest lots on each side")
+    if pair_type != stype:
+        note += f"; the strategy's type is {_words(stype)}, its two commodities make a {_words(pair_type)}"
+    p = {"rule": pair_type, "source": "label" if pair_type == stype else SOURCE_FALLBACK, "note": note,
+         "a": fa, "b": fb, "lots_a": nets[ka] if single else fa.lots, "lots_b": nets[kb] if single else fb.lots,
+         "unit": unit or "", "sizing": sizing, "template": template, "also": also, "level_unit": level_unit,
+         "lupl_a": lupl_a, "lupl_b": lupl_b, "level_why": level_why, "side_keys": (ka, kb)}
+    return {"p": p, "sides": [side(ka), side(kb)], "upl_of": upl_of, "weight_unit": level_unit or "",
+            "pair_id": f"{name}|{ka}|{kb}"}, ""
 
 
 def _residual_row(book, leg: PLeg, lots: float, trade_ids: Sequence[str]) -> dict:
@@ -840,12 +1241,20 @@ def strategy_entry(book, name: str, tids: Sequence[str], spread: Optional[dict])
         spread.update(book.gross_net(tids))
     legs, hedge_ids, options, closed = _build_legs(book, tids)
     labelled = str(spread.get("trade_type") or "")
-    pairs_raw, rem, notes = _pair_all(book, legs, labelled, need_template=(name == ""))
-    alloc = _allocate(legs, pairs_raw, rem)
     prev_day, prev_rows = _prev_rows(book, sid)
-    pairs = [_pair_row(book, name, n, p, alloc, prev_day, prev_rows) for n, p in enumerate(pairs_raw)]
-    residuals = [_residual_row(book, leg, rem[leg.contract_id], alloc[leg.contract_id].get("residual", []))
-                 for leg in legs if abs(rem[leg.contract_id]) > _EPS]
+    one, rule_note = _one_spread(book, name, legs, tids, labelled, str(spread.get("type_source") or ""))
+    if one is not None:
+        rule, notes = RULE_ONE_SPREAD, []
+        pairs = [_position_row(book, name, 0, one["pair_id"], RULE_ONE_SPREAD, one["p"], one["sides"],
+                               one["upl_of"], one["weight_unit"], prev_day, prev_rows)]
+        residuals = []
+    else:
+        rule = RULE_PAIRS
+        pairs_raw, rem, notes = _pair_all(book, legs, labelled, need_template=(name == ""))
+        alloc = _allocate(legs, pairs_raw, rem)
+        pairs = [_pair_row(book, name, n, p, alloc, prev_day, prev_rows) for n, p in enumerate(pairs_raw)]
+        residuals = [_residual_row(book, leg, rem[leg.contract_id], alloc[leg.contract_id].get("residual", []))
+                     for leg in legs if abs(rem[leg.contract_id]) > _EPS]
     residuals += options
     hedges = _hedge_rows(book, hedge_ids)
     split = _split(book, sid, tids, spread)
@@ -853,6 +1262,7 @@ def strategy_entry(book, name: str, tids: Sequence[str], spread: Optional[dict])
         "name": name, "spread_id": sid, "trade_ids": tids, "closed_trade_ids": closed,
         "type": labelled, "type_source": spread.get("type_source", ""), "type_note": spread.get("type_note", ""),
         "pb_roots": spread.get("pb_roots", []), "type_labels": spread.get("type_labels", []),
+        "rule": rule, "rule_note": rule_note,
         "pairs": pairs, "residuals": residuals, "hedges": hedges, "notes": notes,
         "gross_usd": spread.get("gross_usd"), "net_usd": spread.get("net_usd"),
         "notional_reason": spread.get("notional_reason", ""),

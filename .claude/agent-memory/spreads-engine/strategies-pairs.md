@@ -14,7 +14,7 @@ Choices I took (low stakes unless the user objects):
 - CROSS_EXCHANGE needs the same `subsector` on different exchanges; CROSS_PRODUCT the same
   `sector` (else gold pairs with aluminium because both are December). The '' catch-all (unlabelled
   trades) makes a cross pair only where a `config/spreads/` template names the two roots.
-- Whole lots: the smaller side (physical units) pairs in full, the larger side rounds to its
+- Whole lots (cross pairs sized by VALUE since 2026-09-29, [[value-sizing-one-spread]]): the smaller side pairs in full, the larger side rounds to its
   nearest whole lot (min 1); an LME leg (tonnes, lots fractional) pairs exact tonnes. The pair's
   `residual_units` is that tail (COPAR3: 31 HG lots vs 350 t leaves +1.5 t); whole lots left are
   the strategy's `residuals`.

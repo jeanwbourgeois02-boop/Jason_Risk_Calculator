@@ -1,6 +1,6 @@
 ---
 name: leftover-conventions
-description: Choices behind by_subsector's months_units and leftover (2026-09-29): delta units, strategies not outrights, pair residual on the leg carrying its sign, reconciliation, fx hedge rule, lazy spreads import
+description: Choices behind by_subsector's months_units and leftover (2026-09-29): delta units, strategies not outrights, pair leftover from leftover_legs, reconciliation, fx hedge rule, lazy spreads import
 metadata:
   type: project
 ---
@@ -13,9 +13,13 @@ actually as hedged as I think?"; grid = subsector x month, exchange rows under i
   The plain-lots `net_units` stays as it was (futures + LME only).
 - Leftover is read from `book_spreads(...)["strategies"]` only (the '' entry holds the unlabelled
   trades, so strategies partition every open lot); `outrights` would double count and is not read.
-- A pair's `residual_units` goes on the leg whose units share its sign (the larger side), in that
-  leg's month, as residual / (leg units / leg lots). The engine does not name the leg; this is the
-  attribution rule. Option residual = net option lots per instrument x the curve row's DELTA.
+- Since 2026-09-29 (value sizing, one spread per trade name) a pair's leftover is the spreads
+  engine's own placement: sum `pair["leftover_legs"]` (root, month, plain lots; x `_factor` for
+  averaging). `leftover_lots` None -> every root of the pair spoilt at its front month with
+  `leftover_reason`. Never read `residual_units`: it is in the sizing unit (USD for value sizing).
+  The old rule (residual on the leg sharing its sign) failed on a side of two same-sign legs.
+  Verified on risk.db 2026-09-29: feeder cattle +1.00 lot, copper +3.30 HGZ26 (37.4 t), zinc -0.8 LME Nov (-20 t).
+  Option residual = net option lots per instrument x the curve row's DELTA.
 - Each (root, month) is reconciled: strategies' lots (pair legs + residuals) must equal the curve's
   lots, else None with both figures and a line in `reasons`.
 - fx-sector subsector: leftover {} / None / "an FX hedge: not commodity leftover".

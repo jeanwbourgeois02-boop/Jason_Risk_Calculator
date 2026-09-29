@@ -6,10 +6,11 @@ none, so every open lot of the book is in exactly one pair, residual or hedge):
 
 - a **residual** of a strategy (a future or LME prompt with no leg to pair with, or the whole
   lots left after the pairs) is leftover in its own contract month, in full;
-- a **pair** whose legs do not balance holds ``residual_units`` (in the pair's own unit) beyond
-  an exact match. It is the excess of the larger side, so it is put on the leg whose units have
-  the residual's sign, in that leg's month, turned back into its lots by that leg's own units
-  per lot (``units / lots`` of the leg row);
+- a **pair** (two legs or a one-spread of many) whose sides do not balance carries its leftover
+  as the spreads engine placed it: ``leftover_legs`` (root, month, lots, on the heavier side's
+  front leg), summed per (root, month); its sizing unit (USD for value, physical, lots) is the
+  engine's business, never re-read here. ``leftover_lots`` None (with ``leftover_reason``) spoils
+  every root of the pair at its front month with that reason;
 - an **option** residual (an option is never paired) is leftover at its delta: the net option
   lots per instrument x the curve row's ``delta_factor`` (the official DELTA mark), in its
   underlying's month; no DELTA mark, no figure;
@@ -91,6 +92,45 @@ def _factor(root, product: str, contract_id: str, month: str, by_contract: Dict[
     return factor, why
 
 
+def _spoil_pair(pair: dict, legs: List[dict], out: Leftover, why: str) -> None:
+    """A pair whose leftover is not known: each root it holds is None at its front month there
+    (the leftover could sit on either side, so neither root's total is known)."""
+    front: Dict[str, Optional[str]] = {}
+    for leg in legs:
+        root_id, month = str(leg.get("root_id") or ""), leg.get("contract_month") or None
+        if root_id not in front or (month is not None and (front[root_id] is None or month < front[root_id])):
+            front[root_id] = month
+    text = f"pair {pair.get('pair_id', '')}: {why}"
+    for root_id, month in (front.items() if front else [("", None)]):
+        out.spoil(root_id, month, text)
+
+
+def _pair_leftover(pair: dict, legs: List[dict], out: Leftover,
+                   raw: List[Tuple[str, str, str, str, float]]) -> None:
+    """The spreads engine's own leftover of one pair (``leftover_lots`` on ``leftover_legs``),
+    added to ``raw`` in each leg's month; not known, the pair's cells are spoilt with its reason."""
+    total = number(pair.get("leftover_lots"))
+    if total is None:
+        _spoil_pair(pair, legs, out, pair.get("leftover_reason") or "its leftover is not known")
+        return
+    if abs(total) <= _TINY:
+        return
+    placed = pair.get("leftover_legs") or []
+    if not placed:
+        _spoil_pair(pair, legs, out, f"a leftover of {total:g} lots with no leg named")
+        return
+    for leg in placed:
+        lots = number(leg.get("lots"))
+        month = leg.get("contract_month") or None
+        if lots is None or month is None:
+            _spoil_pair(pair, legs, out, f"{leg.get('contract_id', '')}: its leftover "
+                                         + ("has no contract month" if lots is not None else "is not a number"))
+            return
+    for leg in placed:
+        raw.append((str(leg["root_id"]), str(leg["contract_month"]), str(leg.get("product") or FUTURE),
+                    str(leg.get("contract_id") or ""), number(leg.get("lots"))))
+
+
 def leftover_by_root(rows: List[dict], strategies: List[dict], roots: dict, as_of: str) -> Leftover:
     """The leftover delta lots per root and month from spreads-engine's ``strategies``, reconciled
     against the curve's ``rows`` (see the module docstring)."""
@@ -111,20 +151,7 @@ def leftover_by_root(rows: List[dict], strategies: List[dict], roots: dict, as_o
                 lots = number(leg.get("lots"))
                 if lots is not None:
                     accounted[(str(leg["root_id"]), leg.get("contract_month") or None, _LOTS)] += lots
-            residual = number(pair.get("residual_units"))
-            if residual is None or abs(residual) <= _TINY:
-                continue
-            side = [leg for leg in legs if (number(leg.get("units")) or 0.0) * residual > 0]
-            leg = side[0] if len(side) == 1 else None
-            lots, units = (number(leg.get("lots")), number(leg.get("units"))) if leg else (None, None)
-            if leg is None or not lots or units is None:
-                root_id = str(legs[0]["root_id"]) if legs else ""
-                out.spoil(root_id, legs[0].get("contract_month") if legs else None,
-                          f"pair {pair.get('pair_id', '')}: its residual {residual:g} {pair.get('residual_unit', '')} "
-                          "cannot be put on one leg")
-                continue
-            raw.append((str(leg["root_id"]), str(leg.get("contract_month") or ""), str(leg.get("product") or FUTURE),
-                        str(leg.get("contract_id") or ""), residual / (units / lots)))
+            _pair_leftover(pair, legs, out, raw)
         for res in entry.get("residuals") or []:
             root_id, product = str(res.get("root_id") or ""), str(res.get("product") or "")
             if root_id not in roots or roots[root_id].sector == _FX_SECTOR:

@@ -75,6 +75,14 @@ class Template:
     def problem(self) -> str:
         return "; ".join(leg.problem for leg in self.legs if leg.problem)
 
+    @property
+    def sets_quantity_ratio(self) -> bool:
+        """True when the template sizes its legs itself: three legs or more (a 3-2-1 crack, a
+        crush) or two legs of unequal weight (an oil share, 1 : 1.6 rebar against ore). A
+        two-leg 1 : -1 template only says what unit the spread is in, so a pair over it is sized
+        by value (user, 2026-09-29), not by the template's quantity."""
+        return len(self.legs) > 2 or abs(abs(self.legs[0].weight) - abs(self.legs[1].weight)) > 1e-9
+
 
 def quote_quantity_unit(root: ContractRoot) -> str:
     """'bbl' for USD/bbl, 'gal' for USD/gal: the quantity the root's price is quoted per."""

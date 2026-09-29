@@ -8,3 +8,4 @@
 - [Period explain](period-explain.md) — 2026-09-29: one bucket order (explain + Book Daily split), positions_of, hedges.py (XAU no, FX option yes)
 - [Scorecard and carry](scorecard-and-carry.md) — 2026-09-29: ideas closed at flat, P&L at as-of LTD, stats; calendar roll-down on the research curve, common date
 - [Rolls](rolls.md) — 2026-09-29: rolls from fills, position per trade name, pooled pass, roll-ins kept labelled; real book: 2 cattle roll-ins, 1 HRC roll
+- [Value sizing, one spread per name](value-sizing-one-spread.md) — 2026-09-29: RV spreads sized by value; two commodities in a trade name = one spread; entry rule, leftover on front leg
