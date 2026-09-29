@@ -91,14 +91,16 @@ def tab_body_id(label: str) -> str:
     return f"tab-body-{TAB_KEYS[label]}"
 
 
-# Lazy tab bodies (2026-09-28, the page's first load fired every tab's render callback, six
-# full-book passes of 0.8-2.4 s in parallel, for five tabs nobody was looking at). A body's
-# `html.Div` is always in the layout (its id is what the show/hide callback and every tab link
-# key on), but only the first tab's layout is built with the page; the others are built the
-# first time their tab is selected (`build_tab_bodies`), and Dash then fires the callbacks whose
-# outputs the new layout holds, exactly as on a page load. The keys already built are kept in
-# the `TAB_BUILT_ID` store, so a tab is built once per page and keeps its state after that.
-TAB_BUILT_ID = "tab-built"
+# One tab mounted at a time (2026-09-29, performance; lazy since 2026-09-28). A body's `html.Div`
+# is always in the layout (its id is what every tab link keys on), but only the SELECTED tab's
+# layout is inside it: selecting a tab builds its layout and empties the others
+# (`build_tab_bodies`), and Dash fires the callbacks whose outputs the new layout holds, exactly
+# as on a page load. Why unmount: in Dash 4.4 every component a callback renders dispatches one
+# redux action that runs every mounted component's selector, so a render costs about
+# (new components x components on the page); with all six tabs kept mounted a data revision froze
+# the browser for a minute. A hidden tab's callbacks do not fire either (its outputs are not in
+# the page). What the user set survives the rebuild: the switches, filters and search boxes carry
+# `persistence_type="session"`, the Book's open rows, sort and detail are session `dcc.Store`s.
 TAB_BUILDERS = {
     "book": book.build_layout,
     "curve": curve.build_layout,
@@ -115,23 +117,17 @@ def tab_layout(key: str) -> html.Div:
     return TAB_BUILDERS[key](default_date=today_ny())
 
 
-def build_tab_bodies(selected, built) -> list:
-    """The lazy-build callback's outputs: for every visible tab its body's children (the tab's
-    layout when it is the selected tab and not built yet, else `dash.no_update`), then the
-    store's new list of built keys (`dash.no_update` when nothing was built). Pure, so a test can
-    call it without a server."""
-    built = [k for k in (built or []) if k in TAB_BUILDERS]
-    out = []
-    added = None
+def build_tab_bodies(selected) -> list:
+    """The tab switch's outputs: for every visible tab its body's children (the selected tab's
+    layout, built now; `[]` for every other tab, so nothing hidden stays mounted), then for every
+    tab its body's style (shown / `display: none`). Pure, so a test can call it without a server."""
+    children, styles = [], []
     for label in VISIBLE_TABS:
         key = TAB_KEYS[label]
-        if key == selected and key not in built:
-            out.append(tab_layout(key))
-            added = key
-        else:
-            out.append(dash.no_update)
-    out.append(built + [added] if added else dash.no_update)
-    return out
+        on = key == selected
+        children.append(tab_layout(key) if on else [])
+        styles.append({} if on else {"display": "none"})
+    return children + styles
 
 
 def ensure_schema(path: Union[str, Path]) -> None:
@@ -281,12 +277,10 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
     with the upload control pinned to its right; the P&L header sits directly under the
     tab bar, on every tab. Below that, every tab body lives in one always-present
     `html.Div(id="tab-bodies")`, each wrapped in its own `html.Div(id=tab_body_id(label))`
-    -- the wrappers never leave the layout, so a tab's own callbacks (registered against
-    ids inside their body) keep firing once built, regardless of which tab is selected. Since
-    2026-09-28 only the first tab's layout is built with the page; the lazy-build callback
-    (`build_tab_bodies`, in `create_app`) builds each other tab the first time it is selected.
-    One show/hide callback (registered in `create_app`) toggles the bodies' `style` on
-    `main-tabs`' `value` (the selected tab's key, `TAB_KEYS`).
+    -- the wrappers never leave the layout. Since 2026-09-29 only the selected tab's layout is
+    inside its wrapper: the tab switch (`build_tab_bodies`, in `create_app`) builds the selected
+    tab's layout, empties the others and toggles the wrappers' `style` on `main-tabs`' `value`
+    (the selected tab's key, `TAB_KEYS`).
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
     module only assembles them and wires the header's date picker (`header.DATE_PICKER_ID`, the
@@ -301,8 +295,9 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
     tabs = [dcc.Tab(label=label, value=TAB_KEYS[label], className="tab", selected_className="tab--selected")
             for label in VISIBLE_TABS]
     bodies = [
-        html.Div(tab_layout(TAB_KEYS[label]) if TAB_KEYS[label] == first else None,
-                 id=tab_body_id(label), className="tab-body")
+        html.Div(tab_layout(TAB_KEYS[label]) if TAB_KEYS[label] == first else [],
+                 id=tab_body_id(label), className="tab-body",
+                 style={} if TAB_KEYS[label] == first else {"display": "none"})
         for label in VISIBLE_TABS
     ]
     return html.Div([
@@ -313,7 +308,6 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
         ]),
         header.layout(),
         html.Div(id="tab-bodies", children=bodies),
-        dcc.Store(id=TAB_BUILT_ID, data=[first]),
         dcc.Store(id=header.AS_OF_STORE_ID, data=today),
         dcc.Store(id=header.AS_OF_PICKED_ID, data=False),
         # "The data changed" signal (ui/revision.py): every tab listens, so an upload or a
@@ -379,7 +373,18 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     risk.register_callbacks(app, get_db_path=active_db_path)
     market_data.register_callbacks(app, get_db_path=active_db_path)
     uploads.register(app, get_db_path=active_db_path)
-    revision.register(app, get_db_path=active_db_path, build=build)
+    # The header's day roll rides the revision poll (one callback per tick, `revision.register`):
+    # today in New York once the book's day turns at 17:00 New York, header and picker together,
+    # unless a day other than today was picked (`header.as_of_after_tick`).
+    def _roll_to_today(store, picked):
+        today = header.as_of_after_tick(store, bool(picked), today_ny())
+        return (dash.no_update, dash.no_update) if today is None else (today, today)
+
+    revision.register(app, get_db_path=active_db_path, build=build, tick=(
+        [Output(header.AS_OF_STORE_ID, "data", allow_duplicate=True),
+         Output(header.DATE_PICKER_ID, "date", allow_duplicate=True)],
+        [State(header.AS_OF_STORE_ID, "data"), State(header.AS_OF_PICKED_ID, "data")],
+        _roll_to_today))
 
     # The header's as-of (user, 2026-09-22: "always price pnl as of today ... unless changed
     # specifically otherwise"): today in New York on every page load (the callable layout
@@ -395,31 +400,12 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     def _follow_pickers(picked_date):
         return header.as_of_after_pick(picked_date, today_ny())
 
-    @app.callback(Output(header.AS_OF_STORE_ID, "data", allow_duplicate=True),
-                  Output(header.DATE_PICKER_ID, "date", allow_duplicate=True),
-                  Input(revision.POLL_ID, "n_intervals"),
-                  State(header.AS_OF_STORE_ID, "data"),
-                  State(header.AS_OF_PICKED_ID, "data"),
-                  prevent_initial_call=True)
-    def _roll_to_today(_n, store, picked):
-        today = header.as_of_after_tick(store, bool(picked), today_ny())
-        if today is None:
-            return dash.no_update, dash.no_update
-        return today, today
-
-    # Show/hide the always-present tab bodies (see build_layout docstring) on the
-    # dcc.Tabs' own `value`, rather than nesting bodies inside dcc.Tab.children.
-    # The tab bar's value is the selected tab's key (`TAB_KEYS`).
-    body_outputs = [Output(tab_body_id(label), "style") for label in VISIBLE_TABS]
-    app.callback(*body_outputs, Input(MAIN_TABS_ID, "value"))(
-        lambda selected: [{} if TAB_KEYS[label] == selected else {"display": "none"} for label in VISIBLE_TABS]
-    )
-
-    # Build a tab's layout the first time it is selected (`TAB_BUILT_ID` above): the page loads
-    # with the first tab alone, so only its callbacks (and the header's) run on load.
+    # The tab switch (see `build_tab_bodies` above): the selected tab's layout, built now, and
+    # nothing in the others. The page opens with the first tab already built into its body, so
+    # the initial call is skipped.
     app.callback(*[Output(tab_body_id(label), "children") for label in VISIBLE_TABS],
-                 Output(TAB_BUILT_ID, "data"),
-                 Input(MAIN_TABS_ID, "value"), State(TAB_BUILT_ID, "data"))(build_tab_bodies)
+                 *[Output(tab_body_id(label), "style") for label in VISIBLE_TABS],
+                 Input(MAIN_TABS_ID, "value"), prevent_initial_call=True)(build_tab_bodies)
 
     # A tab's name on another screen is a link (user, 2026-09-25: "make tab names in the
     # screens clickable links"): one callback on every tab link, by pattern, so a link a

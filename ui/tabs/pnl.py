@@ -41,10 +41,10 @@ import dash
 import pandas as pd
 from dash import Input, Output, State, dcc, html
 
-from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import header
 from ui.tabs import ranking as rk
+from ui.tabs.formatting import compact
 from ui.tabs.formatting import (
     MISSING, TRADE_TYPE_TITLES, about, contract_name, full_money, fx_name, issues_drawer,
     lme_name, marker, missing_cell, money_cell, price_decimals, price_text, quoted_unit, short_date, short_root_name,
@@ -357,13 +357,44 @@ def group_maps(conn: sqlite3.Connection, frame: pd.DataFrame, spreads: Optional[
 def gather(conn: sqlite3.Connection, as_of: str, key: str = DEFAULT_PERIOD) -> dict:
     """Everything the tab shows for `as_of` and the period `key`, each part in its own try: one
     that fails costs its own section, with the reason. One daily series and one set of positions
-    for the whole render."""
-    from engine.pnl.series import daily_series, monthly_pnl, period_pnl, period_start, track_record
+    for the whole render. Memoised per database revision, as-of and period (2026-09-29), the
+    parts that do not depend on the period once for every period (`_base`), so a period switch
+    only explains the new period. Shared: never edit the result."""
+    from ui.tabs.blotter_pricing import screen_memo
+    key = key if key in PERIODS else DEFAULT_PERIOD
+    return screen_memo("pnl-gather", conn, as_of, lambda: _gather(conn, as_of, key), extra=(key,))
+
+
+def _gather(conn: sqlite3.Connection, as_of: str, key: str) -> dict:
+    from engine.pnl.series import period_pnl, period_start
     from engine.spreads import period_explain
+    from ui.tabs.blotter_pricing import screen_memo
+
+    base = screen_memo("pnl-base", conn, as_of, lambda: _base(conn, as_of))
+    data: Dict[str, Any] = {**base, "key": key, "errors": list(base["errors"])}
+    if not data["n_trades"]:
+        return data
+    eff, series, spreads = data["eff"], data["series"], data["spreads"]
+    try:
+        data["explain"] = period_explain(conn, eff, key, series=series, spreads=spreads)
+        data["period"] = period_pnl(series, period_start(eff, key, series.holidays), eff)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("P&L tab: the %s explain failed for %s", key, eff)
+        data["explain"], data["period"] = None, None
+        # after the positions' reason, before the rest, as when one pass built them all
+        at = 1 if data["errors"] and data["errors"][0][0] == "Positions" else 0
+        data["errors"].insert(at, (PERIOD_TITLES[key],
+                                   f"the period could not be explained ({type(exc).__name__}: {exc})"))
+    return data
+
+
+def _base(conn: sqlite3.Connection, as_of: str) -> dict:
+    """The parts of `gather` no period changes: the series, the positions, the track record, the
+    months, the scorecard, the carry, the rolls, the groups."""
+    from engine.pnl.series import daily_series, monthly_pnl, track_record
     from ui.tabs import book
 
-    key = key if key in PERIODS else DEFAULT_PERIOD
-    data: Dict[str, Any] = {"as_of": as_of, "key": key, "errors": []}
+    data: Dict[str, Any] = {"as_of": as_of, "errors": []}
     data["n_trades"] = book.trades_on_file(conn)
     if not data["n_trades"]:
         return data
@@ -375,13 +406,6 @@ def gather(conn: sqlite3.Connection, as_of: str, key: str = DEFAULT_PERIOD) -> d
     data["spreads"] = spreads
     if err:
         data["errors"].append(("Positions", err))
-    try:
-        data["explain"] = period_explain(conn, eff, key, series=series, spreads=spreads)
-        data["period"] = period_pnl(series, period_start(eff, key, series.holidays), eff)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("P&L tab: the %s explain failed for %s", key, eff)
-        data["explain"], data["period"] = None, None
-        data["errors"].append((PERIOD_TITLES[key], f"the period could not be explained ({type(exc).__name__}: {exc})"))
     try:
         data["track"] = track_record(series, eff)
     except Exception as exc:  # noqa: BLE001
@@ -1438,7 +1462,6 @@ def layout(default_date: Optional[str] = None) -> html.Div:
                 html.Div(id=ISSUES_SLOT_ID),
             ]),
         ]),
-        dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])
 
 
@@ -1457,13 +1480,12 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(TRACK_ID, "children"), Output(ISSUES_SLOT_ID, "children"),
         Input(AS_OF_STORE_ID, "data"), Input(PERIOD_ID, "value"), Input(CHART_BY_ID, "value"),
         Input(MONTH_BY_ID, "value"), Input(SCORE_BY_ID, "value"), Input(DATA_REVISION_ID, "data"),
-        Input(REFRESH_ID, "n_intervals"),
     )
     def _update(as_of, period=DEFAULT_PERIOD, chart_by=CHART_BOOK, month_by=CHART_TYPE, score_by=SCORE_BY_TRADE,
-                _rev=None, _n=0):
+                _rev=None):
         p = render_parts(as_of, get_db_path(), period, chart_by, month_by, score_by)
-        return (p["note"], p["tiles"], p["sections_style"], p["chart"], p["contributors"], p["months"],
-                p["scorecard"], p["carry"], p["rolls"], p["track"], p["issues"])
+        return tuple(compact(x) for x in (p["note"], p["tiles"], p["sections_style"], p["chart"], p["contributors"],
+                                          p["months"], p["scorecard"], p["carry"], p["rolls"], p["track"], p["issues"]))
 
     @app.callback(Output(DOWNLOAD_ID, "data"), Input(CSV_BUTTON_ID, "n_clicks"), State(AS_OF_STORE_ID, "data"),
                   State(PERIOD_ID, "value"), State(MONTH_BY_ID, "value"), prevent_initial_call=True)

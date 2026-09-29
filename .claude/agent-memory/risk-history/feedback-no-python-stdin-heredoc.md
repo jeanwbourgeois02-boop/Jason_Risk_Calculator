@@ -9,3 +9,5 @@ Never run Python through `py -3 -` and a heredoc. Write the script to the scratc
 
 **Why:** the housekeeper forbids it. On 2026-09-24 one of these ran anyway. It hung waiting on stdin until the Bash tool timed out and moved it to the background. The permission classifier then refused `taskkill` ("interfere with workloads"), so the process stayed alive and had to be reported. It exited on its own later, but only after the report had gone out. Other agents' stuck `py -3 -` processes were running on the PC at the same time.
 **How to apply:** this covers every inline Python run in this repo, including throwaway checks.
+
+2026-09-29: it happened again with an EMPTY heredoc (`py -3 - <<'EOF' ... EOF` with nothing inside). It still hung, and the rest of the chained command never ran. Never type `py -3 -` in any form.

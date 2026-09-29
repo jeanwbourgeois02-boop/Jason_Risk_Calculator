@@ -45,9 +45,9 @@ import pandas as pd
 from dash import ALL, Input, Output, State, dash_table, dcc, html
 
 from ui import sample_book
-from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
+from ui.tabs.formatting import compact
 from ui.tabs.formatting import (
     HAND_KINDS, MINUS, MISSING, SOURCE_MIXED, TRADE_TYPE_TITLES, about, contract_name, date_cell,
     fx_name, issues_drawer, lme_name, missing_cell, money_cell, parse_contract_id, plain_words, price_text, quoted_unit,
@@ -377,16 +377,12 @@ def _db_revision(conn: sqlite3.Connection) -> Optional[tuple]:
 
 
 def _memo(kind: str, conn: sqlite3.Connection, as_of: str, build: Callable[[], Any]) -> Any:
-    """`build()` memoised on (kind, database path, mtime, as_of); a failure is not memoised."""
-    rev = _db_revision(conn)
-    if rev is None:
-        return build()
-    key = (kind, *rev, as_of)
-    if key not in _MEMO:
-        if len(_MEMO) >= _MEMO_MAX:
-            _MEMO.clear()
-        _MEMO[key] = build()
-    return _MEMO[key]
+    """`build()` memoised on (kind, database path, mtime, as_of), computed once however many
+    callbacks ask at the same time (2026-09-29: the top and the grid callbacks both fire on a page
+    load and each ran the whole gather; `blotter_pricing.screen_memo`, single-flight); a failure
+    is not memoised."""
+    from ui.tabs.blotter_pricing import screen_memo
+    return screen_memo("book-" + kind, conn, as_of, build)
 
 
 # --------------------------------------------------------------------------- reading the lanes
@@ -397,12 +393,8 @@ def _failure(what: str, exc: Exception) -> str:
 def _spreads(conn: sqlite3.Connection, as_of: str) -> dict:
     """`book_spreads` through the screens' shared filled reader, one pricing snapshot, memoised
     on the database revision and the as-of (the P&L tab reads this too)."""
-    def build():
-        from engine.spreads import book_spreads
-        from ui.tabs.blotter_pricing import priced_value_book, pricing_snapshot
-        with pricing_snapshot(conn, "Book tab"):
-            return book_spreads(conn, as_of, value_fn=priced_value_book)
-    return _memo("spreads", conn, as_of, build)
+    from ui.tabs.blotter_pricing import shared_spreads   # the header reads the same one
+    return shared_spreads(conn, as_of, filled=True)
 
 
 def _needs(conn: sqlite3.Connection, as_of: str) -> tuple:
@@ -521,8 +513,8 @@ def gather(conn: sqlite3.Connection, as_of: str) -> dict:
         log.exception("book tab: research context failed for %s", as_of)
         data["research"], data["research_error"] = None, _failure("the research context could not be read", exc)
     try:
-        from engine.curve import curve_positions
-        data["curve"], data["curve_error"] = curve_positions(conn, as_of), ""
+        from ui.tabs.blotter_pricing import shared_curve    # the Exposure and Risk tabs read the same one
+        data["curve"], data["curve_error"] = shared_curve(conn, as_of), ""
     except Exception as exc:  # noqa: BLE001 -- the commodity group lines then say why
         data["curve"], data["curve_error"] = None, _failure("the net exposure by commodity could not be built", exc)
     try:
@@ -549,7 +541,7 @@ def gather(conn: sqlite3.Connection, as_of: str) -> dict:
                                                             exc)
     try:
         from engine.limits import limit_checks
-        data["limits"], data["limits_error"] = limit_checks(conn, as_of), ""
+        data["limits"], data["limits_error"] = limit_checks(conn, as_of, curve=data.get("curve")), ""
     except Exception as exc:  # noqa: BLE001
         data["limits"], data["limits_error"] = None, _failure("the limits could not be checked", exc)
     try:
@@ -3821,7 +3813,6 @@ def layout(default_date: Optional[str] = None) -> html.Div:
         dcc.Store(id=SORT_STORE_ID, storage_type="session"),
         dcc.Store(id=DETAIL_STORE_ID, storage_type="session"),
         dcc.Store(id=EMPTY_UPLOAD_SINK_ID),
-        dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])
 
 
@@ -3856,13 +3847,13 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         *[Output(filter_id(k), "options") for k in MULTI_FILTERS],
         Input(AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
-        Input(REFRESH_ID, "n_intervals"),
     )
-    def _update(as_of, _data_rev=None, _n_intervals=0):
+    def _update(as_of, _data_rev=None):
         p = render_parts(as_of, get_db_path(), what="top")
         shown = {} if p["shown"] else HIDDEN
         options = p.get("options") or {}
-        return (p["top"], shown, shown, p["prepull"], p["under"], shown, *[options.get(k, []) for k in MULTI_FILTERS])
+        return (compact(p["top"]), shown, shown, compact(p["prepull"]), compact(p["under"]), shown,
+                *[options.get(k, []) for k in MULTI_FILTERS])
 
     @app.callback(
         Output(TBODY_ID, "children"),
@@ -3870,19 +3861,18 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output({"type": SORT_ARROW_TYPE, "idx": ALL}, "children"),
         Input(AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
-        Input(REFRESH_ID, "n_intervals"),
         Input(VIEW_ID, "value"),
         Input(EXPAND_STORE_ID, "data"),
         Input(SORT_STORE_ID, "data"),
         Input(DETAIL_STORE_ID, "data"),
         *filter_inputs,
     )
-    def _grid(as_of, _data_rev, _n_intervals, view, state, sort, detail, *filter_values):
+    def _grid(as_of, _data_rev, view, state, sort, detail, *filter_values):
         p = render_parts(as_of, get_db_path(), view or DEFAULT_VIEW, state, sort, _filters_of(filter_values), detail,
                          what="grid")
         arrows = [(("▼" if (sort or {}).get("desc") else "▲") if (sort or {}).get("key") == k else "")
                   for k, _label, _cls in GRID_COLUMNS]
-        return p["rows"], p["meta"], arrows
+        return compact(p["rows"]), p["meta"], arrows
 
     @app.callback(Output(EXPAND_STORE_ID, "data"),
                   Input({"type": TOGGLE_TYPE, "idx": ALL}, "n_clicks"), Input(EXPAND_ALL_ID, "n_clicks"),

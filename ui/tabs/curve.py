@@ -46,9 +46,8 @@ import dash
 import pandas as pd
 from dash import ALL, Input, Output, State, dcc, html
 
-from engine.curve import curve_positions
-from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
+from ui.tabs.formatting import compact
 from ui.tabs.formatting import (
     MINUS, MISSING, about, contract_name, full_money, issues_drawer, lme_name, marker, missing_cell, money_cell,
     parse_contract_id, plain_words, quoted_unit, short_date, short_money, short_root_name, sign_class, signed_money, size_words, sum_known,
@@ -948,7 +947,9 @@ def commodity_panel(conn: sqlite3.Connection, as_of: str, sub_key: str, result: 
     a missing price a gap with its reason) and the book's positions under each month (the
     engine's `months_units` in the commodity's physical unit; the exchange's own unit when the
     units do not add; delta lots when neither is given)."""
-    result = result if result is not None else curve_positions(conn, as_of)
+    if result is None:
+        from ui.tabs.blotter_pricing import shared_curve
+        result = shared_curve(conn, as_of)
     sub = (result.get("by_subsector") or {}).get(sub_key)
     roots = _roots()
     if not sub:
@@ -1362,12 +1363,12 @@ def gather(conn: sqlite3.Connection, as_of: str) -> dict:
     once and handed to the curve for its leftover."""
     from ui.tabs.book import trades_on_file
     data: Dict[str, Any] = {"as_of": as_of, "n_trades": trades_on_file(conn), "roots": _roots()}
+    from ui.tabs.blotter_pricing import shared_curve, shared_spreads   # one of each per revision, every tab
     try:
-        from engine.spreads import book_spreads
-        spreads, data["spreads_error"] = book_spreads(conn, as_of), ""
+        spreads, data["spreads_error"] = shared_spreads(conn, as_of), ""
     except Exception as exc:  # noqa: BLE001 -- the curve reads them itself and says why the leftover is missing
         spreads, data["spreads_error"] = None, f"the spreads could not be read ({type(exc).__name__}: {exc})"
-    data["result"] = curve_positions(conn, as_of, spreads=spreads)
+    data["result"] = shared_curve(conn, as_of)
     data["strategies"] = list((spreads or {}).get("strategies") or [])
     option_ids = [r["contract_id"] for r in (data["result"].get("rows") or []) if _product(r) == OPTION and r.get("contract_id")]
     try:
@@ -1381,6 +1382,13 @@ def gather(conn: sqlite3.Connection, as_of: str) -> dict:
         data["pos"], data["pos_error"] = None, f"the currency exposure could not be built ({type(exc).__name__}: {exc})"
     data["sources"] = fx_sources(conn, as_of)
     return data
+
+
+def memo_gather(conn: sqlite3.Connection, as_of: str) -> dict:
+    """`gather` once per database revision and as-of (2026-09-29): the switch Physical | Lots |
+    USD and a revisit of the tab re-render from it. Shared: never edit the result."""
+    from ui.tabs.blotter_pricing import screen_memo
+    return screen_memo("exposure-gather", conn, as_of, lambda: gather(conn, as_of))
 
 
 def all_issues(data: dict) -> List[Any]:
@@ -1495,7 +1503,7 @@ def render(as_of: Optional[str], db_path, unit: str = DEFAULT_UNIT) -> Any:
     except sqlite3.OperationalError as exc:
         return message_box(f"Database not available ({exc}).")
     try:
-        return body(gather(conn, as_of), unit or DEFAULT_UNIT)
+        return body(memo_gather(conn, as_of), unit or DEFAULT_UNIT)
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
         log.exception("exposure tab failed for %s", as_of)
         return html.Div(className="status-panel status-panel--down", children=[
@@ -1513,7 +1521,8 @@ def render_csv(as_of: Optional[str], db_path, unit: str):
     except sqlite3.OperationalError:
         return None
     try:
-        frame = csv_frame(curve_positions(conn, as_of), unit if unit in UNITS else DEFAULT_UNIT, _roots(), as_of)
+        from ui.tabs.blotter_pricing import shared_curve
+        frame = csv_frame(shared_curve(conn, as_of), unit if unit in UNITS else DEFAULT_UNIT, _roots(), as_of)
         return dcc.send_data_frame(frame.to_csv, f"exposure-{as_of}.csv", index=False)
     except Exception:  # noqa: BLE001
         log.exception("exposure csv failed for %s", as_of)
@@ -1537,7 +1546,6 @@ def layout(default_date: Optional[str] = None) -> html.Div:
         ]),
         html.Div(id=BODY_ID, children=[message_box("Loading the exposure...")]),
         dcc.Store(id=SELECTED_ID, data=None),
-        dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])
 
 
@@ -1557,11 +1565,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(BODY_ID, "children"),
         Input(AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
-        Input(REFRESH_ID, "n_intervals"),
         Input(UNIT_ID, "value"),
     )
-    def _update(as_of, _data_rev=None, _n_intervals=0, unit=DEFAULT_UNIT):
-        return render(as_of, get_db_path(), unit or DEFAULT_UNIT)
+    def _update(as_of, _data_rev=None, unit=DEFAULT_UNIT):
+        return compact(render(as_of, get_db_path(), unit or DEFAULT_UNIT))
 
     @app.callback(Output(SELECTED_ID, "data"), Input({"type": ROW_TYPE, "idx": ALL}, "n_clicks"),
                   State(SELECTED_ID, "data"), prevent_initial_call=True)

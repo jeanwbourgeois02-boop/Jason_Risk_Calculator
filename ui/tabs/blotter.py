@@ -149,6 +149,7 @@ from ui.revision import (
 from ui.tabs.controls import today_ny
 from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs import ranking as rk
+from ui.tabs.formatting import compact
 from ui.tabs.formatting import (
     HAND_KINDS, MISSING, about, contract_name, format_cell, fx_name, is_fx_pair, issues_drawer, lme_name, marker,
     missing_cell, plain_words, price_text, quoted_unit, short_money, short_root_name, spread_name, trade_type_words,
@@ -2537,7 +2538,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         content = _render_content(db_path, as_of_date, scope)
         if trade_set is None:
             trade_set = trade_set_signature(db_path)
-        return content, (trade_set or no_update), ({} if with_options else SUBTABS_HIDDEN)
+        return compact(content), (trade_set or no_update), ({} if with_options else SUBTABS_HIDDEN)
 
     def _options_shown(db_path, as_of_date) -> bool:
         """Whether the Options sub-tab shows: the book holds an open option (`has_open_option`)."""
@@ -2756,7 +2757,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         except Exception as exc:  # noqa: BLE001 -- the table says why instead of an HTTP 500
             logging.getLogger(__name__).exception("Blotter: the fills filter failed for %s", as_of_date)
             return _error_card("Fills", exc)
-        return fills_table(kept, total, with_uploads)
+        return compact(fills_table(kept, total, with_uploads))
 
     @app.callback(
         *[Output(fid, "value") for fid in fill_filter_ids],

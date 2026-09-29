@@ -44,6 +44,7 @@ from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.feed_controls import pull_timings, recalc_words, safety_refresh_ms, seconds_words
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
+from ui.tabs.formatting import compact
 from ui.tabs.formatting import (MINUS, MISSING, about, contract_name, fx_name, is_fx_pair, issues_drawer, lme_name,
                                 marker, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
                                 short_root_name, signed_number)
@@ -2080,7 +2081,6 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         about(TAB_TITLE, TAB_ABOUT, level="h3"),
         # BODY_ID holds the one status line (the first output of the body callback)
         html.Div(id=BODY_ID, className="status-line data-status-line", children=message_box("Loading...")),
-        dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
         html.Div(id=MISSING_PANEL_ID, className="data-block"),
         html.Div(id=MARKS_SECTION_ID, className="section data-block", children=[
             about(SUSPECT_TITLE, MARKS_ABOUT, level="h4", style={"marginTop": "0"}),
@@ -2138,12 +2138,11 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(DIAG_BODY_ID, "children"),
         Output(ISSUES_ID, "children"),
         Input(HEADER_AS_OF_STORE_ID, "data"),
-        Input(REFRESH_ID, "n_intervals"),
         Input(DATA_REVISION_ID, "data"),
         Input(BOOK_REVISION_ID, "data"),
     )
     def _update_body(as_of_date, *_triggers):
-        return render(as_of_date, get_db_path())
+        return tuple(compact(x) for x in render(as_of_date, get_db_path()))
 
     @app.callback(
         Output(MARKS_TABLE_WRAP_ID, "children"),

@@ -156,8 +156,12 @@ def _empty(reason: str, name: Optional[str] = None) -> pd.Series:
 
 
 def _copy(s: pd.Series) -> pd.Series:
-    """A copy of a kept series with its own attrs (a caller may set attrs on what it gets)."""
-    out = s.copy()
+    """A kept series handed out with its own attrs (a caller may set attrs on what it gets).
+    The values are a shallow copy: pandas 3's copy-on-write copies them the moment either side
+    is written, so a caller that modifies what it gets never reaches the kept series, and one
+    that only reads (every caller today) pays for no copy. The kept series is never modified
+    here, so two threads may hand out the same one at once."""
+    out = s.copy(deep=False)
     out.attrs = {k: (dict(v) if isinstance(v, dict) else v) for k, v in s.attrs.items()}
     return out
 
@@ -235,11 +239,24 @@ class CommodityHistory:
         month = month_from_code(code)
         year = int(digits) + 2000 if len(digits) == 2 else self._one_digit_year(int(digits))
         root = _norm(root_id).replace(" ", "")
-        hit = self.contracts[(self.contracts["instrument_id"] == root) & (self.contracts["year"] == year)
-                             & (self.contracts["month"] == month)]
-        if hit.empty:
+        hit = self._by_month().get((root, year, month))
+        if hit is None:
             return None, f"contract {contract_id} ({root_id} {code}{year}) is not in the research database ({self.path})"
-        return hit.index[0], ""
+        return hit, ""
+
+    def _by_month(self) -> Dict[tuple, str]:
+        """(instrument_id, year, month) -> the first contract id with them in `contracts` order,
+        built once per object: the same pick as filtering the frame and taking its first row (a
+        float year or month equals and hashes as the int asked for; a missing one matches
+        nothing)."""
+        table = self._lookup.get("by_month")
+        if table is None:
+            table = {}
+            c = self.contracts
+            for cid, inst, year, month in zip(c.index, c["instrument_id"], c["year"], c["month"]):
+                table.setdefault((inst, year, month), cid)
+            self._lookup["by_month"] = table
+        return table
 
     def _one_digit_year(self, digit: int) -> int:
         ref = int((self.last_date or "2026")[:4])
@@ -426,12 +443,16 @@ class CommodityHistory:
         research_id, why = self.resolve_contract(contract_id, root_id)
         if research_id is None:
             return None, why
+        return self._rank_of(research_id, as_of), ""
+
+    def _rank_of(self, research_id: str, as_of=None) -> int:
+        """`months_ahead_of` for a contract already resolved to its research id."""
         root = self.contracts.at[research_id, "instrument_id"]
         ids, ltds = self._strip(root)
         ref = pd.Timestamp(as_of or self.last_date).strftime("%Y-%m-%d")
         first_listed = bisect.bisect_right(ltds, ref)
         pos = ids.index(research_id)
-        return max(1, pos - first_listed + 1), ""
+        return max(1, pos - first_listed + 1)
 
     # ------------------------------------------------------------ window moves
     def window_move_detail(self, root_id: str, months_to_expiry: float, start, end) -> dict:
@@ -676,12 +697,16 @@ class CommodityHistory:
         research_id, why = self.resolve_contract(contract_id, root_id)
         if research_id is None:
             return _empty(why, name)
-        n, why = self.months_ahead_of(contract_id, root_id, as_of)
-        if n is None:
-            return _empty(why, name)
+        n = self._rank_of(research_id, as_of)     # = months_ahead_of, without resolving twice
         own = self._raw_settles(research_id)
         own_change = own.diff().iloc[1:]
-        cm = self.constant_maturity_changes(row.name, n, raw=True)
+        # The constant-maturity raw changes straight off the kept frame: the values of
+        # `constant_maturity_changes(root, n, raw=True)` without its `contracts` attr, a
+        # date -> contract dict that pandas deep-copied on every later operation.
+        frame, _ = self._cm_frame(row.name, n)
+        cm = frame["raw_change"].dropna() if frame is not None else None
+        if cm is None or cm.empty:
+            cm = _empty("")
         if not own.empty:
             cm = cm[cm.index <= own.index[0]]
         change = pd.concat([cm, own_change]).sort_index()

@@ -16,3 +16,5 @@ Timing `engine/risk/metrics.py::book_risk` on the sample book (`tests/golden_boo
 
 **Why:** a wrong baseline would have reported a slowdown or hidden the win.
 **How to apply:** any future speed claim about my files. See [[research-db-quirks]].
+
+- 2026-09-29: cProfile inflates pure-Python work. A perf run blamed `_position_pnl` for 3.1 s and `deepcopy` for 1 s. Timed without the profiler, the whole position-P&L share of `book_risk` was about 1.2 s on the sample and 0.8 s on risk.db. The deepcopy was pandas 3 copying `attrs` on every operation: the `contracts` date→contract dict that `constant_maturity_changes` puts in attrs. `_position_pnl` now reads `_cm_frame` directly. Result: sample 1.2-1.3 → 1.0-1.1 s, risk.db 0.72-0.84 → 0.47-0.56 s. What is left is the first read of each root's `price_daily`: the SQL is already a clustered-PK search, and the cost is disk. Keep big dicts out of a Series' attrs on any hot path. Time with a wrapper around the function; use the profiler only to find where the time goes.

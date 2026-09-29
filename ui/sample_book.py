@@ -58,7 +58,16 @@ def build_sample_db(path: Path = SAMPLE_DB_PATH, through: Optional[str] = None) 
     try:
         build_book(conn, through=through)
         ledger.realise_settled(conn, book_today().isoformat())
-        counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
+        # The Bloomberg library, brought up to date once here (2026-09-29, performance): the
+        # screens read the sample read-only, so a dirty library was worked out again by every
+        # reader, 18 times per header render. Nothing is asked of Bloomberg.
+        try:
+            from data.bloomberg import library
+            if library.is_out_of_date(conn):
+                library.sync(conn)
+        except Exception:  # noqa: BLE001 -- the readers then work it out themselves, as before
+            pass
+        counts ={t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
         last_mark = conn.execute("SELECT MAX(as_of_date) FROM marks").fetchone()[0]
     finally:
         conn.close()

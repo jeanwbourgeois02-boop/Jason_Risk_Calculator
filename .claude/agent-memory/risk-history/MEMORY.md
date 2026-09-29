@@ -2,4 +2,4 @@
 - [Research db quirks](research-db-quirks.md) — rv.sqlite: ZZ placeholder ids, raw x multiplier, WAL files, depth, OI/volume caveats (China, LME, 400d volume)
 - [Research spread keys](research-spread-keys.md) — cal id / near-year instance rule, tracked instances only, values in quote units, 5 templates absent
 - [No python stdin heredocs](feedback-no-python-stdin-heredoc.md) — `py -3 -` heredocs hang and cannot be killed here; use scratchpad scripts
-- [Benchmarking book_risk](benchmarking-book-risk.md) — set COMMODITY_HISTORY_DB when timing a HEAD copy (else history silently absent); noisy PC, alternate runs
+- [Benchmarking book_risk](benchmarking-book-risk.md) — set COMMODITY_HISTORY_DB for a HEAD copy; profiler inflates; attrs deepcopy trap (2026-09-29)

@@ -51,11 +51,11 @@ seconds for the poll to notice.
 The page's build (2026-09-28, user: "never a stale page"). A browser tab left open across
 a restart keeps the old layout and bundles while its callbacks land on the new process.
 So every page bakes the fingerprint it was built with (`ui.launch.source_fingerprint`,
-the same string the launcher's identity route answers) into `BUILD_ID`; the poll's
-companion `_build_check` compares it with the process's own on every tick and, when they
+the same string the launcher's identity route answers) into `BUILD_ID`; the poll
+(`_poll`, the one callback of a tick) compares it with the process's own on every tick and, when they
 differ, sets `STALE_ID`, whose clientside listener does `window.location.reload()`: the
 one browser reload in the app, and only because the CODE changed, never for data (data is
-the in-place refresh above). `_build_check`'s ids never change, so a page from any older
+the in-place refresh above). `_poll`'s ids never change, so a page from any older
 build still reaches it.
 
 Nothing here reads a mark or computes a number; every listener re-runs its own
@@ -74,10 +74,13 @@ DATA_REVISION_ID = "data-revision"
 BOOK_REVISION_ID = "book-revision"
 PENDING_ID = "data-revision-pending"
 POLL_ID = "data-revision-poll"
-POLL_MS = 5_000
+POLL_MS = 15_000     # 2026-09-29: 5 s -> 15 s (performance; uploads publish at once)
 BUILD_ID = "build-fingerprint"      # the source fingerprint the page was built with
 STALE_ID = "page-stale"             # True once the process answering is another build
 RELOAD_SINK_ID = "page-reload-sink"  # the clientside reload's (unused) output
+# Never in a layout: the input of the legacy `_build_check` (see `register`), which answers a page
+# built before 2026-09-29 so it still reloads once onto the new build.
+LEGACY_POLL_ID = "build-check-legacy-poll"
 
 
 def page_is_stale(page_build, build) -> bool:
@@ -184,13 +187,22 @@ def components(db_path: Union[str, Path], build: str = "") -> list:
     ]
 
 
-def register(app, get_db_path: Callable[[], object], build: str = "") -> None:
-    @app.callback(
-        Output(STALE_ID, "data"),
-        Input(POLL_ID, "n_intervals"),
-        State(BUILD_ID, "data"),
-        prevent_initial_call=True,
-    )
+def register(app, get_db_path: Callable[[], object], build: str = "", tick=None) -> None:
+    """The page's one poll (2026-09-29, performance: every callback a tick fires is a round trip
+    and a redux dispatch per mounted component, so a tick runs ONE callback). `_poll` publishes
+    the data and book revisions (`decide`), flags a page of another build (`page_is_stale`: the
+    code-change reload) and, when the shell passes `tick`, runs its extra step too: `tick` is
+    `(outputs, states, fn)`, `fn(*state_values)` returning one value per output (the header's
+    17:00 New York day roll, `ui.app`)."""
+    extra_outputs, extra_states, extra_fn = tick if tick is not None else ([], [], None)
+
+    # A page built before 2026-09-29 asks for `page-stale.data` alone (its own `_build_check`).
+    # This answers it (the server matches a request by its output, not its input ids), so that
+    # page reloads once onto this build. Its input id is in no layout, so a page of this build
+    # never fires it; `_poll` writes the same store under `allow_duplicate`. Keep both: `_poll`'s
+    # outputs are what a page of THIS build will ask a later build for, so they never change.
+    @app.callback(Output(STALE_ID, "data"), Input(LEGACY_POLL_ID, "n_intervals"), State(BUILD_ID, "data"),
+                  prevent_initial_call=True)
     def _build_check(_n, page_build):
         return True if page_is_stale(page_build, build) else no_update
 
@@ -207,16 +219,22 @@ def register(app, get_db_path: Callable[[], object], build: str = "") -> None:
         Output(DATA_REVISION_ID, "data"),
         Output(BOOK_REVISION_ID, "data"),
         Output(PENDING_ID, "data"),
+        Output(STALE_ID, "data", allow_duplicate=True),
+        *extra_outputs,
         Input(POLL_ID, "n_intervals"),
         State(DATA_REVISION_ID, "data"),
         State(BOOK_REVISION_ID, "data"),
         State(PENDING_ID, "data"),
+        State(BUILD_ID, "data"),
+        *extra_states,
         prevent_initial_call=True,
     )
-    def _poll(_n, data_rev, book_rev, pending):
+    def _poll(_n, data_rev, book_rev, pending, page_build, *extra):
+        stale = True if page_is_stale(page_build, build) else no_update
+        rest = tuple(extra_fn(*extra)) if extra_fn is not None else ()
         db_path = get_db_path()
         publish, new_pending = decide(data_rev, pending, file_signature(db_path))
         if publish is None:
-            return no_update, no_update, (new_pending if new_pending != pending else no_update)
+            return (no_update, no_update, (new_pending if new_pending != pending else no_update), stale, *rest)
         book = book_signature(db_path)
-        return publish, (book if book and book != book_rev else no_update), new_pending
+        return (publish, (book if book and book != book_rev else no_update), new_pending, stale, *rest)

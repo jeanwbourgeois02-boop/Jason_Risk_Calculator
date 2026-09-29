@@ -387,6 +387,16 @@ def _missing_marks_reason(conn: sqlite3.Connection, as_of: str,
 
 
 def needed_marks(conn: sqlite3.Connection, as_of: str) -> tuple:
+    """`_needed_marks_uncached`, computed once per (database revision, as_of, the New York book
+    date, which decides the list) across every screen and thread (2026-09-29, performance:
+    `blotter_pricing.screen_memo`). Shared: never edit the result."""
+    from data.bloomberg.live import book_today
+    from ui.tabs.blotter_pricing import screen_memo
+    return screen_memo("needed-marks", conn, as_of, lambda: _needed_marks_uncached(conn, as_of),
+                       extra=(book_today().isoformat(),))
+
+
+def _needed_marks_uncached(conn: sqlite3.Connection, as_of: str) -> tuple:
     """(how many marks the book needs on `as_of`, the ones with no official mark as
     [{instrument_id, settle_date, mark_type}]). DB-only reads, never a Bloomberg session.
 
@@ -1055,9 +1065,8 @@ def _spread_summary_uncached(conn: sqlite3.Connection, as_of: str) -> dict:
     closes the P&L cards already read are not valued again). Only the counts and names are
     shown; the spreads' P&L is the Spreads tab's."""
     try:
-        from engine.spreads import book_spreads
-        from ui.tabs.blotter_pricing import priced_value_book
-        out = book_spreads(conn, as_of, value_fn=priced_value_book)
+        from ui.tabs.blotter_pricing import shared_spreads   # the Book reads the same one
+        out = shared_spreads(conn, as_of, filled=True)
     except Exception as exc:  # noqa: BLE001 -- the card says why, the other cards still show
         import logging
         logging.getLogger(__name__).exception("header open spreads failed for as_of=%s", as_of)

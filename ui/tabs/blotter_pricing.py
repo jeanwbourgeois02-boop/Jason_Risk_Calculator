@@ -264,6 +264,82 @@ def priced_value_book(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFram
     return df.copy(), n_fallback, n_total
 
 
+# --------------------------------------------------------------------------- shared screen memos
+# 2026-09-29 (performance): the tabs asked the engine for the same results several times per
+# render (`book_spreads` 5 times on Risk, 3 on the Book) and again on every re-render of a
+# switch. Each result below is computed once per (database file, mtime, as_of) across every
+# thread (`_single_flight`), so a tab rebuilt on a revisit or a second tab of the same book is
+# served from here. Nothing is recomputed differently: each caller keeps its own reader (the
+# engine's `value_book`, unfilled, or the screens' filled reader), and the stored object is
+# shared, so a caller never edits what it gets.
+_MEMOS: "collections.OrderedDict[tuple, object]" = collections.OrderedDict()
+OUTSIDE_INPUTS_SECONDS = 900      # the research histories and config live outside the database
+
+
+def screen_memo(kind: str, conn: sqlite3.Connection, as_of: str, compute, extra: tuple = ()):
+    """`compute()` once per (kind, database file, mtime, as_of, extra) across every thread; the
+    stored object is shared (read it, never edit it). A connection with no file is not memoised,
+    and a `compute` that raises stores nothing."""
+    key = _render_cache_key(conn)
+    if key is None:
+        return compute()
+    value, waited = _single_flight(_MEMOS, (kind, *key, as_of, *extra), compute)
+    _note_wait(waited)
+    return value
+
+
+def outside_inputs_key(*paths) -> tuple:
+    """A key part for a result that also reads files outside the database (the Risk tab's
+    config and the research app's histories): each path's mtime, and the quarter-hour, so such
+    a result is read again at most 15 minutes after its outside inputs change (the safety timer
+    the tabs carried until 2026-09-29)."""
+    out = []
+    for p in paths:
+        try:
+            out.append(os.path.getmtime(p))
+        except (OSError, TypeError):
+            out.append(None)
+    return (*out, int(time.time() // OUTSIDE_INPUTS_SECONDS))
+
+
+def raw_value_book(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
+    """`value_book(conn, as_of)` exactly as the engine gives it (unfilled), priced once per
+    (file, mtime, date) through the shared raw store; a copy. The engine's default reader for
+    `book_spreads`, memoised."""
+    key = _render_cache_key(conn)
+    if key is None:
+        return value_book(conn, as_of)
+    return _raw_book(key, as_of).copy()
+
+
+def shared_spreads(conn: sqlite3.Connection, as_of: str, filled: bool = False) -> dict:
+    """`engine.spreads.book_spreads(conn, as_of)` once per database revision and as-of: with
+    the engine's own reader (`value_book`, unfilled, `filled=False`: Exposure, Risk, the curve
+    positions) or with the screens' filled reader (`priced_value_book`, `filled=True`: the Book
+    and the header, as they read it before). Shared: never edit the result."""
+    def compute():
+        from engine.spreads import book_spreads
+        if filled:
+            with pricing_snapshot(conn):
+                return book_spreads(conn, as_of, value_fn=priced_value_book)
+        return book_spreads(conn, as_of, value_fn=raw_value_book)
+    return screen_memo("spreads-filled" if filled else "spreads", conn, as_of, compute)
+
+
+def shared_curve(conn: sqlite3.Connection, as_of: str) -> dict:
+    """`engine.curve.curve_positions(conn, as_of)` once per database revision and as-of, on
+    the engine's own spreads (`shared_spreads(filled=False)`, what it reads by default).
+    Shared: never edit the result."""
+    def compute():
+        from engine.curve import curve_positions
+        try:
+            spreads = shared_spreads(conn, as_of)
+        except Exception:  # noqa: BLE001 -- the engine then reads them itself and names the failure
+            spreads = None
+        return curve_positions(conn, as_of, spreads=spreads)
+    return screen_memo("curve", conn, as_of, compute)
+
+
 def _priced_value_book_uncached(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, int, int]:
     """`value_book(as_of)` with the fill (user decision 2026-09-21: "there should be a fill
     when bloomberg doesnt have the data"): a trade with no price on `as_of` takes its own

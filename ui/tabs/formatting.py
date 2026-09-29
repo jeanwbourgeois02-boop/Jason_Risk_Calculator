@@ -15,6 +15,7 @@ recomputes P&L or delta itself"), storage/precision stay in engine/ and data/.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import math
 import re
 from typing import Iterable, Optional, Tuple, Union
@@ -200,6 +201,176 @@ def marker(short: str, reason: Optional[str] = None, className: str = ""):
 IssueItem = Union[str, Tuple[str, str]]
 
 
+# ----------------------------------------------------------------------------- static blocks
+# 2026-09-29 (performance): in Dash 4.4 every component a callback renders dispatches one redux
+# action that runs every mounted component's selector, so a read-only table of 1,500 cells cost
+# seconds in the browser. `static_block` sends such a block as ONE component: the same html
+# tree written out as markup and drawn by `dcc.Markdown` (its html is parsed into plain React
+# elements, never redux components). The tags, classes, hovers and styles are the kit's own, so
+# the look is unchanged. Only plain `html.*` trees convert: anything with an id, a callback or a
+# non-html component inside (a tab link, a chart, a dropdown) is returned as it was.
+_STATIC_SKIP = {"children", "n_clicks", "n_clicks_timestamp", "disable_n_clicks", "key", "loading_state"}
+
+
+def _jsx_text(value: str) -> str:
+    return (str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            .replace("{", "&#123;").replace("}", "&#125;").replace("\r", "").replace("\n", "&#10;"))
+
+
+def _to_jsx(node, out: list) -> bool:
+    if node is None or isinstance(node, bool):
+        return True
+    if isinstance(node, (str, int, float)):
+        out.append(_jsx_text(node))
+        return True
+    if isinstance(node, (list, tuple)):
+        return all(_to_jsx(x, out) for x in node)
+    if getattr(node, "_namespace", None) != "dash_html_components":
+        return False
+    props = node.to_plotly_json().get("props") or {}
+    if "id" in props:
+        return False
+    tag = str(node._type).lower()
+    out.append("<" + tag)
+    for k, v in props.items():
+        if k in _STATIC_SKIP or v is None:
+            continue
+        if k == "style":
+            if not isinstance(v, dict):
+                return False
+            out.append(" style={" + json.dumps(v) + "}")
+        elif isinstance(v, bool):
+            out.append(f" {k}" if v else f" {k}={{false}}")
+        elif isinstance(v, (int, float)):
+            out.append(f" {k}={{{json.dumps(v)}}}")
+        elif isinstance(v, str):
+            out.append(f' {k}="{_jsx_text(v)}"')
+        else:
+            return False
+    children = props.get("children")
+    if children is None or children == [] or children == "":
+        out.append(" />")
+        return True
+    out.append(">")
+    if not _to_jsx(children, out):
+        return False
+    out.append(f"</{tag}>")
+    return True
+
+
+def static_block(component, className: Optional[str] = None):
+    """`component` (a plain `html.*` tree: a table, a list) as one `dcc.Markdown` drawing the same
+    markup, or `component` unchanged when it holds an id or a non-html component."""
+    out: list = []
+    if component is None or not _to_jsx(component, out) or not out:
+        return component
+    from dash import dcc
+    return dcc.Markdown("".join(out), dangerously_allow_html=True,
+                        className=" ".join(c for c in ("static-block", className) if c))
+
+
+_ROW_PARENTS = {"Tr", "Tbody", "Thead", "Tfoot", "Ul", "Ol"}
+_KEEP_ROW_ORDER = {"Tbody", "Thead", "Tfoot"}   # zebra rows (nth-child): all rows in one block, or none
+
+
+def compact(node):
+    """A tab's rendered tree with its rows drawn as static blocks (2026-09-29, performance; see
+    `static_block`): every table body, table head, list and table row whose children are all
+    plain becomes that element holding ONE `dcc.Markdown` of those children; a row that holds a
+    click target (the Book's names and chevrons, a tab link) keeps that cell as a component and
+    the plain cells around it become static runs. The elements the kit's CSS targets (the table,
+    its body, a row) stay where they were; a static block is `display: contents`, so the layout
+    and the look are unchanged. Returns `node` (edited in place)."""
+    if isinstance(node, (list, tuple)):
+        return [compact(x) for x in node]
+    if not hasattr(node, "_prop_names") or "children" not in getattr(node, "_prop_names", ()):
+        return node
+    ch = getattr(node, "children", None)
+    if ch is None or isinstance(ch, (str, int, float)):
+        return node
+    kids = list(ch) if isinstance(ch, (list, tuple)) else [ch]
+    html_node = getattr(node, "_namespace", None) == "dash_html_components"
+    if html_node and node._type in _ROW_PARENTS and kids:
+        parts: list = []
+        if all(_to_jsx(k, parts) for k in kids):
+            if len(kids) > 1 or not isinstance(kids[0], (str, int, float)):
+                node.children = [_markdown("".join(parts))]
+            return node
+        if node._type not in _KEEP_ROW_ORDER:
+            node.children = [compact(x) if not isinstance(x, _StaticMarker) else x.block
+                             for x in _runs(kids)]
+            return node
+    node.children = compact(ch) if isinstance(ch, (list, tuple)) else compact(ch)
+    return node
+
+
+class _StaticMarker:
+    def __init__(self, block):
+        self.block = block
+
+
+def _runs(kids: list) -> list:
+    """`kids` with each run of plain ones folded into a `_StaticMarker` of one static block."""
+    out: list = []
+    run: list = []
+
+    def flush():
+        if run:
+            parts: list = []
+            for r in run:
+                _to_jsx(r, parts)
+            out.append(_StaticMarker(_markdown("".join(parts))))
+            run.clear()
+    for k in kids:
+        if _to_jsx(k, []):
+            run.append(k)
+        else:
+            flush()
+            out.append(k)
+    flush()
+    return out
+
+
+def _markdown(source: str):
+    from dash import dcc
+    return dcc.Markdown(source, dangerously_allow_html=True, className="static-block")
+
+
+def static_runs(children: Iterable) -> list:
+    """`children` (the rows of a list or a table body) with each run of plain rows drawn as one
+    `static_block` and every row holding an id or a callback (a tab link) kept as it is, in order."""
+    out: list = []
+    run: list = []
+
+    def flush() -> None:
+        if run:
+            parts: list = []
+            out.append(static_block_of(run) if all(_to_jsx(r, parts) for r in run) else None)
+            if out[-1] is None:
+                out.pop()
+                out.extend(run)
+            run.clear()
+    for child in children:
+        if _to_jsx(child, []):
+            run.append(child)
+        else:
+            flush()
+            out.append(child)
+    flush()
+    return out
+
+
+def static_block_of(rows: list, className: Optional[str] = None):
+    """Several plain rows (list items, table rows) drawn as one `dcc.Markdown`, no element of its own
+    around them."""
+    parts: list = []
+    for r in rows:
+        _to_jsx(r, parts)
+    from dash import dcc
+    return dcc.Markdown("".join(parts), dangerously_allow_html=True,
+                        className=" ".join(c for c in ("static-block", className) if c))
+
+
 def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issues", open: bool = False,
                   id: Optional[str] = None):
     """The tab's one collapsed drawer of reasons: an `html.Details` whose summary reads
@@ -224,7 +395,7 @@ def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issue
     if not rows:
         return None
     extra = {"id": id} if id else {}
-    return html.Details([html.Summary(f"{title} ({len(rows)})"), html.Ul(rows, className="issues-list")],
+    return html.Details([html.Summary(f"{title} ({len(rows)})"), html.Ul(static_runs(rows), className="issues-list")],
                         className="issues-drawer", open=open, **extra)
 
 

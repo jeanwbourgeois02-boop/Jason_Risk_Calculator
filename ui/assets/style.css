@@ -922,3 +922,11 @@ p { margin: 8px 0; }
 .pnl-carry-line { font-size: 13px; margin: 2px 0 10px; }
 .pnl-carry-line > span[title] { cursor: help; }
 .pnl-rolls-table td.pnl-rolls-sub { color: var(--muted); font-style: italic; font-size: 12px; background: #f7f8fa; }
+
+/* Static blocks (2026-09-29, performance; ui/tabs/formatting.py::compact): a run of plain rows,
+   cells or list items drawn as one dcc.Markdown. The wrapper takes no box of its own, so the
+   rows and cells lay out and look exactly as before. A cell that follows a kept cell (the Book's
+   name) is not the row's first cell, whatever its place inside the block. */
+.static-block { display: contents; }
+.book-table tbody tr:last-child > td ~ .static-block > td:first-child { border-bottom-left-radius: 0; }
+.book-card:not(.card-pad) > .static-block > .book-table, .blotter-fills-scroll > .static-block > .book-table { border: none; }

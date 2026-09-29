@@ -25,3 +25,4 @@
 - [Blotter raw cells 2026-09-29](blotter-raw-cells-2026-09-29.md) — fills table shows broker_symbol / broker_price as written; '' reasons; ×100 only when price = cell × scale
 - [Look pass 2026-09-29](look-pass-2026-09-29.md) — reference kit (navy heads, :where zebra, ghost buttons); Book = Needs you card + one book card, Book line first
 - [P&L scorecard, carry, rolls 2026-09-29](pnl-scorecard-carry-rolls-2026-09-29.md) — three P&L blocks, carry dedupe rule, precious pairs = Book outrights, CNY hedge_cny_usd, risk.py placeholder edit refused
+- [Performance pass 2026-09-29](performance-pass-2026-09-29.md) — one tab mounted, one 15 s poll, screen_memo per db revision (shared, never mutate), compact static rows, perf recipe

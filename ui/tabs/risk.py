@@ -54,8 +54,10 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import os
 import re
 import sqlite3
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import plotly.graph_objects as go
@@ -63,10 +65,10 @@ from dash import Input, Output, dash_table, dcc, html
 from dash.dash_table.Format import Format, Scheme, Symbol
 
 from engine.risk import book_risk
-from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
 from ui.tabs.book import empty_state, trades_on_file
+from ui.tabs.formatting import compact
 from ui.tabs.formatting import (MINUS, MISSING, about, contract_name, format_cell, fx_name, issues_drawer, lme_name,
                                 marker, missing_cell, short_money, signed_money, spread_name, sum_known,
                                 trade_type_words)
@@ -1436,10 +1438,10 @@ def limits_pass(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[str, Any], L
     """margin-limits' three results for `as_of` (the margin estimate, the limit checks, the
     liquidity check) on one computation of the curve positions and the spreads. A failure is a
     reason in the result's shape, never a crash of the tab."""
-    from engine.curve import curve_positions
     from engine.limits import limit_checks, liquidity, margin_estimate
+    from ui.tabs.blotter_pricing import shared_curve, shared_spreads   # one of each per revision, every tab
     try:
-        curve = curve_positions(conn, as_of)
+        curve = shared_curve(conn, as_of)
     except Exception as exc:  # noqa: BLE001 -- the reason on screen
         why = f"the commodity positions could not be computed ({type(exc).__name__}: {exc})"
         return ({"available": False, "reasons": [why]},
@@ -1448,8 +1450,7 @@ def limits_pass(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[str, Any], L
     spreads = None
     if curve.get("rows"):
         try:
-            from engine.spreads import book_spreads
-            spreads = book_spreads(conn, as_of)
+            spreads = shared_spreads(conn, as_of)
         except Exception:  # noqa: BLE001 -- the engines read them themselves and name the failure
             spreads = None
     try:
@@ -1610,6 +1611,33 @@ def body(result: Dict[str, Any], margin: Optional[Dict[str, Any]] = None,
         correlation_block(result, ctx), stress_block(result, ctx), margin_part, drawer) if c is not None])
 
 
+def _outside_inputs() -> tuple:
+    """The files the risk figures read beside the database (the risk, stress and limits config,
+    the research app's history database): `blotter_pricing.outside_inputs_key`."""
+    from ui.tabs.blotter_pricing import outside_inputs_key
+    config = Path(__file__).resolve().parents[2] / "config"
+    try:
+        from engine.risk import commodity_history as ch
+        research = os.environ.get(ch.ENV_VAR, "").strip() or str(ch.DEFAULT_PATH)
+    except Exception:  # noqa: BLE001 -- the quarter-hour still refreshes it
+        research = None
+    return outside_inputs_key(config / "risk.yaml", config / "commodity_stress.yaml", config / "limits.yaml",
+                              research, f"{research}-wal" if research else None)
+
+
+def gather(conn: sqlite3.Connection, as_of: str) -> tuple:
+    """(book_risk, margin, limit checks, liquidity, the positions' context) for `as_of`, computed
+    once per database revision, as-of and state of the outside inputs (2026-09-29: the tab is
+    rebuilt on every visit). Shared: never edit the result."""
+    from ui.tabs.blotter_pricing import screen_memo
+
+    def compute():
+        result = book_risk(conn, as_of)
+        margin, checks, liq = limits_pass(conn, as_of)
+        return result, margin, checks, liq, position_context(conn)
+    return screen_memo("risk-gather", conn, as_of, compute, extra=_outside_inputs())
+
+
 def render(as_of: Optional[str], db_path) -> Any:
     """The body for `as_of` from the database at `db_path`: one `book_risk` call, one
     margin-limits pass (margin, limits, liquidity) and the book's context on a read-only
@@ -1625,9 +1653,7 @@ def render(as_of: Optional[str], db_path) -> Any:
     try:
         if trades_on_file(conn) == 0:
             return empty_state(idx="risk")
-        result = book_risk(conn, as_of)
-        margin, checks, liq = limits_pass(conn, as_of)
-        ctx = position_context(conn)
+        result, margin, checks, liq, ctx = gather(conn, as_of)
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
         return html.Div(className="status-panel status-panel--down", children=[
             html.P(f"Risk could not be computed for {as_of} ({type(exc).__name__}: {exc}).", className="status-line status-line--bad")])
@@ -1646,7 +1672,6 @@ def layout(default_date: Optional[str] = None) -> html.Div:
         html.Div(className="ladder-title-row", children=[
             html.H3("Risk", className="ladder-title-row-heading"), html.Span(QUESTION, className="risk-question")]),
         html.Div(id=BODY_ID, children=[message_box("Loading the risk metrics...")]),
-        dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
     ])
 
 
@@ -1670,10 +1695,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(BODY_ID, "children"),
         Input(AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
-        Input(REFRESH_ID, "n_intervals"),
     )
-    def _update(as_of, _data_rev=None, _n_intervals=0):
-        return render(as_of, get_db_path())
+    def _update(as_of, _data_rev=None):
+        return compact(render(as_of, get_db_path()))
 
     app.clientside_callback(_GROUP_TOGGLE_JS, [Output(GROUP_TABLE_IDS[k], "style") for k, _l in GROUP_OPTIONS],
                             Input(GROUP_ID, "value"))
