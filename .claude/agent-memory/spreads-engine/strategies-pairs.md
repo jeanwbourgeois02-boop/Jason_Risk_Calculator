@@ -32,7 +32,7 @@ Choices I took (low stakes unless the user objects):
   (tests/golden_book.py), so its puts read long USD: a fixture quirk, not the rule.
 - Coverage (2026-09-29) reads `hedge_cny_usd` (hedges on a CNH/CNY pair only); `hedge_usd` stays
   every hedge. Before, a EURGBP forward with no USD leg blanked the CNY coverage of the sample.
-- **Ratio is RAW** (China CNY/unit over foreign USD/unit, no FX) where the template has
+- **SUPERSEDED 2026-09-29: the ratio is now CONVERTED (user), see [[trade-book]].** Was: Ratio is RAW (China CNY/unit over foreign USD/unit, no FX) where the template has
   `params.ratio_screen` (now `Template.ratio_screen`): the desk convention text says "8.0-8.3 at FX
   7.1-7.3", i.e. FX left in. ZNA1 entry 6.64 / 6.75. Converted-vs-raw still open with Jason
   ([[project-ratio-convention]] in the user's memory). `level_alt` is the template's USD/t difference.

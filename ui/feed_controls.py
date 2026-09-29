@@ -242,6 +242,53 @@ def status_view(line: str) -> html.Span:
         html.Span(f"Bloomberg: {state}")])
 
 
+def progress_of(status: Optional[dict]) -> Optional[dict]:
+    """`status["progress"]` (bbg-live's `live.set_progress`, 2026-09-29: while a pull or its backfill
+    runs {running: True, step_label, done, total, sentence, ...}; at the end running False, outcome
+    ok | partial | failed, finished_at and the final sentence), or None on an older status file."""
+    block = (status or {}).get("progress")
+    return block if isinstance(block, dict) else None
+
+
+def _joined(*parts: str) -> str:
+    return "\n".join(p for p in parts if p)
+
+
+def _hhmm(text) -> str:
+    parsed = _parse_time(text)
+    return parsed.astimezone().strftime("%H:%M") if parsed is not None else ""
+
+
+def bar_state(status: Optional[dict], line: str) -> Tuple[str, str, str]:
+    """(dot colour key, the two or three words, the hover) of the top bar (Phase G, 2026-09-29):
+    'Pulling 31 of 47 marks…' while a pull runs (the progress sentence AS GIVEN on hover, its first
+    clause in the bar; never re-worded here), 'Last pull 09:14' after one, 'Pull failed' / 'Pull
+    partial' with the final sentence when it ended so, else the short state of `line`."""
+    prog = progress_of(status)
+    if prog and prog.get("running"):
+        sentence = str(prog.get("sentence") or "Pulling")
+        head = sentence.split(" · ", 1)[0].strip() or "Pulling"
+        return "pulling", head + "…", sentence
+    state = short_state(line)
+    if prog and prog.get("outcome") in ("failed", "partial"):
+        final = str(prog.get("sentence") or prog.get("final_sentence") or "")
+        word = "Pull failed" if prog.get("outcome") == "failed" else "Pull partly failed"
+        return ("not connected" if prog.get("outcome") == "failed" else "refused"), word, _joined(final, line)
+    if state == "connected":
+        when = _hhmm((status or {}).get("time"))
+        final = str((prog or {}).get("sentence") or "")
+        return "connected", (f"Last pull {when}" if when else "Connected"), _joined(line, final)
+    return state, state[:1].upper() + state[1:], line
+
+
+def bar_view(status: Optional[dict], line: str) -> Tuple[html.Span, str]:
+    """(the top bar's Bloomberg element, its hover) from the status file and the status line."""
+    key, words, hover = bar_state(status, line)
+    return html.Span(className="feed-state", children=[
+        html.Span(className="header-dot", style={"background": _STATE_DOTS.get(key, "#f59e0b")}),
+        html.Span(words)]), hover
+
+
 def not_connected_message(app, status: Optional[dict]) -> str:
     """What a click says when there is no feed to wake. The reason is the one recorded
     when the app tried to start the feed (`ui.app.create_app` keeps it on
@@ -458,13 +505,14 @@ def register(app, get_db_path: Callable[[], object]) -> None:
     )
     def _pull_poll(_n, pending):
         db_path = get_db_path()
-        line, finished, landed = poll_outcome(read_feed_status(db_path), pending,
-                                              getattr(app, "bloomberg_feed", None))
+        status = read_feed_status(db_path)
+        line, finished, landed = poll_outcome(status, pending, getattr(app, "bloomberg_feed", None))
+        view, hover = bar_view(status, line)
         if not finished:
-            return status_view(line), line, no_update, no_update, no_update, no_update
+            return view, hover, no_update, no_update, no_update, no_update
         # Landed: tell every open view the marks changed (ui/revision.py), no reload. The
         # button re-enables unless the sample book was made active meanwhile.
-        return (status_view(line), line, None, True, pull_locked(),
+        return (view, hover, None, True, pull_locked(),
                 (revision.file_signature(db_path) if landed else no_update))
 
     @app.callback(
@@ -479,6 +527,6 @@ def register(app, get_db_path: Callable[[], object]) -> None:
         if pending and seconds_waited(pending) <= PULL_TIMEOUT_SECONDS:
             return no_update, no_update
         feed = getattr(app, "bloomberg_feed", None)
-        line = feed_headline(read_feed_status(get_db_path()), feed_interval_seconds(feed),
-                             feed_running=feed is not None, say_on_request=False)
-        return status_view(line), line
+        status = read_feed_status(get_db_path())
+        line = feed_headline(status, feed_interval_seconds(feed), feed_running=feed is not None, say_on_request=False)
+        return bar_view(status, line)

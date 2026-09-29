@@ -19,3 +19,5 @@ Facts about `../Commodity Dashboard/var/rv.sqlite`, checked 2026-09-24 on the de
 
 **Why:** these facts decide whether a position's risk history is right or silently empty.
 **How to apply:** re-check the root and depth differences on the Bloomberg PC's copy, and after any contract-master change to `bbg_root`. See [[dev-pc-parquet-and-package-init]].
+
+- **Provenance** (2026-09-29): rows carry no provider; the research app's `job` table does (`provider` 'mock' | 'bloomberg' | '', kinds pull / backfill write prices; `pull_log` maps job to ticker). The dev copy has one job, `pull` by `mock` on 2026-09-28, so every figure drawn from it is generated: Jason's fills sit 30-60 % away (COMEX:SI x0.38, COMEX:HG x0.47, CME:HRC x0.49). Another agent once described these figures as real. `research_source()` / `status()['source_kind']` and `research_price_check(conn, as_of)` now say so; any mock job makes the kind 'mock' (its rows can survive a later Bloomberg pull).

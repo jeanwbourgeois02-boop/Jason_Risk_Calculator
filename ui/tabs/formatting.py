@@ -978,3 +978,83 @@ def date_cell(iso: Optional[str], business_days: Optional[int] = None, estimated
 def unit_suffix(unit: str):
     """The small grey unit after a Now cell ('6.03 USD/bbl'); None for no unit."""
     return html.Span(unit, className="cell-unit") if unit else None
+
+
+# ----------------------------------------------------------------------------- Phase G number formats (2026-09-29)
+# The trade tables' formats (the design doc's "Table specs", Numbers): money on trade, group and
+# total rows in k / m with ONE decimal and the sign always ("+42.1k", "−1.2m"), the full figure on
+# hover; leg rows at full figures ("+42,118"); percent at 0 decimals, 1 below 10 % ("92 %",
+# "4.5 %"); a z-score signed at 1 decimal; dates "22 Sep", the year only outside the current year.
+def km_text(value, signed: bool = True) -> str:
+    """'+42.1k', '−1.2m', '+950', '0'; unsigned ('42.1k') with `signed=False`. None / NaN -> the em
+    dash text."""
+    if _is_missing(value):
+        return MISSING
+    f = float(value)
+    a = abs(f)
+    if round(a) < 1000:
+        body = f"{round(a):,.0f}"
+    elif a < 999_950:
+        body = f"{a / 1e3:,.1f}k"
+    elif a < 999_950_000:
+        body = f"{a / 1e6:,.1f}m"
+    else:
+        body = f"{a / 1e9:,.1f}bn"
+    if body == "0":
+        return "0"
+    if f < 0:
+        return MINUS + body
+    return ("+" + body) if signed else body
+
+
+def full_signed(value) -> str:
+    """'+42,118' / '−6,928' / '0': a full figure with its sign (leg rows)."""
+    if _is_missing(value):
+        return MISSING
+    f = round(float(value))
+    if f == 0:
+        return "0"
+    return (MINUS if f < 0 else "+") + f"{abs(f):,.0f}"
+
+
+def km_cell(value, reason: Optional[str] = None, hover: Optional[str] = None, signed: bool = True,
+            colour: bool = True, className: str = ""):
+    """A trade-table money cell: `km_text`, green / red by sign when `colour`, the full figure (and
+    `hover`) on hover; the em dash with `reason` when missing."""
+    if _is_missing(value):
+        return missing_cell("\n".join(t for t in (reason, hover) if t) or None, className)
+    classes = " ".join(c for c in ((sign_class(value) if colour else ""), className) if c)
+    title = "\n".join(t for t in (f"USD {full_signed(value) if signed else format_cell(value)}", hover) if t)
+    return html.Span(km_text(value, signed), className=classes or None, title=plain_words(title))
+
+
+def pct_text(fraction, signed: bool = False) -> str:
+    """A fraction as a percent: 0.92 -> '92 %', 0.045 -> '4.5 %'. None / NaN -> the em dash text."""
+    if _is_missing(fraction):
+        return MISSING
+    p = float(fraction) * 100.0
+    body = f"{abs(p):.1f}" if abs(p) < 9.95 else f"{abs(p):.0f}"
+    sign = MINUS if p < 0 and float(body) != 0 else ("+" if signed and p > 0 else "")
+    return f"{sign}{body} %"
+
+
+def z_text(z) -> str:
+    """'+1.8', '−0.6': a z-score signed at one decimal."""
+    if _is_missing(z):
+        return MISSING
+    return signed_number(float(z), 1)
+
+
+def day_text(iso: Optional[str], as_of: Optional[str] = None) -> str:
+    """'22 Sep'; '17 Mar 27' outside the current year (of `as_of`, else today); the text as it is
+    when it is not a date."""
+    try:
+        d = dt.date.fromisoformat(str(iso)[:10])
+    except (TypeError, ValueError):
+        return str(iso or "")
+    try:
+        year = dt.date.fromisoformat(str(as_of)[:10]).year if as_of else dt.date.today().year
+    except ValueError:
+        year = dt.date.today().year
+    text = f"{d.day} {_MONTH_ABBR[d.month - 1]}"
+    return text if d.year == year else f"{text} {d.year % 100:02d}"

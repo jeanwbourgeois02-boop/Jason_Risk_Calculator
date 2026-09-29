@@ -35,7 +35,9 @@ returns only what the marks table holds, and the status file says why the feed i
 Every cycle writes a status JSON next to the database (`<db>.bloomberg_status.json`)
 listing each requested (instrument, mark_type, settle_date) as OK or FAILED with the
 value or the failure detail. `py -3 -m data.bloomberg.live --status` prints it;
-`--once` runs a single pull.
+`--once` runs a single pull. Since 2026-09-29 (Phase G, "Smooth and contained") each step
+of the cycle runs on its own and its outcome is under status["steps"]; a running pull
+publishes status["progress"] into the same file as it goes (see `pull_once`).
 
 On request only (user decision 2026-09-21, replacing the 15-minute cadence of the same
 day: "make it only pull the bloomberg info on request - no automatic"): a cycle runs when
@@ -701,6 +703,7 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
     ask = {k: e for k, e in entries.items() if e["ticker"]}
     if ask:
         from data.bloomberg.pull_marks import fetch_reference, _to_date
+        _release_lock(conn)         # the library's sync is committed before Bloomberg is asked
         block["requested"] = len({e["ticker"] for e in ask.values()})
         # One ReferenceDataRequest per set of fields: the futures' (FUT_LAST_TRADE_DT,
         # FUT_NOTICE_FIRST), and the options' on futures (OPT_EXPIRE_DT, LAST_TRADEABLE_DT).
@@ -711,17 +714,26 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
                 by_fields[entry["fields"]].append(entry["ticker"])
         data: Dict[str, dict] = {}
         asked_ok = set()
-        for fields, tickers in sorted(by_fields.items()):
-            tickers = sorted(tickers)
+        def _ask(tickers: List[str], fields: tuple, may_split: bool) -> None:
             try:
                 session, service = get_session()
                 got = fetch_reference(session, service, tickers, list(fields), diag=diag,
                                       tag={"purpose": CONTRACT_DATES}) or {}
                 for t in tickers:
                     data[t] = got.get(t) or {}
-                asked_ok |= set(tickers)
-            except Exception as exc:  # noqa: BLE001 -- every ticker fails with the reason, the pull goes on
-                block["failed"] += [{"ticker": t, "reason": f"request failed: {exc}"} for t in tickers]
+                asked_ok.update(tickers)
+            except Exception as exc:  # noqa: BLE001 -- these tickers fail with the reason, the pull goes on
+                # One ticker that breaks the request must not cost the others their dates
+                # (2026-09-29): asked again one by one, unless Bloomberg timed out or there is
+                # no session at all.
+                if may_split and len(tickers) > 1 and not _is_timeout(exc) and not isinstance(exc, SessionUnavailable):
+                    for t in tickers:
+                        _ask([t], fields, False)
+                    return
+                block["failed"].extend({"ticker": t, "reason": f"request failed: {exc}"} for t in tickers)
+
+        for fields, tickers in sorted(by_fields.items()):
+            _ask(sorted(tickers), fields, True)
         ask = {k: e for k, e in ask.items() if e["ticker"] in asked_ok}
         store_static_dates = None
         if ask:
@@ -792,6 +804,288 @@ def not_requestable_futures(conn: sqlite3.Connection, as_of_date: str) -> List[d
     return [out[k] for k in sorted(out)]
 
 
+# --------------------------------------------------------------------------- fault isolation
+# 2026-09-29 (Phase G, "Smooth and contained"; user: "if something pulls badly it doesnt crash
+# everything - but of course most important is to make sure that everything pulls
+# correctly"). A cycle is a row of steps, each run on its own (`pull_once`): a step that
+# raises is recorded with its reason under status["steps"] and the next step runs, the ledger
+# included. Inside the three marks steps (spot, forwards, futures) the tickers are asked in
+# chunks, so a request Bloomberg cannot answer fails its own chunk only; a chunk that raised
+# for any reason but a timeout is asked again one ticker at a time, so one ticker that breaks
+# a request leaves the others standing. What is asked is unchanged: the same tickers and
+# fields the library lists, in more requests (hard rule 8).
+REQUEST_CHUNK = {"spot": 10, "forwards": 5, "futures": 10}
+# After this many timeouts in a row the rest of the marks chunks are not sent: each timeout
+# costs pull_marks.EVENT_TIMEOUT_MS, and a Bloomberg that stopped answering would otherwise
+# hold the press for minutes. Every row not asked is failed with that reason.
+TIMEOUTS_BEFORE_GIVING_UP = 2
+
+# The steps of a connected cycle, in order, with the plain words the progress line and the
+# per-step outcome use (status["progress"]["step_label"], status["steps"][i]["label"]).
+STEP_LABELS = {
+    "contract_dates": "contract dates",
+    "requests": "the list of what to ask",
+    "spot": "spot prices",
+    "forwards": "forward curves",
+    "futures": "futures and option prices",
+    "write_marks": "saving the marks",
+    "lme": "LME curves",
+    "curves": "OIS curves",
+    "vol": "vol smiles",
+    "options": "option pricing",
+    "ledger": "the ledger",
+    "recalc": "re-pricing the options from the marks on file",
+}
+PULL_STEPS = ("contract_dates", "requests", "spot", "forwards", "futures", "write_marks", "lme", "curves",
+              "vol", "options", "ledger")
+# The outcome of a step in status["steps"]: it ran and nothing failed, some of it failed,
+# it failed (raised, or nothing it asked came back), or it had nothing to do / did not run.
+OUTCOMES = ("ok", "partial", "failed", "skipped")
+
+
+class SessionUnavailable(RuntimeError):
+    """The cycle's blpapi session could not be opened (no Terminal logged in): the press has
+    no Bloomberg, and every step that needs it stops asking."""
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    return getattr(exc, "classification", None) == "TIMEOUT"
+
+
+def _plain_error(exc: BaseException) -> str:
+    """A request failure in a few words: a timeout as such, anything else as its type and
+    message (cut at 300 characters)."""
+    if _is_timeout(exc):
+        try:
+            from data.bloomberg.pull_marks import EVENT_TIMEOUT_MS
+            seconds = f" within {EVENT_TIMEOUT_MS / 1000:.0f} s"
+        except Exception:  # noqa: BLE001
+            seconds = ""
+        return f"Bloomberg did not answer{seconds} ({getattr(exc, 'request_type', 'request')})"
+    if isinstance(exc, SessionUnavailable):
+        return f"no Bloomberg session ({exc})"
+    text = f"{type(exc).__name__}: {exc}"
+    return text if len(text) <= 300 else text[:297] + "..."
+
+
+def _release_lock(conn: sqlite3.Connection) -> None:
+    """Commit whatever the cycle has written so far, so no write lock is held across a
+    Bloomberg request (a request can wait pull_marks.EVENT_TIMEOUT_MS; an upload waiting on
+    the lock gives up after schema.BUSY_TIMEOUT_SECONDS). Never raises."""
+    try:
+        if conn.in_transaction:
+            conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class _NetLog:
+    """What the cycle's Bloomberg requests did: how many were answered, those that raised
+    ({step, reason, traceback}), and the timeouts in a row (`gave_up`)."""
+
+    def __init__(self) -> None:
+        self.answered = 0
+        self.raised: List[dict] = []
+        self.timeouts_in_row = 0
+
+    def ok(self) -> None:
+        self.answered += 1
+        self.timeouts_in_row = 0
+
+    def failed(self, step: str, exc: BaseException) -> None:
+        """Called inside the `except` that caught `exc`."""
+        self.raised.append({"step": step, "reason": _plain_error(exc), "traceback": traceback.format_exc()})
+        self.timeouts_in_row = self.timeouts_in_row + 1 if _is_timeout(exc) else 0
+
+    @property
+    def gave_up(self) -> bool:
+        return self.timeouts_in_row >= TIMEOUTS_BEFORE_GIVING_UP
+
+
+def _ask_in_chunks(step: str, requests, size: int, ask: Callable, net: _NetLog, progress=None) -> dict:
+    """{"rows", "warnings", "failures", "curve_rows"}: `ask(chunk)` for the requests of
+    `size` tickers at a time (every request of a ticker in the same chunk), the lists it
+    returns joined. A chunk that raises fails its own rows with the reason, never the others;
+    one that raised for anything but a timeout is asked again ticker by ticker first. After
+    TIMEOUTS_BEFORE_GIVING_UP timeouts in a row the chunks left are failed unasked.
+    `SessionUnavailable` is raised on: the press has no Bloomberg. `progress.add_done` is
+    told the rows of each chunk once it is settled."""
+    out: dict = {"rows": [], "warnings": [], "failures": [], "curve_rows": []}
+    by_ticker: Dict[str, list] = {}
+    for r in requests:
+        by_ticker.setdefault(r.bbg_ticker, []).append(r)
+    tickers = sorted(by_ticker)
+
+    def _fail(rows, reason: str) -> None:
+        out["failures"].extend({"instrument_id": r.instrument_id, "mark_type": r.mark_type,
+                                "settle_date": r.settle_date, "detail": f"{r.mark_type} {reason}"} for r in rows)
+
+    def _one(chunk: List[str], may_split: bool) -> None:
+        rows = [r for t in chunk for r in by_ticker[t]]
+        if net.gave_up:
+            _fail(rows, f"not asked: Bloomberg did not answer the last {TIMEOUTS_BEFORE_GIVING_UP} requests "
+                        "of this pull")
+            return
+        try:
+            got = ask(rows) or {}
+        except SessionUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- this chunk fails alone
+            net.failed(step, exc)
+            if may_split and len(chunk) > 1 and not _is_timeout(exc):
+                for t in chunk:
+                    _one([t], False)
+                return
+            _fail(rows, f"request failed: {_plain_error(exc)}")
+            return
+        net.ok()
+        for key, values in got.items():
+            out.setdefault(key, []).extend(values or [])
+
+    for i in range(0, len(tickers), max(1, int(size))):
+        chunk = tickers[i:i + max(1, int(size))]
+        _one(chunk, True)
+        if progress is not None:
+            progress.add_done(sum(len(by_ticker[t]) for t in chunk))
+    return out
+
+
+# --------------------------------------------------------------------------- progress
+PROGRESS_KEY = "progress"
+
+
+def set_progress(db_path, block: dict) -> None:
+    """Replace status["progress"] in the status file, under the lock `write_status` takes,
+    leaving every other key as it is: the last pull's report stays what the screens show
+    (its fingerprint, ui/feed_controls.status_fingerprint, does not move), with the running
+    pull's progress beside it. Nothing is written when there is no status file yet (the app
+    writes a placeholder at start). Never raises."""
+    try:
+        with _STATUS_LOCK:
+            current = read_status(db_path)
+            if current is None:
+                return
+            current[PROGRESS_KEY] = block
+            _replace_status_file(status_path(db_path), current)
+    except Exception:  # noqa: BLE001 -- progress is a courtesy, never a failure of the pull
+        pass
+
+
+def progress_sentence(block: dict) -> str:
+    """The progress line: 'Pulling 31 of 47 marks · futures and option prices' while a pull
+    runs (the step alone before the marks are counted), 'Pull finished: 45 of 47 marks
+    written' / 'Pull finished: no Bloomberg (reason)' after."""
+    label = block.get("step_label") or ""
+    done, total = int(block.get("done") or 0), int(block.get("total") or 0)
+    if block.get("running"):
+        head = f"Pulling {done} of {total} marks" if total else "Pulling"
+        return f"{head} · {label}" if label else head
+    return str(block.get("final_sentence") or "Pull finished")
+
+
+class _Progress:
+    """The running pull's status["progress"] block, published at every step and chunk:
+    {running, started_at, updated_at, step, step_label, step_index, step_count, done, total,
+    sentence}; at the end also finished_at and outcome. Never raises."""
+
+    def __init__(self, db_path, started_at: str, steps=PULL_STEPS):
+        self.db_path = db_path
+        self.steps = list(steps)
+        self.block = {"running": True, "started_at": started_at, "updated_at": started_at, "step": "",
+                      "step_label": "", "step_index": 0, "step_count": len(self.steps), "done": 0, "total": 0}
+        self.publish()
+
+    def publish(self) -> None:
+        self.block["updated_at"] = _now_iso()
+        self.block["sentence"] = progress_sentence(self.block)
+        set_progress(self.db_path, dict(self.block))
+
+    def step(self, name: str) -> None:
+        if name not in self.steps:
+            self.steps.append(name)
+            self.block["step_count"] = len(self.steps)
+        self.block.update(step=name, step_label=STEP_LABELS.get(name, name), step_index=self.steps.index(name) + 1)
+        self.publish()
+
+    def set_total(self, n: int) -> None:
+        self.block["total"] = int(n)
+        self.publish()
+
+    def add_done(self, n: int) -> None:
+        self.block["done"] = min(int(self.block["done"]) + int(n), int(self.block["total"]) or 10 ** 9)
+        self.publish()
+
+    def final(self, outcome: str, sentence: str) -> dict:
+        """The block the final status carries: not running, with the pull's outcome."""
+        now = _now_iso()
+        self.block.update(running=False, updated_at=now, finished_at=now, outcome=outcome, step="done",
+                          step_label="", final_sentence=sentence)
+        self.block["sentence"] = progress_sentence(self.block)
+        return dict(self.block)
+
+
+def _step_outcome(name: str, block, failed_items: int = 0, asked: int = 0) -> Tuple[str, str]:
+    """(outcome, detail) of one step from what it returned: `block` is the step's status
+    block (a dict), or None for the marks steps, which are judged by `asked` / `failed_items`."""
+    if block is None:
+        if not asked:
+            return "skipped", "nothing to ask"
+        if failed_items >= asked:
+            return "failed", f"none of {asked} came back"
+        if failed_items:
+            return "partial", f"{asked - failed_items} of {asked} came back, {failed_items} failed"
+        return "ok", f"{asked} of {asked} came back"
+    if not isinstance(block, dict):
+        return "ok", ""
+    if block.get("error"):
+        return "failed", str(block["error"])
+    skipped = block.get("skipped")
+    if isinstance(skipped, str) and skipped:
+        return "skipped", skipped
+    if name == "contract_dates":
+        failed = len(block.get("failed") or [])
+        if not (block.get("requested") or failed or (block.get("applied") or {}).get("updated")):
+            return "skipped", "no contract dates to ask"
+        if (block.get("applied") or {}).get("error"):
+            return "partial", block.get("summary") or str(block["applied"]["error"])
+        if failed and not block.get("stored") and failed >= int(block.get("requested") or 0):
+            return "failed", block.get("summary") or ""
+        return ("partial" if failed else "ok"), block.get("summary") or ""
+    if name == "lme":
+        if not block.get("roots"):
+            return "skipped", "no LME forward open"
+        return ("partial" if block.get("missing") else "ok"), block.get("summary") or ""
+    if name == "curves":
+        currencies = block.get("currencies") or {}
+        bad = sorted(c for c, e in currencies.items() if e.get("error"))
+        short = sorted(c for c, e in currencies.items() if e.get("left_out"))
+        n = len(currencies)
+        detail = f"{n - len(bad)} of {n} currencies"
+        if bad:
+            detail += f"; no curve for {', '.join(bad)}"
+        if short:
+            detail += "; " + "; ".join(f"{c}: {currencies[c].get('left_out_summary', '')}" for c in short)
+        return (("partial" if len(bad) < n else "failed") if bad else ("partial" if short else "ok")), detail
+    if name == "vol":
+        diag = block.get("diagnostics") or []
+        refused = block.get("rejected") or []
+        detail = f"{block.get('written', 0)} quotes written"
+        if diag:
+            detail += f", {len(diag)} tickers gave nothing"
+        if refused:
+            detail += f", {len(refused)} left out ({refused[0].get('ticker', '')}: {refused[0].get('reason', '')})"
+        return ("partial" if diag or refused else "ok"), detail
+    if name == "options":
+        skipped = block.get("skipped") or []
+        return ("partial" if skipped else "ok"), (f"{block.get('priced', 0)} priced"
+                                                  + (f", {len(skipped)} skipped" if skipped else ""))
+    if name == "ledger":
+        realised = block.get("realised")
+        realised = len(realised) if isinstance(realised, (list, tuple)) else realised
+        return "ok", block.get("refrozen_summary") or (f"{realised} realised" if realised is not None else "")
+    return "ok", ""
+
+
 # --------------------------------------------------------------------------- one pull
 class _SharedSession:
     """The one blpapi session of a pull cycle (2026-09-21). Opened on first use, handed to
@@ -801,16 +1095,27 @@ class _SharedSession:
     and the same service. Requests stay strictly sequential, and the three modules draw
     their CorrelationIds from disjoint ranges, so a late reply to one step's timed-out
     request can never be read as another step's answer. `seconds` is the time spent
-    opening (status["timings"]["session"])."""
+    opening (status["timings"]["session"]).
+
+    An open that fails (2026-09-29, Phase G) is tried once per cycle: the failure is kept
+    (`open_error`, its words; `open_traceback`) and every later ask raises
+    `SessionUnavailable` at once, so a PC whose Terminal is not logged in pays the open
+    once, not once per step, and `pull_once` knows the press had no Bloomberg."""
 
     def __init__(self, host: str, port: int, session_factory: Optional[Callable] = None, diag=None):
         self.host, self.port, self._factory, self._diag = host, port, session_factory, diag
         self.session = self.service = None
         self.seconds = 0.0
+        self.opened = False
+        self.open_error = ""
+        self.open_traceback = ""
 
     def get(self):
         """(session, service), opening the session the first time it is asked for. An open
-        that fails raises to the caller and is tried again by the next step that asks."""
+        that fails raises `SessionUnavailable` (its words the open's own), now and on every
+        later ask of this cycle."""
+        if self.open_error:
+            raise SessionUnavailable(self.open_error)
         if self.session is None:
             started = time.perf_counter()
             try:
@@ -820,6 +1125,11 @@ class _SharedSession:
                 else:
                     session, service = self._factory()
                 self.session, self.service = session, service
+                self.opened = True
+            except Exception as exc:  # noqa: BLE001 -- kept, and said by pull_once
+                self.open_error = f"{type(exc).__name__}: {exc}"
+                self.open_traceback = traceback.format_exc()
+                raise SessionUnavailable(self.open_error) from exc
             finally:
                 self.seconds += time.perf_counter() - started
         return self.session, self.service
@@ -843,28 +1153,27 @@ def _bloomberg_said(diag, ticker: str) -> str:
 def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str):
     """Live PX_LAST via ReferenceDataRequest (intraday), unlike pull_marks' close-of-day
     historical path, for every SPOT request in ONE request. A failure carries Bloomberg's
-    own reason when it gave one. Returns (rows, failures)."""
-    from data.bloomberg.pull_marks import fetch_reference, BloombergRequestError
+    own reason when it gave one. Returns (rows, failures).
+
+    A request that raises (a timeout, a dead session) raises to the caller since 2026-09-29:
+    `pull_once` asks in chunks (`_ask_in_chunks`), which fails that chunk's rows with the
+    reason and goes on. A value that is not a finite number fails its own row."""
+    from data.bloomberg.pull_marks import fetch_reference, _plain_number
     spot_reqs = [r for r in requests if r.mark_type == "SPOT"]
     if not spot_reqs:
         return [], []
     tickers = sorted({r.bbg_ticker for r in spot_reqs})
-    try:
-        data = fetch_reference(session, service, tickers, ["PX_LAST"], diag=diag, tag={"purpose": "LIVE_SPOT"})
-    except BloombergRequestError as exc:
-        return [], [{"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
-                     "detail": f"{r.mark_type} request failed: {exc}"} for r in spot_reqs]
+    data = fetch_reference(session, service, tickers, ["PX_LAST"], diag=diag, tag={"purpose": "LIVE_SPOT"}) or {}
     rows, failures = [], []
     for r in spot_reqs:
-        value = data.get(r.bbg_ticker, {}).get("PX_LAST")
+        value = (data.get(r.bbg_ticker) or {}).get("PX_LAST")
         if value is None:
             said = _bloomberg_said(diag, r.bbg_ticker)
             failures.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
                              "detail": "no PX_LAST returned" + (f" (Bloomberg: {said})" if said else "")})
             continue
-        try:
-            fvalue = float(value)
-        except (TypeError, ValueError):
+        fvalue = _plain_number(value)
+        if fvalue is None:
             failures.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
                              "detail": f"PX_LAST not numeric: {value!r}"})
             continue
@@ -925,13 +1234,33 @@ def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Di
         failures += [{"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT", "settle_date": r.settle_date,
                      "detail": f"FWD_CURVE request raised: {exc!r}"} for r in curve_reqs]
         return rows, warnings, failures, curve_rows
+    from data.bloomberg.pull_marks import _plain_number
     instrument_by_ticker = {r.bbg_ticker: r.instrument_id for r in curve_reqs}
     seen_points = set()
-    for ticker, curve in curves.items():
+    # A point that is not a dated, finite number (2026-09-29) is dropped from its curve with a
+    # warning: it is never written, and never stops the pair's other points or other pairs.
+    for ticker, curve in list((curves or {}).items()):
+        if not isinstance(curve, dict):
+            curves[ticker] = {"points": [], "error": f"unreadable FWD_CURVE answer: {curve!r}"[:200]}
+            continue
+        good = []
+        for point in curve.get("points") or []:
+            try:
+                point_date, raw = point
+                value = _plain_number(raw)
+            except (TypeError, ValueError):
+                point_date, value = None, None
+            if not isinstance(point_date, date) or value is None:
+                warnings.append(f"{ticker}: FWD_CURVE point {point!r} is not a date and a number; left out")
+                continue
+            good.append((point_date, value))
+        curve["points"] = sorted(good)
+        # The table rows fwd_curve left out, with its reasons (bbg-curves, 2026-09-29).
+        warnings.extend(f"{ticker}: FWD_CURVE {why}" for why in curve.get("skipped") or [])
         instrument_id = instrument_by_ticker.get(ticker)
         if instrument_id is None:
             continue
-        for point_date, value in curve.get("points") or []:
+        for point_date, value in curve["points"]:
             if point_date <= as_of or (instrument_id, point_date) in seen_points:
                 continue
             seen_points.add((instrument_id, point_date))
@@ -943,10 +1272,16 @@ def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Di
         curve = curves.get(r.bbg_ticker, {"points": [], "error": "no curve"})
         if not curve["points"]:
             failures.append({"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT", "settle_date": r.settle_date,
-                             "detail": f"FWD_CURVE: {curve.get('error', 'no points')}"})
+                             "detail": f"FWD_CURVE: {curve.get('error') or 'no points'}"})
             continue
         target = date.fromisoformat(r.settle_date)
-        value, how = outright_for_date(curve["points"], target, spot_by_pair.get(r.instrument_id), as_of)
+        try:
+            value, how = outright_for_date(curve["points"], target, spot_by_pair.get(r.instrument_id), as_of)
+            value = _plain_number(value) if value is not None else None
+        except Exception as exc:  # noqa: BLE001 -- this forward fails alone
+            failures.append({"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT", "settle_date": r.settle_date,
+                             "detail": f"not read off the FWD_CURVE: {type(exc).__name__}: {exc}"})
+            continue
         if value is None:
             failures.append({"instrument_id": r.instrument_id, "mark_type": "FWD_OUTRIGHT", "settle_date": r.settle_date,
                              "detail": f"{r.settle_date} outside curve {curve['points'][0][0]}..{curve['points'][-1][0]}"
@@ -961,20 +1296,46 @@ def _fwd_outright_rows(session, service, fwd_reqs, as_of: date, spot_by_pair: Di
     return rows, warnings, failures, curve_rows
 
 
-def write_marks(conn: sqlite3.Connection, rows: List[dict]) -> int:
-    """INSERT OR REPLACE so each cycle refreshes the same key with a new snapped_at. Only
-    known instruments; anything else is skipped and reported."""
+def _row_problem(r, known: set) -> str:
+    """Why a mark row cannot be written ('' when it can): an unknown instrument, a missing
+    key field, or a value that is not a finite number (a stored value that is not a number is
+    a data error, CLAUDE.md hard rule 2)."""
+    from data.bloomberg.pull_marks import _plain_number
+    if not isinstance(r, dict):
+        return f"not a mark row: {r!r}"[:200]
+    missing = [k for k in ("as_of_date", "instrument_id", "settle_date", "mark_type", "source", "snapped_at")
+               if not str(r.get(k) or "").strip()]
+    if missing:
+        return f"no {', '.join(missing)}"
+    if r["instrument_id"] not in known:
+        return f"{r['instrument_id']} is not a known instrument"
+    if _plain_number(r.get("value")) is None:
+        return f"value {r.get('value')!r} is not a number"
+    return ""
+
+
+def write_marks(conn: sqlite3.Connection, rows: List[dict], rejected: Optional[List[dict]] = None) -> int:
+    """INSERT OR REPLACE so each cycle refreshes the same key with a new snapped_at, in one
+    short transaction (no Bloomberg request inside it). Only known instruments with a finite
+    value (2026-09-29: a bad row never aborts the others' write); each row left out is
+    appended to `rejected` when given, as {instrument_id, mark_type, settle_date, reason}.
+    Returns the rows written."""
     known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
-    n = 0
+    good = []
+    for r in rows:
+        problem = _row_problem(r, known)
+        if problem:
+            if rejected is not None:
+                row = r if isinstance(r, dict) else {}
+                rejected.append({"instrument_id": row.get("instrument_id", ""), "mark_type": row.get("mark_type", ""),
+                                 "settle_date": row.get("settle_date", ""), "reason": f"not written: {problem}"})
+            continue
+        good.append(r)
     with conn:
-        for r in rows:
-            if r["instrument_id"] not in known:
-                continue
-            conn.execute("INSERT OR REPLACE INTO marks VALUES (?,?,?,?,?,?,?)",
-                         (r["as_of_date"], r["instrument_id"], r["settle_date"], r["mark_type"],
-                          float(r["value"]), r["source"], r["snapped_at"]))
-            n += 1
-    return n
+        conn.executemany("INSERT OR REPLACE INTO marks VALUES (?,?,?,?,?,?,?)",
+                         [(r["as_of_date"], r["instrument_id"], r["settle_date"], r["mark_type"],
+                           float(r["value"]), r["source"], r["snapped_at"]) for r in good])
+    return len(good)
 
 
 def _curves_step(conn: sqlite3.Connection, today: date, host: str, port: int, rates_source=None,
@@ -1013,6 +1374,7 @@ def _curves_step(conn: sqlite3.Connection, today: date, host: str, port: int, ra
         out["error"] = f"rates_marketdata not importable: {exc!r}"
         return out
     in_scope = [c for c in ccys if c in rm.OIS_INDEX]
+    _release_lock(conn)             # no write lock held across the Bloomberg requests below
     for ccy in (c for c in ccys if c not in rm.OIS_INDEX):
         out["currencies"][ccy] = {
             "quotes": 0, "nodes": 0,
@@ -1034,12 +1396,26 @@ def _curves_step(conn: sqlite3.Connection, today: date, host: str, port: int, ra
                 out["error"] = f"RatesBloombergSource unavailable: {exc!r}"
                 return out
         for ccy in in_scope:
-            entry = {"quotes": 0, "nodes": 0, "error": ""}
+            # `left_out` (2026-09-29, Phase G): each quote of the currency that did not land,
+            # {ticker, reason}: the tickers Bloomberg gave nothing for (CurveSnapshot.failed)
+            # and the quotes the writer refused (a value that is not a number), so a partly
+            # failed currency never shows "N quotes" with no word on what is missing.
+            entry = {"quotes": 0, "nodes": 0, "error": "", "left_out": []}
             try:
                 snap = rates_source.get_curve_quotes(ccy, today)
-                entry["quotes"] = rm.write_curve_quotes(conn, snap, today.isoformat())
+                entry["left_out"] += [{"ticker": str(t), "reason": str(why)}
+                                      for t, why in sorted((getattr(snap, "failed", None) or {}).items())]
+                rejected: List[dict] = []
+                entry["quotes"] = rm.write_curve_quotes(conn, snap, today.isoformat(), rejected=rejected)
+                entry["left_out"] += [{"ticker": str(r.get("ticker") or r.get("tenor") or ""),
+                                       "reason": str(r.get("reason") or "not written")} for r in rejected]
             except Exception as exc:  # noqa: BLE001
                 entry["error"] = f"{type(exc).__name__}: {exc}"
+            if entry["left_out"]:
+                n = len(entry["left_out"])
+                entry["left_out_summary"] = (f"{entry['quotes']} quotes written, {n} left out "
+                                             f"({entry['left_out'][0]['ticker']}: {entry['left_out'][0]['reason']}"
+                                             + (f"; +{n - 1} more" if n > 1 else "") + ")")
             out["currencies"][ccy] = entry
         close = getattr(rates_source, "close", None)
         if callable(close):
@@ -1101,6 +1477,7 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"vol_marketdata not importable: {exc!r}"
         return out
+    _release_lock(conn)             # no write lock held across the Bloomberg requests below
     if vol_source is None:
         try:
             if shared is not None:
@@ -1113,7 +1490,12 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
             return out
     try:
         result = vol_source.get_vol_quotes(pairs)  # as_of=None: live ReferenceDataRequest, source BBG_BDP
-        out["written"] = vm.write_vol_quotes(conn, result, today.isoformat(), source=result.source)
+        rejected: List[dict] = []
+        out["written"] = vm.write_vol_quotes(conn, result, today.isoformat(), source=result.source,
+                                             rejected=rejected)
+        # The quotes the writer refused (2026-09-29, Phase G: a value that is not a number),
+        # {pair, tenor, quote_type, ticker, reason}, beside the tickers that gave nothing.
+        out["rejected"] = [dict(r) for r in rejected]
         out["diagnostics"] = list(result.diagnostics)
         out["pairs"] = {p: len(pv.quotes) for p, pv in result.pairs.items()}
         # 2026-09-18: persist what this cycle's response actually confirmed/rejected for
@@ -1318,13 +1700,27 @@ def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snap
         block["error"] = f"data.bloomberg.fwd_curve LME helpers not importable: {exc!r}"
         return _done()
     tickers = sorted({p["ticker"] for e in needs for p in e["pillars"] if p.get("ticker")})
+    _release_lock(conn)             # no write lock held across the Bloomberg request below
     try:
         from data.bloomberg.pull_marks import _get_blpapi
         session, service = get_session()
         quotes = request_lme_pillars(_get_blpapi(), session, service, tickers) or {}
     except Exception as exc:  # noqa: BLE001 -- the pull goes on without the LME marks
-        block["error"] = f"LME pillar request failed: {exc}"
-        return _done()
+        if len(needs) < 2 or _is_timeout(exc) or isinstance(exc, SessionUnavailable):
+            block["error"] = f"LME pillar request failed: {exc}"
+            return _done()
+        # One metal's ticker that breaks the request must not cost the other metals their
+        # curves (2026-09-29): asked again metal by metal; a metal that still fails keeps
+        # its reason on each of its pillars.
+        quotes = {}
+        for entry in needs:
+            own = sorted({p["ticker"] for p in entry["pillars"] if p.get("ticker")})
+            try:
+                quotes.update(request_lme_pillars(_get_blpapi(), session, service, own) or {})
+            except Exception as exc_one:  # noqa: BLE001
+                quotes.update({t: {"value": None, "prompt_date": None,
+                                   "error": f"LME pillar request failed: {exc_one}"} for t in own})
+                block["reasons"].append(f"{entry['root_id']}: LME pillar request failed ({exc_one})")
     snapped = snapped or _now_iso()
     for entry in needs:
         root = entry["root_id"]
@@ -1342,9 +1738,18 @@ def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snap
             rows, reasons = [], []
         rows = list(rows or [])
         block["reasons"] += [str(r) for r in reasons or []]      # each already names its metal
-        known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
-        block["written"] += write_marks(conn, rows)             # an unknown instrument is skipped there
-        block["interp_written"] += sum(1 for r in rows if r.get("source") == SRC_INTERP and r["instrument_id"] in known)
+        rejected: List[dict] = []
+        try:        # one metal's write fails alone (2026-09-29)
+            block["written"] += write_marks(conn, rows, rejected)   # an unknown instrument or a bad value is left out
+        except Exception as exc:  # noqa: BLE001
+            block["reasons"].append(f"{root}: marks not written ({type(exc).__name__}: {exc})")
+            rejected = [{"settle_date": r.get("settle_date", ""), "mark_type": r.get("mark_type", ""),
+                         "reason": f"not written: {exc}"} for r in rows]
+        refused = {(r.get("settle_date"), r.get("mark_type")) for r in rejected}
+        rows = [r for r in rows if (r.get("settle_date"), r.get("mark_type")) not in refused]
+        block["interp_written"] += sum(1 for r in rows if r.get("source") == SRC_INTERP)
+        block["reasons"] += [f"{root} {r.get('mark_type', '')} {r.get('settle_date', '')}: {r['reason']}"
+                             for r in rejected]
         marked = {r["settle_date"] for r in rows if r.get("mark_type") == "FWD_OUTRIGHT"}
         for prompt in prompts:
             if prompt not in marked:
@@ -1455,7 +1860,28 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     listed option, its underlying future asked with the futures; the LME curves of the open
     LME forwards are pulled after the futures prices (`_lme_step`, status["lme"], time
     under "forwards"); the options step prices the options on futures as well
-    (status["options"]["futures_options_priced"])."""
+    (status["options"]["futures_options_priced"]).
+
+    Fault isolation (2026-09-29, Phase G "Smooth and contained"): the cycle is the steps of
+    PULL_STEPS, each run on its own. A step that raises is recorded (status["steps"], a
+    warning) and the next step runs; the ledger always runs. The spot, forwards and futures
+    requests go in chunks (`_ask_in_chunks`), so a request Bloomberg cannot answer fails its
+    own rows only, each with its reason in `items`. No write lock is held across a Bloomberg
+    request: every step's writes are committed when it ends (rolled back when it raised).
+    A session that cannot be opened is the press having no Bloomberg (as before: connected
+    False, the options re-priced from the marks on file) and the ledger still runs. A
+    session that opened but whose every request raised, with nothing written, is a failed
+    pull (connected False, "pull failed: <reason>", the first traceback); anything written
+    makes it a connected pull with its failures listed.
+
+    `status["steps"]`: one entry per step in order, {step, label, outcome (OUTCOMES: ok |
+    partial | failed | skipped), detail (plain words), seconds}. `status["progress"]`: while
+    the pull runs, {running: true, started_at, updated_at, step, step_label, step_index,
+    step_count, done, total, sentence} is published into the status file at every step and
+    chunk (`set_progress`, the rest of the file untouched); `done` / `total` are the marks
+    of the request list settled so far / asked (`total` is 0 until the list is built). The
+    final status carries it with running false, finished_at, outcome (ok | partial |
+    failed) and the closing sentence."""
     from data.ingest.schema import connect
     clock_started = time.perf_counter()
     started = _now_iso()
@@ -1464,6 +1890,10 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     timings = {key: 0.0 for key in TIMING_KEYS}
     other = {"build_requests": 0.0, "write_marks": 0.0}
     shared: Optional[_SharedSession] = None
+    conn: Optional[sqlite3.Connection] = None
+    net = _NetLog()
+    steps: List[dict] = []
+    progress = _Progress(db_path, started)
 
     def _timed(book: dict, key: str, fn, *args, **kwargs):
         """fn(*args, **kwargs), its wall time added to book[key] -- less whatever it spent
@@ -1476,15 +1906,80 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             opened = (shared.seconds if shared is not None else 0.0) - opening
             book[key] += time.perf_counter() - step_started - opened
 
+    def _record(name: str, outcome: str, detail, seconds: float) -> None:
+        steps.append({"step": name, "label": STEP_LABELS.get(name, name), "outcome": outcome,
+                      "detail": str(detail or "")[:500], "seconds": round(max(seconds, 0.0), 1)})
+
+    def _run(name: str, book: dict, key: str, fn, *args, judge: Optional[Callable] = None, **kwargs):
+        """(True, result) or (False, the exception): one step, timed under book[key], its
+        writes committed when it returns and rolled back when it raises, its outcome
+        recorded (`judge(result)` -> (outcome, detail), else `_step_outcome`). A
+        SessionUnavailable is recorded and raised on."""
+        progress.step(name)
+        step_started = time.perf_counter()
+        try:
+            result = _timed(book, key, fn, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 -- the step fails alone
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+            _record(name, "failed", _plain_error(exc), time.perf_counter() - step_started)
+            if isinstance(exc, SessionUnavailable):
+                raise
+            status["warnings"].append(f"{STEP_LABELS.get(name, name)} stopped: {_plain_error(exc)}")
+            status.setdefault("step_errors", {})[name] = {"reason": _plain_error(exc),
+                                                          "traceback": traceback.format_exc()}
+            return False, exc
+        if conn is not None:
+            _release_lock(conn)
+        outcome, detail = judge(result) if judge is not None else _step_outcome(name, result)
+        _record(name, outcome, detail, time.perf_counter() - step_started)
+        return True, result
+
+    def _skip(name: str, why: str) -> None:
+        progress.step(name)
+        _record(name, "skipped", why, 0.0)
+
     def _finish() -> dict:
         timings["session"] = shared.seconds if shared is not None else 0.0
         timings["total"] = time.perf_counter() - clock_started
         status["timings"] = {key: round(timings[key], 1) for key in TIMING_KEYS}
         status["timings_other"] = {key: round(value, 1) for key, value in other.items()}
+        status["steps"] = steps
+        if not status.get("connected"):
+            outcome = "failed"
+            sentence = "Pull stopped: " + (status.get("recalc_summary") or status.get("reason") or "no reason recorded")
+        else:
+            bad = [s["label"] for s in steps if s["outcome"] in ("failed", "partial")]
+            outcome = "partial" if bad or status.get("failed") else "ok"
+            sentence = f"Pull finished: {status.get('written', 0)} of {status.get('requested', 0)} marks written"
+            if status.get("failed"):
+                sentence += f", {status['failed']} failed"
+            if bad:
+                sentence += f"; problems in {', '.join(bad)}"
+        status["progress"] = progress.final(outcome, sentence)
         write_status(db_path, status)
         return status
 
-    session_opened = False
+    def _all_failed(reqs, exc) -> dict:
+        """A marks step that raised: every row it had to ask fails with the step's reason."""
+        return {"rows": [], "warnings": [], "curve_rows": [],
+                "failures": [{"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
+                              "detail": f"{r.mark_type} not priced: the step stopped ({_plain_error(exc)})"}
+                             for r in reqs]}
+
+    def _not_asked(reqs) -> dict:
+        """A marks step the press could not run for want of a session: every row fails with that."""
+        return {"rows": [], "warnings": [], "curve_rows": [],
+                "failures": [{"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": r.settle_date,
+                              "detail": f"{r.mark_type} not asked: no Bloomberg session ({shared.open_error})"}
+                             for r in reqs]}
+
+    def _marks_judge(asked: int):
+        return lambda got: _step_outcome("", None, failed_items=len(got.get("failures") or []), asked=asked)
+
     try:
         # The book date (book_today), fixed once here so every date this cycle stamps,
         # prices, freezes or re-prices as of is the same one. It used to default to
@@ -1494,8 +1989,14 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         ok, why = availability(host, port) if session_factory is None else (True, "")
         if not ok:
             status["reason"] = why
+            progress.steps = ["recalc"]
+            progress.block["step_count"] = 1
+            step_started = time.perf_counter()
+            progress.step("recalc")
             status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today)
             status["recalc_summary"] = recalc_summary(status["recalc"])
+            _record("recalc", "failed" if status["recalc"].get("error") else "ok", status["recalc_summary"],
+                    time.perf_counter() - step_started)
             return _finish()
         from data.bloomberg import pull_marks as pm
         diag = pm.Diagnostics()
@@ -1505,124 +2006,248 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             if as_of_date is None:
                 as_of_date = today.isoformat()
             status["as_of_date"] = as_of_date
+            warnings: List[str] = status["warnings"]
+            no_session = False
             # Bloomberg's contract dates FIRST (2026-09-24): a commodity future carries an
             # estimated expiry until they are stored, and apply_contract_dates moves its
             # instrument, legs and marks onto Bloomberg's; the legs' change marks the
             # library out of date, so build_requests below reads the futures as moved and
             # their FUTURE_PX lands under Bloomberg's expiry.
+            done, block = _run("contract_dates", timings, "futures", contract_dates_step, conn, today, shared.get, diag)
+            if not done:
+                block = {"requested": 0, "stored": 0, "failed": [], "applied": {}, "error": _plain_error(block)}
+                block["summary"] = contract_dates_summary(block)
+            status["contract_dates"] = block
+            asked_failed = [f for f in block.get("failed") or [] if str(f.get("reason", "")).startswith("request failed")]
+            if int(block.get("requested") or 0) > len({f.get("ticker") for f in asked_failed}):
+                net.ok()
+            elif asked_failed and not shared.open_error:
+                net.raised.append({"step": "contract_dates", "reason": asked_failed[0]["reason"], "traceback": ""})
+            no_session = bool(shared.open_error)
 
-            def _open_session():
-                nonlocal session_opened
-                pair = shared.get()
-                session_opened = True
-                return pair
-
-            status["contract_dates"] = _timed(timings, "futures", contract_dates_step, conn, today,
-                                              _open_session, diag)
-            requests = _timed(other, "build_requests", build_requests, conn, as_of_date)
+            done, requests = _run("requests", other, "build_requests", build_requests, conn, as_of_date,
+                                  judge=lambda got: ("ok", f"{len(got)} marks to ask") if got
+                                  else ("skipped", "no open FX leg or future to price"))
+            requests_built = done
+            if not done:
+                status["requests_error"] = _plain_error(requests)
+                requests = []
             status["requested"] = len(requests)
+            progress.set_total(len(requests))
             # A future the library lists with no Bloomberg ticker is never asked for; it is
             # listed here with its reason (2026-09-24).
             status["not_requestable"] = not_requestable_futures(conn, as_of_date)
             for entry in status["not_requestable"]:
-                status["warnings"].append(f"FUTURE_PX {entry['instrument_id']} not requested: {entry['reason']}")
-            if not requests:
-                # Nothing FX-shaped to price, but options may still need a curve /
-                # premium refresh (2026-09-17) before the FX-only early return; an LME-only
-                # book its curves (2026-09-24).
-                status["lme"] = _timed(timings, "forwards", _lme_step, conn, today, _open_session)
-                status["curves"] = _timed(timings, "curves", _curves_step, conn, today, host, port, rates_source,
-                                          shared=shared)
-                status["vol"] = _timed(timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
-                status["options"] = _timed(timings, "options", _options_step, conn, today,
-                                           status["vol"].get("diagnostics"))
-                status.update(connected=True, reason="no open FX legs or futures to price")
-                return _finish()
-            # One session for the whole cycle (2026-09-21): the curves and vol steps below
-            # borrow this one instead of each opening their own.
-            session, service = shared.get()
-            session_opened = True
+                warnings.append(f"FUTURE_PX {entry['instrument_id']} not requested: {entry['reason']}")
             snapped = _now_iso()  # live pull: the real press time, never the 17:00 close stamp
-            spot_rows, spot_fail = _timed(timings, "spot", _live_spot_rows, session, service, requests, today, diag,
-                                          snapped)
-            spot_by_pair = {r["instrument_id"]: r["value"] for r in spot_rows if r["mark_type"] == "SPOT"}
-            # A forward whose settle date is already past (trade settled since the snapshot)
-            # has nothing to price: reported SKIPPED, never FAILED, never counted as missing.
+            empty = {"rows": [], "warnings": [], "failures": [], "curve_rows": []}
+
+            # Spot: live PX_LAST, in chunks of REQUEST_CHUNK["spot"] tickers.
+            spot_reqs = [r for r in requests if r.mark_type == "SPOT"]
+
+            def _ask_spot(chunk):
+                session, service = shared.get()
+                rows, failures = _live_spot_rows(session, service, chunk, today, diag, snapped)
+                return {"rows": rows, "failures": failures}
+
+            spot = empty
+            if no_session:
+                _skip("spot", f"no Bloomberg session ({shared.open_error})")
+                spot = _not_asked(spot_reqs)
+            else:
+                try:
+                    done, spot = _run("spot", timings, "spot", _ask_in_chunks, "spot", spot_reqs, REQUEST_CHUNK["spot"],
+                                      _ask_spot, net, progress, judge=_marks_judge(len(spot_reqs)))
+                    spot = spot if done else _all_failed(spot_reqs, spot)
+                except SessionUnavailable:
+                    no_session = True
+                    spot = _not_asked(spot_reqs)
+            spot_by_pair = {r["instrument_id"]: r["value"] for r in spot["rows"] if r["mark_type"] == "SPOT"}
+
+            # Forwards: a forward whose settle date is already past (trade settled since the
+            # snapshot) has nothing to price: reported SKIPPED, never FAILED, never counted
+            # as missing.
             past = {(r.instrument_id, r.settle_date) for r in requests
                     if r.mark_type == "FWD_OUTRIGHT" and date.fromisoformat(r.settle_date) < today}
             fwd_reqs = [r for r in requests if r.mark_type == "FWD_OUTRIGHT" and (r.instrument_id, r.settle_date) not in past]
-            fwd_rows, fwd_warnings, fwd_fail, curve_rows = _timed(
-                timings, "forwards", _fwd_outright_rows, session, service, fwd_reqs, today, spot_by_pair, snapped)
+            progress.add_done(sum(1 for r in requests if r.mark_type == "FWD_OUTRIGHT") - len(fwd_reqs))
+
+            def _ask_forwards(chunk):
+                later = any(date.fromisoformat(r.settle_date) > today for r in chunk)
+                session, service = shared.get() if later else (None, None)
+                rows, warns, failures, curve_rows = _fwd_outright_rows(session, service, chunk, today, spot_by_pair,
+                                                                       snapped)
+                return {"rows": rows, "warnings": warns, "failures": failures, "curve_rows": curve_rows}
+
+            forwards = empty
+            if no_session:
+                _skip("forwards", f"no Bloomberg session ({shared.open_error})")
+                forwards = _not_asked(fwd_reqs)
+            else:
+                try:
+                    done, forwards = _run("forwards", timings, "forwards", _ask_in_chunks, "forwards", fwd_reqs,
+                                          REQUEST_CHUNK["forwards"], _ask_forwards, net, progress,
+                                          judge=_marks_judge(len(fwd_reqs)))
+                    forwards = forwards if done else _all_failed(fwd_reqs, forwards)
+                except SessionUnavailable:
+                    no_session = True
+                    forwards = _not_asked(fwd_reqs)
+
+            # Futures and listed options: live=True (PX_LAST first, the latest PX_SETTLE as
+            # the fallback: PX_SETTLE for `today` has nothing to return before that day's US
+            # close, 2026-09-17). A listed option (EQ_OPTION, 2026-09-21; an option on a
+            # commodity future, CMDTY_OPTION, since 2026-09-24) is asked like a future, but
+            # its live price is Bloomberg's mid: the last trade of one strike can be hours
+            # old. snapped (2026-09-28): the press time, so a press's FUTURE_PX row never
+            # looks like the day's 17:00 close and the backfill replaces it once the day is past.
             fut_reqs = [r for r in requests if r.mark_type == "FUTURE_PX"]
-            # live=True: PX_SETTLE for `today` has nothing to return before that day's US
-            # close, so the live pull tries PX_LAST first and only falls back to the
-            # latest prior PX_SETTLE if that's also empty (2026-09-17 fix, ESU6 Index
-            # found MISSING every cycle before the close). Historical backfill
-            # (data.bloomberg.backfill.py) always requests a past, already-closed date and
-            # keeps calling this with the default live=False.
-            # A listed option (EQ_OPTION, 2026-09-21; an option on a commodity future,
-            # CMDTY_OPTION, since 2026-09-24) is asked for like a future, but its live price
-            # is Bloomberg's mid: the last trade of one strike can be hours old.
-            # snapped (2026-09-28): the press time, as the spot and forward rows carry, so
-            # a press's FUTURE_PX row never looks like the day's 17:00 close and the
-            # backfill replaces it with the daily PX_LAST once the day is past.
-            listed = _listed_option_ids(conn)
-            fut_rows, fut_warnings, fut_fail = _timed(
-                timings, "futures", pm.build_future_rows, session, service, fut_reqs, today, diag, live=True,
-                mid_first={r.bbg_ticker for r in fut_reqs if r.instrument_id in listed}, snapped=snapped) \
-                if fut_reqs else ([], [], [])
-            # A cross's USD-conversion pair or an option's own pair with no instrument row
-            # on file used to be requested but never written (write_marks skips unknown
-            # instruments); build_requests now creates that row first
-            # (_ensure_fx_instruments), so the mark lands (2026-09-18).
-            warnings = list(status["warnings"]) + fwd_warnings + fut_warnings
-            rows = spot_rows + fwd_rows + fut_rows
-            written = _timed(other, "write_marks", write_marks, conn, rows)
-            # Bloomberg's own FWD_CURVE tenor points, at their own dates, as official
-            # forwards -- kept out of `written` so "wrote N of M requested" stays exact.
+            try:
+                listed = _listed_option_ids(conn) if fut_reqs else set()
+            except Exception as exc:  # noqa: BLE001 -- the options then take PX_LAST, said
+                listed = set()
+                warnings.append(f"listed options not told apart from futures (PX_LAST used): {_plain_error(exc)}")
+
+            def _ask_futures(chunk):
+                session, service = shared.get()
+                rows, warns, failures = pm.build_future_rows(
+                    session, service, chunk, today, diag, live=True,
+                    mid_first={r.bbg_ticker for r in chunk if r.instrument_id in listed}, snapped=snapped)
+                return {"rows": rows, "warnings": warns, "failures": failures}
+
+            futures = empty
+            if no_session:
+                _skip("futures", f"no Bloomberg session ({shared.open_error})")
+                futures = _not_asked(fut_reqs)
+            else:
+                try:
+                    done, futures = _run("futures", timings, "futures", _ask_in_chunks, "futures", fut_reqs,
+                                         REQUEST_CHUNK["futures"], _ask_futures, net, progress,
+                                         judge=_marks_judge(len(fut_reqs)))
+                    futures = futures if done else _all_failed(fut_reqs, futures)
+                except SessionUnavailable:
+                    no_session = True
+                    futures = _not_asked(fut_reqs)
+            progress.add_done(len(requests))             # every row is settled now, asked or not
+            warnings.extend(forwards["warnings"] + futures["warnings"])
+
+            # The marks, in one short write each: the requested rows, then Bloomberg's own
+            # FWD_CURVE tenor points at their own dates as official forwards -- kept out of
+            # `written` so "wrote N of M requested" stays exact. A row that cannot be written
+            # (an unknown instrument, a value that is not a number) is left out with its reason.
+            rows = spot["rows"] + forwards["rows"] + futures["rows"]
             requested_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]) for r in rows}
-            curve_points_written = _timed(
-                other, "write_marks", write_marks,
-                conn, [r for r in curve_rows
-                       if (r["instrument_id"], r["mark_type"], r["settle_date"]) not in requested_keys])
+            points = [r for r in forwards["curve_rows"]
+                      if (r["instrument_id"], r["mark_type"], r["settle_date"]) not in requested_keys]
+            rejected: List[dict] = []
+
+            def _write_all():
+                n = write_marks(conn, rows, rejected)
+                points_rejected: List[dict] = []
+                m = write_marks(conn, points, points_rejected)
+                if points_rejected:
+                    warnings.append(f"{len(points_rejected)} FWD_CURVE tenor point(s) not written: "
+                                    f"{points_rejected[0]['reason']}")
+                return n, m
+
+            done, got = _run("write_marks", other, "write_marks", _write_all,
+                             judge=lambda nm: (("partial" if rejected else "ok") if rows or points else "skipped",
+                                               f"{nm[0]} marks and {nm[1]} curve points written"
+                                               + (f", {len(rejected)} left out" if rejected else "")))
+            if done:
+                written, curve_points_written = got
+            else:
+                written, curve_points_written = 0, 0
+                rejected = [{"instrument_id": r["instrument_id"], "mark_type": r["mark_type"],
+                             "settle_date": r["settle_date"], "reason": f"not written: {_plain_error(got)}"} for r in rows]
+            refused = {(r["instrument_id"], r["mark_type"], r["settle_date"]) for r in rejected}
+            landed_rows = [r for r in rows if (r["instrument_id"], r["mark_type"], r["settle_date"]) not in refused]
+
             # LME curves (2026-09-24, Phase 5): after the futures prices, before the ledger,
             # so an LME forward whose prompt is today freezes at today's cash price. Its
             # marks are reported in status["lme"], not among the requested items.
-            status["lme"] = _timed(timings, "forwards", _lme_step, conn, today, _open_session, snapped)
-            if status["lme"].get("summary"):
-                warnings += [f"LME {m['root_id']} {m['ticker'] or 'prompt'} {m['settle_date']}: {m['reason']}"
-                             for m in status["lme"]["missing"]]
-                if status["lme"].get("error"):
-                    warnings.append(f"LME curves: {status['lme']['error']}")
-            # Curves:the OIS curve quotes of every open FX_OPTION's pair currencies into
+            if no_session:
+                _skip("lme", f"no Bloomberg session ({shared.open_error})")
+            else:
+                done, lme = _run("lme", timings, "forwards", _lme_step, conn, today, shared.get, snapped)
+                status["lme"] = lme if done else {"roots": [], "written": 0, "interp_written": 0, "missing": [],
+                                                  "reasons": [], "error": _plain_error(lme)}
+                if not done:
+                    status["lme"]["summary"] = lme_summary(status["lme"])
+                if status["lme"].get("roots") and not status["lme"].get("error"):
+                    net.ok()
+                if status["lme"].get("summary"):
+                    warnings.extend(f"LME {m['root_id']} {m['ticker'] or 'prompt'} {m['settle_date']}: {m['reason']}"
+                                    for m in status["lme"].get("missing") or [])
+                    if status["lme"].get("error"):
+                        warnings.append(f"LME curves: {status['lme']['error']}")
+
+            # Curves: the OIS curve quotes of every open option's currencies into
             # curve_quotes, bootstrapped into `curves` (no swap is priced since 2026-09-24).
             # Vol (2026-09-17): the FX vol smile (ATM/RR/BF) into vol_quotes for every open
             # option's pair. Then every option priced (PREMIUM and Greeks, source
             # QL_OPTIONS_PRICER), with the vol step's per-ticker diagnostics available to
             # enrich a "no vol" skip reason. All three before realise_settled so an option
             # expiring today freezes at today's mark.
-            status["curves"] = _timed(timings, "curves", _curves_step, conn, today, host, port, rates_source,
-                                      shared=shared)
-            status["vol"] = _timed(timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
-            status["options"] = _timed(timings, "options", _options_step, conn, today,
-                                       status["vol"].get("diagnostics"))
-            # Realisation only (BUILD_PLAN.md section 6, Task B): freeze FX trades whose
-            # settle date is before `today` and are not yet in realised_pnl. The daily LTD
-            # snapshot itself is engine/pnl/ledger.py's job (task A); this module only
-            # calls the one guarded function it needs and never writes pnl_snapshots.
-            try:
-                from engine.pnl.ledger import realise_settled
-                led = _timed(timings, "ledger", realise_settled, conn, today.isoformat())
+            if no_session:
+                _skip("curves", f"no Bloomberg session ({shared.open_error})")
+                _skip("vol", f"no Bloomberg session ({shared.open_error})")
+            else:
+                done, got = _run("curves", timings, "curves", _curves_step, conn, today, host, port, rates_source,
+                                 shared=shared)
+                status["curves"] = got if done else {"currencies": {}, "bootstrapped": 0,
+                                                     "as_of_date": today.isoformat(), "error": _plain_error(got)}
+                if any((e or {}).get("quotes") for e in (status["curves"].get("currencies") or {}).values()):
+                    net.ok()
+                warnings.extend(f"OIS {ccy}: {e['left_out_summary']}"
+                                for ccy, e in sorted((status["curves"].get("currencies") or {}).items())
+                                if (e or {}).get("left_out_summary"))
+                done, got = _run("vol", timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
+                status["vol"] = got if done else {"pairs": {}, "written": 0, "diagnostics": [],
+                                                  "as_of_date": today.isoformat(), "error": _plain_error(got)}
+                if status["vol"].get("written"):
+                    net.ok()
+                warnings.extend(f"vol {r.get('pair', '')} {r.get('tenor', '')} {r.get('quote_type', '')}: "
+                                f"{r.get('reason', '')}" for r in status["vol"].get("rejected") or [])
+            no_session = no_session or bool(shared.open_error)
+            if no_session:
+                # No Bloomberg for this press after all (the port answers but no Terminal is
+                # logged in): the options are re-priced from the marks on file, as when
+                # Bloomberg is not available at all.
+                progress.step("recalc")
+                step_started = time.perf_counter()
+                status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today)
+                status["recalc_summary"] = recalc_summary(status["recalc"])
+                _record("recalc", "failed" if status["recalc"].get("error") else "ok", status["recalc_summary"],
+                        time.perf_counter() - step_started)
+            else:
+                done, got = _run("options", timings, "options", _options_step, conn, today,
+                                 (status.get("vol") or {}).get("diagnostics"))
+                status["options"] = got if done else {"priced": 0, "skipped": [], "closed_out": [],
+                                                      "as_of_date": today.isoformat(), "futures_options_priced": 0,
+                                                      "error": _plain_error(got)}
+
+            # Realisation (BUILD_PLAN.md section 6, Task B): freeze the trades whose settle
+            # date is before `today` and are not yet in realised_pnl. Always run, whatever
+            # the steps above did (2026-09-29).
+            def _ledger() -> dict:
+                try:
+                    from engine.pnl.ledger import realise_settled
+                except ImportError as exc:
+                    return {"skipped": f"engine.pnl.ledger.realise_settled not importable: {exc!r}"}
                 # What the ledger did, its re-freeze included (2026-09-22): see ledger_block.
-                status["ledger"] = ledger_block(led, today.isoformat())
-            except ImportError as exc:
-                status["ledger"] = {"skipped": f"engine.pnl.ledger.realise_settled not importable: {exc!r}"}
-            except Exception as exc:
-                status["ledger"] = {"error": f"{exc!r}"}
-                status.setdefault("warnings", []).append(f"realise_settled failed: {exc!r}")
-            status.update(connected=True, written=written, curve_points_written=curve_points_written,
-                          warnings=list(warnings)[:50], as_of_marks=today.isoformat())
-            ok_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]): r for r in rows}
+                return ledger_block(realise_settled(conn, today.isoformat()), today.isoformat())
+
+            done, got = _run("ledger", timings, "ledger", _ledger)
+            if done:
+                status["ledger"] = got
+            else:
+                status["ledger"] = {"error": f"{got!r}"}
+                warnings.append(f"realise_settled failed: {got!r}")
+
+            # Items: one per requested mark, OK only when its row was written.
+            failures = spot["failures"] + forwards["failures"] + futures["failures"]
+            failures += [{**r, "detail": r["reason"]} for r in rejected]
+            ok_keys = {(r["instrument_id"], r["mark_type"], r["settle_date"]): r for r in landed_rows}
             items = []
             for r in requests:
                 settle = today.isoformat() if r.mark_type == "SPOT" else r.settle_date
@@ -1637,7 +2262,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                                   "status": "OK", "value": hit["value"], "source": hit["source"],
                                   "detail": hit.get("detail", "")})
                 else:
-                    detail = next((f.get("detail", "") or f.get("reason", "") for f in spot_fail + fwd_fail + fut_fail
+                    detail = next((f.get("detail", "") or f.get("reason", "") for f in failures
                                    if f.get("instrument_id") == r.instrument_id and f.get("mark_type") == r.mark_type
                                    and (r.mark_type == "SPOT" or f.get("settle_date") == r.settle_date)),
                                   "not returned")
@@ -1646,6 +2271,28 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             status["items"] = items
             status["failed"] = sum(1 for i in items if i["status"] == "FAILED")
             status["skipped"] = sum(1 for i in items if i["status"] == "SKIPPED")
+
+            # Connected or not: no session is no Bloomberg for this press; a session whose
+            # every request raised with nothing landed is a failed pull; anything landed is
+            # a connected pull with its failures listed.
+            landed = (written + curve_points_written + int((status.get("lme") or {}).get("written") or 0)
+                      + int(status["contract_dates"].get("stored") or 0)
+                      + sum(int((e or {}).get("quotes") or 0)
+                            for e in ((status.get("curves") or {}).get("currencies") or {}).values())
+                      + int((status.get("vol") or {}).get("written") or 0))
+            if no_session:
+                status.update(connected=False, reason="pull failed: " + shared.open_error,
+                              traceback=shared.open_traceback)
+            elif net.raised and not landed:
+                first = next((e for e in net.raised if e["traceback"]), net.raised[0])
+                status.update(connected=False, reason="pull failed: " + first["reason"],
+                              traceback=first["traceback"] or "".join(
+                                  s.get("traceback", "") for s in (status.get("step_errors") or {}).values()))
+            else:
+                status.update(connected=True,
+                              reason="" if requests or not requests_built else "no open FX legs or futures to price")
+            status.update(written=written, curve_points_written=curve_points_written,
+                          warnings=list(warnings)[:50], as_of_marks=today.isoformat())
         finally:
             conn.close()
             # The blpapi session this cycle opened must be stopped here, not left to
@@ -1657,14 +2304,12 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         status["connected"] = False
         status["reason"] = "pull failed: " + traceback.format_exc(limit=3).strip().splitlines()[-1]
         status["traceback"] = traceback.format_exc()
-        if today is not None and not session_opened:
-            # The session could not be opened (the port answers but no Terminal is logged
-            # in): no Bloomberg for this press either, so the options are re-priced from
-            # the marks on file as in the not-available branch above.
+        if today is not None and not (shared is not None and shared.opened) and "recalc" not in status:
+            # The cycle could not run at all before a session was opened: no Bloomberg for
+            # this press either, so the options are re-priced from the marks on file.
             status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today)
             status["recalc_summary"] = recalc_summary(status["recalc"])
     return _finish()
-
 
 # --------------------------------------------------------------------------- feed thread
 @dataclass
@@ -1672,7 +2317,8 @@ class LiveFeed:
     """Pulls Bloomberg ON REQUEST only (user decision 2026-09-21: "make it only pull the
     bloomberg info on request - no automatic"). The thread sleeps until `trigger_now()`
     -- the "Pull Bloomberg now" button -- and then runs one cycle: today's marks
-    (`pull_once`), then the past closes still missing (`start_auto_backfill`). There is
+    (`pull_once`), then the past closes still missing (`start_auto_backfill`), the second
+    run whatever the first did, and neither able to stop the thread. There is
     no pull when the app starts, none on a timer and none after an upload or an edit;
     between requests the app shows the marks on file, with the time of the last pull."""
     db_path: Path
@@ -1705,13 +2351,32 @@ class LiveFeed:
                 return
             try:
                 self.last_status = pull_once(self.db_path, host=self.host, port=self.port)
+            except Exception:  # pull_once already catches; this guards the thread itself
+                try:
+                    now = _now_iso()
+                    write_status(self.db_path, {
+                        "time": now, "connected": False,
+                        "reason": "feed thread error: " + traceback.format_exc().strip().splitlines()[-1],
+                        "traceback": traceback.format_exc(), "requested": 0, "written": 0, "failed": 0,
+                        "items": [], "warnings": [],
+                        PROGRESS_KEY: {"running": False, "finished_at": now, "updated_at": now, "outcome": "failed",
+                                       "step": "done", "done": 0, "total": 0,
+                                       "sentence": "Pull stopped: feed thread error"}})
+                except Exception:  # noqa: BLE001 -- the thread must live to take the next press
+                    pass
+            # The backfill hand-off, on its own (2026-09-29): it runs whatever the pull did,
+            # and a failure to start it is said in the backfill's own block -- it used to
+            # overwrite the pull's whole status with a "feed thread error".
+            try:
                 from data.bloomberg.backfill import start_auto_backfill
                 start_auto_backfill(self.db_path, host=self.host, port=self.port)
-            except Exception:  # pull_once already catches; this guards the thread itself
-                write_status(self.db_path, {"time": _now_iso(), "connected": False,
-                                            "reason": "feed thread error: " + traceback.format_exc().strip().splitlines()[-1],
-                                            "traceback": traceback.format_exc(), "requested": 0, "written": 0,
-                                            "failed": 0, "items": [], "warnings": []})
+            except Exception:  # noqa: BLE001
+                try:
+                    patch_status(self.db_path, "backfill", {
+                        "running": False,
+                        "reason": "backfill failed to start: " + traceback.format_exc().strip().splitlines()[-1]})
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def start_feed_if_available(db_path, host: str = "localhost", port: int = 8194) -> Tuple[Optional[LiveFeed], str]:
@@ -1787,6 +2452,9 @@ def _print_status(status: Optional[dict]) -> None:
                  else None):
         if line:
             print("  " + line)
+    for step in status.get("steps") or []:       # the per-step outcome (2026-09-29)
+        if isinstance(step, dict) and step.get("outcome") in ("failed", "partial"):
+            print(f"  step {step.get('label')}: {step.get('outcome')} -- {step.get('detail')}")
     for w in status.get("warnings", []):
         print("  warning:", w)
 

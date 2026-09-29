@@ -27,3 +27,5 @@
 - [P&L scorecard, carry, rolls 2026-09-29](pnl-scorecard-carry-rolls-2026-09-29.md) — three P&L blocks, carry dedupe rule, precious pairs = Book outrights, CNY hedge_cny_usd, risk.py placeholder edit refused
 - [Performance pass 2026-09-29](performance-pass-2026-09-29.md) — one tab mounted, one 15 s poll, screen_memo per db revision (shared, never mutate), compact static rows, perf recipe
 - [Book spread rows 2026-09-29](book-spread-rows-2026-09-29.md) — pairs with >2 legs sized by value: pair_name/ratio/leftover, Trade + Symbol columns and filters, Needs you gone
+- [Blotter + Data Phase G 2026-09-29](blotter-data-phase-g-2026-09-29.md) — blotter_fills / data_checks / data_kit, session filter store + bar-rev, missing-Input trap, CDP proof recipe
+- [Phase G round 1 2026-09-29](phase-g-round1-2026-09-29.md) — five tabs, trade_filter store/bar pattern, Book/P&L sources, async trade_risk, browser recipe + Dash 4 click traps

@@ -26,10 +26,35 @@ checks marked **auto** and writes a report and a fixes worksheet under `reports/
 | 11 | Bloomberg's contract dates (last trade, first notice) stored for the book's futures | Until then expiries are estimated and flagged early | auto: desk check 8; one Pull Bloomberg now stores them |
 | 12 | LME curve tickers and prompt dates (cash, 3M, monthlies) | The LME forwards' marks | auto: `--lme` |
 | 13 | The research app on this PC pulls real data (its newest settlement is yesterday's, not mock) | Risk, carry, liquidity and the z-scores all read it | **manual**: open the research app, or read desk check 7's dates |
+| 15 | Each exchange's close / settlement time (`close_time` in `config/contracts.csv`, `data.contracts.EXCHANGE_CLOSE`): LME, SGX incl. the USD/CNH future, CME HRC and TIO, ICE Europe per product, HKEX, EEX, GME are best estimates | The "legs closed Nh apart" note and hedge % (2-day moves for legs closing hours apart) read them | **manual**: each exchange's contract specification; the time of PX_LAST's last update |
 | 14 | FX forward points divisor and broken-date forwards (`docs/open-questions.md` 27, 28, 71) | Only if Jason books FX forwards (none in his export yet) | auto: `py 2_launcher.py doctor --bloomberg` |
 
 After the fixes are applied: one **Pull Bloomberg now**, then the Data tab's status line
 should read marks complete, reference closes complete and contract dates from Bloomberg.
+
+## Real research history (item 13)
+
+The Risk tab's VaR, daily risk, hedge %, best-fit ratio and liquidity, and the Book's z-score,
+percentile and carry, all read the research app's database. On the development PC that database
+holds generated prices (provider `mock`), so those figures are for layout only and the Risk tab
+says "mock history". On the Bloomberg PC:
+
+1. **Load the research app's real history** by its own procedure, `docs/BLOOMBERG_TRIP.md` in the
+   research repo (`J.Singh_Commodity_Dashboard`): `setup.bat bloomberg` (never without `bloomberg`:
+   it would load mock prices, and a real pull refuses to mix the two), the ticker search and
+   check, then `run_pull --dry-run --backfill --sector <s>` and `run_pull --backfill --sector <s>`,
+   then `rvapp.quant.engine --mode full`. Jason's book needs three sectors, in this order:
+   `metals` (SHFE silver and zinc, COMEX silver and copper, LME copper and zinc), `ferrous` (CME
+   HRC, SGX iron ore) and `agriculture` (CME feeder and live cattle); its `fx_daily` (USDCNH) comes
+   with the pull. Each backfill stops at the daily cap and resumes where it stopped.
+2. **Point the monitor at it.** The monitor looks for `..\Commodity Dashboard\var\rv.sqlite` next
+   to its own folder, or the path in `COMMODITY_HISTORY_DB`. The research repo clones as
+   `J.Singh_Commodity_Dashboard`, so either clone it into a folder named `Commodity Dashboard`
+   beside the monitor, or set the path once:
+   `setx COMMODITY_HISTORY_DB "C:\path\to\J.Singh_Commodity_Dashboard\var\rv.sqlite"`
+   and open a new Command Prompt before typing `chelsea`.
+3. **Check** that the Risk tab no longer says "mock history", and that its price check shows no
+   root more than 20 % from Jason's fills.
 
 ## Running the check
 

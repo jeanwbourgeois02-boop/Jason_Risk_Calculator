@@ -1,3 +1,4 @@
 - [Phase 2 rates removal (2026-09-24)](phase2_rates_removal_2026_09_24.md) — rate vols + OIS fixings gone; OIS quotes, FX fwd curves, FX smiles kept
 - [LME curve helpers (2026-09-24)](lme_curve_helpers_2026_09_24.md) — cash SPOT / 3M / monthly source rules, unverified FUT_DLV_DT_LAST
+- [Fault isolation (2026-09-29)](fault_isolation_2026_09_29.md) — per-ticker try in every requester, NOT_A_NUMBER reason, writers skip NaN; no split retry here
 - Older notes on these modules (pre-split, 2026-09-24): `.claude/agent-memory/bbg-data/` (rates_marketdata_ois, vol_marketdata_fx_vol_feed)

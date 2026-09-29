@@ -963,3 +963,74 @@ p { margin: 8px 0; }
 .static-block { display: contents; }
 .book-table tbody tr:last-child > td ~ .static-block > td:first-child { border-bottom-left-radius: 0; }
 .book-card:not(.card-pad) > .static-block > .book-table, .blotter-fills-scroll > .static-block > .book-table { border: none; }
+
+/* ---------------------------------------------------------------- Phase G: the trade kit (2026-09-29)
+   Every trade table (Book, P&L, and Risk from round 2) is `.book-table.book-grid.tk-table` inside a
+   `.tk-card`: the one table kit above (navy heads, zebra, totals) plus the rows below. The look pass
+   (round 3) restyles the trade tables here, in one place. */
+.tk-card { overflow: visible; margin: 0 0 16px; }
+.tk-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.tk-strip .tk-title { font-weight: 700; color: var(--navy); margin-right: auto; }
+.tk-strip--controls { background: var(--card); border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; }
+.tk-strip .tk-k, .tk-facts .tk-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.tk-table td.l, .tk-table th.l { text-align: left; }
+.tk-table th.tk-sortable { cursor: pointer; user-select: none; }
+.tk-table th.tk-sortable:hover { background: var(--navy-2); }
+.tk-table .tk-sort .book-sort-arrow { font-size: 10px; margin-left: 2px; }
+.tk-table tr.tk-row { cursor: pointer; }
+.tk-table tr.tk-row--open td { background: #fbf7ea; }
+.tk-table tr.tk-row--pseudo td { font-style: italic; }
+.tk-table tr.tk-row--sub td:first-child, .tk-table td.tk-indent { padding-left: 26px; }
+.tk-table td.tk-indent2 { padding-left: 44px; }
+.tk-table tr.tk-group { cursor: pointer; }
+.tk-table tr.tk-group td { background: var(--tint); font-weight: 700; color: var(--navy); border-top: 1px solid #c9ced8; }
+.tk-table tr.tk-fold { cursor: pointer; }
+.tk-table tr.tk-fold td { color: var(--muted); background: #f7f8fa; font-weight: 600; }
+.tk-table .tk-chev { color: var(--muted); font-size: 10px; display: inline-block; width: 12px; }
+.tk-table .tk-name { font-weight: 700; }
+.tk-table .tk-sub { color: var(--muted); font-weight: 400; font-size: 11.5px; }
+.tk-table td.tk-what { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+.tk-table .tk-bold { font-weight: 700; }
+.tk-table .tk-flags, .tk-table .tk-flag-dot { color: var(--warn); font-weight: 700; cursor: help; }
+.tk-table .tk-flag-dot { margin-left: 4px; font-size: 9px; vertical-align: middle; }
+.tk-table [title] { cursor: help; }
+.tk-table tr.tk-row [title], .tk-table tr.tk-group [title] { cursor: pointer; }
+/* the panel under a trade row */
+.tk-table tr.tk-panel > td { background: #fcfcfd; padding: 10px 14px 12px; white-space: normal; text-align: left; }
+.tk-table tr.tk-panel:hover > td { background: #fcfcfd; }
+.tk-flag-lines { margin: 0 0 8px; }
+.tk-flag-line { color: var(--warn); background: var(--warn-bg); border-radius: 4px; padding: 3px 8px; margin: 0 0 4px; font-size: 12px; }
+.tk-panel-body { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.tk-panel-legs { flex: 1 1 100%; min-width: 0; overflow-x: auto; }
+.tk-chart { flex: 0 1 900px; min-width: 320px; }
+.tk-table.tk-legs { font-size: 12px; }
+.tk-table.tk-legs thead th { position: static !important; top: auto; height: auto; }
+.tk-table.tk-legs tr.tk-leg td { font-size: 12px; }
+.tk-table.tk-legs tr.tk-leg--hedge td { font-style: italic; color: #4b5563; }
+.tk-table.tk-legs tr.tk-leg--flat td { color: var(--muted); }
+.tk-table.tk-legs tr.tk-legsub td { font-weight: 600; font-size: 11.5px; color: var(--navy); background: #f4f6fa; border-top: 1px solid #c9ced8; }
+.tk-table.tk-legs tfoot td { font-size: 12px; }
+.tk-facts { display: flex; flex-wrap: wrap; gap: 4px 24px; font-size: 12px; margin: 8px 2px 0; }
+.tk-links { display: flex; gap: 18px; margin-top: 10px; }
+.tk-foot { margin-top: 4px; }
+.tk-table.tk-small { max-width: 640px; margin-top: 8px; }
+/* the headline over the rows showing */
+.tk-headline { display: flex; flex-wrap: wrap; gap: 8px 28px; align-items: baseline; background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 16px; margin: 0 0 12px; }
+.tk-head-item { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.tk-head-k { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.tk-head-v { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tk-head-v .marker { font-size: 10px; font-weight: 400; }
+/* the shared filter bar */
+.tf-bar { margin-bottom: 12px; }
+.tf-bar .tf-filter { min-width: 0; }
+.tf-bar .tf-check label { font-size: 12.5px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text); }
+.tf-bar .tf-clear { align-self: flex-end; }
+.tf-bar .book-switch { height: 32px; }
+.tk-fold-block { margin: 0 0 16px; }
+.tk-fold-block > summary { cursor: pointer; padding: 6px 0; }
+/* a narrow window: the table scrolls sideways (the sticky head then scrolls with it) rather than break */
+@media (max-width: 1400px) {
+  .tk-card .tk-table-slot { overflow-x: auto; }
+  .tk-card .tk-table-slot .book-table.book-grid thead th, .tk-card .tk-table-slot .book-table.book-grid tr.book-total td { position: static; }
+}

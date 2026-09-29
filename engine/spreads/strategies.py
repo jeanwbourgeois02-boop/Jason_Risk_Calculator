@@ -37,11 +37,13 @@ roots (so gold is never paired with aluminium because both are December), and ca
 usual.
 
 Per pair, beside the sizes: its level at entry, on the previous close and now, in the
-template's unit where a template matches the two roots (a China-against-West template the
-desk screens as a ratio, ``ratio_screen``, is quoted as the plain ratio China over foreign of
-the two raw prices in the template's quantity unit, as the research app's desk convention: no FX
-in it), a calendar's near - far in the root's quote unit, else USD per common physical unit,
-long leg first; the other form on ``level_alt`` / ``unit_alt``. The formula and the marks each
+template's unit where a template matches the two roots, a calendar's near - far in the root's
+quote unit, else USD per common physical unit, long leg first; a China-against-West pair (one leg
+on a Chinese exchange, the other abroad, a template's or not) is quoted as the CONVERTED ratio
+China over foreign (user, 2026-09-29, reversing the raw ratio of 2026-09-28): both legs' prices
+in the spread's unit, the China leg converted to the unit's currency at the USD spot the level
+reads, China on top, VAT left in (``level_china_leg`` says which leg is China). The other form
+is on ``level_alt`` / ``unit_alt``. The formula and the marks each
 level reads are ``levels.py``'s and ``book.py``'s (``level_on``, ``entry_level``): the as-of
 ``value_book`` rows, the Daily reference close's rows, the fills. ``usd_per_unit`` is the USD
 P&L of a 1.0 rise of the level on the paired lots (a ratio: with the foreign leg unchanged).
@@ -84,7 +86,7 @@ each side's physical units, and the leftover (what the sides do not share: USD, 
 on the heavier side's front leg, ``leftover_legs``). The level of a multi-month spread is that
 of its front pair (the largest lots on each side, named in ``level_label``); two legs quoting
 in one unit (feeder and live cattle, USD/cwt) read A - B in it; a template keeps its unit and a
-China-against-West ``ratio_screen`` template its ratio.
+China-against-West pair its converted ratio.
 
 Nothing here re-marks or changes a P&L figure: the P&L keys are the strategy spread's own
 (``value_book`` rows summed), and the split is an identity over them.
@@ -104,7 +106,7 @@ from data.contracts import ContractRoot, quantity_factor
 from engine.pnl.valuation import usd_per_quote
 from engine.spreads.grouping import LEFTOVER_FLOOR, Leg, calendar_shape, template_shape
 from engine.spreads.hedges import FX_HEDGE_PRODUCTS, fx_non_hedge_why, is_hedge
-from engine.spreads.levels import LevelLeg, LevelSpec, converted, spec_for, spec_to_dict, usd_per_level_unit
+from engine.spreads.levels import LevelLeg, LevelSpec, spec_for, spec_to_dict, usd_per_level_unit
 from engine.spreads.templates import Template, lot_in_quote_units, quote_quantity_unit
 from engine.spreads.trade_type import CROSS_EXCHANGE, CROSS_PRODUCT, SOURCE_LABEL, TERM_STRUCTURE, type_fields
 
@@ -248,8 +250,10 @@ def _spot_on(book, ccy: str, day: str) -> Tuple[Optional[float], str]:
     return (s, "") if s else (None, f"no USD spot for {ccy} on {day}, the trade date")
 
 
-def _entry_value(book, tids: Sequence[str]) -> Tuple[Optional[float], float, str]:
+def _entry_value(book, tids: Sequence[str], quoted: bool = False) -> Tuple[Optional[float], float, str]:
     """(USD per unit of ``trades.quantity`` of the open net at its entries, that net, why when None).
+    With ``quoted`` the same average in the fills' own quoted price (no multiplier, no spot: the
+    average entry price of the open net, ``trades.trade_book``'s leg fill).
 
     Each trade is worth quantity x multiplier x fill x the USD spot of its trade date. The trades
     are taken day by day: a day that adds to the net (or opens it) averages its lots in at that
@@ -261,11 +265,13 @@ def _entry_value(book, tids: Sequence[str]) -> Tuple[Optional[float], float, str
     for tid in tids:
         t = book.by_id[tid]
         q, f, m = book.lots(tid), _num(t["price"]), _num(t["multiplier"])
+        if quoted:
+            m = 1.0
         if q is None or f is None or m is None:
             return None, 0.0, f"{tid}: its quantity, fill or multiplier is not a number, so its value at the fill is not known"
         if abs(q) < _EPS:
             continue
-        s, why = _spot_on(book, str(t["quote_ccy"] or "USD"), str(t["trade_date"]))
+        s, why = (1.0, "") if quoted else _spot_on(book, str(t["quote_ccy"] or "USD"), str(t["trade_date"]))
         if s is None:
             return None, 0.0, f"{tid}: {why}, so its value at the fill is not known"
         by_day[str(t["trade_date"])].append((q, q * m * f * s))
@@ -503,57 +509,21 @@ def _spec(book, p: dict) -> Tuple[Optional[LevelSpec], str]:
                      (p["lupl_a"], p["lupl_b"])), ""
 
 
-def _leg_prices(book, spec: LevelSpec, day: str, rows: Dict[str, dict], fallback: bool
-                ) -> Tuple[Optional[List[float]], str, str]:
-    """Each leg's quoted price on ``day`` from the ``value_book`` rows (the first row with a mark),
-    else, with ``fallback``, the exact official FUTURE_PX of the day: the reads of
-    ``book.level_on`` without the FX, for a ratio."""
-    from engine.spreads.book import official_price
-    prices, sources = [], []
-    for leg in spec.legs:
-        leg_rows = [rows[t] for t in leg.trade_ids if t in rows]
-        if leg_rows:
-            r = next((r for r in leg_rows if _num(r.get("mark")) is not None), None)
-            if r is None:
-                return None, f"{leg.instrument_id} has no price on {day} ({_why(leg_rows[0])})", ""
-            prices.append(float(r["mark"]))
-            sources.append(f"{leg.instrument_id} {r.get('mark_source') or 'value_book'}")
-        elif fallback:
-            hit = official_price(book.conn, leg, day, str(book.by_id[leg.trade_ids[0]]["expiry_date"]))
-            if hit is None:
-                return None, (f"{leg.instrument_id} was not yet held on the {day} close and has no official "
-                              f"FUTURE_PX that day"), ""
-            prices.append(hit[0])
-            sources.append(f"{leg.instrument_id} {hit[1]} (official FUTURE_PX of the {day} close: not yet held then)")
-        else:
-            return None, f"{leg.instrument_id} is not valued by value_book on {day}", ""
-    return prices, "", "; ".join(sources)
+def china_index(a_country: str, b_country: str) -> int:
+    """0 or 1: the leg on a Chinese exchange when exactly one of the two is; -1 otherwise."""
+    if a_country == CHINA and b_country != CHINA:
+        return 0
+    if b_country == CHINA and a_country != CHINA:
+        return 1
+    return -1
 
 
-def _entry_prices(book, spec: LevelSpec) -> Tuple[Optional[List[float]], str]:
-    """Each leg's lots-weighted average fill."""
-    out = []
-    for leg in spec.legs:
-        num = den = 0.0
-        for tid in leg.trade_ids:
-            q, f = book.lots(tid), _num(book.by_id[tid]["price"])
-            if q is None or f is None:
-                return None, f"{tid}: its quantity or fill is not a number, so the entry has no level"
-            num += q * f
-            den += q
-        if abs(den) < 1e-12:
-            return None, f"{leg.instrument_id}: its trades net to zero lots, so it has no average fill"
-        out.append(num / den)
-    return out, ""
-
-
-def _ratio(prices: Sequence[float], spec: LevelSpec, cn: int) -> Optional[float]:
-    """China over foreign of the two raw prices in the template's quantity unit (no FX)."""
-    conv = [converted(px, leg, LevelSpec(spec.kind, spec.unit, leg.currency, 0.0, spec.legs, spec.weights,
-                                         spec.units_per_lot)) for px, leg in zip(prices, spec.legs)]
-    if abs(conv[1 - cn]) < 1e-12:
-        return None
-    return conv[cn] / conv[1 - cn]
+def one_leg_spec(spec: LevelSpec, n: int) -> LevelSpec:
+    """``spec`` with weight 1 on leg ``n`` and 0 on the others, no constant: its level is leg
+    ``n``'s price converted to the spread's unit (the quantity conversion and, across currencies,
+    the day's USD spot, exactly as the level converts it)."""
+    weights = tuple(1.0 if i == n else 0.0 for i in range(len(spec.legs)))
+    return LevelSpec(spec.kind, spec.unit, spec.currency, 0.0, spec.legs, weights, spec.units_per_lot)
 
 
 def _difference(book, spec: LevelSpec, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
@@ -569,15 +539,33 @@ def _difference(book, spec: LevelSpec, prev_day: str, prev_rows: Dict[str, dict]
 
 
 def _ratio_levels(book, spec: LevelSpec, cn: int, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
-    entry_px, entry_why = _entry_prices(book, spec)
-    now_px, now_why, now_src = _leg_prices(book, spec, book.as_of, book.today, fallback=False)
-    prev_px, prev_why, prev_src = _leg_prices(book, spec, prev_day, prev_rows, fallback=True)
-    out = {"sources": {"entry": "the fills, each leg's lots-weighted average (no FX in a ratio)", "prev": prev_src,
-                       "now": now_src}, "prices": {"entry": entry_px, "prev": prev_px, "now": now_px}}
-    for key, px, why in (("entry", entry_px, entry_why), ("prev", prev_px, prev_why), ("now", now_px, now_why)):
-        value = _ratio(px, spec, cn) if px is not None else None
-        out[key] = value
-        out[f"{key}_reason"] = why if px is None else ("" if value is not None else "the foreign leg's price is 0")
+    """The CONVERTED ratio China over foreign (user, 2026-09-29, reversing the raw ratio of
+    2026-09-28): each leg's price in the spread's unit, the China leg converted to the unit's
+    currency at the USD spot the level reads (``book.entry_level``: the exact official spot of
+    each trade date; ``book.level_on``: the as-of row's own spot, the previous close's row or its
+    official spot), divided by the foreign leg's. VAT is left in. ``conv`` keeps both converted
+    prices per read (China, foreign)."""
+    sc, sf = one_leg_spec(spec, cn), one_leg_spec(spec, 1 - cn)
+    reads = {
+        "entry": (book.entry_level(sc), book.entry_level(sf)),
+        "now": (book.level_on(sc, book.as_of, book.today, fallback=False),
+                book.level_on(sf, book.as_of, book.today, fallback=False)),
+        "prev": (book.level_on(sc, prev_day, prev_rows, fallback=True),
+                 book.level_on(sf, prev_day, prev_rows, fallback=True)),
+    }
+    out = {"sources": {}, "prices": {}, "conv": {}}
+    for key, ((vc, why_c, src_c, px_c), (vf, why_f, _src_f, _px_f)) in reads.items():
+        out["sources"][key] = src_c
+        out["prices"][key] = px_c if vc is not None else None
+        out["conv"][key] = (vc, vf)
+        if vc is None or vf is None:
+            out[key], out[f"{key}_reason"] = None, why_c or why_f
+        elif abs(vf) < 1e-12:
+            out[key], out[f"{key}_reason"] = None, "the foreign leg's price is 0"
+        else:
+            out[key], out[f"{key}_reason"] = vc / vf, ""
+    out["sources"]["entry"] = (out["sources"]["entry"] or "the fills") + (
+        f"; ratio {spec.legs[cn].instrument_id} over {spec.legs[1 - cn].instrument_id}, both in {spec.unit}")
     out["change"] = (out["now"] - out["prev"]) if out["now"] is not None and out["prev"] is not None else None
     return out
 
@@ -590,7 +578,7 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
            "level_entry_reason": why, "level_prev_reason": why, "level_now_reason": why, "level_change_reason": why,
            "level_prev_date": prev_day, "usd_per_unit": None, "usd_per_unit_reason": why,
            "unit_alt": "", "level_alt": None, "level_alt_reason": why,
-           "level_sources": {}, "level_prices": {}, "level_spec": spec_to_dict(spec)}
+           "level_sources": {}, "level_prices": {}, "level_spec": spec_to_dict(spec), "level_china_leg": -1}
     if spec is None:
         return out
     a, b = p["a"], p["b"]
@@ -599,8 +587,10 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
     template = p["template"]
     diff = _difference(book, spec, prev_day, prev_rows)
     s_unit, s_why = book.unit_spot(spec, book.as_of, exact=False)
-    if template is not None and template.ratio_screen:
-        cn = 0 if a.root.country == CHINA else 1 if b.root.country == CHINA else 0
+    cn = china_index(a.root.country, b.root.country) if p["rule"] != TERM_STRUCTURE else -1
+    if cn >= 0:
+        # China against the West: the converted ratio, China on top (user, 2026-09-29), for every
+        # such pair, a template's or not; the difference in the spread's unit is the alt form
         ratio = _ratio_levels(book, spec, cn, prev_day, prev_rows)
         out.update(unit=RATIO_UNIT, level_entry=ratio["entry"], level_prev=ratio["prev"], level_now=ratio["now"],
                    level_change=ratio["change"], level_entry_reason=ratio["entry_reason"],
@@ -610,24 +600,21 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
                    level_alt_reason="; ".join(f"{k}: {diff[k + '_reason']}" for k in ("entry", "prev", "now")
                                               if diff[k + "_reason"]),
                    level_sources={**ratio["sources"], "alt": diff["sources"]},
-                   level_prices={"ratio": ratio["prices"], "alt": diff["prices"]})
-        # a 1.0 rise of the ratio with the foreign leg unchanged: the China leg moves by the foreign
-        # price (in CNY per unit), on the China leg's paired quantity, converted at the day's spot
-        cn_leg = spec.legs[cn]
-        now_px = ratio["prices"]["now"]
-        s_cn = _num(usd_per_quote(book.conn, cn_leg.currency, book.as_of)[0]) if cn_leg.currency != "USD" else 1.0
-        if now_px is None:
+                   level_prices={"ratio": ratio["prices"], "alt": diff["prices"]},
+                   level_china_leg=cn)
+        # a 1.0 rise of the ratio with the foreign leg unchanged: the China leg's converted price
+        # rises by the foreign leg's converted price, on the China leg's paired quantity
+        _vc, vf = ratio["conv"]["now"]
+        if vf is None:
             out["usd_per_unit_reason"] = ratio["now_reason"] or "no price now"
-        elif not s_cn:
-            out["usd_per_unit_reason"] = f"no SPOT for USD conversion of {cn_leg.currency} on {book.as_of}"
+        elif s_unit is None:
+            out["usd_per_unit_reason"] = s_why
         else:
-            foreign = spec.legs[1 - cn]
-            p_for = converted(now_px[1 - cn], foreign, LevelSpec(spec.kind, spec.unit, foreign.currency, 0.0,
-                                                                  spec.legs, spec.weights, spec.units_per_lot))
             cn_lots = p["lots_a"] if cn == 0 else p["lots_b"]
-            out["usd_per_unit"] = _sign(cn_lots) * size * p_for * s_cn
-            out["level_sources"]["usd_per_unit"] = (f"paired {size:g} {p['level_unit']} x the foreign price {p_for:.6g} "
-                                                    f"x {cn_leg.currency} spot {s_cn:.6g}")
+            out["usd_per_unit"] = _sign(cn_lots) * size * vf * s_unit
+            out["level_sources"]["usd_per_unit"] = (
+                f"paired {size:g} {p['level_unit']} x the foreign price {vf:.6g} {spec.unit}"
+                + ("" if spec.currency == "USD" else f" x {spec.currency} spot {s_unit:.6g}"))
         return out
     out.update(unit=spec.unit, level_entry=diff["entry"], level_prev=diff["prev"], level_now=diff["now"],
                level_change=diff["change"], level_entry_reason=diff["entry_reason"],
@@ -644,14 +631,7 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
     if spec.is_calendar:
         out["level_alt_reason"] = "a calendar has one form: near minus far in the root's quote unit"
     elif template is not None:
-        cn = 0 if a.root.country == CHINA else 1 if b.root.country == CHINA else -1
-        if cn >= 0:
-            ratio = _ratio_levels(book, spec, cn, prev_day, prev_rows)
-            out.update(unit_alt=RATIO_UNIT, level_alt={k: ratio[k] for k in ("entry", "prev", "now", "change")},
-                       level_alt_reason="; ".join(f"{k}: {ratio[k + '_reason']}" for k in ("entry", "prev", "now")
-                                                  if ratio[k + "_reason"]))
-        else:
-            out["level_alt_reason"] = "neither leg is on a Chinese exchange, so there is no China-over-foreign ratio"
+        out["level_alt_reason"] = "neither leg is on a Chinese exchange, so there is no China-over-foreign ratio"
     elif _same_quote_unit(a, b):
         out["level_alt_reason"] = (f"both legs quote in {a.root.quote_unit} and no config/spreads/ template matches "
                                    f"them: the level is their difference in that unit")

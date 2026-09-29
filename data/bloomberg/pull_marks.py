@@ -1043,7 +1043,7 @@ def build_spot_rows(session, service, requests: Sequence[RequestRow], as_of: dat
     out, warnings, failures = [], [], []
     snapped = snapped_at(as_of)
     for r in rows:
-        val = data.get(r.bbg_ticker)
+        val = _plain_number(data.get(r.bbg_ticker))
         if val is None:
             detail = f"no PX_LAST returned for {as_of}" + (f" ({batch_detail})" if batch_detail else "")
             warnings.append(f"SPOT {r.instrument_id} ({r.bbg_ticker}): {detail}")
@@ -1092,7 +1092,11 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
     trade of a single strike can be hours old -- and otherwise PX_LAST, then PX_SETTLE, as
     a future does. With no such ticker the request is the futures' own, unchanged.
 
-    See build_spot_rows for the (rows, warnings, failures) contract."""
+    See build_spot_rows for the (rows, warnings, failures) contract.
+
+    A value that is not a finite number (Bloomberg's 'N.A.', a NaN; 2026-09-29, Phase G
+    "Smooth and contained") is never written and never stops the other rows: live, it counts
+    as no PX_LAST (the PX_SETTLE fallback is tried); otherwise the row fails with its reason."""
     rows = [r for r in requests if r.mark_type == "FUTURE_PX"]
     if not rows:
         return [], [], []
@@ -1105,31 +1109,36 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
                                     diag=diag, tag={"purpose": "FUTURE_PX_LIVE"})
         for ticker in mid_first:       # a listed option: Bloomberg's mid stands in for the last trade
             got = live_data.get(ticker) or {}
-            if got.get("PX_MID") is not None:
+            if _plain_number(got.get("PX_MID")) is not None:
                 live_data[ticker] = {**got, "PX_LAST": got["PX_MID"], "_field": "PX_MID"}
-        missing = sorted({r.bbg_ticker for r in rows if live_data.get(r.bbg_ticker, {}).get("PX_LAST") is None})
+        missing = sorted({r.bbg_ticker for r in rows
+                          if _plain_number((live_data.get(r.bbg_ticker) or {}).get("PX_LAST")) is None})
         settle_data: Dict[str, Optional[float]] = {}
         if missing:
             settle_data = fetch_historical(session, service, missing, "PX_SETTLE", as_of, diag,
                                            {"purpose": "FUTURE_PX_FALLBACK"},
                                            start=as_of - timedelta(days=lookback_days))
         for r in rows:
-            live_val = live_data.get(r.bbg_ticker, {}).get("PX_LAST")
+            raw_live = (live_data.get(r.bbg_ticker) or {}).get("PX_LAST")
+            live_val = _plain_number(raw_live)
             if live_val is not None:
                 out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
-                           "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": float(live_val),
+                           "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": live_val,
                            "source": SRC_FUTURE, "snapped_at": snapped,
                            "detail": f"live {live_data[r.bbg_ticker].get('_field', 'PX_LAST')}"})
                 continue
-            settle_val = settle_data.get(r.bbg_ticker)
+            raw_settle = settle_data.get(r.bbg_ticker)
+            settle_val = _plain_number(raw_settle)
             if settle_val is not None:
                 out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
-                           "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": float(settle_val),
+                           "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": settle_val,
                            "source": SRC_FUTURE, "snapped_at": snapped,
                            "detail": f"no live PX_LAST; used the latest PX_SETTLE on or before {as_of.isoformat()}"})
                 continue
             detail = (f"no live PX_LAST and no PX_SETTLE in the {lookback_days} day(s) up to and "
                      f"including {as_of.isoformat()}")
+            if raw_live is not None or raw_settle is not None:
+                detail += f" (Bloomberg sent a value that is not a number: {raw_live if raw_live is not None else raw_settle!r})"
             warnings.append(f"FUTURE_PX {r.instrument_id} ({r.bbg_ticker}): {detail}")
             failures.append({"instrument_id": r.instrument_id, "settle_date": r.settle_date, "mark_type": "FUTURE_PX",
                              "classification": CLASS_NO_VALUE, "detail": detail})
@@ -1138,7 +1147,7 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
     data = fetch_historical(session, service, tickers, "PX_SETTLE", as_of, diag, {"purpose": "FUTURE_PX"})
     batch_classification, batch_detail = _batch_classification(diag)
     for r in rows:
-        val = data.get(r.bbg_ticker)
+        val = _plain_number(data.get(r.bbg_ticker))
         if val is None:
             detail = f"no PX_SETTLE returned for {as_of}" + (f" ({batch_detail})" if batch_detail else "")
             warnings.append(f"FUTURE_PX {r.instrument_id} ({r.bbg_ticker}): {detail}")

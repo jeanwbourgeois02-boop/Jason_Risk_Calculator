@@ -236,13 +236,15 @@ def _fx_name(f: dict) -> str:
     return f"{pair} {f.get('value_date') or ''} {words.get(str(f.get('product')), '')}".replace("  ", " ").strip()
 
 
-def _position_series(pos: _Position, by_contract: Dict[str, dict], per_lot: _PerLot, as_of: str
-                     ) -> Tuple[List[dict], Optional[pd.Series]]:
+def _position_series(pos: _Position, by_contract: Dict[str, dict], per_lot: _PerLot, as_of: str,
+                     parts_out: Optional[Dict[str, pd.Series]] = None) -> Tuple[List[dict], Optional[pd.Series]]:
     """(its legs' detail, its daily USD P&L) or None with `pos.reasons` filled: the trades netted
     per contract, each contract at its lots x curve-positions' delta per lot, on its contract's
     held-constant history. A contract the position holds flat is skipped. A currency-hedge leg
     with no series goes to `pos.hedges_out` (left out alone, user yes 2026-09-29); any other leg
-    with no series leaves the whole position out."""
+    with no series leaves the whole position out. `parts_out`, when given, receives each leg's
+    own series ({contract_id: daily USD P&L at its delta lots}), the parts the sum is made of
+    (the trade risk's hedge % and best-fit ratio read them, `trades.py`)."""
     booked: Dict[str, Tuple[str, float, bool]] = {}
     for cid, product, q, hedge in pos.exposures:
         booked[cid] = (product, booked.get(cid, (product, 0.0, hedge))[1] + q, hedge)
@@ -275,6 +277,8 @@ def _position_series(pos: _Position, by_contract: Dict[str, dict], per_lot: _Per
                        reason="" if s is not None else f"{cid}: {detail['reason'] or 'no history'}")
             if s is not None:
                 parts.append(s)
+                if parts_out is not None:
+                    parts_out[cid] = s
                 continue
         if hedge:
             pos.hedges_out.append((_contract_name(row) if row else cid, leg["reason"]))
@@ -331,11 +335,15 @@ def _correlation(included: List[dict], series: Dict[str, pd.Series], config: Dic
 
 def position_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict], curve: Optional[dict],
                   per_lot: _PerLot, config: Dict[str, Any], headline_var: float = NAN,
-                  fx_history_reason: str = "") -> Dict[str, Any]:
+                  fx_history_reason: str = "", detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Risk by position for `as_of` (module docstring). `spreads` / `curve`: `book_spreads` and
     `curve_positions` of the same as-of (book_risk's, not computed twice); `per_lot`: the
     commodity rows' per-lot series cache; `headline_var`: `book.var95_1d_usd`, returned beside
     the position book's VaR; `fx_history_reason`: why the FX history is absent, '' when on file.
+    `detail`, when given, receives the series behind the figures (never in the returned dict,
+    which stays JSON-friendly): `series` {position_id: daily USD P&L}, `leg_series`
+    {position_id: {contract_id: its leg's daily USD P&L}}, `by_contract` {contract_id:
+    curve-positions row} (the trade risk reads them, `trades.py`).
 
     Returns {
       "available": bool, "reason": '' or why nothing could be computed,
@@ -393,9 +401,15 @@ def position_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dic
     by_contract, _by_trade = _rows_by_contract(curve)
     positions = open_positions(conn, as_of, spreads, curve, fx_why)
     series: Dict[str, pd.Series] = {}
+    leg_series: Dict[str, Dict[str, pd.Series]] = {}
+    if detail is not None:
+        detail.update(series=series, leg_series=leg_series, by_contract=by_contract)
     rows: List[dict] = []
     for pos in positions:
-        legs, s = _position_series(pos, by_contract, per_lot, as_of)
+        parts: Dict[str, pd.Series] = {}
+        legs, s = _position_series(pos, by_contract, per_lot, as_of, parts)
+        if s is not None and pos.id not in leg_series:
+            leg_series[pos.id] = parts
         partial = s is not None and bool(pos.hedges_out)
         row = {"position_id": pos.id, "book_row_id": pos.id, "kind": pos.kind, "name": pos.name,
                "trade_ids": pos.trade_ids, "legs": legs, "included": s is not None,

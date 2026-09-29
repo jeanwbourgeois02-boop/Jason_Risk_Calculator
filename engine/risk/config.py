@@ -6,7 +6,8 @@ Keys (see the yaml for the meaning of each):
   vol_target_usd, vol_target_placeholder, vol_target_note, stress_pct, blended {trail_window_bd, w_trail, w_stress, stress_start,
   stress_end, cutover}, var_window_bd, var_confidence, worst_day_start,
   shock_dates [{date, name}, ...], var_contribution_days, correlation_min_days (the risk by
-  position, `positions.py`, 2026-09-29).
+  position, `positions.py`, 2026-09-29), trade_window_bd, trade_min_days, level_window_bd,
+  level_min_days, asian_close_countries (the risk by trade, `trades.py`, Phase G).
 `load_config` returns a plain dict of those, dates as ISO strings, plus `file` (the path
 read) and `loaded` (False when the defaults are in use).
 """
@@ -42,6 +43,15 @@ DEFAULTS: Dict[str, Any] = {
     # averaged for each position's contribution, and the fewest common days a correlation needs
     "var_contribution_days": 5,
     "correlation_min_days": 60,
+    # risk by trade (Phase G, 2026-09-29, trades.py): the window of the daily risk, hedge % and
+    # best-fit ratio, the fewest days they need, the level z-score's window and floor, and the
+    # countries whose exchanges close in the Asian day (a leg there against one elsewhere is
+    # measured on 2-day moves)
+    "trade_window_bd": 252,
+    "trade_min_days": 60,
+    "level_window_bd": 252,
+    "level_min_days": 60,
+    "asian_close_countries": ["CN", "SG", "JP", "HK", "MY", "IN", "KR", "TW", "AU"],
     "worst_day_start": "2008-01-01",        # dashboard.py `_worst_start`
     "shock_dates": [                        # core/risk.py STRESS_IGNORE_DATES
         {"date": "2015-01-15", "name": "SNB floor removal"},
@@ -80,6 +90,9 @@ def _merged(file_values: Dict[str, Any]) -> Dict[str, Any]:
     cfg["var_confidence"] = float(cfg["var_confidence"])
     cfg["var_contribution_days"] = max(1, int(cfg["var_contribution_days"]))
     cfg["correlation_min_days"] = max(3, int(cfg["correlation_min_days"]))
+    for key in ("trade_window_bd", "trade_min_days", "level_window_bd", "level_min_days"):
+        cfg[key] = max(3, int(cfg[key]))
+    cfg["asian_close_countries"] = [str(c).strip().upper() for c in (cfg["asian_close_countries"] or [])]
     cfg["vol_target_placeholder"] = bool(cfg["vol_target_placeholder"])
     cfg["vol_target_note"] = str(cfg["vol_target_note"] or "")
     b = cfg["blended"]

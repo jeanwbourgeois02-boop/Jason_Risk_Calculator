@@ -23,6 +23,17 @@ about a dozen lanes' tests load that path, so the replacement kept the path.
 - 2026-09-28: rows 9-17, 24-25, 33 book their cents-quoted roots in the broker's units (455.2 -> 4.552;
   NetInvoice unchanged, since invoice = lots x contract size x broker price), BZ6-UKAA, FEFF7-SPAA,
   and the ambiguous row is bare ZCZ6; the parse (50 trades, ids, fills) equals the pinned golden book.
+- 2026-09-29 (Phase G, spreads-engine's request): every row carries a PBRoot, the ONLY change
+  (edited by a csv round-trip script that asserts each line re-serialises byte-identical first).
+  WTICAL1 .5 (001-004), BRWTI1 .4 (005-006: the deliberate type mismatch, the rule says cross
+  exchange since Brent and WTI share subsector crude_oil), CRACK1 .4 (007-009), CRUSH1 .4
+  (010-012), CORN1 (013, 032 reject), GOLD1 (014, 048 option), SILVER1 (015), COPAR1 .3 (016-018 +
+  USDCNH fwds 031 and settled 034, long USD/CNH against the short SHFE leg), IRON1 .3 (019-020 +
+  USDCNH 030 1.5m: the deliberate hedge_oversized, 14x), TTFNBP1 .4 (021-024 + 035, 037, 038, 040;
+  TFM and M are both exchange ICE, so the rule says cross product, not .3), GOLDJP1 .3 (025-026 +
+  USDJPY 036), WTI1 (027-029), MISC1 (033 reject), XAU1 (039), EURVOL1 (041, 044, 045), JPYVOL1
+  (042-043), WTIRR1 (046-047), CUVOL1 (049), CUAL1 .4 (050-051), NICKEL1 (052). 0 unassigned.
+  The golden book pins `"strategy":""` on its value_book rows, so this needed a re-pin (user's yes).
 - Regenerate from a script, never by hand: NetInvoice must stay consistent (tests assert
   no warnings). The generator lived in the session scratchpad; its logic is simple enough
   to rewrite (forward: quote = round(base x rate, 2); option: NetInvoice = notional x premium).

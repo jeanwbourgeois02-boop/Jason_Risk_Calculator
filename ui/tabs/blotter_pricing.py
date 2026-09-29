@@ -340,6 +340,92 @@ def shared_curve(conn: sqlite3.Connection, as_of: str) -> dict:
     return screen_memo("curve", conn, as_of, compute)
 
 
+# --------------------------------------------------------------------------- the trade as the unit (Phase G)
+# 2026-09-29 (Phase G, round 1): `engine.spreads.trade_book` (one entry per trade name: its legs,
+# type, size, level, hedge, next date, P&L) and `engine.risk.trades.trade_risk` (z, hedge %,
+# daily risk per trade) are computed once per (database revision, as-of, outside inputs) and
+# shared by the Book, the P&L tab and the Risk tab: one valuation per date (the filled reader for
+# the trade book, the engine's own for the risk, as each tab read them before). Both also read the
+# research app's database (roll-down, z, history), so their key carries its mtime and the
+# quarter-hour (`outside_inputs_key`). Shared: never edit the result.
+def research_inputs_key() -> tuple:
+    """The outside-inputs key of a result that reads the research app's history and the risk
+    config: their mtimes and the quarter-hour."""
+    from pathlib import Path
+    config = Path(__file__).resolve().parents[2] / "config"
+    try:
+        from engine.risk import commodity_history as ch
+        research = os.environ.get(ch.ENV_VAR, "").strip() or str(ch.DEFAULT_PATH)
+    except Exception:  # noqa: BLE001 -- the quarter-hour still refreshes it
+        research = None
+    return outside_inputs_key(config / "risk.yaml", config / "commodity_stress.yaml", config / "limits.yaml",
+                              research, f"{research}-wal" if research else None)
+
+
+def shared_trade_book(conn: sqlite3.Connection, as_of: str) -> dict:
+    """`engine.spreads.trade_book(conn, as_of)` on the screens' filled reader and the Book's own
+    `book_spreads` (`shared_spreads(filled=True)`), once per database revision, as-of and state
+    of the research inputs. Shared: never edit the result."""
+    def compute():
+        from engine.spreads.trades import trade_book
+        spreads = shared_spreads(conn, as_of, filled=True)
+        with pricing_snapshot(conn, "Trade book"):
+            return trade_book(conn, as_of, spreads=spreads, value_fn=priced_value_book)
+    return screen_memo("trade-book", conn, as_of, compute, extra=research_inputs_key())
+
+
+def _trade_risk_compute(conn: sqlite3.Connection, as_of: str):
+    from engine.risk.trades import trade_risk
+    try:
+        spreads = shared_spreads(conn, as_of)
+    except Exception:  # noqa: BLE001 -- the engine then reads them itself and names the failure
+        spreads = None
+    try:
+        curve = shared_curve(conn, as_of)
+    except Exception:  # noqa: BLE001
+        curve = None
+    with pricing_snapshot(conn, "Trade risk"):
+        return trade_risk(conn, as_of, spreads=spreads, curve=curve)
+
+
+def shared_trade_risk(conn: sqlite3.Connection, as_of: str, wait: bool = True) -> Optional[dict]:
+    """`engine.risk.trades.trade_risk(conn, as_of)` on the engine's own spreads and curve, once per
+    database revision, as-of and state of the research inputs. With `wait=False` it never blocks:
+    the result when it is ready, else None, and the computation is started on a thread of its own
+    (the Book shows its table first and its z column a moment later). Shared: never edit it."""
+    extra = research_inputs_key()
+    if wait:
+        return screen_memo("trade-risk", conn, as_of, lambda: _trade_risk_compute(conn, as_of), extra=extra)
+    key = _render_cache_key(conn)
+    if key is None:
+        return None
+    full = ("trade-risk", *key, as_of, *extra)
+    with _CACHE_GUARD:
+        if full in _MEMOS:
+            return _MEMOS[full]
+        started = full in _RISK_STARTED
+        _RISK_STARTED.add(full)
+    if not started:
+        path = key[0]
+
+        def run():
+            from ui.app import connect_readonly
+            own = connect_readonly(path)
+            try:
+                _single_flight(_MEMOS, full, lambda: _trade_risk_compute(own, as_of))
+            except Exception:  # noqa: BLE001 -- the next render asks again (and waits) and shows the reason
+                log.exception("trade risk failed for %s", as_of)
+            finally:
+                own.close()
+                with _CACHE_GUARD:
+                    _RISK_STARTED.discard(full)
+        threading.Thread(target=run, name=f"trade-risk-{as_of}", daemon=True).start()
+    return None
+
+
+_RISK_STARTED: set = set()
+
+
 def _priced_value_book_uncached(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, int, int]:
     """`value_book(as_of)` with the fill (user decision 2026-09-21: "there should be a fill
     when bloomberg doesnt have the data"): a trade with no price on `as_of` takes its own

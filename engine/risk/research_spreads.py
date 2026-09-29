@@ -28,6 +28,9 @@ What is served:
     app's daily vol (`dvol_20d`), labelled research.
   * `research_spread_history(key, start=None, end=None, db_path=None)`: `spread_daily` as a
     Series.
+  * On both, `source_kind` / `source_note` (`commodity_history.research_source`): whether the
+    research prices behind them are Bloomberg's ('real'), generated ('mock', for layout only) or
+    'unknown'.
 
 This is CONTEXT only. Nothing read here is ever a mark, written to `marks` or anywhere else, or
 used for P&L or delta (hard rule 2), and nothing asks Bloomberg for anything (hard rule 8).
@@ -44,7 +47,7 @@ from typing import Iterable, List, Optional, Tuple, Union
 
 import pandas as pd
 
-from engine.risk.commodity_history import _connect, candidates
+from engine.risk.commodity_history import _connect, candidates, research_source
 
 __all__ = ["LABEL", "STAT_FIELDS", "research_spread_history", "research_spread_stats", "sigma_move"]
 
@@ -109,7 +112,8 @@ def _clean(value):
 
 def _blank_entry(sid: str, inst: str, reason: str) -> dict:
     out = {"spread_id": sid, "instance": inst, "found": False, "reason": reason, "note": "", "label": LABEL,
-           "name": None, "family": None, "sector": None, "unit": None, "verified": None, "asof": None}
+           "name": None, "family": None, "sector": None, "unit": None, "verified": None, "asof": None,
+           "source_kind": "unknown"}
     out.update({f: None for f in STAT_FIELDS})
     return out
 
@@ -132,26 +136,34 @@ def research_spread_stats(keys: Iterable[Tuple[str, object]], as_of, db_path: Un
     """The research app's statistics per (spread_id, instance) key, each from its latest run with
     `asof` on or before `as_of`. Never raises; see the module docstring for the key convention.
 
-    Returns {available, path, reason, candidates, as_of, run_asof, label, source, stats}:
+    Returns {available, path, reason, candidates, as_of, run_asof, label, source, source_kind,
+    source_note, stats}:
       available  True when the research database was found and read;
       path       the database read ('' when none); reason: '' or why nothing could be read;
       candidates [{path, exists}] tried; as_of: ISO; label: 'research';
       run_asof   the latest research run on or before `as_of` over the whole database (None when none);
-      source     one line naming the database and run, for a caption or a hover;
+      source     one line naming the database and run, for a caption or a hover (with the
+                 source_note added when the prices are not known to be Bloomberg's);
+      source_kind / source_note  `commodity_history.research_source`: 'real' | 'mock' | 'unknown'
+                 and its sentence; the statistics are computed from the research prices, so
+                 'mock' statistics are generated, for layout only;
       stats      {key as the caller gave it: entry}.
     Each entry: spread_id, instance (normalised), found (bool), reason ('' when found), note ('' or
     e.g. that the row is of an older run than run_asof), label 'research', name, family, sector,
     unit (spread_def.unit), verified (bool), asof (the run this row is from), then STAT_FIELDS:
     level, z_primary, z_primary_kind, z_1y, pctile_5y, half_life_days, dvol_20d, chg_1d,
     chg_1d_sd, stale_days, stale_leg, last_obs_date, contract_note, n_obs, computed_at,
-    heavy_asof (None where the research app has NULL: not enough history)."""
+    heavy_asof (None where the research app has NULL: not enough history), and source_kind (the
+    same as the top level's, on a found entry and a blank one alike)."""
     keys = list(keys)
     iso, bad = _iso(as_of)
     out = {"available": False, "path": "", "reason": "", "candidates": [], "as_of": iso, "run_asof": None,
-           "label": LABEL, "source": "", "stats": {}}
+           "label": LABEL, "source": "", "source_kind": "unknown", "source_note": "", "stats": {}}
 
     def fail_all(reason: str) -> dict:
         out["reason"] = reason
+        if not out["source_note"]:
+            out["source_note"] = f"research statistics' provider is unknown: {reason}"
         for k in keys:
             try:
                 sid, inst = _norm_key(k)
@@ -167,6 +179,8 @@ def research_spread_stats(keys: Iterable[Tuple[str, object]], as_of, db_path: Un
     if db is None:
         return fail_all(why)
     out["path"] = str(db)
+    src = research_source(db)
+    out["source_kind"], out["source_note"] = src["source_kind"], src["source_note"]
     if iso is None:
         return fail_all(f"as-of {bad}")
     try:
@@ -192,6 +206,10 @@ def research_spread_stats(keys: Iterable[Tuple[str, object]], as_of, db_path: Un
         return fail_all(f"{db} could not be read ({type(exc).__name__}: {exc})")
     out["source"] = (f"research app database {db}, run of {out['run_asof']} (latest on or before {iso})"
                      if out["run_asof"] else f"research app database {db}: no statistics run on or before {iso}")
+    if out["source_kind"] != "real":
+        out["source"] += f"; {out['source_note']}"
+    for entry in out["stats"].values():
+        entry["source_kind"] = out["source_kind"]
     return out
 
 
@@ -272,7 +290,8 @@ def research_spread_history(key: Tuple[str, object], start=None, end=None,
                             db_path: Union[str, Path, None] = None) -> pd.Series:
     """The spread's daily value from `spread_daily`, in its unit, `start` to `end` inclusive (None =
     open): a float Series on a DatetimeIndex named 'date'. attrs: reason ('' when it has data),
-    label 'research', path, spread_id, instance, unit, spread_name. Empty with the reason otherwise."""
+    label 'research', path, spread_id, instance, unit, spread_name, source_kind, source_note (the
+    last two once a database is found). Empty with the reason otherwise."""
     try:
         sid, inst = _norm_key(key)
     except ValueError as exc:
@@ -290,7 +309,9 @@ def research_spread_history(key: Tuple[str, object], start=None, end=None,
     db, _, why = _find(db_path)
     if db is None:
         return _empty(why, name, path="", spread_id=sid, instance=inst)
-    base = dict(path=str(db), spread_id=sid, instance=inst)
+    src = research_source(db)
+    base = dict(path=str(db), spread_id=sid, instance=inst, source_kind=src["source_kind"],
+                source_note=src["source_note"])
     try:
         conn = _connect(db)
         try:

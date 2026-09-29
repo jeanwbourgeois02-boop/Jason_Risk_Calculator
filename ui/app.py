@@ -3,15 +3,12 @@
 Owns: ui/. Reads (read-only) from the SQLite database produced by data/ingest and
 data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 
-Six tabs (CLAUDE.md "Screens redesign plan", user 2026-09-25; UI redesign waves 1 to 3, user
-2026-09-28), in this order: Book, Exposure, P&L, Risk, Trades, Data. "Exposure" is
-the former Curve (ui/tabs/curve.py, key "curve"), "P&L" is new (ui/tabs/pnl.py, key "pnl"),
-"Trades" the former Blotter (ui/tabs/blotter.py, key "blotter") and "Data" the former Market data
-(ui/tabs/market_data.py). The Spreads tab (ui/tabs/spreads.py), the FX & cash tab
-(ui/tabs/cash_ladder.py, ui/tabs/exposure.py) and the Timing & cash tab (ui/tabs/expiries.py, the
-former Expiries) were deleted on 2026-09-28 (user's yes): the Book tab now holds the spread
-detail helpers and shows each position's next date in its Next column;
-`HIDDEN_TAB_KEYS` only records their old keys so a stale link is ignored. Each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
+Five tabs since Phase G (CLAUDE.md "Screens redesign plan", user 2026-09-29), in this order: Book,
+P&L, Risk, Blotter, Data. The trade (Jason's PBRoot name) is the unit on Book, P&L and Risk, which
+share one filter bar and Group switch (ui/tabs/trade_filter.py; its state is one session store in
+this layout). Exposure (ui/tabs/curve.py, key "curve") merged into Risk: its key is in
+`HIDDEN_TAB_KEYS` with the tabs deleted on 2026-09-28 (Spreads, FX & cash, Timing & cash), so a stale
+link is ignored. Each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
 separate from the label the user reads, so a rename never moves an id. The app opens on the
 first tab, Book (ui/tabs/book.py): the book's home. A slim header (ui/tabs/header.py) sits
 above the tabs on every view: the as-of date, Daily / MTD / YTD / LTD and the Data chip.
@@ -31,7 +28,7 @@ import dash
 import flask
 from dash import ALL, Input, Output, State, dcc, html
 
-from ui.tabs import blotter, book, curve, header, market_data, pnl, risk
+from ui.tabs import blotter, book, header, market_data, pnl, risk, trade_filter
 from ui.tabs.controls import today_ny
 from ui.tabs.formatting import TAB_LINK_TYPE
 from ui import revision, uploads
@@ -72,9 +69,11 @@ def set_active_db(path: Union[str, Path, None]) -> Path:
 # ("spreads") and FX & cash ("ladder") tabs left the bar in wave 3, Timing & cash ("expiries")
 # later the same day (`HIDDEN_TAB_KEYS`): a tab link to any of those keys is dead
 # (`tab_from_link_click` ignores it), so no screen renders one.
+# Phase G (user, 2026-09-29): five tabs, the trade the unit on Book, P&L and Risk. Exposure merged
+# into Risk: its key "curve" joined `HIDDEN_TAB_KEYS` (ui/tabs/curve.py stays on disk, unmounted,
+# until round 2 moves its grid and currency parts into Risk's folds).
 TAB_KEYS = {
     "Book": "book",
-    "Exposure": "curve",
     "P&L": "pnl",
     "Risk": "risk",
     "Blotter": "blotter",
@@ -82,7 +81,7 @@ TAB_KEYS = {
 }
 VISIBLE_TABS = list(TAB_KEYS)
 # Deleted tabs' keys (2026-09-28): nothing of theirs is in the layout; a stale link is ignored.
-HIDDEN_TAB_KEYS = {"Spreads": "spreads", "FX & cash": "ladder", "Timing & cash": "expiries"}
+HIDDEN_TAB_KEYS = {"Spreads": "spreads", "FX & cash": "ladder", "Timing & cash": "expiries", "Exposure": "curve"}
 
 
 def tab_body_id(label: str) -> str:
@@ -103,7 +102,6 @@ def tab_body_id(label: str) -> str:
 # `persistence_type="session"`, the Book's open rows, sort and detail are session `dcc.Store`s.
 TAB_BUILDERS = {
     "book": book.build_layout,
-    "curve": curve.build_layout,
     "pnl": pnl.build_layout,
     "risk": risk.build_layout,
     "blotter": blotter.build_layout,
@@ -310,6 +308,12 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
         html.Div(id="tab-bodies", children=bodies),
         dcc.Store(id=header.AS_OF_STORE_ID, data=today),
         dcc.Store(id=header.AS_OF_PICKED_ID, data=False),
+        # The trade tabs' shared filter (ui/tabs/trade_filter.py, Phase G): one session store outside
+        # every tab, so what is set on Book is set on P&L and Risk; "See fills" writes the Blotter's.
+        dcc.Store(id=trade_filter.STORE_ID, storage_type="session"),
+        dcc.Store(id=trade_filter.FILLS_STORE_ID, storage_type="session"),
+        # The empty state's Upload button clicks the top bar's file input from any tab (book.py).
+        dcc.Store(id=book.EMPTY_UPLOAD_SINK_ID),
         # "The data changed" signal (ui/revision.py): every tab listens, so an upload or a
         # Bloomberg pull shows up without a browser reload; and the build this page is of,
         # so a tab left open across a restart reloads itself once (the code changed).
@@ -367,7 +371,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     # The deleted tabs (`HIDDEN_TAB_KEYS`) register nothing: their bodies are not in the layout.
     header.register_callbacks(app, get_db_path=active_db_path)
     blotter.register_callbacks(app, get_db_path=active_db_path)
-    curve.register_callbacks(app, get_db_path=active_db_path)
+    trade_filter.register(app, MAIN_TABS_ID)
     pnl.register_callbacks(app, get_db_path=active_db_path)
     book.register_callbacks(app, get_db_path=active_db_path)
     risk.register_callbacks(app, get_db_path=active_db_path)

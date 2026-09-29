@@ -87,6 +87,52 @@ def _response_error_text(msg) -> Optional[str]:
     return None
 
 
+def _field_exception_text(sd, field_name: str) -> Optional[str]:
+    """Bloomberg's field exception on `field_name` for one security ('FIELD: message'), or
+    None. Read so a dropped quote says why (2026-09-29)."""
+    try:
+        if not sd.hasElement("fieldExceptions"):
+            return None
+        fx = sd.getElement("fieldExceptions")
+        for k in range(fx.numValues()):
+            x = fx.getValueAsElement(k)
+            fid = x.getElementAsString("fieldId") if x.hasElement("fieldId") else field_name
+            if fid != field_name:
+                continue
+            info = x.getElement("errorInfo") if x.hasElement("errorInfo") else None
+            return f"{fid}: {_element_message(info) if info is not None else 'field exception'}"
+    except Exception:  # noqa: BLE001
+        return f"{field_name}: field exception not readable"
+    return None
+
+
+# The reason a quote is dropped when Bloomberg's value is not a finite number (the same words
+# as data/bloomberg/fwd_curve.NOT_A_NUMBER; kept here so this module imports nothing of the FX
+# curve's). 2026-09-29, Phase G "Smooth and contained".
+NOT_A_NUMBER = "Bloomberg sent a value that is not a number"
+
+
+def _quote_decimal(raw: Any) -> Optional[decimal.Decimal]:
+    """A raw Bloomberg value as a finite Decimal, else None ('N.A.', NaN, an infinity, a
+    bool, a date: never a quote). `decimal.Decimal('N.A.')` used to raise and fail the whole
+    currency; `Decimal('nan')` used to pass and fail the write."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = decimal.Decimal(str(raw))
+    except (decimal.InvalidOperation, ValueError, TypeError):
+        return None
+    return value if value.is_finite() else None
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    try:
+        out = float(value)
+    except (TypeError, ValueError, decimal.InvalidOperation):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
 def _security_error_text(sd) -> Optional[str]:
     """Per-security rejection text (`securityError`: unknown ticker, no permission), or
     None. The ticker is then reported as having no value, with the reason logged, rather
@@ -205,6 +251,10 @@ class CurveSnapshot:
     as_of: datetime.date
     quotes: List[CurveQuote]
     quote_time: Optional[datetime.datetime] = None
+    # {ticker: why it is not among `quotes`} (2026-09-29, Phase G): a securityError, a field
+    # exception, no value, an unreadable answer, or `NOT_A_NUMBER`. Not saved to a snapshot
+    # file and not part of equality.
+    failed: Dict[str, str] = field(default_factory=dict, compare=False)
 
     def to_dict(self) -> dict:
         return {
@@ -591,11 +641,17 @@ class RatesBloombergSource:
                 return
 
     def _fetch_reference(
-        self, tickers: List[str], fields: List[str], overrides: Optional[Dict[str, str]] = None
+        self, tickers: List[str], fields: List[str], overrides: Optional[Dict[str, str]] = None,
+        failures: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """ReferenceDataRequest for `tickers`/`fields` (live snapshot). Returns
         {ticker: {field: raw value}}; a field absent from the response for a
-        given ticker is simply missing from that ticker's dict."""
+        given ticker is simply missing from that ticker's dict.
+
+        Each security is read on its own (2026-09-29, Phase G): a securityError, a field
+        exception or an answer that cannot be read leaves that ticker's dict empty (or
+        without that field) and, when `failures` is given, records {ticker: reason} there;
+        the other tickers are kept. Only a whole-request refusal or three timeouts raise."""
         request = self._service.createRequest("ReferenceDataRequest")
         for t in tickers:
             request.getElement("securities").appendValue(t)
@@ -610,25 +666,44 @@ class RatesBloombergSource:
 
         logger.debug("Sending ReferenceDataRequest: %d securities, fields=%s", len(tickers), fields)
         out: Dict[str, Dict[str, Any]] = {}
+        failures = failures if failures is not None else {}
         for sec_data in self._send_and_collect(request, "ReferenceDataRequest"):
             for i in range(sec_data.numValues()):
-                sd = sec_data.getValueAsElement(i)
-                ticker = sd.getElementAsString("security")
+                ticker = None
                 row: Dict[str, Any] = {}
-                sec_error = _security_error_text(sd)
-                if sec_error is not None:
-                    logger.warning("Bloomberg securityError on %s: %s", ticker, sec_error)
-                elif sd.hasElement("fieldData"):
-                    fd = sd.getElement("fieldData")
-                    for f in fields:
-                        if fd.hasElement(f):
-                            row[f] = fd.getElement(f).getValue()
+                try:
+                    sd = sec_data.getValueAsElement(i)
+                    ticker = sd.getElementAsString("security")
+                    sec_error = _security_error_text(sd)
+                    if sec_error is not None:
+                        logger.warning("Bloomberg securityError on %s: %s", ticker, sec_error)
+                        failures[ticker] = f"securityError: {sec_error}"
+                    else:
+                        fd = sd.getElement("fieldData") if sd.hasElement("fieldData") else None
+                        for f in fields:
+                            try:
+                                if fd is not None and fd.hasElement(f):
+                                    row[f] = fd.getElement(f).getValue()
+                                    continue
+                            except Exception as exc:  # noqa: BLE001 -- this field of this ticker only
+                                failures[ticker] = f"{f} not readable: {type(exc).__name__}: {exc}"[:300]
+                                continue
+                            why = _field_exception_text(sd, f)
+                            if why:
+                                failures[ticker] = f"fieldException {why}"
+                except Exception as exc:  # noqa: BLE001 -- this ticker fails alone
+                    if ticker is None:
+                        logger.warning("Bloomberg answer for an unnamed security not readable: %r", exc)
+                        continue
+                    failures[ticker] = f"answer not readable: {type(exc).__name__}: {exc}"[:300]
                 out[ticker] = row
         return out
 
-    def _fetch_historical_single(self, tickers: List[str], field: str, as_of: datetime.date) -> Dict[str, Any]:
+    def _fetch_historical_single(self, tickers: List[str], field: str, as_of: datetime.date,
+                                 failures: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """HistoricalDataRequest for a single date (start = end = as_of), batched over
-        `tickers`. Returns {ticker: raw value or None}."""
+        `tickers`. Returns {ticker: raw value or None}. Each security is read on its own and
+        a failed one's reason goes to `failures` when given (2026-09-29, as `_fetch_reference`)."""
         request = self._service.createRequest("HistoricalDataRequest")
         for t in tickers:
             request.getElement("securities").appendValue(t)
@@ -639,18 +714,32 @@ class RatesBloombergSource:
 
         logger.debug("Sending HistoricalDataRequest: %d securities, field=%s, date=%s", len(tickers), field, d)
         out: Dict[str, Any] = {}
+        failures = failures if failures is not None else {}
         for sec_data in self._send_and_collect(request, "HistoricalDataRequest"):
-            ticker = sec_data.getElementAsString("security")
+            ticker = None
             value = None
-            sec_error = _security_error_text(sec_data)
-            if sec_error is not None:
-                logger.warning("Bloomberg securityError on %s: %s", ticker, sec_error)
-            elif sec_data.hasElement("fieldData"):
-                fd = sec_data.getElement("fieldData")
-                if fd.numValues() > 0:
-                    point = fd.getValueAsElement(0)
-                    if point.hasElement(field):
-                        value = point.getElement(field).getValue()
+            try:
+                ticker = sec_data.getElementAsString("security")
+                sec_error = _security_error_text(sec_data)
+                if sec_error is not None:
+                    logger.warning("Bloomberg securityError on %s: %s", ticker, sec_error)
+                    failures[ticker] = f"securityError: {sec_error}"
+                elif sec_data.hasElement("fieldData"):
+                    fd = sec_data.getElement("fieldData")
+                    if fd.numValues() > 0:
+                        point = fd.getValueAsElement(0)
+                        if point.hasElement(field):
+                            value = point.getElement(field).getValue()
+                    if value is None:
+                        why = _field_exception_text(sec_data, field)
+                        if why:
+                            failures[ticker] = f"fieldException {why}"
+            except Exception as exc:  # noqa: BLE001 -- this ticker fails alone
+                if ticker is None:
+                    logger.warning("Bloomberg history for an unnamed security not readable: %r", exc)
+                    continue
+                failures[ticker] = f"answer not readable: {type(exc).__name__}: {exc}"[:300]
+                value = None
             out[ticker] = value
         return out
 
@@ -664,31 +753,41 @@ class RatesBloombergSource:
         field = "PX_LAST"
 
         from data.bloomberg.live import book_today
+        failures: Dict[str, str] = {}
         if as_of == book_today():
-            values = self._fetch_reference(tickers, [field])
+            values = self._fetch_reference(tickers, [field], failures=failures)
         else:
-            raw = self._fetch_historical_single(tickers, field, as_of)
+            raw = self._fetch_historical_single(tickers, field, as_of, failures=failures)
             values = {t: ({field: v} if v is not None else {}) for t, v in raw.items()}
 
+        # Every ticker answers for itself (2026-09-29, Phase G): one that failed, sent no
+        # value, or sent a value that is not a finite number ('N.A.', NaN) is left out with its
+        # reason in `failed`; the currency still gets its curve from the others (at least
+        # _MIN_QUOTES of them). 'N.A.' used to raise decimal.InvalidOperation and lose the
+        # whole currency; a NaN used to reach curve_quotes and fail the write.
         quotes = []
+        failed: Dict[str, str] = {}
         for ticker, spec in ticker_to_spec.items():
             field_values = values.get(ticker)
             raw_value = field_values.get(spec.field) if field_values else None
             if raw_value is None:
-                logger.warning("Dropping OIS quote %s tenor %s: no value for field %s", currency, spec.tenor, spec.field)
+                failed[ticker] = failures.get(ticker) or f"no value for {spec.field}"
+                logger.warning("Dropping OIS quote %s tenor %s: %s", currency, spec.tenor, failed[ticker])
                 continue
-            quotes.append(CurveQuote(
-                tenor=spec.tenor, ticker=ticker,
-                value=scale_quote(decimal.Decimal(str(raw_value))), field=spec.field,
-            ))
+            value = _quote_decimal(raw_value)
+            if value is None:
+                failed[ticker] = f"{NOT_A_NUMBER} ({spec.field} {raw_value!r})"[:300]
+                logger.warning("Dropping OIS quote %s tenor %s: %s", currency, spec.tenor, failed[ticker])
+                continue
+            quotes.append(CurveQuote(tenor=spec.tenor, ticker=ticker, value=scale_quote(value), field=spec.field))
         quotes.sort(key=lambda q: tenor_to_days(q.tenor))
         if len(quotes) < _MIN_QUOTES:
-            failed = [t for t in ticker_to_spec if not values.get(t, {}).get(field)]
             raise MarketDataUnavailable(
-                f"Fewer than {_MIN_QUOTES} OIS quotes available for {currency}. Failed tickers: {', '.join(failed)}"
+                f"Fewer than {_MIN_QUOTES} OIS quotes available for {currency}. Failed tickers: "
+                + ", ".join(f"{t} ({why})" for t, why in failed.items())
             )
         index = OIS_CURVES[currency.upper()]["index"]
-        return CurveSnapshot(currency=currency.upper(), index=index, as_of=as_of, quotes=quotes)
+        return CurveSnapshot(currency=currency.upper(), index=index, as_of=as_of, quotes=quotes, failed=failed)
 
     def get_bbg_curve(self, currency: str, as_of: datetime.date) -> Optional[BbgCurve]:
         """Bloomberg's own OIS curve, for reconciliation only. Never raises --
@@ -827,6 +926,7 @@ def write_curve_quotes(
     as_of_date: str,
     source: str = "BBG_BDP",
     quote_type: str = "OIS",
+    rejected: Optional[List[dict]] = None,
 ) -> int:
     """Insert one row per quote in ``snapshot`` into curve_quotes (creating the
     table defensively if it does not exist yet -- see module docstring).
@@ -834,12 +934,24 @@ def write_curve_quotes(
     Uses INSERT OR REPLACE keyed on (as_of_date, ccy, index, tenor, source), so
     re-running a pull for the same day/source updates rather than duplicate-key
     errors. Returns the number of rows written.
+
+    A quote whose value is not a finite number is never written (2026-09-29, Phase G): it
+    is left out with `NOT_A_NUMBER`, appended to `rejected` when given as {ccy, tenor,
+    ticker, reason}, and the currency's other quotes are written (a NaN used to fail the
+    NOT NULL column and lose them all). One short transaction; no Bloomberg request inside.
     """
     ensure_curve_quotes_table(conn)
-    rows = [
-        (as_of_date, snapshot.currency, snapshot.index, q.tenor, q.ticker, float(q.value), quote_type, q.field, source)
-        for q in snapshot.quotes
-    ]
+    rows = []
+    for q in snapshot.quotes:
+        value = _finite_float(q.value)
+        if value is None:
+            logger.warning("Not writing OIS quote %s %s (%s): %s (%r)", snapshot.currency, q.tenor, q.ticker,
+                           NOT_A_NUMBER, q.value)
+            if rejected is not None:
+                rejected.append({"ccy": snapshot.currency, "tenor": q.tenor, "ticker": q.ticker,
+                                 "reason": f"{NOT_A_NUMBER} ({q.value!r}); not written"})
+            continue
+        rows.append((as_of_date, snapshot.currency, snapshot.index, q.tenor, q.ticker, value, quote_type, q.field, source))
     with conn:
         conn.executemany(
             'INSERT OR REPLACE INTO curve_quotes (as_of_date, ccy, "index", tenor, ticker, value, quote_type, field, source) '

@@ -828,8 +828,26 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
     cards = [_pnl_card("Daily", daily), _pnl_card("MTD", entries["mtd"]), _pnl_card("YTD", entries["ytd"]),
              _pnl_card("LTD", ltd_entry)]
     cards.append(marks_chip(conn, as_of, needs_today, n_total))
-    cards.append(trades_count(as_of, n_total, n_open))
+    names, names_open = trade_name_counts(conn, as_of)
+    if names is None:          # the trades could not be grouped: the fills, said so on hover
+        cards.append(trades_count(as_of, n_total, n_open))
+    else:
+        cards.append(trades_count(as_of, names, names_open, unit="trade names", fills=n_total))
     return cards
+
+
+def trade_name_counts(conn: sqlite3.Connection, as_of: str) -> tuple:
+    """(trade names on file, of them open) on `as_of` (Phase G, 2026-09-29: a trade is Jason's PBRoot
+    name; open = any leg not flat): the Book's own trades (`blotter_pricing.shared_trade_book`, one
+    per database revision and as-of, the memo the Book reads), so the two counts always agree.
+    (None, None) when they cannot be read."""
+    try:
+        from ui.tabs.blotter_pricing import shared_trade_book
+        named = [t for t in shared_trade_book(conn, as_of).get("trades") or [] if t.get("trade")]
+        return len(named), sum(1 for t in named if t.get("status") == "open")
+    except Exception:  # noqa: BLE001 -- the fill count then, as before
+        logging.getLogger(__name__).exception("header trade names failed for as_of=%s", as_of)
+        return None, None
 
 
 def _empty_book_cards(as_of: str) -> list:
@@ -1213,11 +1231,17 @@ def _chip(text: str, colour: str, hover: str, chip_id: Optional[str] = None) -> 
         html.Span(text)], **props)
 
 
-def trades_count(as_of: str, n_total: int, n_open: int) -> html.Div:
-    """'50 trades · 45 open', small, at the header's right end; the settled count and the as-of
-    on hover."""
-    hover = (f"{n_total:,} trades on file as of {as_of}: {n_open:,} open, {n_total - n_open:,} settled or "
-             "closed out. Every figure is valued as of that date.")
+def trades_count(as_of: str, n_total: int, n_open: int, unit: str = "", fills: Optional[int] = None) -> html.Div:
+    """'6 trades · 5 open', small, at the header's right end: trade names since Phase G (`unit`
+    "trade names", with the fill count on hover), else fills; the closed count and the as-of on
+    hover."""
+    if unit:
+        hover = (f"{n_total:,} trades (PBRoot names) as of {as_of}: {n_open:,} open, {n_total - n_open:,} fully "
+                 f"closed" + (f"; {fills:,} fills on file" if fills is not None else "") + ". Every figure is valued "
+                 "as of that date.")
+    else:
+        hover = (f"{n_total:,} trades on file as of {as_of}: {n_open:,} open, {n_total - n_open:,} settled or "
+                 "closed out. Every figure is valued as of that date.")
     return html.Div(f"{n_total:,} {'trade' if n_total == 1 else 'trades'} \u00b7 {n_open:,} open",
                     className=TRADES_COUNT_CLASS, title=hover)
 

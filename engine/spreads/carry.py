@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -179,6 +179,82 @@ def _one(history, roots, ident, source, name, kind, spec, upu, upu_why, unit, as
         out["reason"] = f"no USD per unit for the position ({upu_why or 'not known'}): the roll-down in its unit only"
     else:
         out["roll_down_usd"] = out["roll_down"] * upu
+    return out
+
+
+def curve_roll_downs(history, root, legs: Sequence[Tuple[str, str, str]], as_of: str) -> dict:
+    """Each leg's own roll-down on ONE root's research curve (2026-09-29, the trade panel's
+    roll-down per leg; the rule of ``carry`` applied leg by leg): a contract in month Mi moves up
+    the curve into the place Mi-1 holds today, so ``roll_down = price(Mi-1) - price(Mi)``, in the
+    root's quote unit (the research raw settle x our ``price_scale``), over ``horizon_months``
+    (the step back on the root's contract cycle). Every leg is read on the latest research date
+    on or before ``as_of`` that ALL the legs' contracts and their nearer months share, so the legs
+    of one curve add up (a calendar's legs sum to ``carry``'s own roll-down).
+
+    ``legs``: ``(key, contract_id, month_key)`` of the legs, all on ``root`` (a ``ContractRoot``).
+    Returns ``{research_date, reason, note, legs: {key: {contract_id, nearer, horizon_months,
+    roll_down, research_contracts, reason}}}``: a leg that cannot be read (no month, already the
+    front contract, no research settlement, an LME prompt the research app does not carry) is
+    None with its reason and is left out of the common date. RESEARCH CONTEXT: never a mark,
+    never in P&L, delta or a total."""
+    out = {"research_date": None, "reason": "", "note": "", "legs": {}}
+    for key, cid, month in legs:
+        out["legs"][key] = {"contract_id": cid, "nearer": "", "horizon_months": None, "roll_down": None,
+                            "research_contracts": {}, "reason": ""}
+    if not getattr(history, "available", False):
+        out["reason"] = f"research history not found: {getattr(history, 'reason', '')}"
+        for leg in out["legs"].values():
+            leg["reason"] = out["reason"]
+        return out
+    ts = pd.Timestamp(as_of).normalize()
+    series = {}
+    for key, cid, month in legs:
+        leg = out["legs"][key]
+        prev, back, why = _previous(root, month)
+        if prev is None:
+            leg["reason"] = why
+            continue
+        nearer = _contract_id(root, prev)
+        leg.update(nearer=nearer, horizon_months=back)
+        rid, why = history.resolve_contract(nearer, root.root_id)
+        if rid is None:
+            leg["reason"] = f"{cid} is the front contract on the research curve: {why}"
+            continue
+        ltd = str(history.contracts.at[rid, "last_trade_date"] or "")
+        if ltd and ltd < as_of:
+            leg["reason"] = (f"{cid} is already the front contract: {nearer} expired on {ltd}, so there is no "
+                             f"nearer month on the curve to roll into")
+            continue
+        pair, whys = [], []
+        for c in (cid, nearer):
+            s, rid, why = _settles(history, c, root.root_id, ts)
+            leg["research_contracts"][c] = rid
+            if s is None:
+                whys.append(why)
+            pair.append(s)
+        if whys:
+            leg["reason"] = "; ".join(whys)
+            continue
+        series[key] = pair
+    if not series:
+        return out
+    common = None
+    for pair in series.values():
+        for s in pair:
+            common = s.index if common is None else common.intersection(s.index)
+    if common is None or common.empty:
+        for key in series:
+            out["legs"][key]["reason"] = "the legs' contracts share no research settlement date on or before the as-of date"
+        return out
+    day = common.max()
+    out["research_date"] = day.strftime("%Y-%m-%d")
+    latest = max(s.index.max() for pair in series.values() for s in pair)
+    if day < latest:
+        out["note"] = (f"read on {out['research_date']}, the latest date all the legs' contracts settled "
+                       f"(one has {latest:%Y-%m-%d})")
+    scale = float(root.price_scale or 1.0)
+    for key, (s_leg, s_nearer) in series.items():
+        out["legs"][key]["roll_down"] = (float(s_nearer.loc[day]) - float(s_leg.loc[day])) * scale
     return out
 
 

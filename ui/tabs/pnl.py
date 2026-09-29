@@ -1,147 +1,108 @@
-"""P&L tab: "How did the P&L get here, and what drove it?" (rebuilt 2026-09-29, layout approved
-by the user that day; the attribution table left: the Book gives the cross-section).
+"""P&L tab: "What did I make, and why?" (Phase G, 2026-09-29; the design doc's "Table specs", P&L).
 
-The Book is today's cross-section; this tab is the history and the explanation. Every figure is
-the engine's, as given; the tab sums known figures of one unit, ranks and formats, never prices:
-  - `engine.pnl.series.daily_series`: one filled valuation per business day (the screens' fill,
-    memoised in process on the database revision), its `chart_points()` (the LTD line, the
-    header's chart too), `track_record` (the daily P&L bars and the record line) and
-    `monthly_pnl` (month by month, the current month = MTD);
-  - `engine.spreads.period_explain`: the chosen period's total (the header's figure) split into
-    spread, FX, hedge, new trades, realised and other (LTD: realised and open), and the same per
-    position of the Book (`by_position`, the Book's own position ids).
-Any as-of is valued as the header values it (a weekend's too). One `daily_series` and one `book_spreads` (the Book's memoised `_spreads`) are passed to
-everything in a render, so the tab prices nothing twice.
+The trade is the unit, as on the Book: the shared filter bar and its switch (`ui.tabs.trade_filter`;
+here the switch slices the table by Trade (default) | Type | Commodity, whole trades only, never a
+trade split), then the headline of the rows showing, then:
+  - the controls: Period Today | 5d | MTD (default) | YTD | All | Custom (two dates), and Total |
+    By month;
+  - the chart: the period's business days, the daily P&L of the rows showing as bars (one colour per
+    slice value when sliced by Type or Commodity with 6 values or fewer) and the cumulative P&L of
+    the period from 0 as a line; a day's hover gives its P&L, the cumulative and the top 3 trades;
+  - the table: one row per slice value, sorted by the size of its P&L, the total row first (sticky,
+    = the headline, and unfiltered = the top bar's figure for the period), columns P&L, Spread, FX,
+    Hedge, New, Realised (Other only when not zero), % of total; By month: one column per month
+    and a Total; a click on a row opens its legs (sliced by Trade) or its trades, each clickable to
+    its legs;
+  - the track record, folded: best and worst day, days up, largest fall, now against the peak, the
+    closed trades' win rate, average win and loss and holding days, and a small table by type.
 
-Layout, top to bottom: the title line (the period switch Daily | 5d | MTD | YTD | LTD, MTD by
-default, Download CSV); the explain tiles for the period; the chart (cumulative LTD, the daily
-P&L as bars in a lower panel, the period shaded; Book | By spread type | By commodity: the
-per-trade LTDs of the series summed per group and day, display); the five best and five worst
-positions of the period (a click opens the Book tab); month by month by spread type or
-commodity; the scorecard of his ideas (`engine.spreads.scorecard`: closed and open lines, a table
-by trade name or spread type, every idea in a fold); the carry of the calendar spreads
-(`engine.spreads.carry`, research context, never in a P&L figure); the rolls read off the fills
-(`engine.spreads.rolls`: the price spread at each roll, not P&L; rolls out in the headline, moves
-into an earlier month apart); the track record in one line; one "Data issues (N)" drawer.
-
-`period_rows` (below) stays: the Book reads each trade's Daily / MTD / LTD through it (the
-header's own split over the screens' shared filled reader). `layout(default_date)` and
-`register_callbacks(app, get_db_path)` are the shell's interface; `render(as_of, db_path, ...)`
-builds the whole body for a direct render.
+Every figure is the engine's, as given, summed per trade and slice (display): the period's P&L per
+fill and its split are `engine.spreads.period_explain` (a custom range: `engine.pnl.series.
+period_pnl` and `period_explain.classify_trades`, the same rule), the daily bars and the line are
+`period_pnl` per day, the months `engine.pnl.series.monthly_pnl`, the record
+`engine.pnl.series.track_record` and `engine.spreads.scorecard`. The trades are the Book's
+(`ui.tabs.book.gather`: `engine.spreads.trade_book` plus the fills on no trade), so a trade here is
+exactly the Book's. `period_rows` (below) stays: the Book reads each fill's Daily / MTD / YTD / LTD
+through it (the header's own split over the screens' shared filled reader).
 """
 from __future__ import annotations
 
 import datetime as dt
 import logging
-import re
+import math
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import dash
 import pandas as pd
-from dash import Input, Output, State, dcc, html
+from dash import ALL, Input, Output, State, dcc, html
 
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import header
-from ui.tabs import ranking as rk
-from ui.tabs.formatting import compact
+from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
-    MISSING, TRADE_TYPE_TITLES, about, contract_name, full_money, fx_name, issues_drawer,
-    lme_name, marker, missing_cell, money_cell, price_decimals, price_text, quoted_unit, short_date, short_root_name,
-    sign_class, signed_money, signed_number, spread_name, sum_known, tab_link,
+    MISSING, about, compact, day_text, full_signed, issues_drawer, km_cell, km_text, marker, missing_cell,
+    pct_text, plain_words, sign_class, sum_known,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 
 log = logging.getLogger(__name__)
 
 BODY_ID = "pnl-body"
-REFRESH_ID = "pnl-refresh"
+CONTENT_ID = "pnl-content"
+HEADLINE_ID = "pnl-headline"
 PERIOD_ID = "pnl-period"
-CHART_BY_ID = "pnl-chart-by"
-MONTH_BY_ID = "pnl-month-by"
+CUSTOM_ID = "pnl-custom"
+CUSTOM_WRAP_ID = "pnl-custom-wrap"
+MODE_ID = "pnl-mode"
+CHART_ID = "pnl-chart"
+TABLE_SLOT_ID = "pnl-table-slot"
+TABLE_ID = "pnl-table"
+TRACK_ID = "pnl-track"
+FOOT_ID = "pnl-foot"
 CSV_BUTTON_ID = "pnl-csv"
 DOWNLOAD_ID = "pnl-download"
-NOTE_ID = "pnl-note"
-TILES_ID = "pnl-tiles"
-SECTIONS_ID = "pnl-sections"
-CHART_ID = "pnl-chart"
-GRAPH_ID = "pnl-graph"
-CONTRIB_ID = "pnl-contributors"
-MONTHS_ID = "pnl-months"
-MONTHS_TABLE_ID = "pnl-months-table"
-TRACK_ID = "pnl-track"
-SCORE_ID = "pnl-scorecard"
-SCORE_BY_ID = "pnl-score-by"
-CARRY_ID = "pnl-carry"
-ROLLS_ID = "pnl-rolls"
-ISSUES_SLOT_ID = "pnl-issues-slot"
-ISSUES_ID = "pnl-issues"
+OPEN_STORE_ID = "pnl-open-rows"             # session: the rows opened ("g:<slice value>", "t:<trade>")
+ROW_TYPE = "pnl-row"                        # a clickable row: {"type", "idx": row key}
+TAB = "pnl"
 CHART_HEIGHT = 300
-
 NA = MISSING
+HIDDEN = {"display": "none"}
+
+# The per-fill split the Book reads (the header's own rule).
 PERIODS = ("daily", "d5", "mtd", "ytd", "ltd")
 PERIOD_TITLES = {"daily": "Daily", "d5": "5d", "mtd": "MTD", "ytd": "YTD", "ltd": "LTD"}
-PERIOD_TIPS = {"daily": "LTD today less LTD at the previous business day's close.",
-               "d5": "LTD today less LTD five business days back.",
-               "mtd": "LTD today less LTD at the last business day of the previous month.",
-               "ytd": "LTD today less LTD at the last business day of the previous year.",
-               "ltd": "Life to date: every trade's P&L at today's marks, settled trades frozen."}
-DEFAULT_PERIOD = "mtd"
-CHART_BOOK, CHART_TYPE, CHART_COMMODITY = "book", "type", "commodity"
-CHART_OPTIONS = ((CHART_BOOK, "Book"), (CHART_TYPE, "By spread type"), (CHART_COMMODITY, "By commodity"))
-MONTH_OPTIONS = ((CHART_TYPE, "Spread type"), (CHART_COMMODITY, "Commodity"))
-FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION")
-FX_SECTOR = "fx"
-FX_GROUP = "FX hedges"
-OTHER_GROUP = "Other"
-TYPE_ORDER = ("Cross exchange", "Cross product", "Term structure", "Outrights", "Options on futures", "LME forwards",
-              FX_GROUP, OTHER_GROUP)
-_PRODUCT_GROUPS = {"FUTURE": "Outrights", "CMDTY_OPTION": "Options on futures", "LME_FWD": "LME forwards"}
-N_CONTRIBUTORS = 5
-LINES_ON_HOVER = 12
-_CENT = 0.005
-QUESTION = "how did the P&L get here, and what drove it"
 
-TAB_ABOUT = ("How did the P&L get here, and what drove it? The period chosen on the switch drives everything "
-             "below: its total (the header's figure) split by driver, the chart of the LTD and the daily P&L with "
-             "the period shaded, the positions that made and lost the most, the months and the book's record. "
-             "Each figure is the engine's, summed from the trades priced; what is left out is named.")
-TILE_TIPS = {
-    "total": "The period's P&L: the header's figure, the trades priced at both ends summed, a trade new since the "
-             "reference close at its whole P&L to date.",
-    "spread": "Spread: the spreads' and contracts' own prices moved, at today's FX.",
-    "fx": "FX: the currency moved on the P&L a non-USD contract had already made.",
-    "hedge": "Hedge: the currency hedges (FX spot and forwards, the USD/CNH future), their whole change.",
-    "new_trades": "New trades: dealt after the reference close, their whole P&L to date.",
-    "realised": "Realised: trades settled within the period, their whole change. A closed-out option group (bought "
-                "and sold back before expiry) stays open until its expiry.",
-    "other": "Other: trades whose change could not be split between their price and the currency, whole.",
-    "open": "Open: the trades not yet settled (a closed-out option group until its expiry), their P&L to date.",
-}
-LTD_TIPS = {"realised": "Realised: trades settled by the as-of date, frozen at settlement. A closed-out option group "
-                        "(bought and sold back before expiry) stays open until its expiry.",
-            "open": "Open: the trades not yet settled, at today's marks (a closed-out option group at its closing "
-                    "fill until its expiry)."}
-TILE_LABELS = {"total": "Total", "spread": "Spread", "fx": "FX", "hedge": "Hedge", "new_trades": "New trades",
-               "realised": "Realised", "other": "Other", "open": "Open"}
-CHART_ABOUT = ("The LTD of the book (or of each group) on every business day since the first trade, each day the "
-               "trades priced that day summed (excl. and filled on hover); under it each day's Daily P&L, the "
-               "header's figure for that day (excl. N on hover). The chosen period is shaded.")
-CONTRIB_ABOUT = ("The five positions that made the most and the five that lost the most over the period, named "
-                 "as on the Book; their split on hover; a click opens the Book tab.")
-MONTHS_ABOUT = ("Each calendar month: the month-end LTD less the previous month-end LTD, per trade, summed by "
-                "group; the current month is the MTD. A month's Total is the sum of its trades priced at both ends.")
-TRACK_ABOUT = ("The book's record from its daily P&L, each day the header's own Daily for that day (the trades "
-               "priced at both ends; the rest named, excl. N). A day with no Daily figure is left out and named "
-               "on hover; the fall from the peak runs on the LTD.")
-# --------------------------------------------------------------------------- small helpers
+# The tab's own period switch.
+PERIOD_CHOICES = (("today", "Today"), ("d5", "5d"), ("mtd", "MTD"), ("ytd", "YTD"), ("all", "All"),
+                  ("custom", "Custom"))
+DEFAULT_PERIOD = "mtd"
+ENGINE_KEY = {"today": "daily", "d5": "d5", "mtd": "mtd", "ytd": "ytd", "all": "ltd"}
+MODE_TOTAL, MODE_MONTH = "total", "month"
+COMPONENTS = (("spread", "Spread", "The spread's own move: the contracts' change in their currency, at the end's spot."),
+              ("fx", "FX", "The currency's move on the P&L already made (0 on a USD trade)."),
+              ("hedge", "Hedge", "The currency hedges' P&L (the USD/CNH future, FX trades)."),
+              ("new_trades", "New", "Fills dealt within the period: their whole P&L to the end."),
+              ("realised", "Realised", "Trades settled within the period: their whole change."),
+              ("other", "Other", "A trade that could not be split (no local P&L or conversion on one date)."))
+_PALETTE = ("#0f1f3d", "#c9a227", "#2e7d32", "#6a1b9a", "#00838f", "#ef6c00")
+LTD_SPLIT_WORDS = "All has no reference close to split against: realised and open only"
+
+
 def _num(value: Any) -> Optional[float]:
-    v = rk.value(value)
-    return v if isinstance(v, float) else None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) or math.isinf(f) else f
 
 
 def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
+def _lines(*parts: Any) -> str:
+    return "\n".join(str(p) for p in parts if p)
 
 
 def message_box(message: str) -> html.P:
@@ -149,16 +110,14 @@ def message_box(message: str) -> html.P:
 
 
 def full_usd(v: float) -> str:
-    return full_money(v)
+    return f"USD {full_signed(v)}"
 
 
-# --------------------------------------------------------------------------- the period
+# --------------------------------------------------------------------------- the per-fill split (kept)
 class PeriodView:
-    """One period's figures: `entry` (the header's whole-book entry with its markers), `rows`
-    (one per trade on the as-of book: trade_id, instrument_id, product, status, trade_date,
-    value (float or None), reason, note), `ref_iso` (the period's own reference date, '' for
-    LTD), `ref_used` (the close measured from) and `blocked` (the trades priced today but not
-    on the reference close, left out with that reason)."""
+    """One period's figures: `entry` (the header's whole-book entry with its markers), `rows` (one
+    per trade on the as-of book: trade_id, instrument_id, product, status, trade_date, value (float
+    or None), reason, note), `ref_iso`, `ref_used` and `blocked`."""
 
     def __init__(self, key: str, entry: dict, rows: pd.DataFrame, ref_iso: str = "", ref_used: str = "",
                  blocked: Sequence[str] = ()):
@@ -180,10 +139,9 @@ def _rows_frame(df: pd.DataFrame, values: Dict[str, Optional[float]], reasons: D
 
 
 def period_rows(conn: sqlite3.Connection, as_of: str, key: str, df_today: pd.DataFrame) -> PeriodView:
-    """The per-trade figures of `key` (`PERIODS`) on `as_of`, by the header's rule (module
-    docstring). The whole-book `entry` is `header._priced_single` / `_priced_diff` itself,
-    with the fill and step-back markers `header._build_figures` puts beside the header's
-    cards, so the Total line here is the header's figure."""
+    """The per-trade figures of `key` (`PERIODS`) on `as_of`, by the header's rule: the whole-book
+    `entry` is `header._priced_single` / `_priced_diff` itself, with the fill and step-back markers,
+    so the known figures summed are the header's figure."""
     from engine.pnl.calendar import load_holidays
     from engine.pnl.ledger import period_reference_dates
     from engine.pnl.reference import annotate, fill_caption, filled_from, resolve_reference
@@ -260,1162 +218,590 @@ def period_rows(conn: sqlite3.Connection, as_of: str, key: str, df_today: pd.Dat
                       sorted(split.blocked_ids))
 
 
-
-
 # --------------------------------------------------------------------------- gathering
-def _instruments(conn: sqlite3.Connection) -> Dict[str, dict]:
-    out: Dict[str, dict] = {}
-    try:
-        for inst, base, quote, expiry in conn.execute(
-                "SELECT instrument_id, base_ccy, quote_ccy, expiry_date FROM instruments"):
-            out[str(inst)] = {"base": str(base or ""), "quote": str(quote or ""), "expiry": str(expiry or ""),
-                              "strike": None, "option_type": ""}
-        for inst, strike, otype in conn.execute("SELECT instrument_id, strike, option_type FROM instrument_options"):
-            if str(inst) in out:
-                out[str(inst)]["strike"] = _num(strike) or None
-                out[str(inst)]["option_type"] = str(otype or "")
-    except sqlite3.Error:
-        pass
-    return out
-
-
-def _roots() -> Dict[str, Any]:
-    try:
-        from data.contracts import load_roots
-        return dict(load_roots())
-    except Exception:  # noqa: BLE001 -- the ids stand for the names
-        return {}
-
-
-def _spreads(conn: sqlite3.Connection, as_of: str, series) -> Tuple[Optional[dict], str]:
-    """The Book's own `book_spreads` (its memoised reader, so the positions and their ids are the
-    Book's); off the series' frames when that cannot be read."""
-    try:
-        from ui.tabs import book
-        return book._spreads(conn, as_of), ""
-    except Exception as exc:  # noqa: BLE001 -- the engine's own grouping off the series
-        log.exception("P&L tab: the Book's spreads could not be read for %s", as_of)
-        try:
-            from engine.spreads import book_spreads
-            from engine.pnl.valuation import value_book
-
-            def read(c, day):
-                try:
-                    return series.frame(day)
-                except KeyError:
-                    return value_book(c, day)
-            return book_spreads(conn, as_of, value_fn=read), ""
-        except Exception as exc2:  # noqa: BLE001
-            return None, f"the positions could not be grouped ({type(exc2).__name__}: {exc2}; {exc})"
-
-
-def _trade_types(conn: sqlite3.Connection, spreads: Optional[dict]) -> Dict[str, dict]:
-    """{trade_id: {trade_type, ...}}: the Book's one type per trade (`book.trade_types`)."""
-    try:
-        from ui.tabs import book
-        return book.trade_types({"labels": book._labels(conn), "spreads": spreads or {}})
-    except Exception:  # noqa: BLE001 -- the broker's own label then
-        try:
-            return {str(t): {"trade_type": str(tt or "")}
-                    for t, tt in conn.execute("SELECT trade_id, trade_type FROM trades")}
-        except sqlite3.Error:
-            return {}
-
-
-def group_maps(conn: sqlite3.Connection, frame: pd.DataFrame, spreads: Optional[dict], roots: Dict[str, Any],
-               instruments: Dict[str, dict]) -> Dict[str, Dict[str, str]]:
-    """{'type': {trade_id: group}, 'commodity': {trade_id: group}}: each trade grouped as the Book
-    groups it: its position's spread type (else outrights, options on futures, LME forwards, FX
-    hedges), and its commodity across exchanges (`engine.curve.subsector_name`; an FX product or
-    the USD/CNH future under FX hedges)."""
-    try:
-        from engine.curve import subsector_name
-    except Exception:  # noqa: BLE001
-        def subsector_name(key):  # type: ignore[misc]
-            return str(key or "").replace("_", " ").capitalize()
-    types = _trade_types(conn, spreads)
-    by_type: Dict[str, str] = {}
-    by_commodity: Dict[str, str] = {}
-    if frame is None or frame.empty:
-        return {CHART_TYPE: by_type, CHART_COMMODITY: by_commodity}
-    for tid, inst, product in zip(frame["trade_id"], frame["instrument_id"], frame["product"]):
-        tid, product = str(tid), str(product)
-        base = (instruments.get(str(inst)) or {}).get("base", "")
-        root = roots.get(base)
-        fx = product in FX_PRODUCTS or str(getattr(root, "sector", "") or "") == FX_SECTOR
-        code = str((types.get(tid) or {}).get("trade_type") or "")
-        by_type[tid] = TRADE_TYPE_TITLES.get(code) or (FX_GROUP if fx else _PRODUCT_GROUPS.get(product, OTHER_GROUP))
-        if fx:
-            by_commodity[tid] = FX_GROUP
-        elif root is None:
-            by_commodity[tid] = OTHER_GROUP
-        else:
-            by_commodity[tid] = subsector_name(str(getattr(root, "subsector", "") or "")) or OTHER_GROUP
-    return {CHART_TYPE: by_type, CHART_COMMODITY: by_commodity}
-
-
-def gather(conn: sqlite3.Connection, as_of: str, key: str = DEFAULT_PERIOD) -> dict:
-    """Everything the tab shows for `as_of` and the period `key`, each part in its own try: one
-    that fails costs its own section, with the reason. One daily series and one set of positions
-    for the whole render. Memoised per database revision, as-of and period (2026-09-29), the
-    parts that do not depend on the period once for every period (`_base`), so a period switch
-    only explains the new period. Shared: never edit the result."""
+def _memo(kind: str, conn: sqlite3.Connection, as_of: str, build: Callable[[], Any], extra: tuple = ()) -> Any:
     from ui.tabs.blotter_pricing import screen_memo
-    key = key if key in PERIODS else DEFAULT_PERIOD
-    return screen_memo("pnl-gather", conn, as_of, lambda: _gather(conn, as_of, key), extra=(key,))
+    return screen_memo("pnl-" + kind, conn, as_of, build, extra=extra)
 
 
-def _gather(conn: sqlite3.Connection, as_of: str, key: str) -> dict:
-    from engine.pnl.series import period_pnl, period_start
-    from engine.spreads import period_explain
-    from ui.tabs.blotter_pricing import screen_memo
-
-    base = screen_memo("pnl-base", conn, as_of, lambda: _base(conn, as_of))
-    data: Dict[str, Any] = {**base, "key": key, "errors": list(base["errors"])}
-    if not data["n_trades"]:
-        return data
-    eff, series, spreads = data["eff"], data["series"], data["spreads"]
-    try:
-        data["explain"] = period_explain(conn, eff, key, series=series, spreads=spreads)
-        data["period"] = period_pnl(series, period_start(eff, key, series.holidays), eff)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("P&L tab: the %s explain failed for %s", key, eff)
-        data["explain"], data["period"] = None, None
-        # after the positions' reason, before the rest, as when one pass built them all
-        at = 1 if data["errors"] and data["errors"][0][0] == "Positions" else 0
-        data["errors"].insert(at, (PERIOD_TITLES[key],
-                                   f"the period could not be explained ({type(exc).__name__}: {exc})"))
-    return data
+def base(conn: sqlite3.Connection, as_of: str) -> dict:
+    """What no period changes: the daily series, the Book's trades, the months, the record."""
+    from ui.tabs.blotter_pricing import research_inputs_key
+    return _memo("base", conn, as_of, lambda: _base(conn, as_of), extra=research_inputs_key())
 
 
 def _base(conn: sqlite3.Connection, as_of: str) -> dict:
-    """The parts of `gather` no period changes: the series, the positions, the track record, the
-    months, the scorecard, the carry, the rolls, the groups."""
     from engine.pnl.series import daily_series, monthly_pnl, track_record
     from ui.tabs import book
+    from ui.tabs.blotter_pricing import shared_spreads
 
-    data: Dict[str, Any] = {"as_of": as_of, "errors": []}
-    data["n_trades"] = book.trades_on_file(conn)
+    data: Dict[str, Any] = {"as_of": as_of, "errors": [], "n_trades": book.trades_on_file(conn)}
     if not data["n_trades"]:
         return data
-    eff = as_of                  # the series takes any as-of, a weekend's too, as the header does
-    data["eff"], data["note"] = eff, ""
-    series = daily_series(conn, eff)
+    series = daily_series(conn, as_of)
     data["series"] = series
-    spreads, err = _spreads(conn, eff, series)
-    data["spreads"] = spreads
-    if err:
-        data["errors"].append(("Positions", err))
+    bk = book.gather(conn, as_of)
+    data["trades"] = list(bk.get("trades") or [])
+    data["errors"].extend(bk.get("errors") or [])
+    data["trade_of"] = {str(i): str(t.get("trade")) for t in data["trades"] for i in t.get("trade_ids") or []}
     try:
-        data["track"] = track_record(series, eff)
-    except Exception as exc:  # noqa: BLE001
-        data["track"] = None
-        data["errors"].append(("Track record", f"could not be built ({type(exc).__name__}: {exc})"))
-    try:
-        data["monthly"] = monthly_pnl(series, eff)
-    except Exception as exc:  # noqa: BLE001
-        data["monthly"] = None
-        data["errors"].append(("Months", f"could not be built ({type(exc).__name__}: {exc})"))
-    from engine.spreads import carry, rolls, scorecard
-    for name, title, build in (("scorecard", "Scorecard", lambda: scorecard(conn, eff, series=series, spreads=spreads)),
-                               ("carry", "Carry", lambda: carry(conn, eff, spreads=spreads)),
-                               ("rolls", "Rolls", lambda: rolls(conn, eff, spreads=spreads))):
+        data["spreads"] = shared_spreads(conn, as_of, filled=True)
+    except Exception as exc:  # noqa: BLE001 -- period_explain then groups off the series itself
+        data["spreads"] = None
+        data["errors"].append(("Positions", f"could not be grouped ({type(exc).__name__}: {exc})"))
+    for name, title, build in (("track", "Track record", lambda: track_record(series, as_of)),
+                               ("monthly", "Months", lambda: monthly_pnl(series, as_of))):
         try:
             data[name] = build()
-        except Exception as exc:  # noqa: BLE001 -- its own section says so, the reason in the drawer
-            log.exception("P&L tab: the %s failed for %s", name, eff)
+        except Exception as exc:  # noqa: BLE001 -- its own section says so
+            log.exception("P&L tab: the %s failed for %s", name, as_of)
             data[name] = None
             data["errors"].append((title, f"could not be built ({type(exc).__name__}: {exc})"))
-    data["roots"], data["instruments"] = _roots(), _instruments(conn)
-    frame = series.frame(eff) if series.days else pd.DataFrame()
-    data["frame"] = frame
-    data["groups"] = group_maps(conn, frame, spreads, data["roots"], data["instruments"])
+    try:
+        from engine.spreads import scorecard
+        data["scorecard"] = scorecard(conn, as_of, series=series, spreads=data["spreads"])
+    except Exception as exc:  # noqa: BLE001
+        log.exception("P&L tab: the scorecard failed for %s", as_of)
+        data["scorecard"] = None
+        data["errors"].append(("Scorecard", f"could not be built ({type(exc).__name__}: {exc})"))
     return data
 
 
-# --------------------------------------------------------------------------- names
-def position_name(data: dict, position_id: str, fallback: str = "") -> str:
-    """The Book's plain name of a position id: a spread by `spread_name`, an outright contract by
-    `contract_name`, a single trade by its product's name."""
-    roots, instruments = data.get("roots") or {}, data.get("instruments") or {}
-    if position_id.startswith("OUTRIGHT-"):
-        inst = position_id[len("OUTRIGHT-"):]
-        base = (instruments.get(inst) or {}).get("base", "")
-        return contract_name(inst, roots.get(base), base)
-    if position_id.startswith("TRADE-"):
-        tid = position_id[len("TRADE-"):]
-        frame = data.get("frame")
-        row = None
-        if frame is not None and not frame.empty:
-            hit = frame[frame["trade_id"] == tid]
-            row = hit.iloc[0] if not hit.empty else None
-        if row is None:
-            return fallback or tid
-        inst, product, settle = str(row["instrument_id"]), str(row["product"]), str(row.get("settle_date") or "")
-        info = instruments.get(inst) or {}
-        base = info.get("base", "")
-        if product == "LME_FWD":
-            return lme_name(roots.get(base), base, settle)
-        if product == "FX_OPTION":
-            return fx_name(base + info.get("quote", ""), product, info.get("expiry") or settle,
-                           info.get("option_type", ""), info.get("strike"))
-        if product in FX_PRODUCTS:
-            return fx_name(inst, product, settle)
-        return contract_name(inst, roots.get(base), base)
-    for p in (data.get("spreads") or {}).get("positions") or []:
-        if str(p.get("position_id") or p.get("name")) == position_id:
-            return spread_name(p, roots)
-    return fallback or position_id
+def _series_day(series, day: Optional[str]) -> Optional[str]:
+    """The last day of the series on or before `day` (None when there is none)."""
+    if not day:
+        return None
+    days = [d for d in series.days if d <= day]
+    return days[-1] if days else None
 
 
-# --------------------------------------------------------------------------- 1. the tiles
-def _lines_hover(head: str, lines: Sequence[str]) -> str:
-    more = [f"and {len(lines) - LINES_ON_HOVER} more"] if len(lines) > LINES_ON_HOVER else []
-    return "\n".join([head, *lines[:LINES_ON_HOVER], *more])
+def period(conn: sqlite3.Connection, as_of: str, choice: str, start: Optional[str] = None,
+           end: Optional[str] = None) -> dict:
+    """The period's figures per fill and per day, memoised per choice."""
+    choice = choice if choice in dict(PERIOD_CHOICES) else DEFAULT_PERIOD
+    extra = (choice, start or "", end or "") if choice == "custom" else (choice,)
+    return _memo("period", conn, as_of, lambda: _period(conn, as_of, choice, start, end), extra=extra)
 
 
-def total_markers(data: dict) -> List[Any]:
-    """The header's markers for the period, read off the series' period: "excl. N" (the trades
-    left out, each with its reason), "filled N" (valued at an earlier close), "ref <date>" (the
-    reference close stepped back)."""
-    ex, pp = data.get("explain") or {}, data.get("period")
-    out: List[Any] = []
-    excluded = list(ex.get("excluded") or [])
-    if excluded:
-        n_total = len(pp.by_trade) if pp is not None else 0
-        out.append(marker(f"excl. {len(excluded)}",
-                          _lines_hover(f"excludes {len(excluded)} of {n_total} trades",
-                                       [f"{t}: {why}" for t, why in excluded])))
-    if pp is not None:
-        n_filled = pp.n_filled_end if pp.start_ref is None else pp.n_filled_ref
-        if n_filled:
-            where = pp.end if pp.start_ref is None else pp.ref_used
-            out.append(marker(f"filled {n_filled}", f"{n_filled} trade(s) with no price on {where} valued at "
-                                                     "their last earlier close"))
-        if pp.start_ref and pp.ref_used and pp.ref_used != pp.start_ref:
-            out.append(marker(f"ref {short_date(pp.ref_used)}", pp.ref_note or
-                              f"measured from the {pp.ref_used} close: {pp.start_ref} has no usable close"))
-    return [m for m in out if m is not None]
-
-
-def _tile(label: str, tip: str, value: Optional[float], reason: str = "", hover: str = "",
-          extra: Sequence[Any] = (), sub: str = "") -> html.Div:
-    v: List[Any] = [money_cell(value, reason=reason or "no figure", hover=hover)]
-    v.extend(extra)
-    children: List[Any] = [html.Div(label, className="k", title=tip), html.Div(v, className="v")]
-    if sub:
-        children.append(html.Div(sub, className="pnl-tile-sub"))
-    return html.Div(children, className="book-tile")
-
-
-def tiles(data: dict) -> html.Div:
-    key, ex = data["key"], data.get("explain")
-    if ex is None:
-        return html.Div(className="book-tiles", children=[_tile("Total", TILE_TIPS["total"], None,
-                                                                  "the period could not be explained")])
-    title = PERIOD_TITLES[key]
-    reason = str(ex.get("reason") or "")
-    days = data["series"].days
-    if key == "ltd":
-        sub = f"since the first trade, {short_date(days[0])}" if days else ""
-    elif ex.get("ref_used"):
-        sub = f"vs {short_date(ex['ref_used'])} close"
+def _period(conn: sqlite3.Connection, as_of: str, choice: str, start: Optional[str], end: Optional[str]) -> dict:
+    """{available, reason, total, start_ref, ref_used, end, ltd, by_trade {tid: parts}, excluded
+    [(tid, why)], other_trades, days [{date, by_trade {tid: pnl}, cum {tid: pnl}, n_excluded,
+    filled}], title}."""
+    from engine.pnl.series import period_pnl
+    from engine.spreads.period_explain import COMPONENTS as PARTS, classify_trades, period_explain
+    b = base(conn, as_of)
+    series = b["series"]
+    out: Dict[str, Any] = {"available": False, "reason": "", "total": None, "by_trade": {}, "excluded": [],
+                           "other_trades": [], "days": [], "ltd": choice == "all", "choice": choice}
+    if not series.days:
+        out["reason"] = f"no trade dated on or before {as_of}"
+        return out
+    if choice == "custom":
+        s_day, e_day = _series_day(series, start), _series_day(series, min(end or as_of, as_of))
+        if not start or not end:
+            out["reason"] = "choose the two dates of the custom period"
+            return out
+        if e_day is None or (s_day is not None and s_day >= e_day):
+            out["reason"] = f"no business day of the book between {start} and {end}"
+            return out
+        pp = period_pnl(series, s_day, e_day)
+        out.update(start_ref=s_day, ref_used=pp.ref_used, end=e_day, total=pp.total, available=pp.available,
+                   reason=pp.reason, excluded=list(pp.excluded),
+                   title=f"{day_text(s_day, as_of)} to {day_text(e_day, as_of)}")
+        if pp.available and pp.total is not None:
+            from data.contracts import load_roots
+            from engine.spreads.period_explain import _currencies
+            ids = [str(i) for i in (pp.frame_end["instrument_id"] if not pp.frame_end.empty else [])]
+            parts, _bucket, others = classify_trades(pp, load_roots(), _currencies(conn, ids), False)
+            out["by_trade"] = {tid: {**{c: p[c] for c in PARTS}, "total": p["_amount"]} for tid, p in parts.items()}
+            out["other_trades"] = others
     else:
-        sub = ""
-    out = [_tile(f"{title} total", TILE_TIPS["total"] + " " + PERIOD_TIPS[key], ex.get("total"), reason,
-                 extra=total_markers(data) if ex.get("total") is not None else (), sub=sub)]
-    split_reason = str(ex.get("split_reason") or reason or "")
-    names = ("realised", "open") if key == "ltd" else ("spread", "fx", "hedge", "new_trades", "realised")
-    for name in names:
-        tip = LTD_TIPS.get(name, TILE_TIPS[name]) if key == "ltd" else TILE_TIPS[name]
-        out.append(_tile(TILE_LABELS[name], tip, ex.get(name), split_reason))
-    other = ex.get("other")
-    if key != "ltd" and other is not None and abs(other) >= _CENT:
-        lines = [f"{o['trade_id']}: {full_money(o['amount'])} ({o['why']})" for o in ex.get("other_trades") or []]
-        out.append(_tile(TILE_LABELS["other"], TILE_TIPS["other"], other,
-                         hover=_lines_hover("the trades not split:", lines) if lines else ""))
-    return html.Div(out, className="book-tiles pnl-tiles")
-
-
-# --------------------------------------------------------------------------- 2. the chart
-def _point_text(n_unpriced: int, n_total: int, n_filled: int) -> str:
-    parts_ = []
-    if n_unpriced:
-        parts_.append(f"excl. {n_unpriced} of {n_total} trades unpriced")
-    if n_filled:
-        parts_.append(f"filled {n_filled}: valued at an earlier close")
-    return "; ".join(parts_)
-
-
-def _day_text(r: dict) -> str:
-    """A day's markers as the header shows them: "excl. N" (and the first trades left out)."""
-    n = int(r.get("n_excluded") or 0)
-    if not n:
-        return ""
-    names = ", ".join(str(t) for t, _w in (r.get("excluded") or [])[:3])
-    return f"excl. {n} ({names}{', ...' if n > 3 else ''})"
-
-
-def _group_order(names: Sequence[str], by: str, weight: Dict[str, float]) -> List[str]:
-    if by == CHART_TYPE:
-        rank = {n: i for i, n in enumerate(TYPE_ORDER)}
-        return sorted(names, key=lambda n: (rank.get(n, len(TYPE_ORDER)), n))
-    tail = (FX_GROUP, OTHER_GROUP)
-    return sorted(names, key=lambda n: (n in tail, tail.index(n) if n in tail else 0, -abs(weight.get(n, 0.0)), n))
-
-
-def group_lines(data: dict, by: str) -> List[Tuple[str, List[Optional[float]], List[str]]]:
-    """[(group, LTD per day, hover per day)]: each day the per-trade LTDs of the series summed
-    by group (display: known figures of one unit); a group with trades but none priced that
-    day is a gap, a group with no trade yet is 0 (nothing was held)."""
-    series, mapping = data["series"], (data.get("groups") or {}).get(by) or {}
-    names = sorted(set(mapping.values()))
-    values: Dict[str, List[Optional[float]]] = {n: [] for n in names}
-    texts: Dict[str, List[str]] = {n: [] for n in names}
-    for day in series.days:
-        f = series.frames[day]
-        per: Dict[str, List[Tuple[Any, str]]] = {n: [] for n in names}
-        for tid, v in zip(f["trade_id"], f["ltd_usd"]):
-            per.setdefault(mapping.get(str(tid), OTHER_GROUP), []).append((v, str(tid)))
-        for n in names:
-            pairs = per.get(n) or []
-            if not pairs:
-                values[n].append(0.0)
-                texts[n].append("")
-                continue
-            total, excluded, _r = sum_known(pairs)
-            values[n].append(total)
-            texts[n].append(f"excl. {excluded} of {len(pairs)} trades unpriced" if excluded else "")
-    last = {n: next((v for v in reversed(values[n]) if v is not None), 0.0) for n in names}
-    return [(n, values[n], texts[n]) for n in _group_order(names, by, last)]
-
-
-_PALETTE = ("#0f1f3d", "#b8860b", "#2e7d32", "#c0392b", "#6a1b9a", "#00838f", "#ef6c00", "#5d4037", "#546e7a",
-            "#ad1457")
-
-
-def chart_figure(data: dict, by: str = CHART_BOOK) -> dict:
-    """The LTD line(s) over every business day of the series, the daily P&L bars in a lower
-    panel (a grey x where the day has no figure, its reason on hover), the period shaded."""
-    series, key, ex = data["series"], data["key"], data.get("explain") or {}
-    points = series.chart_points()
-    xs = [p[0] for p in points]
-    traces: List[dict] = []
-    book_line = {"x": xs, "y": [p[1] for p in points], "type": "scatter", "mode": "lines", "name": "Book",
-                 "text": [_point_text(p[2], p[3], p[4]) for p in points], "yaxis": "y",
-                 "hovertemplate": "Book LTD %{y:$,.0f} %{text}<extra></extra>",
-                 "line": {"color": "#0f1f3d", "width": 2}}
-    if by == CHART_BOOK:
-        traces.append(book_line)
-    else:
-        book_line["line"] = {"color": "#9ca3af", "width": 1.5, "dash": "dot"}
-        traces.append(book_line)
-        for i, (name, ys, texts) in enumerate(group_lines(data, by)):
-            traces.append({"x": xs, "y": ys, "type": "scatter", "mode": "lines", "name": name, "text": texts,
-                           "yaxis": "y", "line": {"color": _PALETTE[(i + 1) % len(_PALETTE)], "width": 1.6},
-                           "hovertemplate": f"{name} " + "%{y:$,.0f} %{text}<extra></extra>"})
-    track = data.get("track") or {}
-    counted = [r for r in track.get("daily") or [] if r.get("value") is not None]
-    bys = [r["value"] for r in counted]
-    traces.append({"x": [r["date"] for r in counted], "y": bys, "type": "bar", "name": "Daily P&L", "yaxis": "y2",
-                   "showlegend": False, "text": [_day_text(r) for r in counted],
-                   "marker": {"color": ["#1a7f4b" if v >= 0 else "#c0392b" for v in bys]},
-                   "hovertemplate": "Daily %{y:$,.0f} %{text}<extra></extra>"})
-    left_out = dict(track.get("excluded_days") or [])
-    if left_out:
-        lx = sorted(left_out)
-        traces.append({"x": lx, "y": [0] * len(lx), "type": "scatter", "mode": "markers", "yaxis": "y2",
-                       "name": "no daily figure", "showlegend": False, "text": [left_out[d] for d in lx],
-                       "marker": {"symbol": "x-thin", "size": 6, "color": "#9ca3af", "line": {"width": 1}},
-                       "hovertemplate": "Daily: no figure, %{text}<extra></extra>"})
-    shapes = []
-    start = ex.get("ref_used") or ex.get("start_ref")
-    if key != "ltd" and start and xs:
-        shapes.append({"type": "rect", "xref": "x", "yref": "paper", "x0": start, "x1": data["eff"], "y0": 0,
-                       "y1": 1, "fillcolor": "rgba(184,134,11,0.10)", "line": {"width": 0}, "layer": "below"})
-    return {"data": traces, "layout": {
-        "height": CHART_HEIGHT, "margin": {"l": 56, "r": 16, "t": 8 if by == CHART_BOOK else 28, "b": 28},
-        "hovermode": "x unified", "showlegend": by != CHART_BOOK,
-        "legend": {"orientation": "h", "y": 1.0, "yanchor": "bottom", "x": 0, "font": {"size": 11}},
-        "xaxis": {"type": "date", "tickformat": "%d %b", "anchor": "y2", "hoverformat": "%a %d %b %Y"},
-        "yaxis": {"domain": [0.34, 1], "title": {"text": "LTD", "font": {"size": 11}}, "tickformat": "~s",
-                  "zeroline": True, "zerolinecolor": "#c9ced8"},
-        "yaxis2": {"domain": [0, 0.26], "title": {"text": "Daily", "font": {"size": 11}}, "tickformat": "~s",
-                   "zeroline": True, "zerolinecolor": "#c9ced8"},
-        "bargap": 0.25, "shapes": shapes, "plot_bgcolor": "#fff", "paper_bgcolor": "#fff"}}
-
-
-def chart(data: dict, by: str) -> Any:
-    if not data["series"].days:
-        return html.P(f"No trades dated on or before {data['eff']}: nothing to chart.", className="book-quiet")
-    return dcc.Graph(id=GRAPH_ID, figure=chart_figure(data, by), config={"displayModeBar": False})
-
-
-# --------------------------------------------------------------------------- 3. contributors
-_SPLIT_WORDS = (("spread", "spread"), ("fx", "FX"), ("hedge", "hedge"), ("new_trades", "new trades"),
-                ("realised", "realised"), ("other", "other"), ("open", "open"))
-
-
-def split_hover(p: dict, key: str) -> str:
-    """The full figure, 'spread +12.3k · FX −1.2k' (the non-zero parts), the trades, what is left out."""
-    names = ("realised", "open") if key == "ltd" else ("spread", "fx", "hedge", "new_trades", "realised", "other")
-    split = [f"{w} {signed_money(p.get(k))}" for k, w in _SPLIT_WORDS
-             if k in names and p.get(k) is not None and abs(p[k]) >= _CENT]
-    tids = list(p.get("trade_ids") or [])
-    lines = [full_money(p["total"]), " · ".join(split),
-             f"{len(tids)} trade{'' if len(tids) == 1 else 's'}: " + ", ".join(tids[:LINES_ON_HOVER])
-             + (" ..." if len(tids) > LINES_ON_HOVER else "")]
-    if p.get("n_excluded"):
-        lines.append(f"excl. {p['n_excluded']}: left out of the period (see Data issues)")
-    lines.append("Click to open the Book tab.")
-    return "\n".join(x for x in lines if x)
-
-
-def contributor_rows(data: dict) -> Tuple[List[dict], List[dict]]:
-    """(the five best, the five worst) positions of the period by their known total."""
-    ex = data.get("explain") or {}
-    known = [p for p in ex.get("by_position") or [] if p.get("total") is not None]
-    best = sorted([p for p in known if p["total"] >= _CENT], key=lambda p: -p["total"])[:N_CONTRIBUTORS]
-    worst = sorted([p for p in known if p["total"] <= -_CENT], key=lambda p: p["total"])[:N_CONTRIBUTORS]
-    return best, worst
-
-
-def _contrib_list(data: dict, rows: Sequence[dict], side: str, scale: float) -> html.Div:
-    items: List[Any] = []
-    for n, p in enumerate(rows):
-        name = position_name(data, str(p["position_id"]), str(p.get("name") or ""))
-        width = f"{max(2.0, 100.0 * abs(p['total']) / scale):.1f}%" if scale else "2%"
-        label = [html.Span(name, className="pnl-contrib-name"),
-                 html.Span(html.Span(className=f"pnl-bar pnl-bar--{side}", style={"width": width}),
-                           className="pnl-bar-track"),
-                 html.Span(signed_money(p["total"]),
-                           className=f"pnl-contrib-value {'cell-pos' if side == 'best' else 'cell-neg'}")]
-        items.append(tab_link(label, "book", f"pnl-{side}-{n}", title=split_hover(p, data["key"]),
-                              className="pnl-contrib-row"))
-    if not items:
-        items.append(html.Div("No position " + ("made money" if side == "best" else "lost money") + " over the period.",
-                              className="book-quiet"))
-    return html.Div(items, className="pnl-contrib-list")
-
-
-def contributors(data: dict) -> Any:
-    ex = data.get("explain")
-    if ex is None or ex.get("total") is None:
-        return html.P(missing_cell(str((ex or {}).get("reason") or "the period has no figure")), className="book-quiet")
-    best, worst = contributor_rows(data)
-    scale = max([abs(p["total"]) for p in best + worst] or [0.0])
-    return html.Div(className="cards-row pnl-contrib", children=[
-        html.Div(className="book-card card-pad", children=[html.Div("Made the most", className="book-h"),
-                                                           _contrib_list(data, best, "best", scale)]),
-        html.Div(className="book-card card-pad", children=[html.Div("Lost the most", className="book-h"),
-                                                           _contrib_list(data, worst, "worst", scale)]),
-    ])
-
-
-# --------------------------------------------------------------------------- 4. month by month
-def _month_words(month: str) -> str:
-    try:
-        d = dt.date.fromisoformat(month + "-01")
-    except ValueError:
-        return month
-    return f"{d:%b} {d.year}"
-
-
-def month_records(data: dict, by: str) -> Tuple[List[str], List[dict]]:
-    """(groups, rows newest first): each row {month, label, hover, current, total, reason,
-    total_excluded, total_reasons, cells {group: (value, excluded, reasons, n trades)}}; a group's
-    cell is its trades' monthly P&L summed (display), the Total the engine's month total."""
-    monthly = data.get("monthly")
-    if monthly is None:
-        return [], []
-    mapping = (data.get("groups") or {}).get(by) or {}
-    bt = monthly.by_trade
-    weight: Dict[str, float] = {}
-    rows = []
-    for m in monthly.months:
-        sub = bt[bt["month"] == m["month"]] if not bt.empty else bt
-        per: Dict[str, List[Tuple[Any, str]]] = {}
-        left_out = []
-        for tid, v, inc, why in zip(sub["trade_id"], sub["pnl_usd"], sub["included"], sub["reason"]):
-            g = mapping.get(str(tid), OTHER_GROUP)
-            per.setdefault(g, []).append((v if inc else None, f"{tid}: {why}" if why else str(tid)))
-            if not inc:
-                left_out.append(f"{tid}: {why}")
-        cells = {}
-        for g, pairs in per.items():
-            total, excluded, reasons = sum_known(pairs)
-            cells[g] = (total, excluded, reasons, len(pairs))
-            weight[g] = weight.get(g, 0.0) + abs(total or 0.0)
-        hover = f"from the {m.get('ref_used') or m.get('start_ref')} close to {m['end']}"
-        if m.get("ref_note"):
-            hover += f"\n{m['ref_note']}"
-        rows.append({"month": m["month"], "label": _month_words(m["month"]), "current": m["month"] == data["eff"][:7],
-                     "hover": hover, "total": m["total"] if m["available"] else None,
-                     "reason": str(m.get("reason") or ""), "total_excluded": int(m.get("n_excluded") or 0),
-                     "total_reasons": left_out, "cells": cells})
-    return _group_order(list(weight), by, weight), list(reversed(rows))
-
-
-def _sum_td(value: Optional[float], excluded: int, reasons: Sequence[str], reason: str = "",
-            bold: bool = False) -> html.Td:
-    if value is None:
-        return html.Td(missing_cell(reason or "; ".join(reasons[:LINES_ON_HOVER]) or "no figure"))
-    children: List[Any] = [money_cell(value)]
-    if excluded:
-        children.append(marker(f"excl. {excluded}", _lines_hover(f"excludes {excluded} trade(s)", list(reasons))))
-    return html.Td(children, style={"fontWeight": 700} if bold else None)
-
-
-def months_table(data: dict, by: str) -> Any:
-    groups, rows = month_records(data, by)
-    if not rows:
-        return html.P("No month to show.", className="book-quiet")
-    head = html.Thead(html.Tr([html.Th("Month", className="l")] + [html.Th(g) for g in groups]
-                              + [html.Th("Total", title="The month's P&L: the trades priced at both month ends "
-                                                        "summed, a trade new in the month at its P&L to date")]))
-    body = []
-    for r in rows:
-        label: List[Any] = [r["label"]]
-        if r["current"]:
-            label.append(html.Span("MTD", className="book-note"))
-        cells: List[Any] = [html.Td(label, className="l", title=r["hover"])]
-        for g in groups:
-            hit = r["cells"].get(g)
-            if hit is None:
-                cells.append(html.Td("", title=f"no {g.lower()} trade held in {r['label']}"))
-            else:
-                cells.append(_sum_td(hit[0], hit[1], hit[2]))
-        cells.append(_sum_td(r["total"], r["total_excluded"], r["total_reasons"], r["reason"], bold=True))
-        body.append(html.Tr(cells))
-    return html.Div(className="book-card", children=[
-        html.Table([head, html.Tbody(body)], id=MONTHS_TABLE_ID, className="book-table pnl-months-table")])
-
-
-# --------------------------------------------------------------------------- 5. the scorecard, carry and rolls
-# (wave 2, 2026-09-29). Every figure is the engine's (`engine.spreads.scorecard`, `carry`,
-# `rolls`); the tab ranks, formats and sums known figures of one unit (a display subtotal
-# with `excl. N`), never prices.
-SCORE_BY_TRADE, SCORE_BY_TYPE = "trade", "type"
-SCORE_OPTIONS = ((SCORE_BY_TRADE, "By trade"), (SCORE_BY_TYPE, "By spread type"))
-NO_TRADE_NAME, NO_TYPE = "No trade name", "No type"
-SCORE_ABOUT = ("How do his trade ideas do? An idea is a position of the Book (a trade name, a spread, an outright "
-               "contract, any other trade on its own). It is closed when it went flat (bought and sold back, "
-               "settled) and stays flat to the as-of date. Every idea's P&L is its LTD today, so closed and open "
-               "add up to the book's LTD; a closed idea's figure at its close and the currency move since are on "
-               "hover of its P&L. Win rate: winners over closed ideas (a result within half "
-               "a cent of zero is neither). Payoff: the average win over the average loss. Expectancy: the average "
-               "P&L per closed idea. Held: business days from the first trade to the close. An idea with a trade "
-               "unpriced on its P&L day is left out of every figure and named, never counted as zero.")
-CARRY_ABOUT = ("Research context, from the research app's settlement curve: what each calendar spread's level would "
-               "do over the next contract step (a month on a monthly contract) if the curve kept its shape, in USD "
-               "on the position's open lots (+ = the curve's shape pays the position). Calendar spreads only. Never a "
-               "mark, never in a P&L figure or total.")
-ROLLS_ABOUT = ("A roll: on one day, a trade that cuts a position in one contract month and a trade the position's "
-               "way in another month of the same contract, same trade name, lots within 5 %, read off the fills. "
-               "The roll figure is the price spread paid or received at the roll (the month sold less the month "
-               "bought, x lots x the contract's size, in USD at that day's spot): it is NOT P&L. Both fills are "
-               "traded at market and their P&L is already in every figure on this tab. + = the roll earned carry "
-               "(a long rolled out in backwardation, a short in contango), - = it cost carry. The headline counts "
-               "rolls out into a later month only; a move into an earlier month is listed apart, never in it.")
-
-
-def _pct(v: Optional[float], reason: str = "no closed idea yet") -> Any:
-    return missing_cell(reason) if v is None else f"{v * 100:.0f}%"
-
-
-def _days(v: Optional[float]) -> str:
-    return MISSING if v is None else f"{v:.0f} d"
-
-
-def _track_item(items: List[Any], k: str, v: Any, hover: str = "") -> None:
-    items.append(html.Span([html.Span(k, className="pnl-track-k"), v], className="pnl-track-item",
-                           title=hover or None))
-
-
-def _markers(*ms: Any) -> List[Any]:
-    return [m for m in ms if m is not None]
-
-
-def _group_words(key: str, by: str) -> str:
-    if by == SCORE_BY_TYPE:
-        return TRADE_TYPE_TITLES.get(key) or (key.replace("_", " ").capitalize() if key else NO_TYPE)
-    return key or NO_TRADE_NAME
-
-
-def _idea_name(data: dict, idea: dict) -> str:
-    pid, name = str(idea.get("position_id") or ""), str(idea.get("name") or "")
-    if pid.startswith("POSITION-STRATEGY-"):
-        return name or pid[len("POSITION-STRATEGY-"):] or "no trade name"
-    return position_name(data, pid, name)
-
-
-def _excl_marker(excluded: Sequence[Tuple[str, str]], what: str, data: Optional[dict] = None) -> Any:
-    if not excluded:
-        return None
-    names = {str(i.get("position_id")): _idea_name(data, i)
-             for i in ((data or {}).get("scorecard") or {}).get("ideas") or []} if data else {}
-    excluded = [(names.get(str(p), str(p)), w) for p, w in excluded]
-    return marker(f"excl. {len(excluded)}", _lines_hover(f"{_plural(len(excluded), what)} left out (a trade unpriced "
-                                                         "on its P&L day):", [f"{p}: {w}" for p, w in excluded]))
-
-
-def score_lines(data: dict) -> List[Any]:
-    """Two lines: the closed ideas' record, the open ideas' state (the engine's summary)."""
-    sc = data.get("scorecard") or {}
-    summ = sc.get("summary") or {}
-    c, o = summ.get("closed") or {}, summ.get("open") or {}
-    closed: List[Any] = []
-    n = int(c.get("count") or 0)
-    _track_item(closed, "Closed", html.Span([f"{n}", *_markers(_excl_marker(c.get("excluded") or [], "closed idea", data))]),
-                f"{c.get('wins', 0)} won, {c.get('losses', 0)} lost, {c.get('scratches', 0)} flat; "
-                f"together {full_money(c.get('total'))}")
-    if n:
-        best, worst = c.get("best") or {}, c.get("worst") or {}
-        _track_item(closed, "Win rate", html.Span(_pct(c.get("win_rate"))),
-                    f"{c.get('wins', 0)} of {n} closed ideas made money")
-        _track_item(closed, "Avg win", money_cell(c.get("avg_win"), "no closed idea made money"))
-        _track_item(closed, "Avg loss", money_cell(c.get("avg_loss"), "no closed idea lost money"))
-        _track_item(closed, "Payoff", html.Span(missing_cell("needs a win and a loss") if c.get("payoff_ratio") is None
-                                                else f"{c['payoff_ratio']:.2f}"),
-                    "the average win over the average loss (needs a win and a loss)")
-        _track_item(closed, "Expectancy", html.Span([money_cell(c.get("expectancy")), " per idea"]),
-                    "the average P&L per closed idea")
-        _track_item(closed, "Held", html.Span(f"winners {_days(c.get('avg_hold_days_win'))} · "
-                                              f"losers {_days(c.get('avg_hold_days_loss'))}"),
-                    "the average business days from the first trade to the close")
-        if best or worst:
-            _track_item(closed, "Best / worst", html.Span([money_cell(best.get("pnl_usd")), " / ",
-                                                           money_cell(worst.get("pnl_usd"))]),
-                        f"best: {_idea_name(data, best)}\nworst: {_idea_name(data, worst)}")
-    opened: List[Any] = []
-    _track_item(opened, "Open", html.Span([f"{int(o.get('count') or 0)}",
-                                           *_markers(_excl_marker(o.get("excluded") or [], "open idea", data))]))
-    if o.get("count"):
-        _track_item(opened, "Unrealised", money_cell(o.get("unrealised_usd")), "the open ideas' LTD today, summed")
-        _track_item(opened, "In profit", html.Span(f"{int(o.get('in_profit') or 0)} of {int(o['count'])}"))
-    return [html.Div(closed, className="pnl-track pnl-score-line"),
-            html.Div(opened, className="pnl-track pnl-score-line")]
-
-
-def score_table(data: dict, by: str) -> Any:
-    """One row per trade name (or spread type), the engine's summary for that group, all the
-    ideas last."""
-    sc = data.get("scorecard") or {}
-    groups = sc.get("by_trade_name" if by == SCORE_BY_TRADE else "by_spread_type") or {}
-    if not groups:
-        return None
-    word = "trade name" if by == SCORE_BY_TRADE else "spread type"
-    head = html.Thead(html.Tr([
-        html.Th("Trade" if by == SCORE_BY_TRADE else "Spread type", className="l",
-                title=f"The ideas grouped by their {word}"),
-        html.Th("Ideas", title="Closed · open ideas"),
-        html.Th("Win rate", title="Winners over closed ideas"),
-        html.Th("Closed P&L", title="The closed ideas' P&L, each at its LTD today (its figure at the close on hover in "
-                                     "Every idea)"),
-        html.Th("Avg win"), html.Th("Avg loss"),
-        html.Th("Open P&L", title="The open ideas' LTD today (unrealised)")]))
-
-    def row(label: str, s: dict, bold: bool = False) -> html.Tr:
-        c, o = s.get("closed") or {}, s.get("open") or {}
-        excluded = list(c.get("excluded") or []) + list(o.get("excluded") or [])
-        ideas: List[Any] = [f"{int(c.get('count') or 0)} · {int(o.get('count') or 0)}",
-                            *_markers(_excl_marker(excluded, "idea", data))]
-        return html.Tr([
-            html.Td(label, className="l book-name"), html.Td(ideas),
-            html.Td(_pct(c.get("win_rate"))),
-            html.Td(money_cell(c.get("total")) if c.get("count") else missing_cell("no closed idea")),
-            html.Td(money_cell(c.get("avg_win"), "no closed idea made money")),
-            html.Td(money_cell(c.get("avg_loss"), "no closed idea lost money")),
-            html.Td(money_cell(o.get("unrealised_usd")) if o.get("count") else missing_cell("no open idea")),
-        ], style={"fontWeight": 700} if bold else None)
-
-    body = [row(_group_words(k, by), s) for k, s in groups.items() if k]
-    if "" in groups:
-        body.append(row(_group_words("", by), groups[""]))
-    if len(groups) > 1:
-        body.append(row("All ideas", sc.get("summary") or {}, bold=True))
-    return html.Div(className="book-card", children=[html.Table([head, html.Tbody(body)],
-                                                                className="book-table pnl-score-table")])
-
-
-def _idea_pnl_hover(i: dict) -> str:
-    """'on <date>', and for a closed idea 'at close on <date>: $x; since then FX ±$y' (the engine's
-    context figures, never recomputed)."""
-    lines = [f"LTD on {i.get('pnl_date')}"]
-    if i.get("status") == "closed":
-        at = _num(i.get("pnl_at_close"))
-        if at is not None:
-            since = _num(i.get("fx_since_close"))
-            lines.append(f"at close on {i.get('pnl_at_close_date') or i.get('close_date')}: {full_money(at)}"
-                         + (f"; since then FX {signed_money(since, '$')} (the currency re-conversion)"
-                            if since is not None and abs(since) >= _CENT else "; no move since"))
-    return "\n".join(lines)
-
-
-def ideas_fold(data: dict) -> Any:
-    """Every idea, closed first (the engine's order): name, trade, status, held, P&L, best, worst."""
-    ideas = (data.get("scorecard") or {}).get("ideas") or []
-    if not ideas:
-        return None
-    head = html.Thead(html.Tr([html.Th("Idea", className="l"), html.Th("Trade", className="l"),
-                               html.Th("Status", className="l"), html.Th("Held", title="Business days"),
-                               html.Th("P&L", title="Its LTD today; a closed idea's figure at its close and the currency move since on "
-                                                  "hover"),
-                               html.Th("Best", title="The highest LTD it showed while held"),
-                               html.Th("Worst", title="The lowest LTD it showed while held")]))
-    body = []
-    for i in ideas:
-        status = "closed" if i.get("status") == "closed" else "open"
-        status_hover = (f"dealt {i.get('first_trade_date')}, flat from {i.get('close_date')}" if status == "closed"
-                        else f"dealt {i.get('first_trade_date')}, held today")
-        unpriced = (f"; {i['days_unpriced']} day(s) with a trade unpriced left out of best / worst"
-                    if i.get("days_unpriced") else "")
-        body.append(html.Tr([
-            html.Td(_idea_name(data, i), className="l book-name",
-                    title=f"{i.get('position_id')}: trades {', '.join(i.get('trade_ids') or [])}"),
-            html.Td("" if i.get("kind") == "strategy" else (i.get("trade_name") or ""), className="l"),
-            html.Td(status, className="l", title=status_hover),
-            html.Td(f"{int(i.get('holding_days') or 0)}"),
-            html.Td(money_cell(i.get("pnl_usd"), i.get("reason") or "not valued", hover=_idea_pnl_hover(i))),
-            html.Td(money_cell(i.get("best_ltd"), "no day with every trade priced",
-                               hover=f"on {i.get('best_date')}{unpriced}")),
-            html.Td(money_cell(i.get("worst_ltd"), "no day with every trade priced",
-                               hover=f"on {i.get('worst_date')}{unpriced}")),
-        ]))
-    return html.Details(className="book-fold", children=[
-        html.Summary(f"Every idea ({len(ideas)})", className="pnl-fold-summary"),
-        html.Div(className="book-card", children=[html.Table([head, html.Tbody(body)],
-                                                              className="book-table pnl-ideas-table")])])
-
-
-def scorecard_block(data: dict, by: str = SCORE_BY_TRADE) -> Any:
-    sc = data.get("scorecard")
-    if sc is None:
-        return html.P(missing_cell("the scorecard could not be built (see Data issues)"), className="book-quiet")
-    if sc.get("reason"):
-        return html.P(f"No scorecard: {str(sc['reason']).rstrip('.')}.", className="book-quiet")
-    if not sc.get("ideas"):
-        return html.P("No idea on file yet.", className="book-quiet")
-    by = by if by in dict(SCORE_OPTIONS) else SCORE_BY_TRADE
-    return html.Div([c for c in (*score_lines(data), score_table(data, by), ideas_fold(data)) if c is not None])
-
-
-# --- carry (research)
-def _leg_words(data: dict, inst: str) -> str:
-    """A carry leg's plain name: 'WTI Dec26', 'LME zinc 21 Oct'."""
-    roots = data.get("roots") or {}
-    if " " in inst and inst.split(" ")[0].startswith("LME:"):
-        rid, prompt = inst.split(" ", 1)
-        return lme_name(roots.get(rid), rid, prompt)
-    base = ((data.get("instruments") or {}).get(inst) or {}).get("base", "")
-    return contract_name(inst, roots.get(base), base)
-
-
-def _carry_legs(r: dict) -> Tuple[str, str]:
-    """(near, far) of a carry row: a pair's from its id ('<trade>|<near>|<far>', an LME prompt
-    'LME:ZS 2026-10-21' kept whole), a position's from the engine's fields."""
-    parts_ = str(r.get("id") or "").split("|")
-    if r.get("source") != "position" and len(parts_) >= 3:
-        return parts_[1], parts_[2]
-    return str(r.get("near") or ""), str(r.get("far") or "")
-
-
-def _no_path(text: str) -> str:
-    """A reason without a file path in brackets, each clause once (no path on a screen)."""
-    clauses = [re.sub(r"\s*\([A-Za-z]:\\[^)]*\)", "", c).strip() for c in str(text or "").split(";")]
-    return "; ".join(dict.fromkeys(c for c in clauses if c))
-
-
-def carry_rows(data: dict) -> List[dict]:
-    """The calendar rows of the engine's carry as the Book shows them: its positions, then a
-    trade's pair only when no position holds the same two contracts (nothing counts twice)."""
-    rows = [r for r in ((data.get("carry") or {}).get("rows") or []) if r.get("calendar")]
-    positions = [r for r in rows if r.get("source") == "position"]
-    held = {_carry_legs(r) for r in positions}
-    return positions + [r for r in rows if r.get("source") != "position" and _carry_legs(r) not in held]
-
-
-def _carry_name(data: dict, r: dict) -> str:
-    near, far = _carry_legs(r)
-    words = f"{_leg_words(data, near)} / {_leg_words(data, far)}"
-    if r.get("source") != "position":
-        trade = str(r.get("id") or "").split("|")[0]
-        words += f" ({trade})" if trade else ""
-    return words
-
-
-def carry_block(data: dict) -> Any:
-    ca = data.get("carry")
-    if ca is None:
-        return html.P(missing_cell("the carry could not be read (see Data issues)"), className="book-quiet")
-    rows = carry_rows(data)
-    tag = html.Span("research", className="pnl-research-tag", title=CARRY_ABOUT)
-    if not rows:
-        why = str(ca.get("reason") or "no calendar spread held")
-        return html.P([f"Curve shape over the next month: no calendar position ({why}) ", tag], className="book-quiet")
-    lines, pairs = [], []
-    for r in rows:
-        name = _carry_name(data, r)
-        v = _num(r.get("roll_down_usd"))
-        pairs.append((v, f"{name}: {_no_path(r.get('reason')) or 'no figure'}"))
-        step = f"{r['roll_down']:+.2f} {r.get('unit') or ''}".strip() if r.get("roll_down") is not None else ""
-        extra = "; ".join(x for x in (
-            f"read {r['research_date']}" if r.get("research_date") else "",
-            f"steps {r['horizon_months']} months on its contract cycle" if (r.get("horizon_months") or 1) != 1 else "",
-            str(r.get("note") or "")) if x)
-        lines.append(f"{name}: {signed_money(v, '$')}"
-                     + (f" ({'; '.join(x for x in (step, extra) if x)})" if step or extra else "")
-                     + ("" if v is not None else f", {_no_path(r.get('reason')) or 'no figure'}"))
-    total, excluded, reasons = sum_known(pairs)
-    hover = _lines_hover("Per calendar position (research):", lines)
-    value = (money_cell(total, hover=hover) if total is not None
-             else missing_cell("; ".join(reasons[:LINES_ON_HOVER]) or "no figure"))
-    kids: List[Any] = ["Curve shape over the next month: ", value,
-                       html.Span(f" ({_plural(len(rows), 'calendar position')})", title=hover)]
-    if excluded:
-        kids.append(marker(f"excl. {excluded}", _lines_hover(f"{excluded} calendar position(s) with no figure:",
-                                                             reasons)))
-    kids += [" ", tag]
-    return html.P(kids, className="pnl-carry-line")
-
-
-# --- rolls
-def _full_signed(v: Optional[float], reason: str = "") -> Any:
-    """A roll's USD at the full figure, signed and coloured; the dash with its reason."""
+        ex = period_explain(conn, as_of, ENGINE_KEY[choice], series=series, spreads=b.get("spreads"))
+        out.update(start_ref=ex.get("start_ref"), ref_used=ex.get("ref_used"), end=as_of if as_of in series.days
+                   else series.days[-1], total=ex.get("total"), available=bool(ex.get("available")),
+                   reason=ex.get("reason") or "", excluded=list(ex.get("excluded") or []),
+                   other_trades=list(ex.get("other_trades") or []), ref_note=ex.get("ref_note") or "",
+                   title=dict(PERIOD_CHOICES)[choice])
+        out["by_trade"] = {str(r["trade_id"]): {k: r.get(k) for k in ("total", *PARTS)} for r in ex.get("by_trade") or []}
+    # the chart's days: every business day of the period, its daily P&L per fill and the period to date
+    days = [d for d in series.days if (out.get("start_ref") is None or d > out["start_ref"]) and d <= out.get("end", as_of)]
+    for d in days:
+        i = series.days.index(d)
+        prev = series.days[i - 1] if i > 0 else None
+        try:
+            one = period_pnl(series, prev, d)
+            cum = period_pnl(series, out.get("start_ref"), d)
+        except Exception as exc:  # noqa: BLE001 -- that day is left out, said so
+            out.setdefault("days_left", []).append((d, f"{type(exc).__name__}: {exc}"))
+            continue
+        out["days"].append({"date": d, "n_excluded": one.n_excluded, "filled": one.n_filled_end,
+                            "by_trade": _included(one), "cum": _included(cum)})
+    return out
+
+
+def _included(pp) -> Dict[str, float]:
+    bt = pp.by_trade
+    if bt is None or bt.empty:
+        return {}
+    inc = bt[bt["included"]]
+    return {str(t): float(v) for t, v in zip(inc["trade_id"], inc["pnl_usd"])}
+
+
+# --------------------------------------------------------------------------- slicing
+def _slice_of(t: dict, group: str) -> str:
+    return str(t.get("trade") or "") if group == tf.GROUP_NONE else tf.group_of(t, group)
+
+
+def fills_of(trades: Sequence[dict]) -> List[str]:
+    return [str(i) for t in trades for i in t.get("trade_ids") or []]
+
+
+def part_sum(p: dict, ids: Sequence[str], part: str = "total") -> Tuple[Optional[float], int, List[str]]:
+    """(known sum, count excluded, reasons) of a component over the fills `ids` (display)."""
+    by, why = p.get("by_trade") or {}, dict(p.get("excluded") or [])
+    vals = []
+    for i in ids:
+        if i in by:
+            vals.append((by[i].get(part), ""))
+        else:
+            vals.append((None, f"{i}: {why.get(i) or 'not in the period'}"))
+    return sum_known(vals)
+
+
+def row_figures(p: dict, ids: Sequence[str]) -> dict:
+    out = {"total": part_sum(p, ids, "total")}
+    for key, _t, _h in COMPONENTS:
+        out[key] = part_sum(p, ids, key)
+    return out
+
+
+def slices(b: dict, p: dict, state: Optional[dict]) -> List[Tuple[str, List[dict]]]:
+    """[(slice value, its trades)] of the rows showing, sorted by the size of the period's P&L."""
+    s = tf.normal(state)
+    shown = tf.apply(b.get("trades") or [], s)
+    by: Dict[str, List[dict]] = {}
+    for t in shown:
+        by.setdefault(_slice_of(t, s["group"]), []).append(t)
+
+    def size(item):
+        v = part_sum(p, fills_of(item[1]))[0]
+        return (v is None, -abs(v or 0.0), item[0])
+    return sorted(by.items(), key=size)
+
+
+# --------------------------------------------------------------------------- the table
+def _money_td(fig: Tuple[Optional[float], int, List[str]], hover: str = "", full: bool = False) -> html.Td:
+    v, n, reasons = fig
     if v is None:
-        return missing_cell(reason or "no USD figure")
-    text = f"{abs(v):,.0f}"
-    sign = "" if text == "0" else ("+" if v > 0 else "−")
-    return html.Span(sign + text, className=sign_class(v) or None, title=full_money(v))
+        return html.Td(missing_cell(_lines(*reasons[:8]) or "no figure"))
+    m = marker(f"excl. {n}", _lines(f"excludes {_plural(n, 'fill')}", *reasons[:8]), "marker--small") if n else None
+    if full:
+        return html.Td([html.Span(full_signed(v), className=sign_class(v) or None, title=plain_words(hover) or None), m])
+    return html.Td([km_cell(v, hover=hover), m])
 
 
-def _roll_tr(data: dict, r: dict) -> html.Tr:
-    root = (data.get("roots") or {}).get(str(r.get("root_id") or ""))
-    unit = quoted_unit(root) or str(r.get("unit") or "")
-    spread = _num(r.get("roll_spread_unit"))
-    d = max(2, price_decimals(str(r.get("unit") or "")))
-    far_near = _num(r.get("far_minus_near"))
-    held = _num(r.get("held_before"))
-    traded = _num(r.get("lots_traded"))
-    usd = _num(r.get("roll_yield_usd"))
-    ids = list(r.get("from_trade_ids") or []) + list(r.get("to_trade_ids") or [])
-    local_hover = (f"{full_money(r.get('roll_yield_local'), str(r.get('currency') or ''))} at "
-                   f"{r.get('spot_note') or 'spot'}" if usd is not None and str(r.get("currency") or "USD") != "USD"
-                   else None)
-    return html.Tr([
-        html.Td(short_date(r.get("date")), className="l", title=str(r.get("date") or "")),
-        html.Td(r.get("trade_name") or "", className="l"),
-        html.Td(short_root_name(root, str(r.get("root_id") or "")), className="l book-name",
-                title=f"{r.get('root_name')}: {r.get('from_contract')} to {r.get('to_contract')}; trades "
-                      f"{', '.join(ids)}"),
-        html.Td(str(r.get("label") or "").replace("->", "→"), className="l"),
-        html.Td(str(r.get("direction") or ""), className="l",
-                title=f"{held:+g} lots held before the roll" if held is not None else None),
-        html.Td(f"{_num(r.get('lots')) or 0:g}",
-                title=f"{traded:g} lots traded on the smaller side" if traded is not None else None),
-        html.Td(f"{price_text(r.get('sold_price'), unit)} / {price_text(r.get('bought_price'), unit)}",
-                title="the month sold / the month bought, lots-weighted fills"),
-        html.Td([signed_number(spread, d) if spread is not None else MISSING,
-                 html.Span(f" {r.get('unit') or ''}", className="unit-suffix")],
-                title="the month sold less the month bought, in the contract's quoted unit"),
-        html.Td(str(r.get("curve") or ""), className="l",
-                title=f"far month less near month at the fills: {far_near:+g}" if far_near is not None else None),
-        html.Td(_full_signed(usd, str(r.get("reason") or "")), title=local_hover),
+def _columns(p: dict, group: str, mode: str, months: Sequence[str] = ()) -> List[Tuple[str, str, str]]:
+    first = {tf.GROUP_NONE: "Trade", tf.GROUP_BY_TYPE: "Type", tf.GROUP_BY_COMMODITY: "Commodity"}[group]
+    cols = [("name", first, "l")]
+    if group == tf.GROUP_NONE:
+        cols.append(("type", "Type", "l"))
+    if mode == MODE_MONTH:
+        cols += [(f"m:{m}", _month_title(m, months), "") for m in months] + [("mtotal", "Total", "")]
+        return cols
+    cols.append(("total", "P&L", ""))
+    show_other = any(abs(_num(x.get("other")) or 0.0) >= 0.005 for x in (p.get("by_trade") or {}).values())
+    for key, title, _h in COMPONENTS:
+        if key == "other" and not show_other:
+            continue
+        cols.append((key, title, ""))
+    cols.append(("share", "% of total", ""))
+    return cols
+
+
+def _month_title(m: str, months: Sequence[str]) -> str:
+    try:
+        d = dt.date.fromisoformat(m + "-01")
+    except ValueError:
+        return m
+    title = f"{d:%b}"
+    if months and m == months[-1]:
+        title += " (MTD)"
+    if months and months[0][:4] != months[-1][:4]:
+        title = f"{d:%b} {d.year % 100:02d}" + (" (MTD)" if m == months[-1] else "")
+    return title
+
+
+COLUMN_TIPS = {"total": "The period's P&L in USD: each fill's change by the header's own rule, summed.",
+               "share": "The row's share of the total, shown only when the two have the same sign.",
+               "mtotal": "The row's months added up.", "type": "The trade's type by rule, as on the Book."}
+
+
+def head(cols: Sequence[Tuple[str, str, str]]) -> html.Thead:
+    tips = {**COLUMN_TIPS, **{k: h for k, _t, h in COMPONENTS}}
+    return html.Thead(html.Tr([html.Th(title, className=cls or None, title=tips.get(key)) for key, title, cls in cols]))
+
+
+def _month_cells(b: dict, ids: Sequence[str], months: Sequence[str], full: bool = False) -> List[html.Td]:
+    mp = b.get("monthly")
+    frame = mp.by_trade if mp is not None else pd.DataFrame()
+    cells, vals = [], []
+    idset = set(ids)
+    for m in months:
+        sub = frame[(frame["month"] == m) & frame["trade_id"].astype(str).isin(idset)] if not frame.empty else frame
+        pairs = [(_num(v) if inc else None, f"{t}: {r or 'left out'}")
+                 for t, v, inc, r in zip(sub.get("trade_id", []), sub.get("pnl_usd", []), sub.get("included", []),
+                                         sub.get("reason", []))]
+        fig = sum_known(pairs) if pairs else (None, 0, ["no fill of these on file that month"])
+        vals.append((fig[0], ""))
+        cells.append(_money_td(fig, full=full))
+    total = sum_known(vals)
+    cells.append(_money_td((total[0], 0, ["no month with a figure"]), hover="the months added up", full=full))
+    return cells
+
+
+def _cells(p: dict, b: dict, ids: Sequence[str], cols, grand: Optional[float], mode: str, months: Sequence[str],
+           full: bool = False) -> List[html.Td]:
+    if mode == MODE_MONTH:
+        return _month_cells(b, ids, months, full)
+    fig = row_figures(p, ids)
+    out = []
+    for key, _t, _c in cols:
+        if key in ("name", "type"):
+            continue
+        if key == "share":
+            v = fig["total"][0]
+            if v is None or not grand or (v > 0) != (grand > 0):
+                out.append(html.Td(""))
+            else:
+                out.append(html.Td(pct_text(v / grand)))
+            continue
+        if p.get("ltd") and key not in ("total", "realised"):
+            out.append(html.Td(missing_cell(LTD_SPLIT_WORDS)))
+            continue
+        out.append(_money_td(fig[key], full=full))
+    return out
+
+
+def _row_id(key: str) -> dict:
+    return {"type": ROW_TYPE, "idx": key}
+
+
+def leg_rows(p: dict, b: dict, t: dict, cols, grand, mode, months) -> List[html.Tr]:
+    """A trade's legs (hedges last) with the same columns, at full figures."""
+    legs = sorted(t.get("legs") or [], key=lambda leg: (bool(leg.get("hedge")), str(leg.get("name") or "")))
+    rows = []
+    for leg in legs:
+        ids = [str(i) for i in leg.get("trade_ids") or []]
+        name = str(leg.get("name") or leg.get("contract_id") or "") + (" (hedge)" if leg.get("hedge") else "")
+        first = [html.Td(name, className="l tk-indent2" if len(cols) and cols[0][1] != "Trade" else "l tk-indent")]
+        if any(k == "type" for k, _t, _c in cols):
+            first.append(html.Td(""))
+        rows.append(html.Tr(first + _cells(p, b, ids, cols, grand, mode, months, full=True),
+                            className="tk-leg" + (" tk-leg--hedge" if leg.get("hedge") else "")))
+    return rows
+
+
+def table(b: dict, p: dict, state: Optional[dict], mode: str, opened: Sequence[str]) -> html.Table:
+    s = tf.normal(state)
+    group = s["group"]
+    months = [m["month"] for m in (b["monthly"].months if b.get("monthly") is not None else [])] if mode == MODE_MONTH else []
+    cols = _columns(p, group, mode, months)
+    items = slices(b, p, s)
+    shown = [t for _v, ts in items for t in ts]
+    ids_all = fills_of(shown)
+    grand = part_sum(p, ids_all)[0]
+    opened = set(opened or [])
+    filtered = tf.is_filtered(s)
+    named = [t for t in b.get("trades") or [] if not t.get("pseudo")]
+    label = (f"Filtered · {len([t for t in shown if not t.get('pseudo')])} of {len(named)}" if filtered
+             else f"Book · {_plural(len(named), 'trade')}")
+    total_first = [html.Td(html.Span(label, title=("equals the top bar's figure for the period" if not filtered
+                                                   and p.get("choice") in ("today", "mtd", "all") else None)),
+                           className="l")]
+    if group == tf.GROUP_NONE:
+        total_first.append(html.Td(""))
+    body: List[Any] = [html.Tr(total_first + _cells(p, b, ids_all, cols, grand, mode, months),
+                               className="tk-total book-total")]
+    for value, trades in items:
+        ids = fills_of(trades)
+        if group == tf.GROUP_NONE:
+            t = trades[0]
+            key = f"t:{value}"
+            is_open = key in opened
+            first = [html.Td([html.Span("▾ " if is_open else "▸ ", className="tk-chev"), html.Span(value, className="tk-name")],
+                             className="l"),
+                     html.Td(tf.type_label(tf.type_code(t), short=True) if not t.get("pseudo") else "", className="l")]
+            body.append(html.Tr(first + _cells(p, b, ids, cols, grand, mode, months), id=_row_id(key), n_clicks=0,
+                                className="tk-row" + (" tk-row--open" if is_open else "")))
+            if is_open:
+                body.extend(leg_rows(p, b, t, cols, grand, mode, months))
+            continue
+        key = f"g:{value}"
+        is_open = key in opened
+        hover = _lines(*(str(t.get("trade")) for t in trades))
+        first = [html.Td([html.Span("▾ " if is_open else "▸ ", className="tk-chev"),
+                          html.Span(value, className="tk-name", title=hover),
+                          html.Span(f" · {_plural(len(trades), 'trade')}", className="tk-sub")], className="l")]
+        body.append(html.Tr(first + _cells(p, b, ids, cols, grand, mode, months), id=_row_id(key), n_clicks=0,
+                            className="tk-row" + (" tk-row--open" if is_open else "")))
+        if not is_open:
+            continue
+        for t in sorted(trades, key=lambda t: -abs(part_sum(p, fills_of([t]))[0] or 0.0)):
+            tkey = f"t:{t.get('trade')}"
+            t_open = tkey in opened
+            first = [html.Td([html.Span("▾ " if t_open else "▸ ", className="tk-chev"), str(t.get("trade"))],
+                             className="l tk-indent")]
+            body.append(html.Tr(first + _cells(p, b, fills_of([t]), cols, grand, mode, months), id=_row_id(tkey),
+                                n_clicks=0, className="tk-row tk-row--sub" + (" tk-row--open" if t_open else "")))
+            if t_open:
+                body.extend(leg_rows(p, b, t, cols, grand, mode, months))
+    return html.Table([head(cols), html.Tbody(body)], id=TABLE_ID, className="book-table book-grid tk-table")
+
+
+# --------------------------------------------------------------------------- the headline
+def headline(b: dict, p: dict, state: Optional[dict]) -> html.Div:
+    s = tf.normal(state)
+    shown = tf.apply(b.get("trades") or [], s)
+    named = [t for t in b.get("trades") or [] if not t.get("pseudo")]
+    ids = fills_of(shown)
+    fig = row_figures(p, ids)
+    count = (f"{len([t for t in shown if not t.get('pseudo')])} of {len(named)}" if tf.is_filtered(s)
+             else _plural(len(named), "trade"))
+    v, n, r = fig["total"]
+    total = html.Span([km_cell(v, reason=_lines(p.get("reason"), *r[:6])),
+                       marker(f"excl. {n}", _lines(*r[:8]), "marker--small") if n and v is not None else None])
+    if p.get("ltd"):
+        parts: Any = html.Span(["realised ", km_cell(fig["realised"][0])], title=LTD_SPLIT_WORDS)
+    else:
+        parts = html.Span([x for k, w in (("spread", "spread"), ("fx", "FX"), ("hedge", "hedge"))
+                           for x in (f"{w} ", km_cell(fig[k][0]), " ")])
+    per_trade = [(t, part_sum(p, fills_of([t]))[0]) for t in shown]
+    per_trade = [(t, x) for t, x in per_trade if x is not None]
+    best = max(per_trade, key=lambda x: x[1]) if per_trade else None
+    worst = min(per_trade, key=lambda x: x[1]) if per_trade else None
+    bw: Any = MISSING
+    if best:
+        bw = html.Span([f"{best[0].get('trade')} ", km_cell(best[1]), " · ", f"{worst[0].get('trade')} ",
+                        km_cell(worst[1])])
+    ref = p.get("ref_used") or p.get("start_ref")
+    return tf.headline([
+        ("Trades", count, "the trades showing; the top bar is always the whole book"),
+        (f"P&L {p.get('title') or ''}".strip(), total,
+         _lines(f"from the {ref} close" if ref else "since each trade opened", p.get("ref_note") or "")),
+        ("Of which", parts, "the split of the rows showing (the rest is new trades, realised and other)"),
+        ("Best · worst trade", bw, "the rows' single best and worst trade over the period"),
     ])
 
 
-def _roll_sum(rows: Sequence[dict]) -> Tuple[Optional[float], int, List[str]]:
-    return sum_known((_num(r.get("roll_yield_usd")), f"{r.get('date')} {r.get('label')}: {r.get('reason')}")
-                     for r in rows)
+# --------------------------------------------------------------------------- the chart
+def chart_figure(b: dict, p: dict, state: Optional[dict]) -> dict:
+    s = tf.normal(state)
+    items = slices(b, p, s)
+    trade_of = b.get("trade_of") or {}
+    show = set(fills_of([t for _v, ts in items for t in ts]))
+    days = p.get("days") or []
+    xs = [d["date"] for d in days]
+    traces: List[dict] = []
+    daily_tot, cum_tot, texts = [], [], []
+    for d in days:
+        vals = {t: v for t, v in d["by_trade"].items() if t in show}
+        tot = sum(vals.values()) if vals else None
+        cum = [v for t, v in d["cum"].items() if t in show]
+        daily_tot.append(tot)
+        cum_tot.append(sum(cum) if cum else None)
+        per: Dict[str, float] = {}
+        for t, v in vals.items():
+            per[trade_of.get(t, tf.UNASSIGNED)] = per.get(trade_of.get(t, tf.UNASSIGNED), 0.0) + v
+        top = sorted(per.items(), key=lambda x: -abs(x[1]))[:3]
+        texts.append("<br>".join([f"P&L {km_text(tot)} · cumulative {km_text(cum_tot[-1])}"]
+                                 + [f"{n} {km_text(v)}" for n, v in top]
+                                 + ([f"filled {d['filled']}"] if d.get("filled") else [])
+                                 + ([f"excl. {d['n_excluded']}"] if d.get("n_excluded") else [])))
+    group = s["group"]
+    if group != tf.GROUP_NONE and 1 < len(items) <= 6:
+        for n, (value, trades) in enumerate(items):
+            ids = set(fills_of(trades))
+            ys = [sum(v for t, v in d["by_trade"].items() if t in ids) for d in days]
+            traces.append({"x": xs, "y": ys, "type": "bar", "name": value, "marker": {"color": _PALETTE[n % 6]},
+                           "hovertemplate": f"{value} " + "%{y:$,.0f}<extra></extra>"})
+    else:
+        traces.append({"x": xs, "y": daily_tot, "type": "bar", "name": "Daily P&L",
+                       "marker": {"color": ["#1a7f4b" if (v or 0) >= 0 else "#c0392b" for v in daily_tot]},
+                       "hovertemplate": "Daily %{y:$,.0f}<extra></extra>"})
+    traces.append({"x": xs, "y": cum_tot, "type": "scatter", "mode": "lines+markers" if len(xs) < 3 else "lines",
+                   "name": "Cumulative", "line": {"color": "#0f1f3d", "width": 2}, "text": texts, "yaxis": "y",
+                   "hovertemplate": "%{x|%a %d %b %Y}<br>%{text}<extra></extra>"})
+    return {"data": traces, "layout": {
+        "height": CHART_HEIGHT, "barmode": "relative", "margin": {"l": 56, "r": 16, "t": 24, "b": 28},
+        "hovermode": "x unified", "showlegend": group != tf.GROUP_NONE and 1 < len(items) <= 6,
+        "legend": {"orientation": "h", "y": 1.02, "yanchor": "bottom", "x": 0, "font": {"size": 11}},
+        "xaxis": {"type": "date", "tickformat": "%d %b"},
+        "yaxis": {"tickformat": "~s", "zeroline": True, "zerolinecolor": "#c9ced8"},
+        "plot_bgcolor": "#fff", "paper_bgcolor": "#fff"}}
 
 
-def rolls_block(data: dict) -> Any:
-    ro = data.get("rolls")
-    if ro is None:
-        return html.P(missing_cell("the rolls could not be read (see Data issues)"), className="book-quiet")
-    found = list(ro.get("rolls") or [])
-    excluded = [e for e in ro.get("excluded") or [] if e.get("kind") != "no_spot"]
-    if not found and not excluded:
-        return html.P("No roll in the book's fills" + (f" ({ro['reason']})" if ro.get("reason") else "") + ".",
-                      className="book-quiet")
-    outs = [r for r in found if r.get("roll_kind") == "out"]
-    ins = [r for r in found if r.get("roll_kind") == "in"]
-    line: List[Any] = []
-    _track_item(line, "Rolls out", html.Span(f"{len(outs)}"), "rolls into a later month")
-    if outs:
-        t_out, x_out, why_out = _roll_sum(outs)
-        word = "earned" if (t_out or 0.0) >= 0 else "paid"
-        _track_item(line, f"Carry {word}", html.Span([
-            money_cell(t_out, "; ".join(why_out[:LINES_ON_HOVER]) or "no roll converted to USD",
-                       hover="the price spread at the rolls, not P&L (the fills' P&L is already in every figure)"),
-            *_markers(marker(f"excl. {x_out}", _lines_hover(f"{x_out} roll(s) with no USD figure:", why_out))
-                      if x_out else None)]))
-    if ins:
-        t_in, x_in, why_in = _roll_sum(ins)
-        _track_item(line, f"Moved into an earlier month ({len(ins)})", html.Span([
-            money_cell(t_in, "; ".join(why_in[:LINES_ON_HOVER]) or "no move converted to USD"),
-            *_markers(marker(f"excl. {x_in}", _lines_hover(f"{x_in} move(s) with no USD figure:", why_in))
-                      if x_in else None)]),
-            "a position moved into a nearer month: not a roll out, never in the headline")
-    kids: List[Any] = [html.Div(line, className="pnl-track")]
-    if found:
-        head = html.Thead(html.Tr([
-            html.Th("Date", className="l"), html.Th("Trade", className="l"), html.Th("Contract", className="l"),
-            html.Th("Move", className="l"), html.Th("Position", className="l", title="The position rolled"),
-            html.Th("Lots"), html.Th("Sold / bought"), html.Th("Roll spread", title="Sold less bought"),
-            html.Th("Curve", className="l", title="Contango: the far month above the near; backwardation: below"),
-            html.Th("Roll USD", title="The price spread paid or received at the roll, in USD at that day's spot: "
-                                      "not P&L. + = earned carry, − = paid carry.")]))
-        body = [_roll_tr(data, r) for r in outs]
-        if ins:
-            body.append(html.Tr(html.Td(f"Moved into an earlier month ({len(ins)}): not in the headline",
-                                        colSpan=10, className="l pnl-rolls-sub")))
-            body += [_roll_tr(data, r) for r in ins]
-        kids.append(html.Div(className="book-card", children=[
-            html.Table([head, html.Tbody(body)], className="book-table pnl-rolls-table")]))
-    if excluded:
-        kids.append(html.P(f"{_plural(len(excluded), 'possible roll')} not counted.", className="book-quiet",
-                           title=_lines_hover("Not counted, never guessed:",
-                                              [f"{e.get('date')} {e.get('trade_name') or ''} {e.get('root_id')}: "
-                                               f"{e.get('reason')}" for e in excluded])))
-    return html.Div(kids)
+def chart(b: dict, p: dict, state: Optional[dict]) -> Any:
+    if not p.get("days"):
+        return html.P(p.get("reason") or "No business day in the period: nothing to chart.", className="book-quiet")
+    return dcc.Graph(figure=chart_figure(b, p, state), config={"displayModeBar": False})
 
 
-# --------------------------------------------------------------------------- 6. track record
-def track_line(data: dict) -> Any:
-    """One line: best day, worst day, days up (n of N), the largest fall (peak -> trough), now
-    against the peak; the days left out named on hover."""
-    tr = data.get("track")
-    if tr is None:
-        return html.P("The track record could not be built.", className="book-quiet")
-    left = tr.get("excluded_days") or []
-    left_hover = (_lines_hover(f"{len(left)} day(s) with no Daily figure (the header would show a dash)",
-                               [f"{d}: {why}" for d, why in left]) if left else "")
+# --------------------------------------------------------------------------- the track record
+def track_block(b: dict, as_of: str) -> html.Details:
+    tr = b.get("track")
     items: List[Any] = []
 
     def item(k: str, v: Any, hover: str = "") -> None:
         items.append(html.Span([html.Span(k, className="pnl-track-k"), v], className="pnl-track-item",
-                               title=hover or None))
+                               title=plain_words(hover) or None))
 
-    if not tr.get("n_days"):
-        item("Days counted", html.Span("none yet"), left_hover or "no business day with every trade priced yet")
-        return html.Div(items, className="pnl-track")
-    best, worst = tr.get("best_day") or {}, tr.get("worst_day") or {}
-    item("Best day", html.Span([money_cell(best.get("value")), f" {short_date(best.get('date'))}"]))
-    item("Worst day", html.Span([money_cell(worst.get("value")), f" {short_date(worst.get('date'))}"]))
-    share = tr.get("share_positive")
-    partial = [r for r in tr.get("daily") or [] if r.get("value") is not None and r.get("n_excluded")]
-    partial_hover = (_lines_hover(f"{len(partial)} counted day(s) leave trades out (the header's excl. N)",
-                                  [f"{r['date']}: excl. {r['n_excluded']}" for r in partial]) if partial else "")
-    extra = [m for m in (marker(f"{len(left)} days left out", left_hover) if left else None,
-                         marker(f"excl. on {len(partial)}", partial_hover) if partial else None) if m is not None]
-    item("Days up", html.Span([f"{tr['n_positive']} of {tr['n_days']}"
-                               + (f" ({share * 100:.0f}%)" if share is not None else ""), *extra]),
-         "\n".join(x for x in (left_hover, partial_hover) if x))
-    dd = tr.get("max_drawdown") or {}
-    if (dd.get("value") or 0.0) < -_CENT:
-        item("Largest fall", html.Span([money_cell(dd["value"]),
-                                        f" {short_date(dd['peak_date'])} → {short_date(dd['trough_date'])}"]),
-             f"from the LTD peak {full_money(dd['peak_value'])} on {dd['peak_date']} to "
-             f"{full_money(dd['trough_value'])} on {dd['trough_date']}")
+    if tr is None:
+        items.append(missing_cell("the track record could not be built"))
+    elif not tr.get("n_days"):
+        item("Days counted", "none yet", "no business day with a Daily figure yet")
     else:
-        item("Largest fall", html.Span("none"), "the LTD has never been below an earlier peak")
-    fp = tr.get("from_peak") or {}
-    if fp:
-        item("Now vs peak", html.Span([money_cell(fp.get("value")), f" peak {short_date(fp.get('peak_date'))}"]),
-             f"LTD {full_money(fp.get('ltd'))} on {fp.get('date')} against the peak "
-             f"{full_money(fp.get('peak_value'))} on {fp.get('peak_date')}")
-    if tr.get("days_with_fill"):
-        items.append(marker(f"filled {tr['days_with_fill']}", f"{tr['days_with_fill']} counted day(s) include a trade "
-                                                              "valued at an earlier close"))
-    return html.Div(items, className="pnl-track")
+        best, worst = tr.get("best_day") or {}, tr.get("worst_day") or {}
+        item("Best day", html.Span([km_cell(best.get("value")), f" {day_text(best.get('date'), as_of)}"]))
+        item("Worst day", html.Span([km_cell(worst.get("value")), f" {day_text(worst.get('date'), as_of)}"]))
+        share = tr.get("share_positive")
+        item("Days up", f"{pct_text(share)} ({tr['n_positive']} of {tr['n_days']})" if share is not None else MISSING)
+        dd = tr.get("max_drawdown") or {}
+        if (dd.get("value") or 0.0) < -0.005:
+            item("Largest fall", html.Span([km_cell(dd["value"]), f" {day_text(dd.get('peak_date'), as_of)} → "
+                                                                   f"{day_text(dd.get('trough_date'), as_of)}"]))
+        else:
+            item("Largest fall", "none", "the LTD has never been below an earlier peak")
+        fp = tr.get("from_peak") or {}
+        if fp:
+            item("From the peak", html.Span([km_cell(fp.get("value")), f" peak {day_text(fp.get('peak_date'), as_of)}"]))
+    sc = b.get("scorecard") or {}
+    closed = (sc.get("summary") or {}).get("closed") or {}
+    if closed.get("count"):
+        item("Win rate", pct_text(closed.get("win_rate")), f"over {_plural(closed['count'], 'closed trade')}")
+        item("Average win / loss", html.Span([km_cell(closed.get("avg_win")), " / ", km_cell(closed.get("avg_loss"))]))
+        payoff = _num(closed.get("payoff_ratio"))
+        item("Payoff", f"{payoff:.2f}" if payoff is not None else MISSING, "average win over average loss")
+        hw, hl = _num(closed.get("avg_hold_days_win")), _num(closed.get("avg_hold_days_loss"))
+        item("Holding days, winners / losers",
+             f"{hw:.0f} / {hl:.0f}" if hw is not None and hl is not None else MISSING,
+             "average holding days (the engine gives averages, not medians)")
+    else:
+        item("Closed trades", "none yet", "the win rate needs a closed trade")
+    by = sc.get("by_spread_type") or {}
+    rows = []
+    for code, summ in sorted(by.items()):
+        c = (summ or {}).get("closed") or {}
+        o = (summ or {}).get("open") or {}
+        rows.append(html.Tr([html.Td(tf.type_label({"TERM_STRUCTURE": "CALENDAR"}.get(code, code)) if code else "No type",
+                                     className="l"),
+                             html.Td(str(c.get("count") or 0)), html.Td(pct_text(c.get("win_rate"))),
+                             html.Td(km_cell(c.get("total"))), html.Td(str(o.get("count") or 0)),
+                             html.Td(km_cell(o.get("unrealised_usd")))]))
+    type_table = (html.Table([html.Thead(html.Tr([html.Th("Type (the PBRoot's)", className="l"), html.Th("Closed"),
+                                                  html.Th("Win rate"), html.Th("Closed P&L"), html.Th("Open"),
+                                                  html.Th("Open P&L")])), html.Tbody(rows)],
+                             className="book-table tk-table tk-small") if rows else None)
+    return html.Details([html.Summary(about("Track record", "The whole book since the first trade: each day by the "
+                                                            "header's own Daily rule; win rate over the closed trades.",
+                                            level="span")),
+                         html.Div(items, className="pnl-track"), type_table], className="book-fold tk-fold-block",
+                        id=TRACK_ID)
 
 
-# --------------------------------------------------------------------------- 7. data issues
-def issue_items(data: dict) -> List[Any]:
-    items: List[Any] = list(data.get("errors") or [])
-    ex, key = data.get("explain") or {}, data.get("key", DEFAULT_PERIOD)
-    title = PERIOD_TITLES.get(key, key)
-    if data.get("note"):
-        items.append(("As of", data["note"]))
-    if ex:
-        if not ex.get("available") and ex.get("reason"):
-            items.append((title, str(ex["reason"])))
-        if ex.get("ref_note"):
-            items.append((title, str(ex["ref_note"])))
-        for tid, why in ex.get("excluded") or []:
-            items.append((str(tid), f"left out of {title}: {why}"))
-        for o in ex.get("other_trades") or []:
-            items.append((str(o["trade_id"]), f"{title}: {full_money(o['amount'])} under Other, not split between "
-                                              f"price and currency ({o['why']})"))
-    pp = data.get("period")
-    if pp is not None and not pp.by_trade.empty:
-        for tid, note in zip(pp.by_trade["trade_id"], pp.by_trade["note"]):
-            if note:
-                items.append((str(tid), str(note)))
-    monthly = data.get("monthly")
-    if monthly is not None:
-        for m in monthly.months:
-            if not m["available"]:
-                items.append((_month_words(m["month"]), str(m.get("reason") or "no figure")))
-            elif m.get("n_excluded"):
-                items.append((_month_words(m["month"]), f"{m['n_excluded']} trade(s) left out of the month's total"))
-    left = (data.get("track") or {}).get("excluded_days") or []
-    if left:
-        items.append(("Track record", f"{len(left)} day(s) with no Daily figure, left out: "
-                                      + "; ".join(f"{d} ({why})" for d, why in left[:5])
-                                      + (f"; and {len(left) - 5} more" if len(left) > 5 else "")))
-    sc = data.get("scorecard") or {}
-    if sc.get("excluded"):
-        names = {str(i.get("position_id")): _idea_name(data, i) for i in sc.get("ideas") or []}
-        items.append(("Scorecard", f"{len(sc['excluded'])} idea(s) left out of every statistic, a trade unpriced on "
-                                   "the P&L day: " + ", ".join(names.get(str(p), str(p)) for p, _w in sc["excluded"][:5])
-                                   + (f"; and {len(sc['excluded']) - 5} more" if len(sc["excluded"]) > 5 else "")))
-    for r in carry_rows(data):
-        if r.get("roll_down_usd") is None and r.get("reason"):
-            items.append((f"Carry, {_carry_name(data, r)}", _no_path(r["reason"])))
-    for e in (data.get("rolls") or {}).get("excluded") or []:
-        items.append((f"Roll, {e.get('date')} {e.get('root_id')}", str(e.get("reason") or "")))
-    review = (data.get("spreads") or {}).get("review") or []
-    if review:
-        items.append(("Positions", f"{len(review)} set(s) of trades could not be grouped into a spread, shown as "
-                                   "outrights (the Book tab names them)."))
+# --------------------------------------------------------------------------- issues, CSV
+def issue_items(b: dict, p: dict) -> List[Any]:
+    items: List[Any] = list(b.get("errors") or [])
+    trade_of = b.get("trade_of") or {}
+    if p.get("reason") and not p.get("available"):
+        items.append(("Period", p["reason"]))
+    for tid, why in p.get("excluded") or []:
+        items.append((f"{trade_of.get(str(tid), '')} {tid}".strip(), str(why)))
+    for o in p.get("other_trades") or []:
+        items.append((f"Other {o.get('trade_id')}", f"{full_signed(o.get('amount'))} USD not split: {o.get('why')}"))
+    for d, why in p.get("days_left") or []:
+        items.append((f"Chart {d}", why))
     return items
 
 
-# --------------------------------------------------------------------------- the CSV
-def csv_frame(data: dict, month_by: str = CHART_TYPE) -> pd.DataFrame:
-    """Every position of the period with its split, and the month table (per month and group, and
-    the month's total), at full figures."""
-    records = []
-    ex, key = data.get("explain") or {}, data.get("key", DEFAULT_PERIOD)
-    for p in ex.get("by_position") or []:
-        rec = {"table": f"positions {PERIOD_TITLES.get(key, key)}", "month": "",
-               "line": position_name(data, str(p["position_id"]), str(p.get("name") or "")),
-               "position_id": p["position_id"], "total_usd": p.get("total")}
-        for k, _w in _SPLIT_WORDS:
-            rec[f"{k}_usd"] = p.get(k)
-        rec["excluded"] = p.get("n_excluded")
-        rec["trade_ids"] = " ".join(p.get("trade_ids") or [])
-        records.append(rec)
-    groups, rows = month_records(data, month_by)
-    words = dict(MONTH_OPTIONS).get(month_by, month_by).lower()
-    for r in rows:
-        for g in groups:
-            hit = r["cells"].get(g)
-            if hit is not None:
-                records.append({"table": f"months by {words}", "month": r["month"], "line": g,
-                                "total_usd": hit[0], "excluded": hit[1]})
-        records.append({"table": "months", "month": r["month"], "line": "Total", "total_usd": r["total"],
-                        "excluded": r["total_excluded"]})
-    for i in (data.get("scorecard") or {}).get("ideas") or []:
-        records.append({"table": "scorecard ideas", "line": _idea_name(data, i), "position_id": i.get("position_id"),
-                        "trade_name": i.get("trade_name"), "spread_type": i.get("spread_type"),
-                        "status": i.get("status"), "first_trade_date": i.get("first_trade_date"),
-                        "close_date": i.get("close_date"), "holding_days": i.get("holding_days"),
-                        "total_usd": i.get("pnl_usd"), "pnl_at_close_usd": i.get("pnl_at_close"),
-                        "fx_since_close_usd": i.get("fx_since_close"), "best_ltd_usd": i.get("best_ltd"),
-                        "worst_ltd_usd": i.get("worst_ltd"), "reason": i.get("reason"),
-                        "trade_ids": " ".join(i.get("trade_ids") or [])})
-    for r in carry_rows(data):
-        records.append({"table": "carry (research, not P&L)", "line": _carry_name(data, r), "position_id": r.get("id"),
-                        "total_usd": r.get("roll_down_usd"), "roll_down": r.get("roll_down"), "unit": r.get("unit"),
-                        "research_date": r.get("research_date"), "reason": r.get("reason")})
-    for r in (data.get("rolls") or {}).get("rolls") or []:
-        records.append({"table": f"rolls {r.get('roll_kind')} (price spread at the roll, not P&L)",
-                        "month": r.get("date"), "line": f"{r.get('root_name')} {r.get('label')}",
-                        "trade_name": r.get("trade_name"), "direction": r.get("direction"), "lots": r.get("lots"),
-                        "sold_price": r.get("sold_price"), "bought_price": r.get("bought_price"),
-                        "roll_spread": r.get("roll_spread_unit"), "unit": r.get("unit"), "curve": r.get("curve"),
-                        "total_usd": r.get("roll_yield_usd"), "reason": r.get("reason"),
-                        "trade_ids": " ".join((r.get("from_trade_ids") or []) + (r.get("to_trade_ids") or []))})
-    return pd.DataFrame(records)
+def csv_frame(b: dict, p: dict, state: Optional[dict], mode: str) -> pd.DataFrame:
+    s = tf.normal(state)
+    rows = []
+    months = [m["month"] for m in (b["monthly"].months if b.get("monthly") is not None else [])]
+    mp = b.get("monthly")
+    for value, trades in slices(b, p, s):
+        for t in trades:
+            for leg in t.get("legs") or []:
+                ids = [str(i) for i in leg.get("trade_ids") or []]
+                row = {"Slice": value, "Trade": t.get("trade"), "Type": tf.type_label(tf.type_code(t)),
+                       "Commodity": tf.family_label(t), "Leg": leg.get("name"), "Hedge": bool(leg.get("hedge")),
+                       "Period": p.get("title"), "From close": p.get("ref_used") or p.get("start_ref"),
+                       "To": p.get("end")}
+                fig = row_figures(p, ids)
+                row["P&L"] = fig["total"][0]
+                for key, title, _h in COMPONENTS:
+                    row[title] = fig[key][0]
+                row["Fills excluded"] = fig["total"][1]
+                if mode == MODE_MONTH and mp is not None:
+                    fr = mp.by_trade
+                    for m in months:
+                        sub = fr[(fr["month"] == m) & fr["trade_id"].astype(str).isin(ids) & fr["included"]]
+                        row[m] = float(sub["pnl_usd"].sum()) if not sub.empty else None
+                rows.append(row)
+    return pd.DataFrame(rows)
 
 
-# --------------------------------------------------------------------------- body and shell
-_HIDDEN = {"display": "none"}
-
-
-def parts(data: dict, chart_by: str = CHART_BOOK, month_by: str = CHART_TYPE, score_by: str = SCORE_BY_TRADE) -> dict:
-    """{note, tiles, sections_style, chart, contributors, months, scorecard, carry, rolls, track,
-    issues}: the callback's outputs, each section built in its own try."""
-    chart_by = chart_by if chart_by in dict(CHART_OPTIONS) else CHART_BOOK
-    month_by = month_by if month_by in dict(MONTH_OPTIONS) else CHART_TYPE
-    if not data.get("n_trades"):                  # no blotter loaded: the Book's card (user, 2026-09-28)
-        from ui.tabs.book import empty_state
-        return {"note": "", "tiles": empty_state(idx="pnl"), "sections_style": _HIDDEN, "chart": None,
-                "contributors": None, "months": None, "scorecard": None, "carry": None, "rolls": None, "track": None,
-                "issues": None}
-    out: Dict[str, Any] = {"note": data.get("note") or "", "sections_style": {}}
-    for name, build in (("tiles", lambda: tiles(data)), ("chart", lambda: chart(data, chart_by)),
-                        ("contributors", lambda: contributors(data)),
-                        ("months", lambda: months_table(data, month_by)),
-                        ("scorecard", lambda: scorecard_block(data, score_by)), ("carry", lambda: carry_block(data)),
-                        ("rolls", lambda: rolls_block(data)), ("track", lambda: track_line(data))):
-        try:
-            out[name] = build()
-        except Exception as exc:  # noqa: BLE001 -- the reason in its own section, never a blank tab
-            log.exception("P&L tab: %s failed for %s", name, data.get("as_of"))
-            out[name] = html.P(f"This section could not be built ({type(exc).__name__}: {exc}).",
-                               className="status-line status-line--bad")
-    out["issues"] = issues_drawer(issue_items(data), id=ISSUES_ID)
-    return out
-
-
+# --------------------------------------------------------------------------- render
 def _open(db_path):
     from ui.app import connect_readonly       # local: ui.app imports the tabs
     return connect_readonly(db_path)
 
 
-def render_parts(as_of: Optional[str], db_path, period: str = DEFAULT_PERIOD, chart_by: str = CHART_BOOK,
-                 month_by: str = CHART_TYPE, score_by: str = SCORE_BY_TRADE) -> dict:
-    blank = {"note": "", "sections_style": _HIDDEN, "chart": None, "contributors": None, "months": None,
-             "scorecard": None, "carry": None, "rolls": None, "track": None, "issues": None}
+def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, choice: str = DEFAULT_PERIOD,
+                 start: Optional[str] = None, end: Optional[str] = None, mode: str = MODE_TOTAL,
+                 opened: Sequence[str] = ()) -> dict:
+    out = {"body": None, "shown": False, "headline": None, "chart": None, "table": None, "track": None, "foot": None}
     if not as_of:
-        return {**blank, "tiles": message_box("No as-of date available.")}
+        out["body"] = message_box("No as-of date available.")
+        return out
     try:
         conn = _open(db_path)
     except sqlite3.OperationalError as exc:
-        return {**blank, "tiles": message_box(f"Database not available ({exc}).")}
+        out["body"] = message_box(f"Database not available ({exc}).")
+        return out
     try:
-        return parts(gather(conn, as_of, period or DEFAULT_PERIOD), chart_by or CHART_BOOK, month_by or CHART_TYPE,
-                     score_by or SCORE_BY_TRADE)
+        from ui.tabs import book
+        if book.trades_on_file(conn) == 0:
+            out["body"] = book.empty_state(idx=TAB)
+            return out
+        b = base(conn, as_of)
+        p = period(conn, as_of, choice or DEFAULT_PERIOD, start, end)
+        mode = mode if mode in (MODE_TOTAL, MODE_MONTH) else MODE_TOTAL
+        out.update(shown=True, headline=headline(b, p, state), chart=chart(b, p, state),
+                   table=table(b, p, state, mode, opened), track=track_block(b, as_of),
+                   foot=issues_drawer(issue_items(b, p)))
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
-        log.exception("P&L tab failed for as_of=%s", as_of)
-        return {**blank, "tiles": html.Div(className="status-panel status-panel--down", children=[
-            html.P(f"The P&L tab could not be built for {as_of} ({type(exc).__name__}: {exc}).",
-                   className="status-line status-line--bad")])}
+        log.exception("P&L tab could not be built for %s", as_of)
+        out["body"] = html.Div(className="status-panel status-panel--down", children=[
+            html.P(f"The P&L could not be built for {as_of} ({type(exc).__name__}: {exc}).",
+                   className="status-line status-line--bad")])
     finally:
         conn.close()
+    return out
 
 
-def render(as_of: Optional[str], db_path, period: str = DEFAULT_PERIOD, chart_by: str = CHART_BOOK,
-           month_by: str = CHART_TYPE, score_by: str = SCORE_BY_TRADE) -> html.Div:
-    """The whole body for a direct render (the smoke test, a proof): the tiles, the chart, the
-    contributors, the months, the scorecard, the carry, the rolls, the track record and the
-    drawer, in the tab's order."""
-    p = render_parts(as_of, db_path, period, chart_by, month_by, score_by)
-    children = [html.Div(p["note"], className="book-quiet") if p["note"] else None, p["tiles"], p["chart"],
-                p["contributors"], p["months"], p["scorecard"], p["carry"], p["rolls"], p["track"], p["issues"]]
-    return html.Div(className="pnl-body", children=[c for c in children if c is not None])
+def render(as_of: Optional[str], db_path, state: Optional[dict] = None, choice: str = DEFAULT_PERIOD,
+           mode: str = MODE_TOTAL) -> html.Div:
+    """The whole body for a direct render."""
+    p = render_parts(as_of, db_path, state, choice, mode=mode)
+    if not p["shown"]:
+        return html.Div([p["body"]])
+    return html.Div([p["headline"], p["chart"], html.Div(p["table"], className="book-card book-main tk-card"),
+                     p["track"], p["foot"]])
 
 
-def render_csv(as_of: Optional[str], db_path, period: str, month_by: str):
-    if not as_of:
-        return None
-    try:
-        conn = _open(db_path)
-    except sqlite3.OperationalError:
-        return None
-    try:
-        data = gather(conn, as_of, period or DEFAULT_PERIOD)
-        frame = csv_frame(data, month_by or CHART_TYPE) if data.get("n_trades") else pd.DataFrame()
-        return dcc.send_data_frame(frame.to_csv, f"pnl-{period or DEFAULT_PERIOD}-{as_of}.csv", index=False)
-    except Exception:  # noqa: BLE001
-        log.exception("P&L csv failed for %s", as_of)
-        return None
-    finally:
-        conn.close()
+def options_of(as_of: str, db_path) -> Dict[str, List[dict]]:
+    from ui.tabs import book
+    return book.options_of(as_of, db_path)
 
 
 def _switch(id_: str, options: Sequence[Tuple[str, str]], default: str) -> dcc.RadioItems:
@@ -1423,45 +809,29 @@ def _switch(id_: str, options: Sequence[Tuple[str, str]], default: str) -> dcc.R
                           value=default, inline=True, persistence=True, persistence_type="session")
 
 
-def _head(title: str, tip: str, *extra: Any) -> html.Div:
-    return html.Div(className="book-section-head", children=[
-        about(title, tip, level="h4", className="book-section-title"), *extra])
-
-
 def layout(default_date: Optional[str] = None) -> html.Div:
-    """The static shell: the title line (the period switch, the as-of note, Download CSV), then the
-    sections' heads with their switches (always in the layout: a static callback input must be)
-    and the slots the one callback fills. No date picker: the tab follows the header's as-of."""
     return html.Div(className="pnl-tab", children=[
-        html.Div(className="book-title-row", children=[
-            about("P&L", TAB_ABOUT, level="h3"),
-            html.Span(QUESTION, className="book-counts"),
-            _switch(PERIOD_ID, [(k, PERIOD_TITLES[k]) for k in PERIODS], DEFAULT_PERIOD),
-            html.Span(id=NOTE_ID, className="book-counts pnl-note"),
-            html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
-                        title="Every position of the period with its split, and the month table, at full figures"),
-            dcc.Download(id=DOWNLOAD_ID),
+        html.Div(id=BODY_ID, children=[message_box("Loading the P&L...")]),
+        html.Div(id=CONTENT_ID, style=HIDDEN, children=[
+            tf.bar_slot(TAB),
+            html.Div(className="tk-strip tk-strip--controls", children=[
+                html.Span("Period", className="tk-k"),
+                _switch(PERIOD_ID, PERIOD_CHOICES, DEFAULT_PERIOD),
+                html.Span(id=CUSTOM_WRAP_ID, style=HIDDEN, children=[
+                    dcc.DatePickerRange(id=CUSTOM_ID, display_format="D MMM YYYY", persistence=True,
+                                        persistence_type="session", clearable=True, className="tk-range")]),
+                html.Span("Table", className="tk-k"),
+                _switch(MODE_ID, ((MODE_TOTAL, "Total"), (MODE_MONTH, "By month")), MODE_TOTAL),
+                html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
+                            title="Every leg of the rows showing with its split (and months), at full figures"),
+                dcc.Download(id=DOWNLOAD_ID)]),
+            html.Div(id=HEADLINE_ID),
+            html.Div(id=CHART_ID, className="book-card card-pad pnl-chart-card"),
+            html.Div(html.Div(id=TABLE_SLOT_ID, className="tk-table-slot"), className="book-card book-main tk-card"),
+            html.Div(id=f"{TRACK_ID}-slot"),
+            html.Div(id=FOOT_ID),
         ]),
-        html.Div(id=BODY_ID, className="pnl-body", children=[
-            html.Div(id=TILES_ID, children=[message_box("Loading the P&L...")]),
-            html.Div(id=SECTIONS_ID, children=[
-                _head("LTD and daily P&L", CHART_ABOUT, _switch(CHART_BY_ID, CHART_OPTIONS, CHART_BOOK)),
-                html.Div(id=CHART_ID, className="book-card pnl-chart-card"),
-                _head("What drove it", CONTRIB_ABOUT),
-                html.Div(id=CONTRIB_ID),
-                _head("Month by month", MONTHS_ABOUT, _switch(MONTH_BY_ID, MONTH_OPTIONS, CHART_TYPE)),
-                html.Div(id=MONTHS_ID),
-                _head("Scorecard", SCORE_ABOUT, _switch(SCORE_BY_ID, SCORE_OPTIONS, SCORE_BY_TRADE)),
-                html.Div(id=SCORE_ID),
-                _head("Carry", CARRY_ABOUT),
-                html.Div(id=CARRY_ID),
-                _head("Rolls", ROLLS_ABOUT),
-                html.Div(id=ROLLS_ID),
-                _head("Track record", TRACK_ABOUT),
-                html.Div(id=TRACK_ID),
-                html.Div(id=ISSUES_SLOT_ID),
-            ]),
-        ]),
+        dcc.Store(id=OPEN_STORE_ID, storage_type="session"),
     ])
 
 
@@ -1469,27 +839,50 @@ build_layout = layout
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """One callback fills every slot on the header's as-of, the three switches, every data
-    revision and the safety interval (the engine memoises the series on the database revision,
-    the Book memoises the positions); the CSV on its button."""
+    tf.register_bar(app, TAB, get_db_path, options_of)
+
+    @app.callback(Output(CUSTOM_WRAP_ID, "style"), Input(PERIOD_ID, "value"))
+    def _custom_shown(choice):
+        return {} if choice == "custom" else HIDDEN
 
     @app.callback(
-        Output(NOTE_ID, "children"), Output(TILES_ID, "children"), Output(SECTIONS_ID, "style"),
-        Output(CHART_ID, "children"), Output(CONTRIB_ID, "children"), Output(MONTHS_ID, "children"),
-        Output(SCORE_ID, "children"), Output(CARRY_ID, "children"), Output(ROLLS_ID, "children"),
-        Output(TRACK_ID, "children"), Output(ISSUES_SLOT_ID, "children"),
-        Input(AS_OF_STORE_ID, "data"), Input(PERIOD_ID, "value"), Input(CHART_BY_ID, "value"),
-        Input(MONTH_BY_ID, "value"), Input(SCORE_BY_ID, "value"), Input(DATA_REVISION_ID, "data"),
+        Output(BODY_ID, "children"), Output(CONTENT_ID, "style"), Output(HEADLINE_ID, "children"),
+        Output(CHART_ID, "children"), Output(TABLE_SLOT_ID, "children"), Output(f"{TRACK_ID}-slot", "children"),
+        Output(FOOT_ID, "children"),
+        Input(AS_OF_STORE_ID, "data"), Input(DATA_REVISION_ID, "data"), Input(tf.STORE_ID, "data"),
+        Input(PERIOD_ID, "value"), Input(CUSTOM_ID, "start_date"), Input(CUSTOM_ID, "end_date"),
+        Input(MODE_ID, "value"), Input(OPEN_STORE_ID, "data"),
     )
-    def _update(as_of, period=DEFAULT_PERIOD, chart_by=CHART_BOOK, month_by=CHART_TYPE, score_by=SCORE_BY_TRADE,
-                _rev=None):
-        p = render_parts(as_of, get_db_path(), period, chart_by, month_by, score_by)
-        return tuple(compact(x) for x in (p["note"], p["tiles"], p["sections_style"], p["chart"], p["contributors"],
-                                          p["months"], p["scorecard"], p["carry"], p["rolls"], p["track"], p["issues"]))
+    def _render(as_of, _rev, state, choice, start, end, mode, opened):
+        p = render_parts(as_of, get_db_path(), state, choice or DEFAULT_PERIOD, start, end, mode or MODE_TOTAL,
+                         opened or [])
+        if not p["shown"]:
+            return p["body"], HIDDEN, None, None, None, None, None
+        return (None, {}, compact(p["headline"]), p["chart"], compact(p["table"]), compact(p["track"]),
+                compact(p["foot"]))
+
+    @app.callback(Output(OPEN_STORE_ID, "data"), Input({"type": ROW_TYPE, "idx": ALL}, "n_clicks"),
+                  State(OPEN_STORE_ID, "data"), prevent_initial_call=True)
+    def _toggle(_clicks, current):
+        trig = dash.ctx.triggered_id
+        hit = dash.ctx.triggered or []
+        if not isinstance(trig, dict) or not (hit and hit[0].get("value")):
+            return dash.no_update
+        key = str(trig.get("idx") or "")
+        cur = list(current or [])
+        return [x for x in cur if x != key] if key in cur else cur + [key]
 
     @app.callback(Output(DOWNLOAD_ID, "data"), Input(CSV_BUTTON_ID, "n_clicks"), State(AS_OF_STORE_ID, "data"),
-                  State(PERIOD_ID, "value"), State(MONTH_BY_ID, "value"), prevent_initial_call=True)
-    def _csv(n_clicks, as_of, period, month_by):
-        if not n_clicks:
+                  State(tf.STORE_ID, "data"), State(PERIOD_ID, "value"), State(CUSTOM_ID, "start_date"),
+                  State(CUSTOM_ID, "end_date"), State(MODE_ID, "value"), prevent_initial_call=True)
+    def _csv(n_clicks, as_of, state, choice, start, end, mode):
+        if not n_clicks or not as_of:
             return dash.no_update
-        return render_csv(as_of, get_db_path(), period, month_by)
+        conn = _open(get_db_path())
+        try:
+            b = base(conn, as_of)
+            p = period(conn, as_of, choice or DEFAULT_PERIOD, start, end)
+            frame = csv_frame(b, p, state, mode or MODE_TOTAL)
+        finally:
+            conn.close()
+        return dcc.send_data_frame(frame.to_csv, f"pnl_{choice}_{as_of}.csv", index=False)

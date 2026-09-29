@@ -16,10 +16,12 @@ multiplier is a wrong P&L.
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import difflib
 import functools
 import re
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -31,9 +33,61 @@ COLUMNS = (
     "quote_unit", "price_scale", "multiplier", "active_months", "calendar", "delivery",
     "status", "notes",
 )
-# Added 2026-09-24 (Phases 3-5) and 2026-09-28 (broker_price_scale): read as '' when a file does
-# not carry them.
-OPTIONAL_COLUMNS = ("settlement", "option_style", "option_lead_months", "broker_price_scale")
+# Added 2026-09-24 (Phases 3-5), 2026-09-28 (broker_price_scale) and 2026-09-29 (family,
+# close_time): read as '' when a file does not carry them.
+OPTIONAL_COLUMNS = ("settlement", "option_style", "option_lead_months", "broker_price_scale",
+                    "family", "close_time")
+
+# The commodity family a root belongs to: how the desk groups whole trades (the P&L and Risk
+# tabs' "Commodity family"), coarser than the subsector where the desk reads several as one
+# (iron ore, HRC, rebar and coking coal are all "ferrous"; gasoline and gasoil "products";
+# soybeans, meal, palm and rapeseed "oilseeds"). Display grouping only: never a P&L or risk input.
+# A ``family`` outside this list is refused, so a typo never opens a family of its own.
+FAMILIES = (
+    # metals
+    "copper", "aluminium", "zinc", "lead", "tin", "nickel", "gold", "silver", "platinum",
+    "palladium", "lithium", "cobalt", "silicon",
+    # ferrous
+    "ferrous",
+    # energy
+    "crude", "products", "lpg", "gas", "coal", "carbon", "power", "freight",
+    # agriculture
+    "grains", "oilseeds", "softs", "cattle", "hogs", "eggs", "fruit", "rubber", "forest products",
+    # chemicals
+    "polyester", "plastics", "olefins", "aromatics", "methanol", "fertilisers", "glass",
+    "caustic soda",
+    # currency futures (the SGX USD/CNH future, an FX hedge)
+    "fx",
+)
+
+# Each exchange's daily close, local time and IANA time zone: the time of the settlement that
+# Bloomberg's daily PX_LAST reflects (the app's futures close, "Mark time" in CLAUDE.md). The
+# day session on the Chinese exchanges (the night session belongs to the next trading day), the
+# closing prices on the LME, the settlement window on the US and European exchanges. A root whose
+# own settlement differs (COMEX copper 13:00, ICE Brent 19:30) carries it in ``close_time``.
+# Approximate, not verified on a terminal: for the "legs closed ~Nh apart" note and for choosing
+# 2-day moves where the legs close hours apart, never a mark time and never in P&L.
+EXCHANGE_CLOSE = {
+    "SHFE": ("15:00", "Asia/Shanghai"), "INE": ("15:00", "Asia/Shanghai"),
+    "DCE": ("15:00", "Asia/Shanghai"), "ZCE": ("15:00", "Asia/Shanghai"),
+    "GFEX": ("15:00", "Asia/Shanghai"),
+    "HKEX": ("16:30", "Asia/Hong_Kong"),
+    "SGX": ("19:00", "Asia/Singapore"),
+    "OSE": ("15:15", "Asia/Tokyo"), "TOCOM": ("15:15", "Asia/Tokyo"),
+    "BMD": ("18:00", "Asia/Kuala_Lumpur"),
+    "GME": ("12:30", "Asia/Dubai"),           # Oman crude settles at the Singapore close, 16:30 SGT
+    "LME": ("17:00", "Europe/London"),
+    "ICE": ("17:30", "Europe/London"),        # ICE Futures Europe; Brent's own 19:30 on its row
+    "EEX": ("18:00", "Europe/Berlin"),
+    "EURONEXT": ("18:30", "Europe/Paris"),
+    "COMEX": ("13:30", "America/New_York"),   # gold; copper and silver on their rows
+    "NYMEX": ("14:30", "America/New_York"),
+    "ICEUS": ("13:30", "America/New_York"),
+    "CME": ("13:00", "America/Chicago"),      # livestock settlement, 12:59-13:00 CT
+    "CBOT": ("13:15", "America/Chicago"),
+    "MGEX": ("13:15", "America/Chicago"),
+}
+_CLOSE_RE = re.compile(r"^(?P<hh>[01]\d|2[0-3]):(?P<mm>[0-5]\d)\s+(?P<tz>[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+)$")
 
 # Exchange-calendar ids (engine/calendars, the exchange-calendars lane) by exchange.
 EXCHANGE_CALENDAR = {
@@ -117,6 +171,20 @@ class ContractRoot:
     # 2026-09-28 export for feeder cattle, live cattle and COMEX copper); 1 (blank in the file)
     # where the broker's fill is the quoted price
     broker_price_scale: float = 1.0
+    # the commodity family ('copper', 'ferrous', 'cattle'; one of FAMILIES): how whole trades
+    # are grouped; the subsector when the file carries no family column
+    family: str = ""
+    # the root's own daily close when it differs from its exchange's ('13:00 America/New_York'
+    # for COMEX copper); '' = the exchange's, EXCHANGE_CLOSE. Read it through ``close``.
+    close_time: str = ""
+
+    @property
+    def close(self) -> Tuple[dt.time, str]:
+        """(local time, IANA time zone) of this root's daily close: its own ``close_time`` when
+        set, else its exchange's (``exchange_close``). Approximate; never a mark time."""
+        if self.close_time:
+            return _parse_close(self.close_time, self.root_id)
+        return exchange_close(self.exchange)
 
     @property
     def averaging(self) -> bool:
@@ -127,6 +195,30 @@ class ContractRoot:
     def bbg_placeholder(self) -> bool:
         """True when ``bbg_root`` is the research app's placeholder ('ZZ' prefix: not known yet)."""
         return self.bbg_root.startswith("ZZ")
+
+
+def _parse_close(text: str, where: str) -> Tuple[dt.time, str]:
+    """'13:00 America/New_York' -> (time(13, 0), 'America/New_York'); ValueError otherwise."""
+    m = _CLOSE_RE.match(str(text or "").strip())
+    if not m:
+        raise ValueError(f"{where}: close_time {text!r} is not 'HH:MM Area/City'")
+    tz = m.group("tz")
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"{where}: close_time {text!r}: {tz!r} is not a known time zone") from None
+    return dt.time(int(m.group("hh")), int(m.group("mm"))), tz
+
+
+def exchange_close(exchange: str) -> Tuple[dt.time, str]:
+    """(local time, IANA time zone) of an exchange's daily close, the settlement Bloomberg's
+    PX_LAST reflects: ``exchange_close('SHFE')`` -> (time(15, 0), 'Asia/Shanghai'). KeyError
+    naming the known exchanges for any other. A root with its own close: ``ContractRoot.close``."""
+    key = str(exchange or "").strip().upper()
+    if key not in EXCHANGE_CLOSE:
+        raise KeyError(f"no close time for exchange {exchange!r}; known: {', '.join(sorted(EXCHANGE_CLOSE))}")
+    hhmm, tz = EXCHANGE_CLOSE[key]
+    return _parse_close(f"{hhmm} {tz}", key)
 
 
 def _bool(text: str, where: str) -> bool:
@@ -192,6 +284,17 @@ def _root_from_row(raw: Dict[str, str], line: int) -> ContractRoot:
         raise ValueError(f"{where}: broker_price_scale {broker_text!r} is not a number") from None
     if not broker_scale > 0 or broker_scale == float("inf"):
         raise ValueError(f"{where}: broker_price_scale {broker_text!r} is not a positive number")
+    if "family" in raw:
+        family = (raw.get("family") or "").strip().lower()
+        if family not in FAMILIES:
+            raise ValueError(f"{where}: family {raw.get('family')!r} is not one of {', '.join(FAMILIES)}")
+    else:
+        family = raw["subsector"].strip().lower()     # a file with no family column
+    close_time = re.sub(r"\s+", " ", (raw.get("close_time") or "").strip())
+    if close_time:
+        _parse_close(close_time, where)
+    if exchange not in EXCHANGE_CLOSE:
+        raise ValueError(f"{where}: exchange {exchange!r} has no close time in EXCHANGE_CLOSE")
     return ContractRoot(
         root_id=root_id, name=raw["name"].strip(), sector=raw["sector"].strip(),
         subsector=raw["subsector"].strip(), exchange=exchange, country=raw["country"].strip(),
@@ -202,7 +305,7 @@ def _root_from_row(raw: Dict[str, str], line: int) -> ContractRoot:
         price_scale=scale, multiplier=multiplier, active_months=_months(raw["active_months"], where),
         calendar=calendar, delivery=delivery, status=status, notes=raw["notes"].strip(),
         settlement=settlement, option_style=option_style, option_lead_months=lead,
-        broker_price_scale=broker_scale,
+        broker_price_scale=broker_scale, family=family, close_time=close_time,
     )
 
 

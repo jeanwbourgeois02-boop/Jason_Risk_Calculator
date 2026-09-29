@@ -44,10 +44,12 @@ from dash import Input, Output, State, dash_table, dcc, html
 
 from ui.feed_controls import pull_timings, recalc_words, safety_refresh_ms, seconds_words
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
+from ui.tabs import data_checks
+from ui.tabs import data_kit as kit
 from ui.tabs.formatting import compact
-from ui.tabs.formatting import (MINUS, MISSING, about, contract_name, fx_name, is_fx_pair, issues_drawer, lme_name,
-                                marker, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
-                                short_root_name, signed_number)
+from ui.tabs.formatting import (MISSING, about, contract_name, fx_name, is_fx_pair, issues_drawer, lme_name,
+                                missing_cell, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
+                                short_root_name)
 
 BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"
 BBG_RESULTS_ID = "market-data-bbg-check-results"
@@ -1656,252 +1658,99 @@ def _hover_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict]
     return table
 
 
+# ---- Phase G (round 2, 2026-09-29): the checks. The tables are drawn through `ui.tabs.data_kit`
+# and their rows built by `ui.tabs.data_checks` (the problems, the marks check, the pull steps).
+PROBLEMS_TITLE = "Problems"
+PROBLEMS_ABOUT = ("Every price the book needs that is missing or failed a check, every failed step of the last "
+                  "Bloomberg pull and of its backfill, and any trade left out of the P&L, each with what it does to "
+                  "the figures. A flagged price stays the official price: the Book marks the figures it touches.")
+MARKS_ABOUT = ("Every official price the book uses on the date, missing and flagged first, each checked four ways: "
+               "it arrived (an official price dated the as-of is on file), it is fresh (the date's own price, not one "
+               "carried), its move since the previous close is sane, and its units agree with the fills it prices. "
+               "Hover a cross for its sentence.")
+PROBLEMS_STORE_ID = "market-data-problems-rows"
+PROBLEMS_SORT_ID = "market-data-problems-sort"
+PROBLEMS_SLOT_ID = "market-data-problems-slot"
+PROBLEMS_META_ID = "market-data-problems-meta"
+PROBLEMS_CSV_ID = "market-data-problems-csv"
+PROBLEMS_DOWNLOAD_ID = "market-data-problems-download"
+PROBLEM_SORT_TYPE = "data-problem-sort"
+MARKS_STATUS_ID = "market-data-marks-status"
+MARKS_SORT_ID = "market-data-marks-sort"
+MARK_SORT_TYPE = "data-mark-sort"
+
+
 def _link(text: str, target: str, hover: str = "", warn: bool = False) -> html.A:
-    classes = "data-status-link" + (" data-status-link--warn" if warn else "")
+    classes = "data-status-link " + ("data-status-link--warn cell-amber" if warn else "cell-pos")
     return html.A(text, href=f"#{target}", className=classes, title=plain_words(hover) or None)
 
 
 # ---- 1. the status line
-def status_line(status: Optional[dict], needs: Tuple[int, int], closes: List[dict],
+def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, int], closes: List[dict],
                 dates: Tuple[int, int]) -> list:
-    """The last pull, marks complete, reference closes complete, contract dates: four links to
-    their blocks, the full sentence of each on hover."""
+    """Last pull (ok / N problems) · Marks 43 of 47 · Reference closes Daily ✓ 5d ✓ MTD ✓ YTD ✗ ·
+    Contract dates 9 from Bloomberg, 2 estimated: each green or amber, each a jump to its detail,
+    the full sentence on hover."""
     from ui.feed_controls import short_state, short_time
     line = top_bar_status(status)
     state = short_state(line)
     when = short_time((status or {}).get("time")) if status else ""
     if not status or state == "no pull yet":
         pull = _link("No Bloomberg pull yet", DIAGNOSTICS_ID, line, warn=True)
-    elif state == "connected":
-        pull = _link(f"Last pull {when}" if when else "Last pull: time not recorded", DIAGNOSTICS_ID, line)
     else:
-        pull = _link(f"Last pull {when} · {state}" if when else f"Bloomberg {state}", DIAGNOSTICS_ID, line,
-                     warn=state == "not connected")
-    needed, n_missing = needs
-    if not needed:
-        marks = _link("no marks needed", MISSING_PANEL_ID, "The book needs no marks on this date.")
-    else:
-        marks = _link(f"{needed - n_missing:,} of {needed:,} marks",
-                      MISSING_PANEL_ID if n_missing else MARKS_SECTION_ID,
-                      f"{n_missing:,} of the {needed:,} marks the book needs are not on file as official."
-                      if n_missing else "Every mark the book needs is on file as official.", warn=bool(n_missing))
-    done = [c for c in closes if not c["flag"]]
-    open_ = [c for c in closes if c["flag"]]
-    words = f"{len(done)} of {len(closes)} reference closes"
-    if open_:
-        words += " · " + ", ".join(c["period"] for c in open_) + " incomplete"
-    ref = _link(words, PAST_CLOSES_PANEL_ID,
-                "; ".join(f"{c['period']} ({c['date_iso']}): {c['state']}" for c in closes), warn=bool(open_))
-    total, estimated = dates
+        words = f"Last pull {when}" if when else "Last pull"
+        if pull_problems:
+            pull = _link(f"{words} · {pull_problems} problem{'s' if pull_problems != 1 else ''}", MISSING_PANEL_ID,
+                         line, warn=True)
+        elif state == "not connected":
+            pull = _link(f"{words} · not connected", DIAGNOSTICS_ID, line, warn=True)
+        else:
+            pull = _link(f"{words} · ok", DIAGNOSTICS_ID, line)
+    total, arrived = marks
     if not total:
-        dates_link = _link("no contract dates needed", CONTRACT_DATES_PANEL_ID,
-                           "No open future or option needs Bloomberg's contract dates.")
-    elif estimated:
-        dates_link = _link(f"{estimated} contract{'s' if estimated != 1 else ''} on estimated dates",
-                           CONTRACT_DATES_PANEL_ID, f"{total - estimated} of {total} contracts on Bloomberg's dates.",
-                           warn=True)
+        marks_link = _link("Marks: none needed", MARKS_SECTION_ID, "The book needs no official price on this date.")
     else:
-        dates_link = _link("contract dates all from Bloomberg", CONTRACT_DATES_PANEL_ID,
-                           f"All {total} contracts on Bloomberg's own dates.")
+        marks_link = _link(f"Marks {arrived:,} of {total:,}", MISSING_PANEL_ID if arrived < total else MARKS_SECTION_ID,
+                           f"{total - arrived:,} of the {total:,} official prices the book needs are not on file for "
+                           "the date." if arrived < total else "Every official price the book needs is on file.",
+                           warn=arrived < total)
+    bits = [f"{c['period']} {kit.CROSS if c['flag'] else kit.TICK}" for c in closes]
+    ref = _link("Reference closes " + " ".join(bits) if bits else "Reference closes: none", PAST_CLOSES_PANEL_ID,
+                "; ".join(f"{c['period']} ({c['date_iso']}): {c['state']}" for c in closes),
+                warn=any(c["flag"] for c in closes))
+    n, estimated = dates
+    if not n:
+        dates_link = _link("Contract dates: none needed", CONTRACT_DATES_PANEL_ID,
+                           "No open future or option needs Bloomberg's contract dates.")
+    else:
+        dates_link = _link(f"Contract dates {n - estimated} from Bloomberg, {estimated} estimated",
+                           CONTRACT_DATES_PANEL_ID, f"{n - estimated} of {n} contracts on Bloomberg's own dates.",
+                           warn=bool(estimated))
     out: list = []
-    for part in (pull, marks, ref, dates_link):
+    for part in (pull, marks_link, ref, dates_link):
         if out:
             out.append(html.Span(" · ", className="data-status-sep"))
         out.append(part)
     return out
 
 
-# ---- 2. Missing, and what it blocks
-def missing_block(conn: sqlite3.Connection, as_of: str, status: Optional[dict], df_today: Optional[pd.DataFrame],
-                  ctx: tuple, issues: Optional[list] = None) -> Tuple[html.Div, Tuple[int, int]]:
-    """One table: each official mark the book needs on `as_of` that is not on file (plain name,
-    the kind of price, the date), the trades it leaves unpriced and the trades reading it (names on
-    hover), their face notional, the reason on hover; then the trades left out of the P&L for any
-    other reason. One quiet line when nothing is missing. Returns (component, (needed, missing))."""
-    roots, bases, tnames = ctx
-    needed, rows = missing_rows(conn, as_of, status)
-    unpriced: Dict[str, str] = {}
-    if df_today is not None and not df_today.empty:
-        left = df_today[df_today["reason"] != ""]
-        unpriced = {str(t): str(r) for t, r in zip(left["trade_id"], left["reason"])}
-    shown, linked = [], set()
-    for r in rows:
-        ids = [str(t) for t in r.get("trade_ids") or []]
-        out = [t for t in ids if t in unpriced]
-        linked.update(out)
-        name = mark_name(r["instrument_id"], r["mark_type"], r["settle_date"], roots, bases)
-        told = str(r.get("reason") or "")
-        reason = "; ".join(x for x in (
-            told or "no reason from Bloomberg",
-            f"on file instead: {r['on_file']}" if r.get("on_file") and r["on_file"] != "nothing" else "",
-            f"{len(ids) - len(out)} trade(s) priced off the nearest official marks meanwhile" if len(ids) > len(out)
-            else "",
-        ) if x)
-        shown.append({
-            "name": name, "what": price_kind_words(r["instrument_id"], r["mark_type"], r["settle_date"]),
-            "date": short_date(as_of), "unpriced": len(out), "reading": len(ids),
-            "notional": r.get("notional_blocked") or MISSING,
-            "reason": f"{r['instrument_id']} {r['mark_type']} {r['settle_date']}: {reason}",
-            "unpriced_names": "; ".join(tnames.get(t, t) for t in out),
-            "reading_names": "; ".join(tnames.get(t, t) for t in ids),
-            "flag": "unpriced" if out else "",       # tinted only when it leaves a trade out of the P&L
-            "_usd": float((r.get("notional") or {}).get("USD") or 0.0),
-        })
-        if issues is not None and (told or out):
-            # a row with neither Bloomberg's own word nor an unpriced trade is covered by the one
-            # sentence on why no reason is shown (`pull_note`, below); its reason stays on hover
-            issues.append((name, reason))
-    shown.sort(key=lambda x: (-x["_usd"], -x["unpriced"], -x["reading"], x["name"]))
-    for tid in sorted(set(unpriced) - linked, key=lambda t: tnames.get(t, t)):
-        shown.append({"name": tnames.get(tid, tid), "what": "trade left out of the P&L", "date": short_date(as_of),
-                      "unpriced": 1, "reading": "", "notional": "", "reason": unpriced[tid],
-                      "unpriced_names": tnames.get(tid, tid), "reading_names": "", "flag": "unpriced",
-                      "_usd": 0.0})
-        if issues is not None:
-            issues.append((tnames.get(tid, tid), unpriced[tid]))
-    n_missing = len(rows)
-    if not shown:
-        sentence = (f"the book needs no marks on {as_of}" if not needed
-                    else f"every mark the book needs is on file ({needed:,} of {needed:,})")
-        return _quiet(MISSING_TITLE, sentence, MISSING_ABOUT), (needed, 0)
-    if rows:
-        from ui.tabs.header import backfill_status
-        is_past = as_of < _book_today_iso()
-        note = pull_note(status, as_of, is_past, backfill_status(conn) if is_past else None)
-        if note and issues is not None:
-            issues.append((MISSING_TITLE, note))
-    for x in shown:
-        x.pop("_usd", None)
-    head = f"{n_missing:,} of {needed:,} marks not on file" if n_missing else "every mark is on file"
-    if unpriced:
-        head += f" · {len(unpriced):,} trade{'s' if len(unpriced) != 1 else ''} left out of the P&L"
-    table = _hover_table(MISSING_TABLE_ID, [
-        ("Instrument", "name"), ("Price", "what"), ("Date", "date"), ("Trades unpriced", "unpriced"),
-        ("Trades reading it", "reading"), ("Notional", "notional"),
-    ], shown, hover={"name": "reason", "what": "reason", "unpriced": "unpriced_names", "reading": "reading_names"},
-        numeric=("unpriced", "reading", "notional"))
-    return _panel(MISSING_TITLE, [html.P(head, className="status-line"), table],
-                  about_text=MISSING_ABOUT), (needed, n_missing)
-
-
-# ---- 3. Marks check
-def _signed_price(change: Optional[float], unit: str) -> str:
-    if change is None:
-        return MISSING
-    text = price_text(abs(change), unit)
-    if float(text.replace(",", "") or 0) == 0:
-        return text
-    return ("+" if change > 0 else MINUS) + text
-
-
-def marks_check_rows(conn: sqlite3.Connection, as_of: str, ctx: tuple, now: Optional[datetime] = None,
-                     today: Optional[str] = None) -> Tuple[List[dict], dict]:
-    """(rows, the `suspect_rows` result): every official mark the book uses on `as_of` (futures,
-    options, LME and FX together) with its source and snap time, the previous business day's
-    close and the change, and the "marks that look wrong" flag; flagged rows first, then by sector
-    (FX last), commodity and name. Two stored marks compared: nothing recomputed. JSON-safe rows
-    (the tab keeps them in a store for its filter and its CSV)."""
-    from ui.tabs.header import mark_time_words
-    roots, bases, _names = ctx
-    found = suspect_rows(conn, as_of, now=now, today=today)
-    units = _price_units(conn, {r["instrument_id"] for r in found["rows"]})
-    rows = []
-    for r in found["rows"]:
-        iid = str(r["instrument_id"])
-        unit = units.get(iid, "")
-        sector, commodity = mark_group(iid, roots, bases)
-        value, previous = _as_float(r.get("value")), _as_float(r.get("previous"))
-        change = value - previous if value is not None and previous is not None else None
-        pct = r.get("change_pct")
-        prev_iso = str(r.get("previous_date") or "")
-        snapped = str(r.get("snapped_at") or "")
-        rows.append({
-            "name": mark_name(iid, r["mark_type"], r["settle_date"], roots, bases),
-            "price_kind": price_kind_words(iid, r["mark_type"], r["settle_date"]),
-            "group": _sector_label(sector), "sector": sector, "commodity": commodity,
-            "mark": price_text(value, unit), "source": source_label(r.get("source")),
-            "snapped": mark_time_words(as_of, snapped) if snapped else MISSING,
-            "previous": price_text(previous, unit) if previous is not None else MISSING,
-            "previous_date": short_date(prev_iso) if prev_iso else "",
-            "change": _signed_price(change, unit),
-            "change_pct": (signed_number(pct, 2) + " %") if pct is not None else MISSING,
-            "flag": str(r.get("flag") or ""), "note": str(r.get("note") or ""),
-            "hover_name": f"{iid} · {r['mark_type']} · {r['settle_date']}",
-            "hover_flag": "; ".join(x for x in (r.get("flag"), r.get("note")) if x),
-            "instrument_id": iid, "mark_type": r["mark_type"], "settle_date": r["settle_date"],
-            "value_raw": value, "source_code": str(r.get("source") or ""), "snapped_at": snapped,
-            "previous_raw": previous, "previous_date_iso": prev_iso, "change_raw": change, "change_pct_raw": pct,
-        })
-    rows.sort(key=lambda x: (not x["flag"], _sector_rank(x["sector"]), x["commodity"], x["name"]))
-    return rows, found
-
-
-def marks_filter_options(rows: List[dict]) -> List[dict]:
-    """The filter's options: each sector with a mark, then its commodities under it."""
-    by_sector: Dict[str, set] = {}
-    for r in rows:
-        by_sector.setdefault(r["sector"], set()).add(r["commodity"])
-    out = []
-    for sector in sorted(by_sector, key=lambda s: (_sector_rank(s), s)):
-        out.append({"label": f"{_sector_label(sector)} (all)", "value": f"sector:{sector}"})
-        out += [{"label": f"· {c}", "value": f"commodity:{sector}:{c}"} for c in sorted(by_sector[sector])]
-    return out
-
-
-def filter_marks(rows: Optional[List[dict]], chosen: Optional[list], search: Optional[str]) -> List[dict]:
-    """The rows the filter (any chosen sector or commodity) and the search (a substring of the
-    name, instrument id, source, group or commodity) keep."""
-    picks = [str(c) for c in (chosen or [])]
-    text = str(search or "").strip().lower()
-
-    def keep(r: dict) -> bool:
-        if picks and not any(p in (f"sector:{r['sector']}", f"commodity:{r['sector']}:{r['commodity']}")
-                             for p in picks):
-            return False
-        if text:
-            hay = " ".join(str(r.get(k) or "") for k in ("name", "instrument_id", "source", "source_code", "group",
-                                                          "commodity", "price_kind")).lower()
-            return text in hay
-        return True
-    return [r for r in rows or [] if keep(r)]
-
-
-_MARKS_COLUMNS = [("Instrument", "name"), ("Price", "price_kind"), ("Group", "group"), ("Mark", "mark"),
-                  ("Source", "source"), ("Marked at", "snapped"), ("Previous close", "previous"),
-                  ("Close of", "previous_date"), ("Change", "change"), ("Change %", "change_pct"), ("Flag", "flag")]
-
-
-def marks_table_view(rows: Optional[List[dict]], chosen: Optional[list], search: Optional[str]) -> tuple:
-    """(the table of the rows the filter and search keep, the count line)."""
-    rows = rows or []
-    if not rows:
-        return html.Div(), ""
-    shown = filter_marks(rows, chosen, search)
-    flagged = sum(1 for r in shown if r["flag"])
-    meta = f"{len(shown):,} of {len(rows):,} marks · " + (f"{flagged} flagged" if flagged else "none flagged")
-    if not shown:
-        return message_box("No mark matches the filter."), meta
-    keys = [k for _n, k in _MARKS_COLUMNS] + ["hover_name", "hover_flag", "note"]
-    data = [{k: r.get(k, "") for k in keys} for r in shown]
-    return _hover_table(MARKS_TABLE_ID, _MARKS_COLUMNS, data,
-                        hover={"name": "hover_name", "flag": "hover_flag", "previous": "note"},
-                        numeric=("mark", "previous", "change", "change_pct"), wide=("flag",), page_size=25), meta
-
-
 # ---- 4. Reference closes
 def reference_close_rows(conn: sqlite3.Connection, as_of: str, df_today: Optional[pd.DataFrame],
                          tnames: Dict[str, str], backfill: Optional[dict] = None) -> List[dict]:
-    """Daily, 5d, MTD, YTD: the reference close each period differences against, its marks
-    needed and present (`header.needed_marks`, the header's own count), the backfill's reason when
-    incomplete, and the trades that period leaves out for want of a price on that close
-    (`engine.pnl.reference.diff_split`, the header's own test)."""
+    """Daily, 5d, MTD, YTD: the reference close each period differences against, its marks needed
+    and present (`header.needed_marks`, the header's own count), the backfill's reason when
+    incomplete, the trades that period leaves out for want of a price on that close
+    (`engine.pnl.reference.diff_split`), and the close the header actually measures from
+    (`engine.pnl.reference.resolve_reference`, the header's own call)."""
+    from engine.pnl.calendar import load_holidays
     from engine.pnl.ledger import period_reference_dates
-    from engine.pnl.reference import diff_split
+    from engine.pnl.reference import diff_split, resolve_reference
     from ui.tabs.blotter_pricing import priced_value_book
     from ui.tabs.header import backfill_status, needed_marks, past_close_explanation
     refs = period_reference_dates(as_of)
     if backfill is None:
         backfill = backfill_status(conn)
+    holidays = load_holidays()
     rows = []
     for key, label in _PERIODS:
         day = refs.get(key)
@@ -1909,8 +1758,16 @@ def reference_close_rows(conn: sqlite3.Connection, as_of: str, df_today: Optiona
             continue
         needed, missing = needed_marks(conn, day)
         blocked: List[str] = []
+        used, used_why = day, ""
         if df_today is not None and not df_today.empty:
             blocked = sorted(str(t) for t in diff_split(df_today, priced_value_book(conn, day)[0]).blocked_ids)
+            try:
+                choice = resolve_reference(df_today, day, lambda iso: priced_value_book(conn, iso)[0], holidays,
+                                           frames_filled=True)
+                used = choice.ref_date_used if choice.found else None
+                used_why = choice.note if choice.found else choice.exhausted_sentence
+            except Exception as exc:  # noqa: BLE001 -- the cell says why
+                used, used_why = None, f"the close used could not be worked out ({type(exc).__name__}: {exc})"
         if not needed:
             state, why = "nothing needed", "no trade was open that day"
         elif missing:
@@ -1919,76 +1776,134 @@ def reference_close_rows(conn: sqlite3.Connection, as_of: str, df_today: Optiona
             state, why = "complete", ""
         rows.append({"period": label, "date": short_date(day), "date_iso": day,
                      "marks": f"{needed - len(missing):,} of {needed:,}" if needed else MISSING,
-                     "state": state, "why": why, "left_out": len(blocked),
+                     "needed": needed, "missing": len(missing), "state": state, "why": why,
+                     "used": used, "used_why": used_why, "left_out": len(blocked),
                      "left_names": "; ".join(tnames.get(t, t) for t in blocked),
                      "flag": "incomplete" if missing else ""})
     return rows
 
 
 def reference_closes_panel(rows: List[dict], issues: Optional[list] = None) -> html.Div:
-    """The four reference closes as one small table; the reason column only when one is incomplete."""
+    """Daily, 5d, MTD, YTD: the reference close, complete or not, the close actually used, the
+    trades that period leaves out."""
+    head = kit.strip([kit.strip_title(PAST_CLOSES_TITLE, REFERENCE_ABOUT)])
     if not rows:
-        return _quiet(PAST_CLOSES_TITLE, "no reference close for this date", REFERENCE_ABOUT)
-    columns = [("Period", "period"), ("Reference close", "date"), ("Marks", "marks"), ("Status", "state"),
-               ("Trades left out", "left_out")]
-    if any(r["why"] and r["flag"] for r in rows):
-        columns.append(("Why", "why"))
+        return kit.card([head, html.P("No reference close for this date.", className="book-section-meta")])
+    cols: Tuple[kit.Column, ...] = (
+        ("period", "Period", "l", "The header's period.", False),
+        ("date", "Reference close", "l", "The close the period is measured from by its own rule.", False),
+        ("complete", "Complete", "l", "Every official price the book needed that day is on file.", False),
+        ("used", "Close used", "l", "The close the header's figure is actually measured from: an earlier one when the "
+                                   "reference close is not usable (at most 5 business days back).", False),
+        ("left_out", "Trades left out", "", "Priced today but with no price on that close, so that period leaves "
+                                            "them out (names on hover).", False),
+    )
+    body = []
     for r in rows:
         if r["flag"] and issues is not None:
             issues.append((f"{r['period']} close {r['date_iso']}", r["why"]))
-    data = [{k: r.get(k, "") for k in ("period", "date", "marks", "state", "left_out", "why", "left_names", "flag",
-                                        "date_iso")} for r in rows]
-    return _panel(PAST_CLOSES_TITLE, [_hover_table(PAST_CLOSES_TABLE_ID, columns, data,
-                                                   hover={"left_out": "left_names", "state": "why",
-                                                          "date": "date_iso"},
-                                                   numeric=("left_out",), wide=("why",))],
-                  about_text=REFERENCE_ABOUT)
+        if not r["needed"]:
+            complete = html.Span("nothing needed", className="cell-missing", title=r["why"])
+        elif r["flag"]:
+            complete = html.Span(f"{kit.CROSS} {r['missing']:,} of {r['needed']:,} missing", className="cell-amber",
+                                 title=plain_words(r["why"]) or None)
+        else:
+            complete = html.Span(f"{kit.TICK} {r['marks']}", className="cell-pos")
+        if r["used"] is None:
+            used = missing_cell(r["used_why"] or "no usable close within 5 business days")
+        elif r["used"] != r["date_iso"]:
+            used = html.Span(short_date(r["used"]), className="cell-amber", title=plain_words(r["used_why"]) or None)
+        else:
+            used = html.Span(short_date(r["used"]), title=plain_words(r["used_why"]) or "the reference close itself")
+        body.append(html.Tr([
+            kit.td(r["period"], left=True), kit.td(r["date"], left=True, title=r["date_iso"]),
+            kit.td(complete, left=True), kit.td(used, left=True),
+            kit.td(f"{r['left_out']:,}", title=r["left_names"] or None),
+        ]))
+    return kit.card([head, kit.table(kit.head(cols, None, "data-ref-none"), body, className="tk-small")])
 
 
 # ---- 5. Contract dates
 def contract_dates_line(conn: sqlite3.Connection, as_of: str, ctx: tuple,
                         issues: Optional[list] = None) -> Tuple[html.Div, Tuple[int, int]]:
-    """'N of M contracts on Bloomberg's dates; K estimated', the list on click."""
+    """'Contract dates · 9 from Bloomberg, 2 estimated', the list on click (last trade, first
+    notice, source)."""
     roots, bases, _names = ctx
     rows = contract_date_rows(conn, as_of)
     if not rows:
         return _quiet(CONTRACT_DATES_TITLE, f"no open future or option needs Bloomberg's contract dates on {as_of}",
                       CONTRACT_DATES_ABOUT), (0, 0)
-    data = []
+    estimated = [r for r in rows if r["flag"]]
+    held: Dict[str, str] = {}
+    try:
+        held = {str(i): str(e or "") for i, e in conn.execute("SELECT instrument_id, expiry_date FROM instruments")}
+    except sqlite3.Error:
+        pass
+    body = []
     for r in rows:
         cid = str(r["contract_id"])
         root_id = _root_id(cid, roots, bases)
-        data.append({"name": contract_name(cid, roots.get(root_id), root_id), "contract_id": cid,
-                     "bbg_ticker": r["bbg_ticker"], "status": "estimated" if r["flag"] else "Bloomberg",
-                     "last_trade_date": r["last_trade_date"], "first_notice_date": r["first_notice_date"],
-                     "trades": r["trades"], "why": r["why"], "flag": r["flag"]})
-    estimated = [d for d in data if d["flag"]]
-    summary = f"{len(rows) - len(estimated)} of {len(rows)} contracts on Bloomberg's dates; {len(estimated)} estimated"
+        name = data_checks.price_name(cid, "FUTURE_PX", "", root_id, roots)
+        guess = held.get(cid, "")
+        if r["last_trade_date"]:
+            last = short_date(r["last_trade_date"])
+        elif guess and not guess.startswith("9999"):
+            last = html.Span(f"≈ {short_date(guess)}", className="cell-estimated",
+                             title=plain_words(f"The contract master's conservative estimate ({guess}), used until "
+                                               f"Bloomberg's own date is on file: {r['why']}"))
+        else:
+            last = missing_cell(r["why"])
+        body.append(html.Tr([
+            kit.td(name, left=True, title=f"{cid} · {r['bbg_ticker']}"),
+            kit.td(last, left=True, title=r["last_trade_date"] or None),
+            kit.td(short_date(r["first_notice_date"]) if r["first_notice_date"] else missing_cell(
+                r["why"] or "no first notice for this contract"), left=True, title=r["first_notice_date"] or None),
+            kit.td(html.Span("estimated", className="cell-amber", title=plain_words(r["why"]))
+                   if r["flag"] else (r["source"] or "Bloomberg"), left=True),
+            kit.td(str(r["trades"] if r["trades"] is not None else MISSING)),
+        ]))
     if estimated and issues is not None:
         issues.append((CONTRACT_DATES_TITLE, f"{len(estimated)} contract(s) run on the contract master's estimated "
                                              "dates until Bloomberg's own are on file: "
-                                             + ", ".join(d["name"] for d in estimated)))
-    return html.Details(className="details", children=[
-        html.Summary([html.Span(CONTRACT_DATES_TITLE, style={"fontWeight": "600"}), f" · {summary}"],
-                     title=CONTRACT_DATES_ABOUT, className="about-title"),
-        _hover_table(CONTRACT_DATES_TABLE_ID, [
-            ("Contract", "name"), ("Ticker", "bbg_ticker"), ("Dates", "status"), ("Last trade", "last_trade_date"),
-            ("First notice", "first_notice_date"), ("Trades", "trades"), ("Why estimated", "why")],
-            data, hover={"name": "contract_id"}, numeric=("trades",), wide=("why",), page_size=25),
+                                             + ", ".join(str(r["contract_id"]) for r in estimated)))
+    cols: Tuple[kit.Column, ...] = (
+        ("contract", "Contract", "l", "The contract with its exchange; its id and Bloomberg ticker on hover.", False),
+        ("last", "Last trade", "l", "Bloomberg's last trade date.", False),
+        ("fn", "First notice", "l", "Bloomberg's first notice date.", False),
+        ("source", "Source", "l", "Bloomberg's own dates, or estimated by the contract master until they are on file.",
+         False),
+        ("trades", "Trades", "", "Trades on the contract.", False),
+    )
+    summary = f"{len(rows) - len(estimated)} from Bloomberg, {len(estimated)} estimated"
+    return html.Details(className="book-fold tk-fold-block", children=[
+        html.Summary([html.Span(CONTRACT_DATES_TITLE, className="book-section-title", title=CONTRACT_DATES_ABOUT),
+                      html.Span(f" · {summary}", className="cell-amber" if estimated else "book-section-meta")]),
+        kit.table(kit.head(cols, None, "data-dates-none"), body, className="tk-small"),
     ]), (len(rows), len(estimated))
 
 
 # ---- 6. Diagnostics
 def diagnostics_body(conn: sqlite3.Connection, as_of: str, status: Optional[dict]) -> html.Div:
-    """The Bloomberg library and the feed status in detail (the contract dates, curves, LME,
-    options, recalc and ledger blocks); the connection check button sits after it in the static
-    layout."""
+    """The last pull step by step, the backfill's requests / errors / values that were not
+    numbers, the curves' and vols' left-outs, the Bloomberg library, and everything the pull
+    recorded (folded); the connection check button sits after it in the static layout."""
+    left = data_checks.left_out_block(status)
     feed = status_block(status)
-    return html.Div([
-        safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)),
-        about("Feed status", "What the last Pull Bloomberg now did, step by step.", level="h5"),
-        html.Div(feed if isinstance(feed, list) else [feed], className="status-line"),
-    ])
+    parts = [
+        about("The last pull, step by step", "What the last Pull Bloomberg now did, each step's outcome.", level="h5"),
+        data_checks.steps_table(status),
+        about("Past closes (the backfill)", "What the backfill after the last pull asked, and what went wrong.",
+              level="h5"),
+        data_checks.backfill_block(status),
+    ]
+    if left is not None:
+        parts += [about("Left out by the curves and vols", "Quotes the OIS curves and vol smiles did not use.",
+                        level="h5"), left]
+    parts += [safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)),
+              html.Details(className="details", children=[
+                  html.Summary("Everything the last pull recorded", className="about-title"),
+                  html.Div(feed if isinstance(feed, list) else [feed], className="status-line")])]
+    return html.Div(parts)
 
 
 def _failed_panel(title: str, exc: Exception) -> html.Div:
@@ -1998,25 +1913,30 @@ def _failed_panel(title: str, exc: Exception) -> html.Div:
 
 
 def render(as_of_date: Optional[str], db_path) -> tuple:
-    """The body callback's ten outputs for `as_of_date` (the header's as-of): the status line,
-    the missing block, the marks-check rows (store), the filter's options, the marks-check empty
-    line, the filter bar's style, the reference closes, the contract dates, the diagnostics body,
-    the Data issues drawer. A block that fails says so where it would be."""
+    """The body callback's outputs for `as_of_date` (the header's as-of): the status line, the
+    problems (rows for the store) and the card's style, the marks-check rows (store), its
+    sector / commodity options, its empty line and its bar's style, the reference closes, the
+    contract dates, the diagnostics body, the Data issues drawer. A block that fails says so
+    where it would be; the rest still renders."""
     blank = html.Div()
     if not as_of_date:
-        return (message_box("No as-of date available."), blank, [], [], blank, _HIDDEN, blank, blank, blank, blank)
+        return (message_box("No as-of date available."), [], _HIDDEN, [], [], blank, _HIDDEN, blank, blank, blank,
+                blank)
     try:
         conn = _connect_readonly(db_path)
     except sqlite3.OperationalError as exc:
-        return (message_box(f"Database not available ({exc})."), blank, [], [], blank, _HIDDEN, blank, blank, blank,
-                blank)
+        return (message_box(f"Database not available ({exc})."), [], _HIDDEN, [], [], blank, _HIDDEN, blank, blank,
+                blank, blank)
+    import logging
+    log = logging.getLogger(__name__)
     issues: list = []
     try:
         try:
-            from data.bloomberg.live import read_status
+            from data.bloomberg.live import book_today, read_status
             feed_status = read_status(db_path)
+            today = book_today().isoformat()
         except Exception:  # noqa: BLE001 -- an unreadable status file is "no pull recorded"
-            feed_status = None
+            feed_status, today = None, _book_today_iso()
         ctx = name_context(conn)
         try:
             from ui.tabs.blotter_pricing import priced_value_book
@@ -2025,31 +1945,29 @@ def render(as_of_date: Optional[str], db_path) -> tuple:
             df_today = None
             issues.append((TAB_TITLE, f"The book could not be priced on {as_of_date} ({type(exc).__name__}: {exc})."))
 
+        mark_rows: List[dict] = []
         try:
-            missing, needs = missing_block(conn, as_of_date, feed_status, df_today, ctx, issues)
+            mark_rows = data_checks.mark_rows(conn, as_of_date, data_checks.check_frame(conn, as_of_date))
         except Exception as exc:  # noqa: BLE001
-            missing, needs = _failed_panel(MISSING_TITLE, exc), (0, 0)
-
-        try:
-            mark_rows, found = marks_check_rows(conn, as_of_date, ctx)
-        except Exception as exc:  # noqa: BLE001
-            _failed_panel(SUSPECT_TITLE, exc)
-            mark_rows, found = [], {"rows": [], "prev_has_marks": True, "prev_day": ""}
+            log.exception("Data tab: the marks check failed for %s", as_of_date)
             issues.append((SUSPECT_TITLE, f"The marks check could not be built ({type(exc).__name__}: {exc})."))
+        unpriced: Dict[str, Tuple[str, str]] = {}
+        if df_today is not None and not df_today.empty:
+            left = df_today[df_today["reason"] != ""]
+            unpriced = {str(t): (ctx[2].get(str(t), str(t)), str(r)) for t, r in zip(left["trade_id"], left["reason"])}
+        try:
+            problems = data_checks.problem_rows(mark_rows, feed_status, unpriced, as_of_date, today)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Data tab: the problems failed for %s", as_of_date)
+            problems = []
+            issues.append((PROBLEMS_TITLE, f"The problems could not be listed ({type(exc).__name__}: {exc})."))
+        n_pull = len(data_checks.pull_problems(feed_status))
         if not mark_rows:
-            marks_empty = html.P(f"No official mark the book uses is on file for {as_of_date}.",
-                                 className="status-line")
+            marks_empty = html.P(f"The book uses no official price on {as_of_date}.", className="book-section-meta",
+                                 style={"padding": "8px 12px"})
             tools_style = _HIDDEN
         else:
-            marks_empty, tools_style = html.Div(), {}
-            if not found.get("prev_has_marks"):
-                from ui.tabs.header import backfill_status, past_close_explanation
-                prev = found.get("prev_day")
-                why = (f"No official marks are on file for {prev}, the previous business day, so the marks of "
-                       f"{as_of_date} are not compared with a previous close: "
-                       f"{past_close_explanation(backfill_status(conn), prev)}.")
-                marks_empty = html.Div(marker(f"not compared with {prev}", why))
-                issues.append((SUSPECT_TITLE, why))
+            marks_empty, tools_style = html.Div(), {"padding": "8px 12px 0"}
 
         closes: List[dict] = []
         try:
@@ -2064,45 +1982,78 @@ def render(as_of_date: Optional[str], db_path) -> tuple:
             dates_panel, dates = _failed_panel(CONTRACT_DATES_TITLE, exc), (0, 0)
 
         diag = safe_panel(DIAG_TITLE, lambda: diagnostics_body(conn, as_of_date, feed_status))
-        line = status_line(feed_status, needs, closes, dates)
+        arrived = sum(1 for r in mark_rows if r["arrived"])
+        line = status_line(feed_status, n_pull, (len(mark_rows), arrived), closes, dates)
     finally:
         conn.close()
-    drawer = issues_drawer(issues) or blank
-    return (line, missing, mark_rows, marks_filter_options(mark_rows), marks_empty, tools_style, closes_panel,
-            dates_panel, diag, drawer)
+    drawer = issues_drawer(issues, id=f"{ISSUES_ID}-drawer") or blank
+    return (line, problems, {} if problems else _HIDDEN, mark_rows, marks_filter_options(mark_rows), marks_empty,
+            tools_style, closes_panel, dates_panel, diag, drawer)
+
+
+def marks_filter_options(rows: List[dict]) -> List[dict]:
+    """The sector / commodity filter's options: each sector with a price, its commodities under it."""
+    by_sector: Dict[str, set] = {}
+    for r in rows or []:
+        by_sector.setdefault(r["sector"], set()).add(r["commodity"])
+    out = []
+    for sector in sorted(by_sector, key=lambda s: (_sector_rank(s), s)):
+        out.append({"label": f"{_sector_label(sector)} (all)", "value": f"sector:{sector}"})
+        out += [{"label": f"· {c}", "value": f"commodity:{sector}:{c}"} for c in sorted(by_sector[sector])]
+    return out
+
+
+def _marks_controls() -> list:
+    """The marks check's bar: search, status, sector / commodity; each kept for the session."""
+    return [
+        html.Div(className="blotter-filter", children=[
+            html.Label("Search"),
+            dcc.Input(id=MARKS_SEARCH_ID, type="text", value="", debounce=True, persistence=True,
+                      persistence_type="session", placeholder="price, trade or source",
+                      className="blotter-filter-search")]),
+        html.Div(className="blotter-filter", style={"minWidth": "170px"}, children=[
+            html.Label("Status"),
+            dcc.Dropdown(id=MARKS_STATUS_ID, value=[], multi=True, placeholder="All", persistence=True,
+                         persistence_type="session", className="blotter-filter-dropdown",
+                         options=[{"label": "Missing", "value": "MISSING"}, {"label": "Check", "value": "CHECK"},
+                                  {"label": "OK", "value": "OK"}])]),
+        html.Div(className="blotter-filter", style={"minWidth": "200px"}, children=[
+            html.Label("Commodity / sector"),
+            dcc.Dropdown(id=MARKS_FILTER_ID, options=[], value=[], multi=True, placeholder="All", persistence=True,
+                         persistence_type="session", className="blotter-filter-dropdown")]),
+    ]
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
-    """The Data tab (2026-09-29): the status line, Missing and what it blocks, Marks check (its
-    filter bar static, so its choice and focus survive each re-read), Reference closes, Contract
-    dates, Diagnostics (one closed fold, the connection check button static inside it), the Data
-    issues drawer. Every container is filled by the callbacks of `register_callbacks`."""
+    """The Data tab (Phase G): the status line, Problems (only when any), Marks check (its bar
+    static, its choices kept for the session), Reference closes, Contract dates, Diagnostics (one
+    closed fold, the connection check button static inside it), the Data issues drawer. Every
+    container is filled by the callbacks of `register_callbacks`."""
     return html.Div(className="market-data", children=[
         about(TAB_TITLE, TAB_ABOUT, level="h3"),
         # BODY_ID holds the one status line (the first output of the body callback)
         html.Div(id=BODY_ID, className="status-line data-status-line", children=message_box("Loading...")),
-        html.Div(id=MISSING_PANEL_ID, className="data-block"),
-        html.Div(id=MARKS_SECTION_ID, className="section data-block", children=[
-            about(SUSPECT_TITLE, MARKS_ABOUT, level="h4", style={"marginTop": "0"}),
+        kit.card(id=MISSING_PANEL_ID, style=_HIDDEN, children=[
+            kit.strip([kit.strip_title(PROBLEMS_TITLE, PROBLEMS_ABOUT),
+                       html.Span(id=PROBLEMS_META_ID, className="book-section-meta"),
+                       html.Button("Download CSV", id=PROBLEMS_CSV_ID, n_clicks=0, className="btn btn--ghost",
+                                   title="The problems, every column, with their full sentences"),
+                       dcc.Download(id=PROBLEMS_DOWNLOAD_ID)]),
+            html.Div(id=PROBLEMS_SLOT_ID, className=kit.SLOT_CLASS),
+            dcc.Store(id=PROBLEMS_STORE_ID, data=[]),
+            dcc.Store(id=PROBLEMS_SORT_ID, storage_type="session"),
+        ]),
+        kit.card(id=MARKS_SECTION_ID, children=[
+            kit.strip([kit.strip_title(SUSPECT_TITLE, MARKS_ABOUT),
+                       html.Span(id=MARKS_META_ID, className="book-section-meta"),
+                       html.Button("Download CSV", id=MARKS_CSV_ID, n_clicks=0, className="btn btn--ghost",
+                                   title="The prices showing, every column, at full figures"),
+                       dcc.Download(id=MARKS_DOWNLOAD_ID)]),
             html.Div(id=MARKS_EMPTY_ID),
-            html.Div(id=MARKS_TOOLS_ID, className="blotter-filter-bar", style=_HIDDEN, children=[
-                html.Div(className="blotter-filter", children=[
-                    html.Label("Commodity / sector"),
-                    dcc.Dropdown(id=MARKS_FILTER_ID, options=[], value=[], multi=True, placeholder="All",
-                                 className="blotter-filter-dropdown"),
-                ]),
-                html.Div(className="blotter-filter", children=[
-                    html.Label("Search"),
-                    dcc.Input(id=MARKS_SEARCH_ID, type="text", value="", debounce=True,
-                              placeholder="instrument or source", className="blotter-filter-search"),
-                ]),
-                html.Span(id=MARKS_META_ID, className="status-line data-marks-meta"),
-                html.Button("Download CSV", id=MARKS_CSV_ID, n_clicks=0, className="btn btn--ghost",
-                            title="The rows shown, at full figures"),
-                dcc.Download(id=MARKS_DOWNLOAD_ID),
-            ]),
-            html.Div(id=MARKS_TABLE_WRAP_ID),
+            html.Div(id=MARKS_TOOLS_ID, className="blotter-filter-bar", style=_HIDDEN, children=_marks_controls()),
+            html.Div(id=MARKS_TABLE_WRAP_ID, className=kit.SLOT_CLASS),
             dcc.Store(id=MARKS_STORE_ID, data=[]),
+            dcc.Store(id=MARKS_SORT_ID, storage_type="session"),
         ]),
         html.Div(id=PAST_CLOSES_PANEL_ID, className="data-block"),
         html.Div(id=CONTRACT_DATES_PANEL_ID, className="data-block"),
@@ -2121,14 +2072,17 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """The body (every block, on the header's as-of, a data change and the safety timer), the
-    marks-check filter, its CSV, and the Bloomberg connection check. `get_db_path` is the shell's
-    zero-arg callable returning the database path."""
+    """The body (every block, on the header's as-of and a data change), the problems' and the
+    marks check's tables (their filter, sort and CSV), and the Bloomberg connection check.
+    `get_db_path` is the shell's zero-arg callable returning the database path."""
+    import dash
+    from dash import ALL
     from ui.tabs.header import AS_OF_STORE_ID as HEADER_AS_OF_STORE_ID
 
     @app.callback(
         Output(BODY_ID, "children"),
-        Output(MISSING_PANEL_ID, "children"),
+        Output(PROBLEMS_STORE_ID, "data"),
+        Output(MISSING_PANEL_ID, "style"),
         Output(MARKS_STORE_ID, "data"),
         Output(MARKS_FILTER_ID, "options"),
         Output(MARKS_EMPTY_ID, "children"),
@@ -2142,31 +2096,65 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Input(BOOK_REVISION_ID, "data"),
     )
     def _update_body(as_of_date, *_triggers):
-        return tuple(compact(x) for x in render(as_of_date, get_db_path()))
+        out = render(as_of_date, get_db_path())
+        return tuple(x if isinstance(x, (list, dict)) and i in (1, 2, 3, 4, 6) else compact(x)
+                     for i, x in enumerate(out))
 
-    @app.callback(
-        Output(MARKS_TABLE_WRAP_ID, "children"),
-        Output(MARKS_META_ID, "children"),
-        Input(MARKS_STORE_ID, "data"),
-        Input(MARKS_FILTER_ID, "value"),
-        Input(MARKS_SEARCH_ID, "value"),
-    )
-    def _filter_marks(rows, chosen, search):
-        return marks_table_view(rows, chosen, search)
+    @app.callback(Output(PROBLEMS_SLOT_ID, "children"), Output(PROBLEMS_META_ID, "children"),
+                  Input(PROBLEMS_STORE_ID, "data"), Input(PROBLEMS_SORT_ID, "data"))
+    def _problems(rows, sort):
+        rows = rows or []
+        if not rows:
+            return html.Div(), ""
+        red = sum(1 for r in rows if r.get("level") == "red")
+        meta = f"{len(rows):,} · {red:,} blocking" if red else f"{len(rows):,} to check"
+        return compact(data_checks.problems_table(rows, sort, PROBLEM_SORT_TYPE)), meta
 
-    @app.callback(
-        Output(MARKS_DOWNLOAD_ID, "data"),
-        Input(MARKS_CSV_ID, "n_clicks"),
-        State(MARKS_STORE_ID, "data"),
-        State(MARKS_FILTER_ID, "value"),
-        State(MARKS_SEARCH_ID, "value"),
-        State(HEADER_AS_OF_STORE_ID, "data"),
-        prevent_initial_call=True,
-    )
-    def _marks_csv(_n, rows, chosen, search, as_of_date):
-        shown = filter_marks(rows, chosen, search)
-        frame = pd.DataFrame([{k: r.get(k) for k in MARKS_CSV_COLUMNS} for r in shown], columns=MARKS_CSV_COLUMNS)
-        return dcc.send_data_frame(frame.to_csv, f"marks-{as_of_date or 'today'}.csv", index=False)
+    @app.callback(Output(MARKS_TABLE_WRAP_ID, "children"), Output(MARKS_META_ID, "children"),
+                  Input(MARKS_STORE_ID, "data"), Input(MARKS_STATUS_ID, "value"), Input(MARKS_FILTER_ID, "value"),
+                  Input(MARKS_SEARCH_ID, "value"), Input(MARKS_SORT_ID, "data"))
+    def _marks(rows, statuses, groups, search, sort):
+        rows = rows or []
+        if not rows:
+            return html.Div(), ""
+        shown = data_checks.filter_marks(rows, statuses, groups, search)
+        meta = f"{len(shown):,} of {len(rows):,}" if len(shown) != len(rows) else f"{len(rows):,} prices"
+        return compact(data_checks.marks_table(shown, sort, MARK_SORT_TYPE, len(rows))), meta
+
+    def _sorter(store_id: str, sort_type: str) -> None:
+        @app.callback(Output(store_id, "data"), Input({"type": sort_type, "idx": ALL}, "n_clicks"),
+                      State(store_id, "data"), prevent_initial_call=True)
+        def _sort(_clicks, current):
+            trig = dash.ctx.triggered_id
+            if not isinstance(trig, dict) or not kit.clicked(dash.ctx.triggered):
+                return dash.no_update
+            return kit.next_sort(current, str(trig.get("idx") or ""))
+
+    _sorter(PROBLEMS_SORT_ID, PROBLEM_SORT_TYPE)
+    _sorter(MARKS_SORT_ID, MARK_SORT_TYPE)
+
+    @app.callback(Output(MARKS_DOWNLOAD_ID, "data"), Input(MARKS_CSV_ID, "n_clicks"),
+                  State(MARKS_STORE_ID, "data"), State(MARKS_STATUS_ID, "value"), State(MARKS_FILTER_ID, "value"),
+                  State(MARKS_SEARCH_ID, "value"), State(MARKS_SORT_ID, "data"), State(HEADER_AS_OF_STORE_ID, "data"),
+                  prevent_initial_call=True)
+    def _marks_csv(n_clicks, rows, statuses, groups, search, sort, as_of_date):
+        if not n_clicks:
+            return None
+        shown = kit.sort_records(data_checks.filter_marks(rows, statuses, groups, search), sort, data_checks.MARK_SORT)
+        cols = data_checks.MARK_CSV_COLUMNS
+        frame = pd.DataFrame([{k: r.get(k) for k in cols} for r in shown], columns=cols)
+        return dcc.send_data_frame(frame.to_csv, f"marks-check-{as_of_date or 'today'}.csv", index=False)
+
+    @app.callback(Output(PROBLEMS_DOWNLOAD_ID, "data"), Input(PROBLEMS_CSV_ID, "n_clicks"),
+                  State(PROBLEMS_STORE_ID, "data"), State(PROBLEMS_SORT_ID, "data"),
+                  State(HEADER_AS_OF_STORE_ID, "data"), prevent_initial_call=True)
+    def _problems_csv(n_clicks, rows, sort, as_of_date):
+        if not n_clicks or not rows:
+            return None
+        shown = kit.sort_records(rows, sort, data_checks.PROBLEM_SORT)
+        cols = data_checks.PROBLEM_CSV_COLUMNS
+        frame = pd.DataFrame([{k: r.get(k) for k in cols} for r in shown], columns=cols)
+        return dcc.send_data_frame(frame.to_csv, f"data-problems-{as_of_date or 'today'}.csv", index=False)
 
     @app.callback(
         Output(BBG_RESULTS_ID, "children"),

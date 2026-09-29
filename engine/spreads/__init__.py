@@ -116,6 +116,14 @@ Carry (2026-09-29; ``carry.py``): the roll-down of each calendar position and te
 pair over the next contract step on the research app's curve, in the pair's unit and in USD.
 Research context: never a mark, never in P&L, delta or a total.
 
+Trades (2026-09-29, Phase G; ``trades.py``): the trade, Jason's PBRoot name, is the unit of the
+screens. ``trade_book(conn, as_of, spreads)`` gives every trade's Book row and panel in one dict:
+its legs (hedges last), its type by a written rule (calendar, cross exchange, cross product,
+mixed with its parts, outright; a disagreeing PBRoot decimal named), what it is in words, its size
+and value balance, its level (a China-against-the-West pair the converted ratio, China on top),
+carry, hedge, leftover, rolls, next key date, P&L (the strategy position's, ``value_book`` rows
+summed) and flags. ``level_history`` gives its level and LTD on past closes, rolls marked.
+
 Tables: ``spread_overrides`` (``overrides.py``), created defensively here. Its read is wired into
 the rule; nothing writes it yet.
 """
@@ -136,6 +144,7 @@ from engine.spreads.scorecard import scorecard
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
 from engine.spreads.strategies import strategies_from, strategy_entry
 from engine.spreads.templates import Template, TemplateLeg, load_templates
+from engine.spreads.trades import level_history, trade_book
 from engine.spreads.trade_type import (
     CROSS_EXCHANGE, CROSS_PRODUCT, NO_TYPE, SHAPE_TYPES, SOURCE_INFERRED, SOURCE_LABEL, SOURCE_MIXED, SOURCE_NONE,
     TERM_STRUCTURE, TRADE_TYPES, Inference, TypeLeg, classify, infer, outright_fields, type_fields,
@@ -149,5 +158,5 @@ __all__ = [
     "TERM_STRUCTURE", "TOLERANCE", "TRADE_TYPES", "Template", "TemplateLeg", "TypeLeg", "book_spreads", "classify",
     "daily_split", "ensure_overrides_table", "history_dates", "infer", "load_templates", "outright_fields",
     "override_problems", "period_explain", "position_history", "positions_from", "read_overrides", "research_key", "strategies_from",
-    "strategy_entry", "type_fields",
+    "strategy_entry", "type_fields", "level_history", "trade_book",
 ]

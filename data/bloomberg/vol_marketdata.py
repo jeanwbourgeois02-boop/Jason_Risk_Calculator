@@ -432,6 +432,35 @@ def _classify_hist_ticker(sec_data, field_name: str) -> dict:
     return {"value": None, "status": "NO_VALUE", "detail": "no value returned for this ticker"}
 
 
+def _read_one(out: Dict[str, dict], get_element, classify) -> None:
+    """Classify one security's element into `out[ticker]`; an element that cannot be read
+    is that ticker's NO_VALUE with the reason, never the batch's (2026-09-29)."""
+    ticker = None
+    try:
+        sd = get_element()
+        ticker = sd.getElementAsString("security")
+        out[ticker] = classify(sd, VOL_FIELD)
+    except Exception as exc:  # noqa: BLE001 -- this ticker fails alone
+        if ticker is not None:
+            out[ticker] = {"value": None, "status": "NO_VALUE",
+                           "detail": f"answer not readable: {type(exc).__name__}: {exc}"[:300]}
+
+
+# The reason a vol quote is dropped when Bloomberg's value is not a finite number (the same
+# words as data/bloomberg/fwd_curve.NOT_A_NUMBER; kept here so this module imports nothing of
+# the FX curve's). 2026-09-29, Phase G "Smooth and contained".
+NOT_A_NUMBER = "Bloomberg sent a value that is not a number"
+
+
+def _finite_vol(value) -> Optional[float]:
+    """A vol quote as a float when it is a finite int / float (not a bool), else None. A
+    string is not taken even if it reads as a number (as before: only real numbers were)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    out = float(value)
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
 class VolBloombergSource:
     """Live blpapi wrapper for FX vol quotes. Opens its OWN blpapi.Session -- see module
     docstring -- unless `session` / `service` (an already started session and its opened
@@ -550,14 +579,14 @@ class VolBloombergSource:
                     if not msg.hasElement("securityData"):
                         continue
                     sec_data = msg.getElement("securityData")
+                    # One security at a time (2026-09-29, Phase G): an answer that cannot be
+                    # read fails that ticker alone (NO_VALUE with its reason) instead of the
+                    # whole batch; the tickers already read are kept.
                     if live:
                         for i in range(sec_data.numValues()):
-                            sd = sec_data.getValueAsElement(i)
-                            ticker = sd.getElementAsString("security")
-                            out[ticker] = _classify_live_ticker(sd, VOL_FIELD)
+                            _read_one(out, lambda i=i: sec_data.getValueAsElement(i), _classify_live_ticker)
                     else:
-                        ticker = sec_data.getElementAsString("security")
-                        out[ticker] = _classify_hist_ticker(sec_data, VOL_FIELD)
+                        _read_one(out, lambda: sec_data, _classify_hist_ticker)
                 if event_type == blpapi.Event.RESPONSE and event_is_ours:
                     break
             return out, None
@@ -596,16 +625,26 @@ class VolBloombergSource:
                 })
                 continue
             val = info.get("value")
-            if val is None or isinstance(val, bool) or not isinstance(val, (int, float)):
+            if val is None:
                 diagnostics.append({
                     "pair": pair, "tenor": tenor, "quote_type": quote_type, "ticker": ticker,
                     "status": "MISSING", "bbg_status": info.get("status", "NO_VALUE"),
                     "detail": info.get("detail") or batch_detail or "no value returned for this ticker",
                 })
                 continue
+            value = _finite_vol(val)
+            if value is None:
+                # 2026-09-29 (Phase G): 'N.A.', a NaN or an infinity fails this quote alone
+                # and is never a vol quote (a NaN used to pass and fail the whole write).
+                diagnostics.append({
+                    "pair": pair, "tenor": tenor, "quote_type": quote_type, "ticker": ticker,
+                    "status": "MISSING", "bbg_status": "NO_VALUE",
+                    "detail": f"{NOT_A_NUMBER} ({VOL_FIELD} {val!r})"[:300],
+                })
+                continue
             pairs_out.setdefault(pair, PairVolSnapshot(pair=pair, as_of=effective_as_of, quotes=[]))
             pairs_out[pair].quotes.append(VolQuote(
-                tenor=tenor, quote_type=quote_type, ticker=ticker, value=float(val),
+                tenor=tenor, quote_type=quote_type, ticker=ticker, value=value,
                 field=VOL_FIELD, source="BBG",
             ))
 
@@ -644,6 +683,7 @@ def write_vol_quotes(
     snapshot: Union[VolFetchResult, PairVolSnapshot, Dict[str, PairVolSnapshot]],
     as_of_date: str,
     source: str = "BBG_BDP",
+    rejected: Optional[List[dict]] = None,
 ) -> int:
     """Insert one row per quote into vol_quotes (creating the table defensively if it
     doesn't exist -- see module docstring). Accepts a VolFetchResult (the normal case,
@@ -653,6 +693,11 @@ def write_vol_quotes(
     Uses INSERT OR REPLACE keyed on (as_of_date, pair, tenor, quote_type, source), so
     re-running a pull for the same day/source updates rather than duplicate-key errors.
     Returns the number of rows written.
+
+    A quote whose value is not a finite number is never written (2026-09-29, Phase G): it is
+    left out with `NOT_A_NUMBER`, appended to `rejected` when given as {pair, tenor,
+    quote_type, ticker, reason}, and the other quotes are written (a NaN used to fail the
+    NOT NULL column and lose the whole write). One short transaction; no request inside.
     """
     ensure_vol_quotes_table(conn)
     if isinstance(snapshot, VolFetchResult):
@@ -665,10 +710,19 @@ def write_vol_quotes(
         raise TypeError(f"Unsupported snapshot type for write_vol_quotes: {type(snapshot)!r}")
 
     stamp = snapped_at(date.fromisoformat(as_of_date))
-    rows = [
-        (as_of_date, pair, q.tenor, q.quote_type, float(q.value), q.ticker, q.field, source, stamp)
-        for pair, pv in pairs.items() for q in pv.quotes
-    ]
+    rows = []
+    for pair, pv in pairs.items():
+        for q in pv.quotes:
+            try:
+                value = float(q.value)
+            except (TypeError, ValueError):
+                value = float("nan")
+            if value != value or value in (float("inf"), float("-inf")):
+                if rejected is not None:
+                    rejected.append({"pair": pair, "tenor": q.tenor, "quote_type": q.quote_type, "ticker": q.ticker,
+                                     "reason": f"{NOT_A_NUMBER} ({q.value!r}); not written"})
+                continue
+            rows.append((as_of_date, pair, q.tenor, q.quote_type, value, q.ticker, q.field, source, stamp))
     with conn:
         conn.executemany(
             "INSERT OR REPLACE INTO vol_quotes "

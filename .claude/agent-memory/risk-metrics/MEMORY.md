@@ -3,4 +3,5 @@
 - [Commodity underlyers, Phase 4](commodity_phase4_2026_09_24.md) — COMMODITY parts, SECTOR/SPREAD views, crisis fallback, shock days, LME mapping, how tests run without pyarrow.
 - [Perf profile 2026-09-28](perf_profile_2026_09_28.md) — book_risk cold 3 s / warm 0.6 s on the sample; caches survive a sample switch; the 16 s chip is GIL contention, not the engine; the two fixes are risk-history and spreads-engine.
 - [Position risk 2026-09-29](position_risk_2026_09_29.md) — positions by period_explain ids, component-VaR tail rule, correlation window, hedge exception (partial_reason).
-- [Never kill all python](feedback_never_kill_all_python.md) — no taskkill by image name; no `py -3 -` heredocs; scripts in scratchpad with timeout and </dev/null.
+- [Trade risk, Phase G](trade_risk_2026_09_29.md) — trades.py choices (sides, 2-day, best-fit sign, level pick, CM splice for z), memo mtime pitfall; the research DB here is MOCK (check source_kind first).
+- [Never kill all python](feedback_never_kill_all_python.md) — no kills at all; never `py -3 -` even with </dev/null; own scratch subfolder (shared scratchpad).

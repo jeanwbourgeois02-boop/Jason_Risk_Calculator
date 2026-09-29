@@ -22,6 +22,11 @@ multiplier, unit, Bloomberg ticker or expiry asks here.
 - ``apply_fixes``: the Bloomberg check's fixes worksheet (columns ``WORKSHEET_COLUMNS``) applied
   to ``config/contracts.csv``, only the ``FIXABLE_FIELDS``, the multiplier recomputed, the whole
   file validated by the loader before it is written (``fixes.py``).
+- ``ContractRoot.family`` (one of ``FAMILIES``: 'copper', 'ferrous', 'cattle' ...), how whole
+  trades are grouped; ``exchange_close(exchange)`` and ``ContractRoot.close``: (local time, IANA
+  time zone) of the daily close Bloomberg's PX_LAST reflects, the root's own ``close_time`` where
+  it differs from its exchange's (``EXCHANGE_CLOSE``). Display and risk grouping only, never a
+  mark time (``universe.py``).
 - ``quantity_factor``: how many of one unit make another of the same dimension (mass, volume,
   energy), the table the multiplier check uses (``universe.py``).
 
@@ -53,13 +58,22 @@ from data.contracts.options import (
 from data.contracts.resolve import AmbiguousContract, UnknownContract, contract_for, resolve_future
 from data.contracts.static import ensure_static_table, static_dates, store_static_dates
 from data.contracts.tickers import MONTH_CODES, format_strike, make_contract_id, make_option_id
-from data.contracts.universe import CONTRACTS_CSV, ContractRoot, get_root, load_roots, quantity_factor
+from data.contracts.universe import (
+    CONTRACTS_CSV,
+    EXCHANGE_CLOSE,
+    FAMILIES,
+    ContractRoot,
+    exchange_close,
+    get_root,
+    load_roots,
+    quantity_factor,
+)
 
 __all__ = [
     "AMERICAN", "AmbiguousContract", "BLOOMBERG", "CALL", "CONTRACTS_CSV", "ContractMonth",
-    "ContractRoot", "ESTIMATED", "EUROPEAN", "FIXABLE_FIELDS", "MONTH_CODES", "OptionContract", "PUT",
+    "ContractRoot", "ESTIMATED", "EUROPEAN", "EXCHANGE_CLOSE", "FAMILIES", "FIXABLE_FIELDS", "MONTH_CODES", "OptionContract", "PUT",
     "SYMBOL", "UnknownContract", "WORKSHEET_COLUMNS", "apply_fixes", "averaging_period", "contract_for",
-    "contract_month", "ensure_static_table", "estimated_last_trade_date", "format_strike", "get_root",
+    "contract_month", "ensure_static_table", "estimated_last_trade_date", "exchange_close", "format_strike", "get_root",
     "load_roots", "make_contract_id", "make_option_id", "option_contract", "option_for",
     "option_request_ticker", "quantity_factor", "request_ticker", "resolve_future", "resolve_option",
     "static_dates", "store_static_dates",

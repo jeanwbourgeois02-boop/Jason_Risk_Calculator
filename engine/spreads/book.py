@@ -1073,8 +1073,9 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
       lots (signed, paired), whole_lots, units (paired physical, signed), unit, weight, currency,
       trade_ids, contract_trade_ids}], two, the level's first leg first), trade_ids, size,
       size_unit, direction, residual_units, residual_unit, gross_usd, net_usd, residual_usd (=
-      net_usd), notional_reason, unit ('ratio' for a China-against-West template the desk
-      screens as a ratio, else the template's / the root's quote unit / 'USD/<common unit>'),
+      net_usd), notional_reason, unit ('ratio' for a China-against-the-West pair: the CONVERTED
+      ratio China over foreign since 2026-09-29, ``level_china_leg`` its numerator leg (-1 on
+      any other pair); else the template's / the root's quote unit / 'USD/<common unit>'),
       level_entry, level_prev, level_now, level_change, usd_per_unit (each with ``<key>_reason``),
       level_prev_date, unit_alt, level_alt ({entry, prev, now, change} or None), level_alt_reason,
       level_sources, level_prices, level_spec, next_event ({contract_id, event, date, alert_date,

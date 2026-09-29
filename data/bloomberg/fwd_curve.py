@@ -59,6 +59,26 @@ Point = Tuple[date, float]
 _MID_KEYS = ("MID", "OUTRIGHT", "RATE", "PX_MID", "VALUE")
 _DATE_KEYS = ("SETTLE", "DATE", "MATURITY")
 
+# The one reason given when Bloomberg's answer carries something that is not a finite number
+# where a price belongs ('N.A.', a NaN, an infinity, an empty bulk row) (2026-09-29, Phase G
+# "Smooth and contained"): that item fails alone with this reason and is never turned into a
+# mark, a curve quote or a vol quote. rates_marketdata and vol_marketdata use the same words.
+NOT_A_NUMBER = "Bloomberg sent a value that is not a number"
+
+
+def finite_number(v) -> Optional[float]:
+    """`v` as a float when it is a finite number (a bool, a string that is not a number,
+    None, NaN or an infinity give None)."""
+    if isinstance(v, bool):
+        return None
+    try:
+        out = float(v)
+    except (TypeError, ValueError):
+        return None
+    if out != out or out in (float("inf"), float("-inf")):
+        return None
+    return out
+
 
 def _to_date(v) -> Optional[date]:
     if isinstance(v, datetime):
@@ -78,10 +98,23 @@ def points_from_rows(rows: List[dict]) -> Tuple[List[Point], List[str]]:
     """rows: list of {column_name: value} for each tenor. Returns (sorted points, columns).
     Date column: first column whose name contains SETTLE/DATE/MATURITY with a parseable
     date. Value: column named like MID/OUTRIGHT/RATE; else mean of BID and ASK; else the
-    single numeric column. Rows without both are skipped."""
+    single numeric column. Rows without both are skipped (`parse_rows` says why)."""
+    points, columns, _ = parse_rows(rows)
+    return points, columns
+
+
+def parse_rows(rows: List[dict]) -> Tuple[List[Point], List[str], List[str]]:
+    """`points_from_rows` plus the reason each skipped row was left out (2026-09-29): an
+    empty row, or a row whose value is not a finite number, is `NOT_A_NUMBER`; a row with no
+    date, or with a value at or below zero, says so. A value that is not a finite number is
+    never a point (an infinity used to pass the `> 0` test)."""
     points: List[Point] = []
     columns: List[str] = []
-    for row in rows:
+    skipped: List[str] = []
+    for n, row in enumerate(rows or [], start=1):
+        if not isinstance(row, dict) or not row:
+            skipped.append(f"row {n}: {NOT_A_NUMBER} (an empty FWD_CURVE row)")
+            continue
         if not columns:
             columns = list(row.keys())
         settle = None
@@ -109,10 +142,18 @@ def points_from_rows(rows: List[dict]) -> Tuple[List[Point], List[str]]:
                 value = (bid + ask) / 2.0
         if value is None and len(numeric) == 1:
             value = next(iter(numeric.values()))
-        if settle is not None and value is not None and value > 0:
+        if value is not None and finite_number(value) is None:
+            value = None                        # a NaN or an infinity is no price
+        if settle is None:
+            skipped.append(f"row {n}: no settle date in {row!r}"[:200])
+        elif value is None:
+            skipped.append(f"row {n} ({settle.isoformat()}): {NOT_A_NUMBER}")
+        elif value <= 0:
+            skipped.append(f"row {n} ({settle.isoformat()}): outright {value!r} is not above zero")
+        else:
             points.append((settle, value))
     points.sort()
-    return points, columns
+    return points, columns, skipped
 
 
 def outright_for_date(points: List[Point], target: date, spot: Optional[float] = None,
@@ -154,8 +195,14 @@ def element_rows(bulk_element) -> List[dict]:
 
 def request_fwd_curves(blpapi, session, service, tickers: List[str], timeout_ms: int = 15000
                        ) -> Dict[str, dict]:
-    """{ticker: {'points': [...], 'columns': [...], 'error': str}} for FWD_CURVE in
-    OUTRIGHTS format. Plain Python out; no blpapi objects escape.
+    """{ticker: {'points': [...], 'columns': [...], 'skipped': [...], 'error': str}} for
+    FWD_CURVE in OUTRIGHTS format. Plain Python out; no blpapi objects escape.
+
+    Never raises over one ticker (2026-09-29, Phase G): a securityError, a field exception,
+    an answer that cannot be read, or a table with nothing but non-numbers fails that ticker
+    alone with its reason in `error`; `skipped` names each table row left out (a row whose
+    value is not a finite number: `NOT_A_NUMBER`), and the ticker's other rows still count.
+    It takes no database connection, so it can never hold a write lock while it waits.
 
     Sent with its own CorrelationId (2026-09-18): without one, a message left over from a
     PREVIOUS request on the same session/service that timed out (e.g. live.py's own SPOT
@@ -174,7 +221,8 @@ def request_fwd_curves(blpapi, session, service, tickers: List[str], timeout_ms:
     ov.setElement("value", "OUTRIGHTS")
     correlation_id = blpapi.CorrelationId(id(req))
     session.sendRequest(req, correlationId=correlation_id)
-    out: Dict[str, dict] = {t: {"points": [], "columns": [], "error": "no response for ticker"} for t in tickers}
+    out: Dict[str, dict] = {t: {"points": [], "columns": [], "skipped": [], "error": "no response for ticker"}
+                            for t in tickers}
     while True:
         ev = session.nextEvent(timeout_ms)
         if ev.eventType() == blpapi.Event.TIMEOUT:
@@ -195,29 +243,70 @@ def request_fwd_curves(blpapi, session, service, tickers: List[str], timeout_ms:
                 continue
             sec = msg.getElement("securityData")
             for i in range(sec.numValues()):
-                sd = sec.getValueAsElement(i)
-                t = sd.getElementAsString("security")
-                if sd.hasElement("securityError"):
-                    out[t] = {"points": [], "columns": [],
-                              "error": "securityError: " + sd.getElement("securityError").getElementAsString("message")}
-                    continue
-                fe = []
-                if sd.hasElement("fieldExceptions"):
-                    fx = sd.getElement("fieldExceptions")
-                    for k in range(fx.numValues()):
-                        x = fx.getValueAsElement(k)
-                        fe.append(f"{x.getElementAsString('fieldId')}: {x.getElement('errorInfo').getElementAsString('message')}")
-                fd = sd.getElement("fieldData")
-                if not fd.hasElement("FWD_CURVE"):
-                    out[t] = {"points": [], "columns": [], "error": "fieldExceptions: " + "; ".join(fe) if fe else "FWD_CURVE absent"}
-                    continue
-                rows = element_rows(fd.getElement("FWD_CURVE"))
-                points, columns = points_from_rows(rows)
-                out[t] = {"points": points, "columns": columns,
-                          "error": "" if points else f"FWD_CURVE table not parseable; columns={columns}"}
+                # One security at a time (2026-09-29, Phase G): an answer that cannot be
+                # read fails that ticker alone, with its reason; the others are kept.
+                t = None
+                try:
+                    sd = sec.getValueAsElement(i)
+                    t = sd.getElementAsString("security")
+                    out[t] = _fwd_curve_answer(sd)
+                except Exception as exc:  # noqa: BLE001 -- this ticker fails alone
+                    if t is not None:
+                        out[t] = {"points": [], "columns": [], "skipped": [],
+                                  "error": f"answer not readable: {type(exc).__name__}: {exc}"[:300]}
         if ev.eventType() == blpapi.Event.RESPONSE and event_is_ours:
             break
     return out
+
+
+def _error_text(el, key: str) -> str:
+    """`el.<key>`'s message, else the element's own text."""
+    sub = el.getElement(key)
+    try:
+        if sub.hasElement("message"):
+            return sub.getElementAsString("message")
+    except Exception:  # noqa: BLE001
+        pass
+    return str(sub)
+
+
+def _field_exceptions(sd) -> List[str]:
+    """'FIELD: message' per field exception of one security; an unreadable one says so."""
+    out: List[str] = []
+    if not sd.hasElement("fieldExceptions"):
+        return out
+    fx = sd.getElement("fieldExceptions")
+    for k in range(fx.numValues()):
+        try:
+            x = fx.getValueAsElement(k)
+            out.append(f"{x.getElementAsString('fieldId')}: {x.getElement('errorInfo').getElementAsString('message')}")
+        except Exception as exc:  # noqa: BLE001
+            out.append(f"field exception not readable ({type(exc).__name__})")
+    return out
+
+
+def _fwd_curve_answer(sd) -> dict:
+    """One security's FWD_CURVE answer -> {'points', 'columns', 'skipped', 'error'}.
+    `skipped`: the reason each table row was left out (`parse_rows`); a table whose every
+    row was a non-number fails with `NOT_A_NUMBER`."""
+    if sd.hasElement("securityError"):
+        return {"points": [], "columns": [], "skipped": [], "error": "securityError: " + _error_text(sd, "securityError")}
+    fe = _field_exceptions(sd)
+    fd = sd.getElement("fieldData") if sd.hasElement("fieldData") else None
+    if fd is None or not fd.hasElement("FWD_CURVE"):
+        return {"points": [], "columns": [], "skipped": [],
+                "error": ("fieldExceptions: " + "; ".join(fe)) if fe else "FWD_CURVE absent"}
+    rows = element_rows(fd.getElement("FWD_CURVE"))
+    points, columns, skipped = parse_rows(rows)
+    if points:
+        error = ""
+    elif not rows:
+        error = f"{NOT_A_NUMBER}: the FWD_CURVE table came back with no rows"
+    elif any(NOT_A_NUMBER in s for s in skipped):
+        error = f"{NOT_A_NUMBER} in the FWD_CURVE table ({len(skipped)} of {len(rows)} rows left out); columns={columns}"
+    else:
+        error = f"FWD_CURVE table not parseable; columns={columns}"
+    return {"points": points, "columns": columns, "skipped": skipped, "error": error}
 
 
 def historical_points_by_day(tenor_series: Dict[str, Dict[str, Dict[str, object]]],
@@ -246,11 +335,8 @@ def historical_points_by_day(tenor_series: Dict[str, Dict[str, Dict[str, object]
             settle = _to_date(sd)
             if settle is None:
                 continue
-            try:
-                value = float(px)
-            except (TypeError, ValueError):
-                continue
-            if value <= 0:
+            value = finite_number(px)          # a NaN or an infinity is no point (2026-09-29)
+            if value is None or value <= 0:
                 continue
             by_day.setdefault(day_iso, []).append((settle, value))
     for points in by_day.values():
@@ -348,7 +434,8 @@ def historical_curve(day: date, tenor_rows: Dict[str, Dict[str, object]], spot: 
     one}}) and that day's SPOT close. Returns
     {'points': [(settle_date, outright), ...] sorted, 'own_dates': {settle dates that are
     Bloomberg's own SETTLE_DT}, 'unit': OUTRIGHT | POINTS | '', 'reason': why there are no
-    points, else ''}.
+    points, else '', 'skipped': one sentence per tenor whose PX_LAST was not a finite number
+    (`NOT_A_NUMBER`), left out of the curve (2026-09-29)}.
 
     POINTS: outright = spot + points / scale, exactly pull_marks.outright_from_points
     (`scale` = the pair's points divisor, pull_marks.fetch_points_scales: FWD_POINTS_SCALE
@@ -359,16 +446,23 @@ def historical_curve(day: date, tenor_rows: Dict[str, Dict[str, object]], spot: 
     points, since spot and scale are the same for every pillar. OUTRIGHT: each positive
     value is used as it came. Nothing is guessed: no SPOT that day, or points with no
     scale, gives no points and a reason."""
-    out = {"points": [], "own_dates": set(), "unit": "", "reason": ""}
+    out = {"points": [], "own_dates": set(), "unit": "", "reason": "", "skipped": []}
+    label = pair or "this pair"
     quotes: Dict[str, float] = {}
     for tenor, row in tenor_rows.items():
-        try:
-            quotes[tenor] = float((row or {}).get("PX_LAST"))
-        except (TypeError, ValueError):
+        raw = (row or {}).get("PX_LAST")
+        if raw is None:
+            continue                            # no close for this tenor that day
+        value = finite_number(raw)
+        if value is None:
+            # 2026-09-29 (Phase G): 'N.A.', a NaN or an infinity is left out with its reason;
+            # a NaN used to pass float() and reach the curve as a NaN outright.
+            out["skipped"].append(f"{label} {tenor} on {day.isoformat()}: {NOT_A_NUMBER} (PX_LAST {raw!r}); left out")
             continue
-    label = pair or "this pair"
+        quotes[tenor] = value
     if not quotes:
-        out["reason"] = f"Bloomberg returned no forward tenor prices for {label} on {day.isoformat()}"
+        out["reason"] = (f"{NOT_A_NUMBER} for any forward tenor of {label} on {day.isoformat()}" if out["skipped"]
+                         else f"Bloomberg returned no forward tenor prices for {label} on {day.isoformat()}")
         return out
     if spot is None or spot <= 0:
         out["reason"] = f"{label} has no SPOT close on {day.isoformat()}, so its forward tenors cannot be read"
@@ -400,7 +494,7 @@ def historical_curve(day: date, tenor_rows: Dict[str, Dict[str, object]], spot: 
         else:
             settle, is_own = tenor_settle_date(spot_day, tenor, holidays), False
         outright = spot + value / scale if unit == UNIT_POINTS else value
-        if settle is None or outright <= 0 or settle in by_date:
+        if settle is None or finite_number(outright) is None or outright <= 0 or settle in by_date:
             continue
         by_date[settle] = outright
         if is_own:
@@ -454,7 +548,10 @@ def request_lme_pillars(blpapi, session, service, tickers: List[str], timeout_ms
     missing prompt date alone is not an error: the pillar then sits on our computed date, see
     `lme_curve_marks`). Same event loop as `request_fwd_curves`: its own CorrelationId, a
     message tagged with another request's id is discarded, a whole-request responseError is
-    reported on every ticker, a TIMEOUT ends the wait."""
+    reported on every ticker, a TIMEOUT ends the wait. Never raises over one ticker
+    (2026-09-29, Phase G): a securityError, a field exception, an unreadable answer, or a
+    price that is not a finite number ('N.A.', NaN: `NOT_A_NUMBER`) fails that ticker alone.
+    No database connection, so no write lock is held while it waits."""
     no_reply = "no response for ticker"
     out: Dict[str, dict] = {t: {"value": None, "prompt_date": None, "error": no_reply} for t in tickers}
     if not tickers:
@@ -486,43 +583,51 @@ def request_lme_pillars(blpapi, session, service, tickers: List[str], timeout_ms
                 continue
             sec = msg.getElement("securityData")
             for i in range(sec.numValues()):
-                sd = sec.getValueAsElement(i)
-                t = sd.getElementAsString("security")
-                if sd.hasElement("securityError"):
-                    out[t] = {"value": None, "prompt_date": None,
-                              "error": "securityError: " + sd.getElement("securityError").getElementAsString("message")}
-                    continue
-                exceptions = []
-                if sd.hasElement("fieldExceptions"):
-                    fx = sd.getElement("fieldExceptions")
-                    for k in range(fx.numValues()):
-                        x = fx.getValueAsElement(k)
-                        exceptions.append(f"{x.getElementAsString('fieldId')}: "
-                                          f"{x.getElement('errorInfo').getElementAsString('message')}")
-                fd = sd.getElement("fieldData") if sd.hasElement("fieldData") else None
-                raw_value = raw_date = None
-                if fd is not None and fd.hasElement(LME_PRICE_FIELD):
-                    try:
-                        raw_value = fd.getElement(LME_PRICE_FIELD).getValue()
-                    except Exception:  # noqa: BLE001 -- an unreadable element is no value
-                        raw_value = None
-                if fd is not None and fd.hasElement(LME_PROMPT_DATE_FIELD):
-                    try:
-                        raw_date = fd.getElement(LME_PROMPT_DATE_FIELD).getValue()
-                    except Exception:  # noqa: BLE001
-                        raw_date = None
-                value = _positive_number(raw_value)
-                prompt = _to_date(raw_date)
-                if value is not None:
-                    error = ""
-                elif raw_value is not None:
-                    error = f"{LME_PRICE_FIELD} {raw_value!r} is not a positive price"
-                else:
-                    error = ("fieldExceptions: " + "; ".join(exceptions)) if exceptions else f"{LME_PRICE_FIELD} absent"
-                out[t] = {"value": value, "prompt_date": prompt.isoformat() if prompt else None, "error": error}
+                # One security at a time (2026-09-29, Phase G): an answer that cannot be
+                # read fails that ticker alone, with its reason; the others are kept.
+                t = None
+                try:
+                    sd = sec.getValueAsElement(i)
+                    t = sd.getElementAsString("security")
+                    out[t] = _lme_pillar_answer(sd)
+                except Exception as exc:  # noqa: BLE001 -- this ticker fails alone
+                    if t is not None:
+                        out[t] = {"value": None, "prompt_date": None,
+                                  "error": f"answer not readable: {type(exc).__name__}: {exc}"[:300]}
         if ev.eventType() == blpapi.Event.RESPONSE and event_is_ours:
             break
     return out
+
+
+def _lme_pillar_answer(sd) -> dict:
+    """One LME security's answer -> {'value', 'prompt_date', 'error'}. A price that is not a
+    finite number fails with `NOT_A_NUMBER`; a number at or below zero is not a price."""
+    if sd.hasElement("securityError"):
+        return {"value": None, "prompt_date": None, "error": "securityError: " + _error_text(sd, "securityError")}
+    exceptions = _field_exceptions(sd)
+    fd = sd.getElement("fieldData") if sd.hasElement("fieldData") else None
+    raw_value = raw_date = None
+    if fd is not None and fd.hasElement(LME_PRICE_FIELD):
+        try:
+            raw_value = fd.getElement(LME_PRICE_FIELD).getValue()
+        except Exception:  # noqa: BLE001 -- an unreadable element is no value
+            raw_value = None
+    if fd is not None and fd.hasElement(LME_PROMPT_DATE_FIELD):
+        try:
+            raw_date = fd.getElement(LME_PROMPT_DATE_FIELD).getValue()
+        except Exception:  # noqa: BLE001
+            raw_date = None
+    value = _positive_number(raw_value)
+    prompt = _to_date(raw_date)
+    if value is not None:
+        error = ""
+    elif raw_value is not None and finite_number(raw_value) is None:
+        error = f"{NOT_A_NUMBER} ({LME_PRICE_FIELD} {raw_value!r})"
+    elif raw_value is not None:
+        error = f"{LME_PRICE_FIELD} {raw_value!r} is not a positive price"
+    else:
+        error = ("fieldExceptions: " + "; ".join(exceptions)) if exceptions else f"{LME_PRICE_FIELD} absent"
+    return {"value": value, "prompt_date": prompt.isoformat() if prompt else None, "error": error}
 
 
 def _lme_marks(root_id: str, day, pillars: List[dict], quotes: Dict[str, dict],
