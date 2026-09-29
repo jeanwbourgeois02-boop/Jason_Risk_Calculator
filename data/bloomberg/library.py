@@ -111,6 +111,11 @@ OPTION_CONTRACT_DATES_FIELDS = ("OPT_EXPIRE_DT", "LAST_TRADEABLE_DT")   # unveri
 # LME forwards (Phase 5): the product, and the kind standing for a day's LME curve pillars.
 LME_PRODUCTS = ("LME_FWD",)
 LME_CURVE = "LME_CURVE"
+# A blotter row the parser could not resolve to a contract (every row loads, user 2026-09-29):
+# product and asset class 'UNRECOGNISED', no legs, no ticker. It needs nothing from Bloomberg
+# and is never asked for (hard rule 8): the queries below leave it out by name, not only by
+# its lack of legs. inventory.unrecognised lists these trades for the Data tab.
+UNRECOGNISED = "UNRECOGNISED"
 
 # Bump whenever `compute` learns a new need (a kind, a ticker rule) or drops one: a library
 # synced by older code is then out of date although no trade changed, and the next reader
@@ -162,7 +167,7 @@ def _in(values) -> str:
 _FX_LEGS_SQL = f"""
 SELECT t.trade_id, t.product, t.trade_date, i.instrument_id, i.bbg_ticker, i.base_ccy, i.quote_ccy, l.settle_date
 FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
-WHERE i.asset_class = 'FX' AND t.product NOT IN ({_in(LME_PRODUCTS)})
+WHERE i.asset_class = 'FX' AND t.product NOT IN ({_in(LME_PRODUCTS + (UNRECOGNISED,))})
 ORDER BY i.instrument_id, l.settle_date, t.trade_id
 """
 
@@ -170,7 +175,7 @@ _FUTURE_LEGS_SQL = f"""
 SELECT t.trade_id, t.product, t.trade_date, i.instrument_id, i.bbg_ticker, l.settle_date,
        i.base_ccy, i.quote_ccy, i.expiry_date
 FROM trade_legs l JOIN trades_official t USING (trade_id) JOIN instruments i USING (instrument_id)
-WHERE i.asset_class = 'FUTURE' AND t.product NOT IN ({_in(LME_PRODUCTS + LISTED_OPTION_PRODUCTS)})
+WHERE i.asset_class = 'FUTURE' AND t.product NOT IN ({_in(LME_PRODUCTS + LISTED_OPTION_PRODUCTS + (UNRECOGNISED,))})
 ORDER BY i.instrument_id, l.settle_date, t.trade_id
 """
 

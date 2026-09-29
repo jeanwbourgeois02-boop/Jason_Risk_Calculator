@@ -27,6 +27,9 @@ not hold yet (`inputs_missing`); the backfill asks Bloomberg's history for those
 check: every mark of `mark_inventory` checked four ways (arrived, fresh, a sane move, units
 against the fills), with the trades it prices and what a problem does to them, MISSING and
 CHECK first. It reports only: a flagged mark stays the official mark.
+
+`unrecognised(conn)` (2026-09-29, every row loads) lists the trades whose contract the parser
+could not resolve (product 'UNRECOGNISED'): no mark, no Bloomberg ask, no P&L until mapped.
 """
 from __future__ import annotations
 
@@ -391,6 +394,70 @@ def _official_snap(conn: sqlite3.Connection, day: str, item: dict):
 
 
 STATUS_ON_FILE = "ON_FILE"
+
+UNRECOGNISED_BLOCKS = "no P&L: contract not recognised"
+_UNRECOGNISED_FIX = "add it to config/contracts.csv"
+
+
+def _norm_symbol(value) -> str:
+    return str(value or "").strip().upper()
+
+
+def unrecognised(conn: sqlite3.Connection) -> List[dict]:
+    """The trades on file whose blotter row the parser could not resolve to a contract
+    (product 'UNRECOGNISED', every row loads, user 2026-09-29), for the Data tab's problems:
+    one dict per trade, sorted by symbol then trade id:
+
+      trade_id, trade_name (trades.strategy, the trade id when blank), trade_date, quantity,
+      price (the file's own, as parsed), broker_symbol (the Symbol cell as written; the part
+      after 'UNRECOGNISED:' of its instrument id when the trade predates that column),
+      instrument_id, reason (the upload's own sentence for that symbol when `upload_issues`
+      holds one, else "contract not recognised: <symbol> is not in the contract list; add it
+      to config/contracts.csv"), blocks_what ("no P&L: contract not recognised").
+
+    Such a trade has no legs and needs no mark, so it is never in the Bloomberg library and
+    never asked for (hard rule 8); it is listed here and not among `mark_checks`' rows, whose
+    every row is a mark a pull can bring. [] when there are none or no trades table. Read-only."""
+    from data.bloomberg.library import UNRECOGNISED
+    try:
+        found = conn.execute(
+            "SELECT t.trade_id, t.strategy, t.trade_date, t.quantity, t.price, t.instrument_id, "
+            "COALESCE(t.broker_symbol, '') FROM trades t "
+            "LEFT JOIN instruments i USING (instrument_id) "
+            "WHERE t.product = :u OR i.asset_class = :u", {"u": UNRECOGNISED}).fetchall()
+    except sqlite3.OperationalError:
+        try:        # an older database without broker_symbol
+            found = [r + ("",) for r in conn.execute(
+                "SELECT t.trade_id, t.strategy, t.trade_date, t.quantity, t.price, t.instrument_id FROM trades t "
+                "LEFT JOIN instruments i USING (instrument_id) "
+                "WHERE t.product = :u OR i.asset_class = :u", {"u": UNRECOGNISED}).fetchall()]
+        except sqlite3.OperationalError:
+            return []
+    if not found:
+        return []
+    # The upload's own reason per symbol (the parser's sentence), when the last upload holds one.
+    reasons: dict = {}
+    try:
+        for sym, why in conn.execute("SELECT symbol, reason FROM upload_issues ORDER BY row_no, rowid"):
+            key = _norm_symbol(sym)
+            if key and why and key not in reasons:
+                reasons[key] = str(why).strip()
+    except sqlite3.OperationalError:
+        pass
+    prefix = UNRECOGNISED + ":"
+    out = []
+    for tid, strategy, trade_date, qty, price, iid, symbol in found:
+        symbol = str(symbol or "").strip()
+        if not symbol and str(iid or "").upper().startswith(prefix):
+            symbol = str(iid)[len(prefix):].strip()
+        reason = reasons.get(_norm_symbol(symbol)) or (
+            f"contract not recognised: {symbol or 'a row with no symbol'} is not in the contract list; "
+            f"{_UNRECOGNISED_FIX}")
+        out.append({"trade_id": tid, "trade_name": str(strategy or "").strip() or tid, "trade_date": trade_date,
+                    "quantity": _num(qty), "price": _num(price), "broker_symbol": symbol,
+                    "instrument_id": iid, "reason": reason, "blocks_what": UNRECOGNISED_BLOCKS})
+    out.sort(key=lambda r: (_norm_symbol(r["broker_symbol"]), str(r["trade_id"])))
+    return out
 
 
 def contract_dates_inventory(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:

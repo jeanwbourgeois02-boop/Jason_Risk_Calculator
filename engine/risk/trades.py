@@ -86,6 +86,7 @@ CHINA = "CN"
 _TRADE = "__trade"
 _MEMO_SLOTS = 4
 _MEMO: "OrderedDict[tuple, dict]" = OrderedDict()
+_BASE: "OrderedDict[tuple, dict]" = OrderedDict()
 _LOCK = threading.Lock()
 
 LEVEL_RATIO = "ratio"
@@ -145,11 +146,30 @@ def _memo_key(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, A
             getattr(history, "path", ""), getattr(history, "last_date", None), params)
 
 
-def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve: Optional[dict], history,
-           config: Dict[str, Any]) -> dict:
-    """{rows (one per trade, the full book), series {position_id: daily USD P&L}, position_risk,
-    missing}: kept in process per `_memo_key`."""
+def _levels_key(book_levels: Optional[Dict[str, dict]]) -> tuple:
+    """The part of the memo key the Book's levels decide (their spec and the day's move)."""
+    if book_levels is None:
+        return ()
+    return ("trade_book",) + tuple(sorted((pid, repr((lv or {}).get("spec")), repr((lv or {}).get("change")),
+                         str((lv or {}).get("mode") or "")) for pid, lv in book_levels.items()))
+
+
+def _base_block(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, Any]) -> Optional[dict]:
+    """The latest block built for this database, as_of, history and parameters, whatever Book
+    levels it was given: its series and component VaR do not depend on them (subset_var)."""
     key = _memo_key(conn, as_of, history, config)
+    if key is None:
+        return None
+    with _LOCK:
+        return _BASE.get(key)
+
+
+def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve: Optional[dict], history,
+           config: Dict[str, Any], book_levels: Optional[Dict[str, dict]] = None) -> dict:
+    """{rows (one per trade, the full book), series {position_id: daily USD P&L}, position_risk,
+    missing}: kept in process per `_memo_key` and the Book's levels (`_levels_key`)."""
+    base = _memo_key(conn, as_of, history, config)
+    key = None if base is None else base + (_levels_key(book_levels),)
     if key is not None:
         with _LOCK:
             hit = _MEMO.get(key)
@@ -177,18 +197,24 @@ def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve:
         ctx = _Ctx(p, series.get(p["position_id"]), leg_series.get(p["position_id"], {}), by_contract, roots,
                    strategies.get(p["name"]) if p.get("kind") == "strategy" else None,
                    positions.get(p["position_id"]), config)
+        ctx.book_level = (book_levels or {}).get(p["position_id"])
+        ctx.book_given = book_levels is not None
         rows.append(_trade_row(ctx, history, as_of, first_dates))
     block = {"rows": rows, "series": series, "position_risk": pr, "missing": missing}
     # kept under the key read after the build as well: a first `book_spreads` on a database
     # creates its own tables, which moves the file's mtime, so the key read before it never
     # matches again
-    keys = [k for k in dict.fromkeys((key, _memo_key(conn, as_of, history, config))) if k is not None]
-    if keys:
+    after = _memo_key(conn, as_of, history, config)
+    bases = [k for k in dict.fromkeys((base, after)) if k is not None]
+    if bases:
         with _LOCK:
-            for k in keys:
-                _MEMO[k] = block
+            for b in bases:
+                _MEMO[b + (_levels_key(book_levels),)] = block
+                _BASE[b] = block
             while len(_MEMO) > _MEMO_SLOTS:
                 _MEMO.popitem(last=False)
+            while len(_BASE) > _MEMO_SLOTS:
+                _BASE.popitem(last=False)
     return block
 
 
@@ -208,6 +234,8 @@ class _Ctx:
                  position: Optional[dict], config: Dict[str, Any]):
         self.row, self.series, self.parts, self.by_contract = row, series, parts, by_contract
         self.roots, self.strategy, self.position, self.config = roots, strategy, position, config
+        self.book_level: Optional[dict] = None     # the trade's `level` of spreads-engine's trade_book, when given
+        self.book_given = False                    # trade_book was passed (a row may still have no trade in it)
 
     def root_of(self, cid: str) -> str:
         return str((self.by_contract.get(cid) or {}).get("root_id") or "")
@@ -426,6 +454,10 @@ def _same_contract(contract_id: str, leg) -> bool:
 def _level_spec(ctx: _Ctx) -> Tuple[Optional[LevelSpec], str]:
     """The trade's level: the one spreads-engine pair whose legs are all open in the trade (a
     strategy), or the position's own level spec (a spread with no trade name)."""
+    if ctx.book_level is not None:                 # spreads-engine's one level of the trade wins
+        if ctx.book_level.get("spec"):
+            return spec_from_dict(ctx.book_level["spec"]), ""
+        return None, str(ctx.book_level.get("reason") or "the Book's level of this trade has no formula")
     open_ids = [lg["contract_id"] for lg in ctx.row.get("legs") or []
                 if not lg.get("hedge") and _num(lg.get("lots")) not in (None, 0.0)]
     if ctx.strategy is not None and len(open_ids) < 2:
@@ -449,9 +481,11 @@ def _level_spec(ctx: _Ctx) -> Tuple[Optional[LevelSpec], str]:
     return None, "the position has no level (no calendar or template fits its legs)"
 
 
-def _leg_prices(history, leg, as_of: str) -> Tuple[Optional[pd.Series], str, Optional[str]]:
+def _leg_prices(history, leg, as_of: str
+                ) -> Tuple[Optional[pd.Series], str, Optional[str], Optional[pd.Series]]:
     """(a level leg's settlements as quoted (the research app's raw settle = Bloomberg's quote) on
-    or before as_of, why None, the first date of its own settlements). An LME metal reads its
+    or before as_of, why None, the first date of its own settlements, the research contract read
+    on each date (a roll or the splice changes it)). An LME metal reads its
     prompt month's research contract. Before the contract's first settlement, the contract that
     held its place on the strip that day (its months ahead on as_of): the rule the P&L history
     already follows (`commodity_history.daily_pnl_series_for_position`), so the level's history
@@ -460,32 +494,39 @@ def _leg_prices(history, leg, as_of: str) -> Tuple[Optional[pd.Series], str, Opt
         try:
             year, month = (int(x) for x in leg.month_key.split("-")[:2])
         except ValueError:
-            return None, f"{leg.instrument_id}: its prompt month {leg.month_key!r} is not known", None
+            return None, f"{leg.instrument_id}: its prompt month {leg.month_key!r} is not known", None, None
         cid, _note, why = lme_history_contract(history, leg.root_id, year, month, f"{year:04d}-{month:02d}-15", as_of)
         if cid is None:
-            return None, f"{leg.instrument_id} {leg.month_key}: {why}", None
+            return None, f"{leg.instrument_id} {leg.month_key}: {why}", None, None
         s = history.settle_series(cid)
         name = cid
     else:
         s = history.settle_series(leg.instrument_id, leg.root_id)
         name = leg.instrument_id
     if s.empty:
-        return None, s.attrs.get("reason") or f"{leg.instrument_id}: no settlements", None
+        return None, s.attrs.get("reason") or f"{leg.instrument_id}: no settlements", None, None
     scale = _num(s.attrs.get("price_scale")) or 1.0
     raw = (s / scale).astype(float)
     raw.index = pd.to_datetime(raw.index)
     own_from = _iso(raw.index[0])
+    ids = pd.Series(str(s.attrs.get("research_contract_id") or name), index=raw.index, dtype=object)
     rank, _why = history.months_ahead_of(name, leg.root_id, as_of)
     if rank is not None:
         cm = history.constant_maturity_series(leg.root_id, int(rank))
         if not cm.empty:
+            held = cm.attrs.get("contracts") or {}
             cm = (cm / scale).astype(float)
             cm.index = pd.to_datetime(cm.index)
-            raw = pd.concat([cm[cm.index < raw.index[0]], raw]).sort_index()
-    raw = raw[raw.index <= pd.Timestamp(as_of)]
+            early = cm[cm.index < raw.index[0]]
+            cm_ids = pd.Series([str(held.get(d, held.get(pd.Timestamp(d), ""))) for d in early.index],
+                               index=early.index, dtype=object)
+            raw = pd.concat([early, raw]).sort_index()
+            ids = pd.concat([cm_ids, ids]).sort_index()
+    keep = raw.index <= pd.Timestamp(as_of)
+    raw, ids = raw[keep], ids[keep]
     if raw.empty:
-        return None, f"{leg.instrument_id}: no settlement on or before {as_of}", None
-    return raw, "", own_from
+        return None, f"{leg.instrument_id}: no settlement on or before {as_of}", None, None
+    return raw, "", own_from, ids
 
 
 def _usd_per(history, ccy: str, index: pd.DatetimeIndex) -> Tuple[Optional[pd.Series], str]:
@@ -512,13 +553,15 @@ def level_history(history, spec: LevelSpec, roots: Dict[str, Any], as_of: str
     target = "USD" if ratio else spec.currency
     unit = "ratio China / foreign, both in USD" if ratio else spec.unit
     cols = []
+    held: List[pd.Series] = []
     own_from: List[str] = []
     for lg in spec.legs:
-        raw, why, first = _leg_prices(history, lg, as_of)
+        raw, why, first, ids = _leg_prices(history, lg, as_of)
         if raw is None:
             return None, kind, unit, why
         if first:
             own_from.append(first)
+        held.append(ids)
         own = LevelSpec(spec.kind, spec.unit, lg.currency, 0.0, spec.legs, spec.weights, spec.units_per_lot)
         cols.append(converted(raw, lg, own))               # no FX yet: the leg's own currency
     frame = pd.concat(cols, axis=1, join="inner").dropna()
@@ -545,6 +588,10 @@ def level_history(history, spec: LevelSpec, roots: Dict[str, Any], as_of: str
     if not len(level):
         return None, kind, unit, "no level could be formed"
     level.attrs["own_from"] = max(own_from) if own_from else None
+    # a day whose change spans a roll or the splice (any leg reads another contract than the day
+    # before): its change is not a move of the level (level_sd leaves it out)
+    key = pd.concat([h.reindex(level.index) for h in held], axis=1).astype(str).agg("|".join, axis=1)
+    level.attrs["switch"] = (key != key.shift()).to_numpy()
     return level, kind, unit, ""
 
 
@@ -574,18 +621,21 @@ def _z_block(history, spec: Optional[LevelSpec], spec_why: str, as_of: str, entr
     out = {"z": None, "percentile": None, "level_now": None, "level_date": None, "level_days": 0,
            "level_kind": None, "level_unit": "", "level_legs": [], "z_reason": spec_why,
            "z_entry": None, "percentile_entry": None, "level_at_entry": None, "z_entry_reason": spec_why,
-           "level_own_from": None, "level_note": ""}
+           "level_own_from": None, "level_note": "",
+           "level_sd": None, "level_sd_reason": spec_why, "level_sd_days": 0,
+           "level_move": None, "move_sigma": None, "move_sigma_reason": spec_why}
     if spec is None:
         return out
     out["level_legs"] = [lg.instrument_id + (f" {lg.month_key}" if lg.instrument_id == lg.root_id else "")
                          for lg in spec.legs]
     if not getattr(history, "available", False):
-        out["z_reason"] = out["z_entry_reason"] = f"no settlement history: {getattr(history, 'reason', '')}"
+        out["z_reason"] = out["z_entry_reason"] = out["level_sd_reason"] = out["move_sigma_reason"] = (
+            f"no settlement history: {getattr(history, 'reason', '')}")
         return out
     level, kind, unit, why = level_history(history, spec, ctx.roots, as_of)
     out.update(level_kind=kind, level_unit=unit)
     if level is None:
-        out["z_reason"] = out["z_entry_reason"] = why
+        out["z_reason"] = out["z_entry_reason"] = out["level_sd_reason"] = out["move_sigma_reason"] = why
         return out
     n, floor = int(ctx.config["level_window_bd"]), int(ctx.config["level_min_days"])
     now = _z_at(level, as_of, n, floor)
@@ -597,12 +647,63 @@ def _z_block(history, spec: Optional[LevelSpec], spec_why: str, as_of: str, entr
                            f"history's rule)" if own and first_in_window and own > first_in_window else ""))
     if now["date"] and (pd.Timestamp(as_of) - pd.Timestamp(now["date"])).days > 7 and not now["reason"]:
         out["z_reason"] = f"the settlements end {now['date']}, before {as_of}"
+    out.update(_level_sd(level, as_of, n, floor))
+    out.update(_move_sigma(ctx.book_level, kind, out["level_sd"], out["level_sd_reason"], ctx.book_given))
     if not entry_date:
         out["z_entry_reason"] = "the trade's first trade date is not on file"
         return out
     ent = _z_at(level, entry_date, n, floor)
     out.update(z_entry=ent["z"], percentile_entry=ent["percentile"], level_at_entry=ent["level"],
                z_entry_reason=ent["reason"])
+    return out
+
+
+def _level_sd(level: pd.Series, as_of: str, n: int, floor: int) -> dict:
+    """The standard deviation of the level's daily changes over the z window (its last n
+    settlements to as_of: the n - 1 changes into them), leaving out a change that spans a roll or
+    the splice (a leg read another contract the day before), in the level's unit."""
+    out = {"level_sd": None, "level_sd_reason": "", "level_sd_days": 0}
+    cut = level.index <= pd.Timestamp(as_of)
+    s = level[cut]
+    if len(s) < 2:
+        out["level_sd_reason"] = f"{len(s)} settlement(s) of the level to {as_of}: no daily change"
+        return out
+    switch = pd.Series(level.attrs.get("switch", [False] * len(level)), index=level.index)[cut].to_numpy(dtype=bool)
+    start = s.index[-n:][0]
+    diff = s.diff()
+    changes = diff[(diff.index > start) & ~switch].dropna()
+    out["level_sd_days"] = int(len(changes))
+    if len(changes) < floor - 1:
+        out["level_sd_reason"] = f"needs {floor - 1} daily changes of the level: {len(changes)}"
+        return out
+    sd = _std(changes)
+    if not sd:
+        out["level_sd_reason"] = "the level did not move over the window"
+        return out
+    out["level_sd"] = sd
+    return out
+
+
+def _move_sigma(book_level: Optional[dict], kind: str, sd: Optional[float], sd_why: str,
+                book_given: bool = False) -> dict:
+    """Today's move of the Book's level (spreads-engine's trade_book `level.change`, our marks)
+    over level_sd (the research history's), when the caller passed trade_book."""
+    out = {"level_move": None, "move_sigma": None, "move_sigma_reason": ""}
+    if book_level is None:
+        out["move_sigma_reason"] = ("not a trade of the Book's trade_book (no trade name): no level move"
+                                    if book_given else
+                                    "the Book's level move was not passed (trade_book=): the move / level_sd")
+        return out
+    out["level_move"] = _num(book_level.get("change"))
+    mode = str(book_level.get("mode") or "")
+    if out["level_move"] is None:
+        out["move_sigma_reason"] = str(book_level.get("change_reason") or "the Book's level has no move today")
+    elif sd is None:
+        out["move_sigma_reason"] = sd_why or "no standard deviation of the level"
+    elif mode and mode != kind:
+        out["move_sigma_reason"] = f"the Book's level is a {mode}, the history's a {kind}: not the same unit"
+    else:
+        out["move_sigma"] = out["level_move"] / sd
     return out
 
 
@@ -683,19 +784,22 @@ def subset_var(conn: sqlite3.Connection, as_of: str, trade_names: Optional[Itera
     source_note (whose settlement history the figures are drawn from)}. None with its reason
     where a figure cannot be computed."""
     history, config = _defaults(history, config)
-    out = _subset(_block(conn, as_of, spreads, curve, history, config), trade_names, config)
+    block = _base_block(conn, as_of, history, config) or _block(conn, as_of, spreads, curve, history, config)
+    out = _subset(block, trade_names, config)
     out["source_kind"], out["source_note"] = _source(history)
     return out
 
 
 def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] = None,
                curve: Optional[dict] = None, trade_names: Optional[Sequence[str]] = None, history=None,
-               config: Optional[Dict[str, Any]] = None) -> dict:
+               config: Optional[Dict[str, Any]] = None, trade_book: Optional[dict] = None) -> dict:
     """Risk by trade for `as_of` (module docstring). `spreads` / `curve`: `book_spreads` and
     `curve_positions` of the same as-of when the caller has them (else computed); `history`: a
     `CommodityHistory` (default `load_commodity_history()`); `trade_names`: only those rows
     (trade names or position ids), the shares still of the whole book, plus `subset` =
-    `subset_var` of them.
+    `subset_var` of them; `trade_book`: spreads-engine's `trade_book(conn, as_of)` when the
+    caller holds it: each trade's `level.spec` is then THE level (read before this module's own
+    pick) and its `level.change` gives `move_sigma`.
 
     Returns {as_of, available, reason, book_var (the positions' book VaR, every trade),
       method {daily_risk, share, hedge, best_fit, z}: one sentence each,
@@ -710,7 +814,11 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
                 lots_a, lots_b, best_fit_moves, best_fit_days,
                 z, percentile (percent), level_now, level_date, level_days, level_kind ('ratio' |
                 'difference'), level_unit, level_legs, z_reason,
-                z_entry, percentile_entry, level_at_entry, z_entry_reason}]
+                z_entry, percentile_entry, level_at_entry, z_entry_reason, level_own_from,
+                level_note, level_sd (sd of the level's daily changes over the z window, rolls and
+                the splice left out, in level_unit), level_sd_reason, level_sd_days, level_move
+                (the Book's level.change, our marks; None without trade_book), move_sigma
+                (level_move / level_sd), move_sigma_reason, source_kind, source_note, sources}]
               (position_risk's order: the included by contribution, largest first, then the
               left out),
       excluded_count, partial_note, missing, subset (only with trade_names), not_found,
@@ -721,7 +829,9 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
       the research prices are the same market as ours, root by root)}.
     Every figure a number or None with its reason."""
     history, config = _defaults(history, config)
-    block = _block(conn, as_of, spreads, curve, history, config)
+    book_levels = ({str(t.get("position_id")): (t.get("level") or {}) for t in (trade_book or {}).get("trades") or []
+                    if t.get("position_id")} if trade_book is not None else None)
+    block = _block(conn, as_of, spreads, curve, history, config, book_levels)
     pr = block["position_risk"] or {}
     rows, not_found = _select(block["rows"], trade_names)
     out = {

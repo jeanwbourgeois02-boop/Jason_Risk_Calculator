@@ -77,6 +77,13 @@ valued at that same freeze figure (`_lme_cash_row`; user decision 2026-09-28, re
 LTD is the same on the freeze day, tom, the prompt and the day after, when the ledger takes
 over. It is never relabelled FX_SPOT (`_reported_product`).
 
+Every row loads (user decision 2026-09-29): a blotter row the parser could not resolve to a
+contract is on file as product UNRECOGNISED (instrument 'UNRECOGNISED:<symbol>', no leg,
+multiplier 0). `value_book` lists it as a row with status UNRECOGNISED, every figure blank (NaN)
+and the reason "contract not recognised: <the last upload's reason for its symbol, else 'symbol
+<s> is not in the contract list'>; P&L can't be computed until it is mapped" (`_unrecognised_row`):
+never zero, never dropped, never estimated by the near-marks rule, never frozen by the ledger.
+
 One bad value, one trade (2026-09-18, guards only -- no formula changed): every stored
 figure a formula uses (`trades.quantity`, `trades.price`, `instruments.multiplier`, each
 `marks.value`, `realised_pnl.pnl_usd`) passes through `_number` first. SQLite keeps text
@@ -127,6 +134,12 @@ RETIRED_PRODUCTS = {
     "SWAPTION": _RATES_OPTIONS_GONE,
     "CAP_FLOOR": _RATES_OPTIONS_GONE,
 }
+
+# A blotter row the parser could not resolve to a contract (user decision 2026-09-29, "every row
+# loads"): the trade is on file with product and status UNRECOGNISED, no leg, never marked, never
+# frozen, and `value_book` lists it blank with a plain reason, never zero and never dropped.
+UNRECOGNISED = "UNRECOGNISED"
+UNRECOGNISED_PREFIX = "UNRECOGNISED:"
 
 _NAN = float("nan")
 
@@ -243,6 +256,22 @@ def _retired_sql(theme: bool) -> str:
                    AS settle_date
         FROM trades_official t
         WHERE t.product IN ({", ".join(f"'{p}'" for p in RETIRED_PRODUCTS)}) AND t.trade_date <= :as_of
+    """
+
+
+def _unrecognised_sql(theme: bool, columns: set) -> str:
+    """Trades the parser could not resolve to a contract (product UNRECOGNISED, user decision
+    2026-09-29 "every row loads"): no leg and no usable instrument, so nothing is joined. The
+    broker's symbol and the description, where the database has them, name the trade in its reason."""
+    theme_col = "COALESCE(t.theme, '')" if theme else "''"
+    symbol_col = "COALESCE(t.broker_symbol, '')" if "broker_symbol" in columns else "''"
+    price_col = "COALESCE(t.broker_price, '')" if "broker_price" in columns else "''"
+    return f"""
+        SELECT t.trade_id, t.instrument_id, t.product, t.strategy, {theme_col} AS theme,
+               t.trade_date, t.quantity, t.price AS fill, {symbol_col} AS broker_symbol,
+               {price_col} AS broker_price, COALESCE(t.description, '') AS description
+        FROM trades_official t
+        WHERE t.product = '{UNRECOGNISED}' AND t.trade_date <= :as_of
     """
 
 
@@ -563,11 +592,15 @@ def value_book(conn: sqlite3.Connection, as_of: str, trade_ids=None) -> pd.DataF
     fut = pd.read_sql_query(_fut_sql(theme), conn, params={"as_of": as_of})
     opt = pd.read_sql_query(_opt_sql(theme, _has_option_terms(conn)), conn, params={"as_of": as_of})
     retired = pd.read_sql_query(_retired_sql(theme), conn, params={"as_of": as_of})
+    trade_columns = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+    unrecognised = pd.read_sql_query(_unrecognised_sql(theme, trade_columns), conn, params={"as_of": as_of})
+    issues = _upload_issue_reasons(conn) if not unrecognised.empty else {}
     conn = _BookConn(conn, as_of)  # one load of the day's marks and realised rows for every row below
     conn.closed_out = closed_out_from_rows(opt)
     if trade_ids is not None:
         wanted = set(trade_ids)
-        fx, fut, opt, retired = (f[f["trade_id"].isin(wanted)] for f in (fx, fut, opt, retired))
+        fx, fut, opt, retired, unrecognised = (f[f["trade_id"].isin(wanted)]
+                                               for f in (fx, fut, opt, retired, unrecognised))
 
     for r in fx.itertuples(index=False):
         rows.append(_guarded_row(conn, r, as_of, _open_fx_row, _settled_fx_row, _TRADE_NUMBERS, holidays))
@@ -577,6 +610,8 @@ def value_book(conn: sqlite3.Connection, as_of: str, trade_ids=None) -> pd.DataF
         rows.append(_guarded_row(conn, r, as_of, _open_option_row, _settled_option_row, _TRADE_NUMBERS))
     for r in retired.itertuples(index=False):
         rows.append(_retired_row(conn, r, as_of))
+    for r in unrecognised.itertuples(index=False):
+        rows.append(_unrecognised_row(r, issues))
 
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
@@ -667,6 +702,61 @@ def _retired_row(conn, r, as_of) -> dict:
         if unreadable:
             reason += f"; its realised_pnl row is unreadable ({unreadable})"
     return {**base, **_unpriced(reason)}
+
+
+def _symbol_key(text) -> str:
+    return " ".join(str(text or "").split()).upper()
+
+
+def _upload_issue_reasons(conn) -> dict:
+    """{symbol as written, upper-cased and stripped: the last upload's reason for it} from
+    `upload_issues` (ingest-booking's table, replaced by each upload); {} when the table is
+    absent or unreadable. Read-only context for an UNRECOGNISED trade's reason."""
+    try:
+        found = conn.execute("SELECT symbol, reason FROM upload_issues WHERE symbol <> '' "
+                             "ORDER BY row_no, rowid").fetchall()
+    except sqlite3.Error:
+        return {}
+    out = {}
+    for symbol, reason in found:
+        key, why = _symbol_key(symbol), " ".join(str(reason or "").split())
+        if key and why:
+            out.setdefault(key, why)
+    return out
+
+
+def _unrecognised_reason(r, issues: dict) -> str:
+    """'contract not recognised: <why>; P&L can't be computed until it is mapped', <why> being
+    the last upload's own reason for the trade's symbol when it is on file, else a sentence naming
+    the symbol (the broker's cell, else the instrument id after 'UNRECOGNISED:')."""
+    symbol = str(getattr(r, "broker_symbol", "") or "").strip()
+    if not symbol:
+        inst = str(r.instrument_id or "")
+        symbol = inst[len(UNRECOGNISED_PREFIX):] if inst.upper().startswith(UNRECOGNISED_PREFIX) else inst
+    why = issues.get(_symbol_key(symbol), "")
+    lead = "contract not recognised:"
+    if why.lower().startswith(lead):
+        why = why[len(lead):].strip()
+    if not why:
+        why = f"symbol {symbol} is not in the contract list" if symbol else "the row names no symbol"
+    return f"{lead} {why.rstrip('.; ')}; P&L can't be computed until it is mapped"
+
+
+def _unrecognised_row(r, issues: dict) -> dict:
+    """A trade the parser could not resolve to a contract (product UNRECOGNISED, user decision
+    2026-09-29, "every row loads"): listed, never dropped, with status UNRECOGNISED, every figure
+    blank (NaN, never zero: quantity and fill too, since they are in the file's own units with no
+    contract behind them; they stay on `trades`) and the reason. No mark is read, nothing is
+    estimated by the near-marks rule, and the ledger never freezes it (no leg, no product rule)."""
+    base = {
+        "trade_id": r.trade_id, "instrument_id": r.instrument_id, "product": UNRECOGNISED,
+        "strategy": r.strategy, "theme": r.theme, "trade_date": r.trade_date,
+        "settle_date": "", "status": UNRECOGNISED, "quantity": _NAN, "fill": _NAN,
+    }
+    out = {**base, **_unpriced(_unrecognised_reason(r, issues))}
+    price = str(getattr(r, "broker_price", "") or "").strip() or str(r.fill)
+    out["note"] = f"as uploaded: quantity {r.quantity}, price {price}"
+    return out
 
 
 def _open_fx_row(conn, r, as_of) -> dict:

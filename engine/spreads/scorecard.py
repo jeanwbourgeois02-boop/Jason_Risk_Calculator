@@ -35,9 +35,10 @@ The summary over CLOSED ideas: count, wins, losses, scratches (within half a cen
 win rate (wins / count), average win, average loss, payoff ratio (average win / |average
 loss|), expectancy (the mean P&L per idea), total, best and worst idea, average holding days of
 the winners and of the losers. Over OPEN ideas: count, the unrealised total, how many are in
-profit. The same summary by spread type (the position's ``trade_type``: CROSS_EXCHANGE,
-CROSS_PRODUCT, TERM_STRUCTURE, '' none) and by trade name (the PBRoot name,
-``trades.strategy``, '' none).
+profit. The same summary by the trade-book rule type (``trades.trade_book``: CALENDAR,
+CROSS_EXCHANGE, CROSS_PRODUCT, MIXED, OUTRIGHT; 2026-09-29, what the screens show), by spread
+type (the position's PBRoot-label ``trade_type``, kept) and by trade name (the PBRoot name,
+``trades.strategy``, '' none). Winners' and losers' holding days as a median beside the average.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ import bisect
 import datetime as dt
 import math
 import sqlite3
+import statistics
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -68,6 +70,35 @@ def _num(x) -> Optional[float]:
 
 def _mean(values: Sequence[float]) -> Optional[float]:
     return float(sum(values)) / len(values) if values else None
+
+
+def _median(values: Sequence[float]) -> Optional[float]:
+    return float(statistics.median(values)) if values else None
+
+
+_SHAPE_TYPE = {"TERM_STRUCTURE": "CALENDAR", "CROSS_EXCHANGE": "CROSS_EXCHANGE", "CROSS_PRODUCT": "CROSS_PRODUCT"}
+
+
+def _rule_types(spreads: dict, ideas: List[dict], trades: Optional[dict]) -> Dict[str, str]:
+    """{position_id: the trade-book rule type} (``trades.trade_book``: CALENDAR | CROSS_EXCHANGE |
+    CROSS_PRODUCT | MIXED | OUTRIGHT): a trade name's own type; a spread the finder grouped by its
+    shape (a calendar CALENDAR, a template its family's type); an outright contract or a lone
+    trade OUTRIGHT; '' when not known."""
+    by_trade = {str(t["position_id"]): str(t.get("type") or "") for t in (trades or {}).get("trades") or []}
+    by_pid = {str(p.get("position_id")): p for p in spreads.get("positions") or []}
+    out = {}
+    for idea in ideas:
+        pid = idea["position_id"]
+        p = by_pid.get(pid)
+        if pid in by_trade:
+            out[pid] = by_trade[pid]
+        elif p is not None and p.get("kind") == "calendar":
+            out[pid] = "CALENDAR"
+        elif p is not None:
+            out[pid] = _SHAPE_TYPE.get(str(p.get("trade_type") or ""), "")
+        else:
+            out[pid] = "OUTRIGHT"
+    return out
 
 
 def _labels(conn: sqlite3.Connection, as_of: str) -> Dict[str, dict]:
@@ -186,6 +217,8 @@ def _summary(ideas: Sequence[dict]) -> dict:
             "worst": pick(min(closed, key=lambda i: i["pnl_usd"]) if closed else None),
             "avg_hold_days_win": _mean([i["holding_days"] for i in wins]),
             "avg_hold_days_loss": _mean([i["holding_days"] for i in losses]),
+            "median_hold_days_win": _median([i["holding_days"] for i in wins]),
+            "median_hold_days_loss": _median([i["holding_days"] for i in losses]),
             "excluded": [(i["position_id"], i["reason"]) for i in ideas
                          if i["status"] == "closed" and not i["included"]],
         },
@@ -199,11 +232,13 @@ def _summary(ideas: Sequence[dict]) -> dict:
 
 
 def scorecard(conn: sqlite3.Connection, as_of: str, series: Optional[DailySeries] = None,
-              spreads: Optional[dict] = None) -> dict:
+              spreads: Optional[dict] = None, trades: Optional[dict] = None) -> dict:
     """The trader's scorecard on ``as_of`` (module docstring for the rules).
 
     ``series``: ``daily_series(conn, as_of)`` when None. ``spreads``: ``book_spreads(conn, as_of)``
     for the positions, built off the series' frames when None (as ``period_explain`` does).
+    ``trades``: ``trades.trade_book(conn, as_of, spreads)`` for the rule types, built off the same
+    frames when None.
 
     Returns ``{as_of, ideas, summary, by_spread_type, by_trade_name, excluded, reason}``:
 
@@ -212,23 +247,27 @@ def scorecard(conn: sqlite3.Connection, as_of: str, series: Optional[DailySeries
       ''), status ('open' | 'closed'), first_trade_date, close_date ('' when open),
       holding_days, pnl_usd (LTD on as-of, closed or open; None when a member is unpriced
       that day), pnl_date (= as_of), included, reason, pnl_at_close / pnl_at_close_date (a
-      closed idea's LTD on its close date, context; None / '' when open), fx_since_close
+      closed idea's LTD on its close date, context; None / '' when open), rule_type (the
+      trade-book rule type, 2026-09-29), fx_since_close
       (pnl_usd - pnl_at_close, 0.0 when under half a cent; None when open or either is
       unpriced), best_ltd, best_date, worst_ltd, worst_date, days_unpriced}``, closed first,
       each by P&L largest first.
     - ``summary``: ``{closed: {count, wins, losses, scratches, win_rate, avg_win, avg_loss,
       payoff_ratio, expectancy, total, best, worst ({position_id, name, pnl_usd} or None),
-      avg_hold_days_win, avg_hold_days_loss, excluded [(position_id, why)]}, open: {count,
+      avg_hold_days_win, avg_hold_days_loss, median_hold_days_win, median_hold_days_loss (2026-09-29),
+      excluded [(position_id, why)]}, open: {count,
       unrealised_usd, in_profit, excluded}}``; a statistic with nothing to average is None.
     - ``by_spread_type`` / ``by_trade_name``: ``{key: summary}``, the same shape per group
-      ('' = no type / no name).
+      ('' = no type / no name). ``by_type`` (2026-09-29): the same by the trade-book rule type
+      (each idea's ``rule_type``: CALENDAR | CROSS_EXCHANGE | CROSS_PRODUCT | MIXED | OUTRIGHT | ''),
+      the breakdown the screens show; ``by_spread_type`` (the PBRoot label) is kept beside it.
     - ``excluded``: every idea left out, ``[(position_id, why)]``.
     - ``reason``: '' or why there is no scorecard (no trades, as-of not a business day).
     """
     if series is None:
         series = daily_series(conn, as_of)
     out = {"as_of": as_of, "ideas": [], "summary": _summary([]), "by_spread_type": {}, "by_trade_name": {},
-           "excluded": [], "reason": ""}
+           "by_type": {}, "excluded": [], "reason": ""}
     days = [d for d in series.days if d <= as_of]
     if not days:
         out["reason"] = "no trades on file on or before the as-of date"
@@ -243,12 +282,21 @@ def scorecard(conn: sqlite3.Connection, as_of: str, series: Optional[DailySeries
     ideas = positions_of(spreads, rows_by_day[as_of])
     labels = _labels(conn, as_of)
     type_names = _idea_labels(spreads, ideas, labels)
+    if trades is None:
+        try:
+            from engine.spreads.trades import trade_book
+            trades = trade_book(conn, as_of, spreads, value_fn=_series_reader(series))
+        except Exception:  # noqa: BLE001 -- no rule types: every idea's rule_type reads '' below
+            trades = {}
+    rule_types = _rule_types(spreads, ideas, trades)
     rows = [_idea(i, days, rows_by_day, labels, type_names[i["position_id"]], as_of, series.holidays)
             for i in ideas]
+    for r in rows:
+        r["rule_type"] = rule_types.get(r["position_id"], "")
     rows.sort(key=lambda r: (r["status"] != "closed", r["pnl_usd"] is None, -(r["pnl_usd"] or 0.0), r["position_id"]))
     out["ideas"] = rows
     out["summary"] = _summary(rows)
-    for key, field in (("by_spread_type", "spread_type"), ("by_trade_name", "trade_name")):
+    for key, field in (("by_spread_type", "spread_type"), ("by_trade_name", "trade_name"), ("by_type", "rule_type")):
         groups: Dict[str, List[dict]] = defaultdict(list)
         for r in rows:
             groups[r[field]].append(r)

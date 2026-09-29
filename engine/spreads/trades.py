@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import re
 import sqlite3
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -80,6 +81,8 @@ FLAG_UNBALANCED = "unbalanced"
 FLAG_HEDGE_OVERSIZED = "hedge_oversized"
 FLAG_TYPE_MISMATCH = "type_mismatch"
 FLAG_NO_PRICE = "leg_without_price"
+FLAG_UNRECOGNISED = "unrecognised"
+UNRECOGNISED = "UNRECOGNISED"        # a blotter row the parser could not identify (hard rule 6, 2026-09-29)
 
 _EPS = 1e-9
 _PRECIOUS_FAMILY = {"XAU": "gold", "XAG": "silver", "XPT": "platinum", "XPD": "palladium"}
@@ -396,9 +399,94 @@ def _broker_symbols(conn: sqlite3.Connection, tids: Sequence[str]) -> Dict[str, 
     return {str(r[0]): str(r[1] or "") for r in rows}
 
 
-def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str]) -> List[dict]:
+def product_word(root) -> str:
+    """The product a root trades, to tell two roots of one commodity on one exchange apart: the
+    first all-capitals word of its contract-master name that is not its exchange or a country
+    code ('ICE Endex Dutch TTF natural gas' -> 'TTF', 'ICE UK NBP natural gas' -> 'NBP'), else
+    its root code."""
+    for word in str(root.name or "").replace("(", " ").replace(")", " ").split():
+        if len(word) > 2 and word.isupper() and word != root.exchange.upper() and word.isalpha():
+            return word
+    return root.root_id.partition(":")[2] or root.root_id
+
+
+def _twins(book, tids: Sequence[str]) -> set:
+    """The roots of the trade that share their exchange and commodity words with another of its
+    roots (ICE TTF and NBP, both 'natural gas'): named by product."""
+    seen: Dict[Tuple[str, str], set] = defaultdict(set)
+    for tid in tids:
+        root = book.roots.get(str(book.by_id[tid]["base_ccy"] or ""))
+        if root is not None:
+            seen[(root.exchange, commodity_words(root))].add(root.root_id)
+    return {r for ids in seen.values() if len(ids) > 1 for r in ids}
+
+
+def _twin_words(root) -> str:
+    """'TTF gas' for ICE TTF natural gas: the product word and the commodity's last word."""
+    return f"{product_word(root)} {commodity_words(root).rsplit(' ', 1)[-1]}"
+
+
+_MARK_TYPES = {"FUTURE": ("FUTURE_PX",), "CMDTY_OPTION": ("FUTURE_PX",), "EQ_OPTION": ("FUTURE_PX",),
+               "FX_OPTION": ("PREMIUM",), "LME_FWD": ("FWD_OUTRIGHT", "SPOT"), "FX_FWD": ("FWD_OUTRIGHT", "SPOT"),
+               "FX_SPOT": ("FWD_OUTRIGHT", "SPOT"), "FX_SWAP": ("FWD_OUTRIGHT", "SPOT")}
+
+
+def _mark_close(row: Optional[dict], day: str) -> str:
+    """The close a ``value_book`` row's mark is from: ``day``, or the earlier close the screens'
+    filled reader took it from (its note 'no price on <d>: value of the <earlier> close ...')."""
+    m = re.search(r"value of the (\d{4}-\d{2}-\d{2}) close", str((row or {}).get("note") or ""))
+    return m.group(1) if m else day
+
+
+def _mark_stamp(conn: sqlite3.Connection, row: Optional[dict], product: str, day: str) -> str:
+    """The ``snapped_at`` of the official mark a ``value_book`` row read on ``day`` (keyed on the
+    row's ``mark_date``, the leg's own settle date); '' for an estimate (``INTERP:``), a frozen
+    or closed-out row, or a mark not found as one official row: ``mark_source`` says what it is."""
+    if not row or not row.get("mark_date") or str(row.get("mark_source") or "").startswith("INTERP"):
+        return ""
+    types = _MARK_TYPES.get(product, ())
+    if not types or str(row.get("status") or "") != "OPEN":
+        return ""
+    hit = conn.execute(
+        f"SELECT snapped_at FROM marks_official WHERE instrument_id = ? AND as_of_date = ? "
+        f"AND mark_type IN ({','.join('?' * len(types))}) AND settle_date = ? ORDER BY snapped_at DESC LIMIT 1",
+        (str(row.get("instrument_id")), day, *types, str(row.get("mark_date")))).fetchone()
+    return str(hit[0]) if hit else ""
+
+
+def _unrecognised_row(book, cid: str, ids: List[str], symbols: Dict[str, str]) -> dict:
+    """A leg the parser could not identify (product UNRECOGNISED, hard rule 6 "Every row loads"):
+    the broker's symbol as written, its lots and fills as the file gave them, no mark, no value,
+    no P&L (the reason instead); never typed, never in a level, balance, hedge or carry."""
+    t = book.by_id[ids[0]]
+    sym = next((symbols[i] for i in ids if symbols.get(i)), "") or str(t["instrument_id"]).partition(":")[2]
+    rows = [book.today.get(i) for i in ids]
+    why = next((str(r.get("reason")) for r in rows if r and r.get("reason")), "") or (
+        f"contract not recognised: {sym}: P&L can't be computed until it is mapped (add it to config/contracts.csv)")
+    qty = float(sum(book.lots(i) or 0.0 for i in ids))
+    px, _net, px_why = st._entry_value(book, ids, quoted=True)
+    return {
+        "contract_id": cid, "instrument_id": str(t["instrument_id"]), "root_id": "", "product": UNRECOGNISED,
+        "hedge": False, "name": sym, "exchange": "", "commodity": "", "month": "", "prompt": "",
+        "broker_symbols": sorted({symbols.get(i, "") for i in ids} - {""}),
+        "side": "long" if qty > _EPS else "short" if qty < -_EPS else "flat", "lots": qty, "quantity": qty,
+        "status": UNRECOGNISED.lower(), "currency": str(t["quote_ccy"] or ""), "trade_ids": list(ids),
+        "open_trade_ids": [], "avg_fill": px, "avg_fill_reason": px_why if px is None else "the file's price, as written",
+        "mark": None, "mark_source": "", "mark_as_of": "", "mark_snapped_at": "", "mark_reason": why,
+        "prev_mark": None, "prev_mark_date": "", "prev_mark_source": "", "prev_mark_reason": why,
+        "value_local": None, "value_local_reason": why, "value_usd": None, "value_reason": why,
+        "pnl_usd": {"daily": None, "ltd": None}, "pnl_reasons": {"daily": why, "ltd": why},
+        "roll_down": None, "roll_down_unit": "", "roll_down_usd_per_month": None, "horizon_months": None,
+        "roll_down_reason": why, "unrecognised": True, "unrecognised_reason": why,
+    }
+
+
+def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str], prev_day: str = "",
+              prev_rows: Optional[Dict[str, dict]] = None) -> List[dict]:
     """One row per contract of the trade (an LME ticket per prompt, an FX trade per value date):
     open legs first, then the legs now flat or expired, hedges last."""
+    prev_rows = prev_rows or {}
+    twins = _twins(book, tids)
     groups: Dict[str, List[str]] = defaultdict(list)
     meta: Dict[str, Tuple[str, str]] = {}
     for tid in tids:
@@ -415,6 +503,9 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str]) -
     for cid, ids in groups.items():
         ids = sorted(ids, key=lambda i: (str(book.by_id[i]["trade_date"]), i))
         t = book.by_id[ids[0]]
+        if t["product"] == UNRECOGNISED:
+            rows.append(_unrecognised_row(book, cid, ids, symbols))
+            continue
         root = book.roots.get(str(t["base_ccy"] or ""))
         month, prompt = meta[cid]
         hedge = is_hedge(root, t["product"], t["base_ccy"], t["quote_ccy"], t["instrument_id"])
@@ -430,6 +521,9 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str]) -
             name = f"{root.exchange} {_title(commodity_words(root))} {str(t['instrument_id']).replace(' Comdty', '')}"
         else:
             name = leg_name(root, month, prompt if t["product"] == "LME_FWD" else "", str(t["instrument_id"]))
+            if root is not None and root.root_id in twins:
+                name = name.replace(f"{root.exchange} {_title(commodity_words(root))}",
+                                    f"{root.exchange} {_twin_words(root)}", 1)
         row = {
             "contract_id": cid, "instrument_id": str(t["instrument_id"]), "root_id": str(t["base_ccy"] or ""),
             "product": t["product"], "hedge": hedge, "name": name,
@@ -453,8 +547,30 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str]) -
         first = next((r for r in today if r), None)
         row.update(mark=_num(marked["mark"]) if marked else None,
                    mark_source=str(marked.get("mark_source") or "") if marked else "",
+                   mark_as_of=_mark_close(marked, book.as_of) if marked else "",
+                   mark_snapped_at=(_mark_stamp(book.conn, marked, t["product"], _mark_close(marked, book.as_of))
+                                    if marked else ""),
                    mark_reason="" if marked else (str((first or {}).get("reason") or "")
                                                   or f"not valued by value_book on {book.as_of}"))
+        # the previous close's mark: the row the trade's Daily is measured from
+        before = [prev_rows.get(i) for i in (open_ids or ids)]
+        prev_marked = next((r for r in before if r and _num(r.get("mark")) is not None), None)
+        prev_first = next((r for r in before if r), None) or {}
+        row.update(prev_mark=_num(prev_marked["mark"]) if prev_marked else None,
+                   prev_mark_date=_mark_close(prev_marked, prev_day) if prev_marked else prev_day,
+                   prev_mark_source=str(prev_marked.get("mark_source") or "") if prev_marked else "",
+                   prev_mark_reason="" if prev_marked else (str(prev_first.get("reason") or "")
+                                                            or f"not held or not valued on the {prev_day} close"))
+        # the value in the leg's own currency: open quantity x multiplier x mark (never for an option)
+        mult = _num(t["multiplier"])
+        if status != "open":
+            row.update(value_local=0.0, value_local_reason="")
+        elif t["product"] in st.OPTION_PRODUCTS:
+            row.update(value_local=None, value_local_reason="an option's lots x price is its value, not a notional")
+        elif row["mark"] is None or mult is None:
+            row.update(value_local=None, value_local_reason=row["mark_reason"] or "its multiplier is not a number")
+        else:
+            row.update(value_local=qty * mult * row["mark"], value_local_reason="")
         if status != "open":
             row.update(value_usd=0.0, value_reason="")
         elif hedge and t["instrument_id"] in hedge_rows:
@@ -481,9 +597,10 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str]) -
         row.update(pnl_usd={"daily": daily, "ltd": ltd},
                    pnl_reasons={"daily": daily_reason, "ltd": ("unpriced: " + "; ".join(unpriced)) if unpriced else ""},
                    roll_down=None, roll_down_unit="", roll_down_usd_per_month=None, horizon_months=None,
-                   roll_down_reason="a hedge: no roll-down" if hedge else "")
+                   roll_down_reason="a hedge: no roll-down" if hedge else "",
+                   unrecognised=False, unrecognised_reason="")
         rows.append(row)
-    order = {"open": 0, "flat": 1, "closed": 1}
+    order = {"open": 0, UNRECOGNISED.lower(): 1, "flat": 2, "closed": 2}
     rows.sort(key=lambda r: (r["hedge"], order[r["status"]], r["root_id"], r["month"], r["prompt"], r["contract_id"]))
     return rows
 
@@ -521,6 +638,24 @@ def _blank_level(why: str) -> dict:
             "usd_per_unit": None, "usd_per_unit_reason": why, "label": "", "sources": {},
             "alt": None, "unit_alt": "", "spec": None, "mode": "", "china_leg": -1, "note": "", "source": "",
             "reason": why}
+
+
+def _price_level(rows: List[dict], blank: dict) -> dict:
+    """An outright of one open contract: its price is its level (entry the open lots' average
+    fill, prev and now the leg's marks; mode 'price', no spec). Anything else: ``blank``."""
+    legs = [r for r in rows if not r["hedge"] and r["status"] == "open"]
+    if len(legs) != 1:
+        return blank
+    r = legs[0]
+    out = _blank_level("")
+    now, prev = r["mark"], r["prev_mark"]
+    out.update(unit=f"{r['currency']} (price)", entry=r["avg_fill"], entry_reason=r["avg_fill_reason"],
+               now=now, now_reason=r["mark_reason"], prev=prev, prev_reason=r["prev_mark_reason"],
+               prev_date=r["prev_mark_date"], change=(now - prev) if now is not None and prev is not None else None,
+               change_reason=_join([r["mark_reason"], r["prev_mark_reason"]]), label=r["name"], mode="price",
+               source="price", usd_per_unit_reason="an outright's price: see the leg's value",
+               sources={"entry": "the open lots' average fill", "now": r["mark_source"], "prev": r["prev_mark_source"]})
+    return out
 
 
 def _pair_level(book, pair: dict) -> dict:
@@ -843,13 +978,15 @@ def _what_it_is(book, kind: str, parts: List[_Part], rows: List[dict], hedge: di
     roots.sort(key=lambda r: r.country != st.CHINA)
     months = _months_text(r["month"] for r in open_rows)
     subs = list(dict.fromkeys(r.subsector for r in roots))
+    unknown = [r["name"] for r in rows if r.get("unrecognised")]
     if not roots:
         named = open_rows or [r for r in rows if r["status"] == "open"]
-        text = " + ".join(r["name"] for r in named) if named else "nothing open"
+        text = " + ".join(r["name"] for r in named) if named else (
+            f"contract not recognised: {', '.join(unknown)}" if unknown else "nothing open")
         months = ""
     elif len(subs) == 1 and len({r.exchange for r in roots}) == 1 and len(roots) > 1:
         # two contracts of one commodity on one exchange (TTF and NBP): named by their codes
-        codes = " vs ".join(r.root_id.partition(":")[2] or r.root_id for r in roots)
+        codes = " vs ".join(product_word(r) for r in roots)
         text = f"{roots[0].exchange} {commodity_words(roots[0])} ({codes})"
     elif len(subs) == 1:
         text = f"{' vs '.join(dict.fromkeys(r.exchange for r in roots))} {commodity_words(roots[0])}"
@@ -900,20 +1037,24 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
     tids = list(entry["trade_ids"])
     legs, _hedge_ids, _options, _closed = st._build_legs(book, tids)
     pleg_by_cid = {leg.contract_id: leg for leg in legs}
-    rows = _leg_rows(book, entry, tids, symbols)
+    prev_day = (entry.get("ref_dates") or {}).get("daily") or book.refs["daily"]
+    try:
+        prev_rows = {r["trade_id"]: r for r in book.frames.records(prev_day)}
+    except Exception:  # noqa: BLE001 -- a close that cannot be valued: each level and leg says so
+        prev_rows = {}
+    rows = _leg_rows(book, entry, tids, symbols, prev_day, prev_rows)
     rows_by_cid = {r["contract_id"]: r for r in rows}
     parts, _left, type_note = _decompose(book, tids, legs, _roll_trade_ids(roll_data, name))
     kinds = [p.kind for p in parts]
-    if not parts:
+    unknown = [r for r in rows if r["unrecognised"]]
+    if not parts and unknown and all(r["unrecognised"] or r["hedge"] for r in rows):
+        kind, type_note = TYPE_NONE, ("only contracts the app does not recognise: not typed until they are mapped "
+                                      f"({', '.join(r['name'] for r in unknown)})")
+    elif not parts:
         kind, type_note = _type_other(book, tids, rows)
     else:
         kind = kinds[0] if len(set(kinds)) == 1 else TYPE_MIXED
     # the levels: one per part; the trade's is its one spread's
-    prev_day = (entry.get("ref_dates") or {}).get("daily") or book.refs["daily"]
-    try:
-        prev_rows = {r["trade_id"]: r for r in book.frames.records(prev_day)}
-    except Exception:  # noqa: BLE001 -- a close that cannot be valued: each level says so per leg
-        prev_rows = {}
     cross_pairs = [p for p in entry.get("pairs") or [] if p.get("type") in (CROSS_EXCHANGE, CROSS_PRODUCT)]
     part_levels: List[dict] = []
     for part in parts:
@@ -932,7 +1073,11 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
     subs = [_part_row(book, p, rows_by_cid, lv) for p, lv in zip(parts, part_levels)]
     cross_idx = [n for n, p in enumerate(parts) if p.kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT)]
     cal_idx = [n for n, p in enumerate(parts) if p.kind == TYPE_CALENDAR]
-    if len(parts) == 1:
+    if len(parts) == 1 and parts[0].kind == TYPE_OUTRIGHT:
+        level = _price_level(rows, part_levels[0])
+    elif not parts:
+        level = _price_level(rows, _blank_level("nothing open: no level"))
+    elif len(parts) == 1:
         level = part_levels[0]
     elif len(cross_idx) == 1:
         level = part_levels[cross_idx[0]]
@@ -964,23 +1109,26 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
     flags = []
     if size.get("unbalanced"):
         a, b = size["sides"]
-        flags.append({"code": FLAG_UNBALANCED, "label": "unbalanced",
+        flags.append({"code": FLAG_UNBALANCED, "label": "unbalanced", "severity": "amber",
                       "sentence": (f"the sides differ by {size['value_gap']:.0%} of their value at the fill "
                                    f"({a['label']} {abs(a['value_fill_usd']):,.0f} USD against {b['label']} "
                                    f"{abs(b['value_fill_usd']):,.0f} USD); balanced is within {UNBALANCED:.0%}")})
     if hedge.get("hedge_oversized"):
-        flags.append({"code": FLAG_HEDGE_OVERSIZED, "label": "hedge oversized", "sentence": hedge["hedge_oversized"]})
+        flags.append({"code": FLAG_HEDGE_OVERSIZED, "label": "hedge oversized", "severity": "amber", "sentence": hedge["hedge_oversized"]})
     if mismatch:
-        flags.append({"code": FLAG_TYPE_MISMATCH, "label": "type mismatch", "sentence": mismatch})
+        flags.append({"code": FLAG_TYPE_MISMATCH, "label": "type mismatch", "severity": "amber", "sentence": mismatch})
+    for r in unknown:
+        flags.append({"code": FLAG_UNRECOGNISED, "label": "contract not recognised", "severity": "red",
+                      "sentence": f"contract not recognised: {r['name']}: P&L can't be computed until it is mapped"})
     no_price = [r for r in rows if r["status"] == "open" and r["mark"] is None]
     if no_price:
-        flags.append({"code": FLAG_NO_PRICE,
+        flags.append({"code": FLAG_NO_PRICE, "severity": "amber",
                       "label": f"{len(no_price)} leg{'s' if len(no_price) > 1 else ''} without price",
                       "sentence": "; ".join(f"{r['name']}: {r['mark_reason']}" for r in no_price)})
     pnl = entry.get("pnl_usd") or {}
     return {
         "trade": name, "trade_ids": sorted(tids), "position_id": f"POSITION-{entry['spread_id']}",
-        "status": "open" if any(r["status"] == "open" for r in rows) else "closed",
+        "status": "open" if any(r["status"] in ("open", UNRECOGNISED.lower()) for r in rows) else "closed",
         "first_trade_date": min(str(book.by_id[t]["trade_date"]) for t in tids),
         "pb_roots": list(entry.get("pb_roots") or []), "type_labels": list(entry.get("type_labels") or []),
         "type": kind, "type_note": type_note, "type_mismatch": mismatch, "sub_spreads": subs,
@@ -1000,6 +1148,86 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         "notional_reason": entry.get("notional_reason", ""),
         "flags": flags,
     }
+
+
+def _close_date(book, tids: Sequence[str]) -> str:
+    """The day a closed trade went flat: its last fill, or the settlement of a leg that expired
+    after it (``value_book``'s ``settle_date`` of a SETTLED row), whichever is later."""
+    days = [str(book.by_id[t]["trade_date"])[:10] for t in tids]
+    for t in tids:
+        r = book.today.get(t) or {}
+        if str(r.get("status") or "") == "SETTLED" and r.get("settle_date"):
+            days.append(min(str(r["settle_date"])[:10], book.as_of))
+    return max(days)
+
+
+def _closed_block(conn: sqlite3.Connection, book, name: str, entry: dict, read: ValueFn, roll_data: dict,
+                  symbols: Dict[str, str]) -> dict:
+    """A closed trade's level at entry and when it went flat (the Book's closed fold): the trade is
+    read as it stood on the last business day it was open (its parts and level by the same rules),
+    its entry level from the fills, its exit level on the close date's marks (a leg not held that
+    day, or settled, reads that day's official price or leaves the exit on the last open close,
+    said in ``exit_basis``). Display only: the P&L is the trade's LTD, as for an open trade."""
+    from engine.pnl.calendar import _prev_business_day
+    from engine.spreads.book import _Book, type_legs
+    from engine.spreads.trade_type import type_fields
+    tids = list(entry["trade_ids"])
+    close = _close_date(book, tids)
+    out = {"close_date": close, "open_date": "", "unit": "", "mode": "", "entry": None, "exit": None,
+           "exit_date": "", "exit_basis": "", "reason": "", "type": ""}
+    day = _prev_business_day(dt.date.fromisoformat(close), book.holidays).isoformat()
+    first = min(str(book.by_id[t]["trade_date"])[:10] for t in tids)
+    if day < first:
+        out["reason"] = f"opened and closed on {close}: no close on which it was open, so no level"
+        return out
+    out["open_date"] = day
+    try:
+        then = _Book(conn, day, read, None)
+        ids = [t for t in tids if t in then.by_id]
+        sid = entry["spread_id"]
+        stub = {"spread_id": sid, **then.label_fields(ids), "pnl_usd": {}, "pnl_reasons": {}, "pnl_notes": {},
+                "ref_dates": {"daily": day}, "gross_usd": None, "net_usd": None, "notional_reason": ""}
+        stub["legs"] = then.leg_rows(ids)
+        stub.update(type_fields(stub["type_labels"], type_legs(stub["legs"]), then.roots, None))
+        then.daily[sid] = {"rows": {r["trade_id"]: r for r in then.frames.records(day)}, "date": day}
+        was = _trade(then, name, st.strategy_entry(then, name, ids, stub), roll_data, symbols, None)
+    except Exception as exc:  # noqa: BLE001 -- the fold shows the reason, never a failure of the book
+        out["reason"] = f"its level on {day} could not be read ({type(exc).__name__}: {exc})"
+        return out
+    level = was["level"]
+    out.update(unit=level.get("unit", ""), mode=level.get("mode", ""), type=was["type"],
+               entry=level.get("entry"), entry_reason=level.get("entry_reason", ""))
+    if level.get("mode") == "price":
+        # an outright of one contract: its exit is its price on the close date (the mark its row
+        # carries that day, the settlement price once it has expired)
+        leg = next(r for r in was["legs"] if not r["hedge"] and r["status"] == "open")
+        got = read(conn, close)
+        frame = got[0] if isinstance(got, tuple) else got
+        rows = ({r["trade_id"]: r for r in frame.to_dict("records") if r["trade_id"] in set(leg["trade_ids"])}
+                if isinstance(frame, pd.DataFrame) and not frame.empty else {})
+        hit = next((r for r in rows.values() if _num(r.get("mark")) is not None), None)
+        if hit is not None:
+            out.update(exit=_num(hit["mark"]), exit_date=close,
+                       exit_basis=f"{leg['name']} on the {close} close ({hit.get('mark_source') or 'value_book'})")
+        elif level.get("now") is not None:
+            out.update(exit=level["now"], exit_date=day, exit_basis=f"{leg['name']} on the {day} close, the last it "
+                                                                   f"was open (no price on {close})")
+        else:
+            out["reason"] = level.get("now_reason") or "no price on the close it went flat"
+        return out
+    if level.get("spec") is None:
+        out["reason"] = level.get("reason") or level.get("now_reason") or "no level"
+        return out
+    point = level_history(conn, was, [close], read)["points"]
+    if point and point[0]["level"] is not None:
+        out.update(exit=point[0]["level"], exit_date=close, exit_basis=f"the {close} close, the day it went flat")
+    elif level.get("now") is not None:
+        why = point[0]["level_reason"] if point else "not valued"
+        out.update(exit=level["now"], exit_date=day,
+                   exit_basis=f"the {day} close, the last it was open (on {close}: {why})")
+    else:
+        out["reason"] = level.get("now_reason") or "no price on the close it went flat"
+    return out
 
 
 def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = None,
@@ -1058,7 +1286,24 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
       reasons, notes, ref_dates, split ({spread, fx, hedge, new_trades, realised, other}, or None
       with ``split_reason``)}; ``gross_usd`` / ``net_usd`` / ``notional_reason``.
     - ``flags``: [{code ('unbalanced' | 'hedge_oversized' | 'type_mismatch' |
-      'leg_without_price'), label, sentence}].
+      'leg_without_price' | 'unrecognised'), label, sentence, severity ('red' on 'unrecognised', else 'amber')}].
+    - A row the parser could not identify (product UNRECOGNISED, hard rule 6) stays in its trade as
+      a leg: ``unrecognised`` True, ``status`` 'unrecognised', ``name`` the broker's symbol as
+      written, lots and average fill as the file gave them, no mark, value or P&L (``unrecognised_
+      reason`` instead), never in the type, level, balance, hedge, leftover or carry; its trade
+      carries the red ``unrecognised`` flag and counts as open. A trade of such rows only is type
+      '' with that flag, never dropped. Every leg carries ``unrecognised`` (False on the others).
+    - ``closed`` (a closed trade, else None; 2026-09-29): {close_date (its last fill or a leg's
+      settlement), open_date (the last business day it was open), type, unit, mode, entry /
+      entry_reason (the level at entry, read as it stood on ``open_date``), exit, exit_date,
+      exit_basis (the level on the close date's marks, else on ``open_date``), reason}.
+
+    Legs also carry (2026-09-29) ``mark_as_of`` (the close the mark is from: the as-of, or the
+    earlier close the filled reader carried) / ``mark_snapped_at`` (the official mark's stamp, ''
+    for an estimate or a frozen row), ``prev_mark`` / ``prev_mark_date`` / ``prev_mark_source`` /
+    ``prev_mark_reason`` (the Daily's reference close) and ``value_local`` / ``value_local_reason``
+    (open quantity x multiplier x mark, in ``currency``); two roots of one commodity on one exchange
+    are named by product ('ICE TTF gas Nov26', 'ICE NBP gas Nov26').
 
     Every figure that cannot be given is None with its reason, never 0 (hard rule 2)."""
     from engine.spreads.book import _Book, book_spreads
@@ -1090,7 +1335,10 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
             notes.append(f"{name}: its trades are not the ones on file on {as_of} (spreads built on another book?)")
             continue
         try:
-            trades.append(_trade(book, name, entry, roll_data, symbols, history))
+            row = _trade(book, name, entry, roll_data, symbols, history)
+            row["closed"] = (_closed_block(conn, book, name, entry, read, roll_data, symbols)
+                             if row["status"] == "closed" else None)
+            trades.append(row)
         except Exception as exc:  # noqa: BLE001 -- one trade's reason, never the whole book
             notes.append(f"{name} could not be read ({type(exc).__name__}: {exc})")
     unassigned = sorted(entries[""]["trade_ids"]) if "" in entries else []
@@ -1158,6 +1406,6 @@ def level_history(conn: sqlite3.Connection, trade: dict, dates: Iterable[str], v
             "points": points, "rolls": list(trade.get("rolls") or [])}
 
 
-__all__ = ["FAMILY_CROSS", "FLAG_HEDGE_OVERSIZED", "FLAG_NO_PRICE", "FLAG_TYPE_MISMATCH", "FLAG_UNBALANCED",
+__all__ = ["FAMILY_CROSS", "FLAG_HEDGE_OVERSIZED", "FLAG_NO_PRICE", "FLAG_TYPE_MISMATCH", "FLAG_UNBALANCED", "FLAG_UNRECOGNISED",
            "TRADE_TYPES", "TYPE_CALENDAR", "TYPE_CROSS_EXCHANGE", "TYPE_CROSS_PRODUCT", "TYPE_MIXED", "TYPE_NONE",
            "TYPE_OUTRIGHT", "commodity_words", "family_of", "leg_name", "level_history", "month_label", "trade_book"]

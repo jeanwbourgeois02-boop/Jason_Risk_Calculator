@@ -21,6 +21,11 @@ Choices made where the brief left room (reported, not yet contradicted by the us
 - z history: own contract settlements only reached 41-54 days on Jason's book, so before a leg's first
   settlement the constant-maturity contract at its as_of rank is spliced (the P&L history's own rule);
   `level_own_from` / `level_note` say so. Now or entry = research settlement on/before the date.
+- ui round 1 (2026-09-29): `trade_book=` kwarg (spreads-engine's trade_book): its `level.spec` wins over
+  my own pick (SCO1 then reads its "2 spreads" reason), `level.change` / level_sd = move_sigma. level_sd =
+  sd of the level's daily changes over the z window, a change spanning a roll or the CM splice left out
+  (contract-per-date tracked in `_leg_prices`). subset_var reads `_BASE` (latest block whatever levels) so
+  a trade_book call never forces a rebuild on a filter change.
 - Memo pitfall: the first book_spreads on a db creates tables and moves the file mtime, so the memo is
   stored under the key read AFTER the build too (warm 0.02-0.04 s, subsets 15-30 ms).
 

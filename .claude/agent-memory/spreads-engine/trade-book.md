@@ -27,3 +27,12 @@ Built 2026-09-29 (Phase G: the trade, the PBRoot name, is the screens' unit). `t
 - Sample blotter has no PBRoot: every trade unassigned. Verify by labelling a scratch copy (UPDATE trades SET strategy,
   trade_type, pb_root). Checked: legs' LTD and Daily sum to the trade's, = position pnl, deterministic.
 - Scratchpad is shared with other lanes' agents: use a private subfolder (another agent overwrote real.db once).
+- Round 1 (2026-09-29): value_book's mark_date is the leg's SETTLE date, not the quote date: the mark's close is the as-of
+  (or the filled reader's earlier close, parsed from its note); snapped_at looked up on (instrument, as-of, settle_date).
+  A one-contract OUTRIGHT's level is its price (mode 'price', no spec). Closed trades: read as on the last open business
+  day (stub strategy entry, no period P&L, so 2 extra valuations: that day and the close date). Scorecard by_type = these
+  rule types; by_spread_type (label) kept.
+- UNRECOGNISED rows (hard rule 6, 2026-09-29): a leg of its PBRoot trade (status 'unrecognised', name = broker symbol,
+  red flag), never typed / levelled / balanced / hedged; only-unrecognised trade = type '' + flag, counts as open. The
+  strategy P&L stays None whole (no partial sum, existing rule): the ui may sum priced legs with excl. N. Test by
+  inserting instruments + trades rows by hand (asset_class/product UNRECOGNISED, multiplier 0, no legs).

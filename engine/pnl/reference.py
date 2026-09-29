@@ -168,7 +168,10 @@ class ReferenceChoice:
 # still blank in LTD, on the chart and in the Blotter.
 _VALUATION_COLUMNS = ("mark", "mark_date", "mark_source", "spot", "spot_source", "pnl_local", "pnl_usd",
                       "pnl_spot_usd", "pnl_carry_usd")
-_NEVER_FILLED = (" is not a number (", "could not be valued")
+_NEVER_FILLED = (" is not a number (", "could not be valued", "contract not recognised:")
+# A blotter row whose contract the app cannot identify (`value_book` status UNRECOGNISED, no legs,
+# never marked, 2026-09-29) has no earlier price to find: never looked back for.
+_NEVER_FILLED_STATUS = ("UNRECOGNISED",)
 _FILL_NOTE_RE = re.compile(r"^no price on (\d{4}-\d{2}-\d{2}): value of the (\d{4}-\d{2}-\d{2}) close")
 
 
@@ -221,8 +224,10 @@ def fill_book(frame: pd.DataFrame, as_of: str, rows_for: Callable[[str, FrozenSe
         holidays = load_holidays()
     # A stored value that is not a number is a data error to fix, not data Bloomberg does not
     # have: that row stays blank and loud (`valuation._BadValue`, `_guarded_row`).
-    remaining = {tid for tid, reason in zip(frame["trade_id"], frame["reason"])
-                 if reason and not any(s in str(reason) for s in _NEVER_FILLED)}
+    statuses = frame["status"] if "status" in frame.columns else [""] * len(frame)
+    remaining = {tid for tid, reason, status in zip(frame["trade_id"], frame["reason"], statuses)
+                 if reason and status not in _NEVER_FILLED_STATUS
+                 and not any(s in str(reason) for s in _NEVER_FILLED)}
     if not remaining:
         return frame, ()
     frame = frame.copy()

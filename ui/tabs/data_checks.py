@@ -196,6 +196,7 @@ def mark_rows(conn: sqlite3.Connection, as_of: str, frame: pd.DataFrame) -> List
             "arrived": _bool(r.get("arrived")), "arrived_reason": _s(r.get("arrived_reason")),
             "fresh": _bool(r.get("fresh")), "fresh_reason": _s(r.get("fresh_reason")),
             "sane": _bool(r.get("sane")), "sane_reason": _s(r.get("sane_reason")),
+            "usual_move_pct": _num(r.get("usual_move_pct")), "sane_limit_pct": _num(r.get("sane_limit_pct")),
             "units_ok": _bool(r.get("units_ok")), "units_reason": _s(r.get("units_reason")),
             "avg_fill": _num(r.get("avg_fill")),
             "trades": _s(r.get("trade_names")), "blocks": blocks, "blocks_what": _s(r.get("blocks_what")),
@@ -221,7 +222,15 @@ def problem_words(row: dict, as_of: str, today: str) -> Tuple[str, str]:
         tips.append(row["fresh_reason"])
     if row["sane"] is False:
         if row["pct_raw"] is not None:
-            words.append(f"Moved {row['pct']} in a day, beyond its usual move")
+            when = "in a day" if "in a day" in row["sane_reason"] or not row["sane_reason"] else "since its last close"
+            moved = f"Moved {abs(row['pct_raw']) * 100:.1f} % {when}"
+            usual = row.get("usual_move_pct")
+            if usual is not None:
+                words.append(f"{moved}, usual move {abs(usual) * 100:.1f} %")
+            elif row["sane_reason"]:
+                words.append(f"{moved} ({row['sane_reason'].split('; ', 1)[-1]})")
+            else:
+                words.append(f"{moved}, beyond its usual move")
         else:
             words.append("The stored price is not a number")
         tips.append(row["sane_reason"])

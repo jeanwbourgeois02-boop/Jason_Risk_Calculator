@@ -6,7 +6,8 @@ data/bloomberg; never recomputes P&L or delta -- that lives in engine/.
 Five tabs since Phase G (CLAUDE.md "Screens redesign plan", user 2026-09-29), in this order: Book,
 P&L, Risk, Blotter, Data. The trade (Jason's PBRoot name) is the unit on Book, P&L and Risk, which
 share one filter bar and Group switch (ui/tabs/trade_filter.py; its state is one session store in
-this layout). Exposure (ui/tabs/curve.py, key "curve") merged into Risk: its key is in
+this layout). Exposure (key "curve") merged into Risk (its grid, curves and currency card are Risk's
+folds, ui/tabs/risk_folds.py; ui/tabs/curve.py deleted in round 2b): its key is in
 `HIDDEN_TAB_KEYS` with the tabs deleted on 2026-09-28 (Spreads, FX & cash, Timing & cash), so a stale
 link is ignored. Each tab has a stable key (`TAB_KEYS`) that names its body's DOM id and the tab bar's value,
 separate from the label the user reads, so a rename never moves an id. The app opens on the
@@ -70,8 +71,8 @@ def set_active_db(path: Union[str, Path, None]) -> Path:
 # later the same day (`HIDDEN_TAB_KEYS`): a tab link to any of those keys is dead
 # (`tab_from_link_click` ignores it), so no screen renders one.
 # Phase G (user, 2026-09-29): five tabs, the trade the unit on Book, P&L and Risk. Exposure merged
-# into Risk: its key "curve" joined `HIDDEN_TAB_KEYS` (ui/tabs/curve.py stays on disk, unmounted,
-# until round 2 moves its grid and currency parts into Risk's folds).
+# into Risk: its key "curve" joined `HIDDEN_TAB_KEYS`; its grid, curves and currency card became Risk's
+# folds in round 2b and ui/tabs/curve.py was deleted.
 TAB_KEYS = {
     "Book": "book",
     "P&L": "pnl",

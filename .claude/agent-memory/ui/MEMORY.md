@@ -29,3 +29,4 @@
 - [Book spread rows 2026-09-29](book-spread-rows-2026-09-29.md) — pairs with >2 legs sized by value: pair_name/ratio/leftover, Trade + Symbol columns and filters, Needs you gone
 - [Blotter + Data Phase G 2026-09-29](blotter-data-phase-g-2026-09-29.md) — blotter_fills / data_checks / data_kit, session filter store + bar-rev, missing-Input trap, CDP proof recipe
 - [Phase G round 1 2026-09-29](phase-g-round1-2026-09-29.md) — five tabs, trade_filter store/bar pattern, Book/P&L sources, async trade_risk, browser recipe + Dash 4 click traps
+- [Risk per-trade table 2026-09-29](risk-trade-table-phase-g-2026-09-29.md) — Phase G 2b: trade table + store-driven folds, curve.py deleted, risk_limits.py, subset_var headline, sticky-head trap
