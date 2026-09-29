@@ -59,3 +59,8 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 
 ## Then
 - `py -3 -m pytest tests/ -q` once; the golden book (`tests/test_golden_book.py`) included.
+
+## Phase G (2026-09-29): owed, not written or run (user rule: no tests until the site is final)
+
+- Breaking now: tests/test_ui_curve.py and tests/test_ui_risk.py (old Exposure / Risk screens: delete); tests/test_app.py (curve ids, old risk ids); tests/test_ui.py (curve reference); tests/test_ui_market_data.py and the old-fills parts of tests/test_ui_blotter*.py; tests/test_blotter.py, test_commodity_ingest.py, test_bloomberg.py, test_upload.py (assert rejects / "not loaded": every row now loads); test_live.py recalc assertion (connected); test_backfill_options.py and test_auto_backfill.py (fault isolation); any positional `INSERT INTO trades VALUES` fixture (trades has 19 columns with fin_type); test_golden_book.py (the sample now has PBRoot names and 52 trades incl. 2 UNRECOGNISED; curve_positions has new keys: re-pin needs the user's yes).
+- New coverage owed, by lane: trade_book (types, month-pair rule, flags, closed levels, fx_name, unrecognised legs); trade_risk / subset_var (hedge % rules, best fit, z, level_sd, vol target, legs_risk); research provenance and price check (futures, LME, FX); mark_checks (four checks, usual move); every-row-loads (UNRECOGNISED write, merge, reasons across uploads, re-resolve, NOID ids); fault isolation (live, curves, backfill); value_fn once-per-date (daily_series, curve_positions, book_positions, book_spreads); warm-up (debounce, file-stamp keys); stress by_position sums; liquidity single book_spreads.
