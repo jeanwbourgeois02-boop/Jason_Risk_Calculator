@@ -29,6 +29,12 @@ Choices made where the brief left room (reported, not yet contradicted by the us
 - ui round 2b: subset_var's vol target block uses metrics.series_metrics (blended vol, the engine's
   vol_vs_target_pct) plus var_vs_target_pct = VaR / target; legs_risk per contract (1 sd, corr with the
   other side as HELD, so an offsetting leg is negative); best_fit_r2 = corr squared (fit has an intercept).
+- hedge % fixes (checker B, 2026-09-29): an outright (one side, no hedge in series) is None "one leg:
+  nothing hedges it", never 0 (0 became the headline's lowest hedge). A trade where a commodity nets to
+  zero lots (SCO1: iron ore calendars + an HRC month) is measured WITHIN each commodity, RISK-weighted
+  by each commodity's bigger month's sd (value-weighting needs a price; research prices are context and
+  mock here): SCO1 -0.0 % -> 65.6 %. `hedge_method` says which way. Such a trade with a currency hedge in
+  series is None.
 - The hand-back tool delivers ONE report per run: after it, the coordinator never sees later text.
 - Memo pitfall: the first book_spreads on a db creates tables and moves the file mtime, so the memo is
   stored under the key read AFTER the build too (warm 0.02-0.04 s, subsets 15-30 ms).

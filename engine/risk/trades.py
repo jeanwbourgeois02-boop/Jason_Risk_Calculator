@@ -25,8 +25,11 @@ Per trade (parameters in `config/risk.yaml`; W = `trade_window_bd`, 252; a figur
                    legs close hours apart (an exchange of `asian_close_countries` against one
                    elsewhere: SHFE zinc against LME zinc) the moves are 2-day sums (overlapping),
                    so the close-time gap does not read as unhedged risk (`hedge_moves`). An
-                   outright with nothing against it is 0 %; one whose only hedge has no history
-                   is None. It can be negative: the other side adds risk.
+                   outright with nothing against it is None ("one leg: nothing hedges it", never
+                   0 %), as is one whose only hedge has no history. A trade in which a commodity
+                   nets to zero lots (calendars on it) is measured within each commodity and
+                   risk-weighted (`_hedge_calendars`; `hedge_method` names the way). It can be
+                   negative: the other side adds risk.
   best_fit_ratio   two-leg trades only (two sides as above; three or more: None, "more than two
                    legs"): the lots of leg B per lot of leg A, held opposite, that minimise the
                    variance of the pair (the slope of a regression of A's P&L per lot on B's,
@@ -369,15 +372,23 @@ def _sides(ctx: _Ctx) -> Tuple[List[dict], bool, str]:
 
 def _hedge(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str) -> dict:
     out = {"hedge_pct": None, "hedge_reason": "", "hedge_leg": None, "hedge_moves": "2-day" if two_day else "1-day",
-           "hedge_days": 0}
+           "hedge_days": 0, "hedge_method": ""}
     w, why = _window(ctx)
     if w is None or not sides:
         out["hedge_reason"] = why or side_why
         return out
+    hedged = any(lg.get("hedge") and lg.get("in_series") for lg in ctx.row.get("legs") or [])
     if len(sides) == 1 and ctx.row.get("partial"):
         out["hedge_reason"] = (f"one leg, and its currency hedge has no price history "
                                f"({ctx.row.get('partial_reason')}): nothing to measure")
         return out
+    if len(sides) == 1 and not hedged:
+        # an outright: 0 % would read as a measured hedge (and be the headline's lowest); it is not one
+        out["hedge_reason"] = "one leg: nothing hedges it"
+        return out
+    if len(sides) >= 2 and any(abs(sd["lots"]) < 1e-9 for sd in sides):
+        return _hedge_calendars(ctx, w, sides, hedged, out)
+    out["hedge_method"] = "trade" if len(sides) >= 2 else "one leg against its currency hedge"
     frame = pd.DataFrame({_TRADE: w, **{s["key"]: s["series"].reindex(w.index).fillna(0.0) for s in sides}})
     m = _moves(frame, two_day)
     sd_trade = _std(m[_TRADE])
@@ -391,13 +402,52 @@ def _hedge(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str) -> dict:
     out["hedge_pct"] = (1.0 - sd_trade / sd_big) * 100.0
     notes = []
     if len(sides) == 1:
-        hedged = any(lg.get("hedge") and lg.get("in_series") for lg in ctx.row.get("legs") or [])
-        notes.append("one leg against its currency hedge" if hedged else "one leg: nothing hedges it")
+        notes.append("one leg against its currency hedge")
     if ctx.row.get("partial"):
         notes.append(ctx.row.get("partial_reason"))
     if len(m) < int(ctx.config["trade_window_bd"]) - (1 if two_day else 0):
         notes.append(f"on {len(m)} {'2-day' if two_day else 'daily'} moves")
     out["hedge_reason"] = "; ".join(n for n in notes if n)
+    return out
+
+
+def _hedge_calendars(ctx: _Ctx, w: pd.Series, sides: List[dict], hedged: bool, out: dict) -> dict:
+    """hedge % of a trade whose commodities include one that nets to zero lots (calendars on it:
+    SCO1's iron ore Oct/Feb and Nov/Mar). Between commodities there is then no "other side": the
+    bigger commodity's P&L is already a hedged strip. So the hedge is measured WITHIN each
+    commodity (its months against each other, 1-day moves: one exchange, one close) and the
+    trade's figure is RISK-weighted, each commodity by its bigger month's standalone sd:
+        hedge % = 1 - sum over commodities sd(commodity) / sum sd(its bigger month)
+    (= the sd-weighted mean of each commodity's own 1 - sd / sd_big). A commodity held in one
+    month (an outright) enters at 0 %: sd = its bigger month's. Not value-weighted: a value needs
+    a price, and the research prices are context, not ours. A currency hedge with a series would
+    not fit this split, so such a trade is None with its reason."""
+    out.update(hedge_method="within calendars (risk-weighted)", hedge_moves="1-day")
+    if hedged:
+        out["hedge_reason"] = ("a commodity nets to zero lots (calendars) and the trade holds a currency hedge: "
+                               "no honest single hedge %")
+        return out
+    num = den = 0.0
+    parts = []
+    days = 0
+    for sd in sides:
+        cids = [c for c in sd["contracts"] if c in ctx.parts]
+        frame = pd.DataFrame({c: ctx.parts[c].reindex(w.index).fillna(0.0) for c in cids})
+        net = frame.sum(axis=1)
+        legs_sd = {c: _std(frame[c]) for c in cids}
+        big = max(cids, key=lambda c: legs_sd[c] if legs_sd[c] is not None else -1.0)
+        sd_big, sd_net = legs_sd[big], _std(net)
+        days = max(days, int(len(frame)))
+        if not sd_big or sd_net is None:
+            out["hedge_reason"] = f"{sd['name']}: its bigger month did not move over the window, so there is no ratio"
+            return out
+        num += sd_net
+        den += sd_big
+        parts.append(f"{sd['name']} {(1.0 - sd_net / sd_big) * 100.0:.0f} %"
+                     + (" (one month: unhedged)" if len(cids) == 1 else ""))
+    out.update(hedge_pct=(1.0 - num / den) * 100.0, hedge_days=days,
+               hedge_leg=", ".join(sd["name"] for sd in sides),
+               hedge_reason="measured within each commodity's months, weighted by risk: " + "; ".join(parts))
     return out
 
 
