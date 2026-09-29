@@ -96,8 +96,11 @@ import bisect
 import os
 import re
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -106,8 +109,8 @@ import pandas as pd
 from data.contracts.tickers import month_from_code, padded_root, parse_bbg_ticker, parse_option_ticker
 from data.contracts.universe import load_roots
 
-__all__ = ["CHECK_KINDS", "CommodityHistory", "DEFAULT_FX_PAIR", "DEFAULT_PATH", "ENV_VAR", "FX_CHECK_THRESHOLD",
-           "LABEL", "PRICE_CHECK_THRESHOLD", "SOURCE_KINDS", "candidates", "contract_liquidity", "load_commodity_history", "research_curve",
+__all__ = ["CHECK_KINDS", "CommodityHistory", "ContractMap", "DEFAULT_FX_PAIR", "DEFAULT_PATH", "ENV_VAR", "FX_CHECK_THRESHOLD",
+           "LABEL", "PRICE_CHECK_THRESHOLD", "SOURCE_KINDS", "candidates", "latest_settles", "warm", "contract_liquidity", "load_commodity_history", "research_curve",
            "research_price_check", "research_source", "window_move"]
 
 LABEL = "research"
@@ -157,6 +160,60 @@ def _our_lot(root_id: Optional[str]) -> Optional[Tuple[float, str]]:
 # The pair each currency converts through when the caller names none (the research
 # app's fx_daily rule: "convert CNY prices with USDCNH unless a spread names USDCNY").
 DEFAULT_FX_PAIR = {"CNY": "USDCNH", "CNH": "USDCNH"}
+
+
+class ContractMap(Mapping):
+    """The date -> research contract map a constant-maturity series carries in `attrs['contracts']`,
+    read-only. pandas deep-copies a Series' attrs on every operation (a copy, an arithmetic step,
+    a slice), and a plain dict of a few thousand dates made that about 1.9 s of a profiled
+    `book_risk` (2026-09-29). This map is immutable, so a deep copy returns it as it is, and the
+    dict is built only when first read. It reads like the dict it replaces: `m[date]`,
+    `m.get(date)`, `len`, iteration, `items()`, `dict(m)`, equality with a dict."""
+    __slots__ = ("_source", "_dict")
+
+    def __init__(self, source: pd.Series):
+        self._source = source         # date -> contract id; never modified here
+        self._dict = None
+
+    def _built(self) -> dict:
+        if self._dict is None:
+            self._dict = self._source.to_dict()
+        return self._dict
+
+    def __getitem__(self, key):
+        return self._built()[key]
+
+    def __iter__(self):
+        return iter(self._built())
+
+    def __len__(self) -> int:
+        return len(self._source)
+
+    def __contains__(self, key) -> bool:
+        return key in self._built()
+
+    def __eq__(self, other) -> bool:
+        if other is self:
+            return True
+        return Mapping.__eq__(self, other)
+
+    __hash__ = None
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __reduce__(self):
+        return (_contract_map_from_dict, (self._built(),))
+
+    def __repr__(self) -> str:
+        return f"ContractMap({len(self)} dates)"
+
+
+def _contract_map_from_dict(d: dict) -> "ContractMap":
+    return ContractMap(pd.Series(d, dtype=object))
 
 
 def _empty(reason: str, name: Optional[str] = None) -> pd.Series:
@@ -328,6 +385,9 @@ class CommodityHistory:
     _lookup: Dict[str, dict] = field(default_factory=dict, repr=False)
     _cm: Dict[tuple, pd.DataFrame] = field(default_factory=dict, repr=False)      # (root, months_ahead) -> frame
     _pnl: Dict[tuple, pd.Series] = field(default_factory=dict, repr=False)        # position P&L per argument set
+    # Serialises the per-root reads, so a request arriving while `warm()` reads the same roots in
+    # the background waits for that read instead of doing it twice (2026-09-29).
+    _read_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     # ----------------------------------------------------------------- summary
     def status(self) -> dict:
@@ -426,6 +486,10 @@ class CommodityHistory:
         reports its reason there."""
         if not self.available:
             return
+        with self._read_lock:
+            self._prefetch(root_ids)
+
+    def _prefetch(self, root_ids) -> None:
         wanted = sorted({_norm(r).replace(" ", "") for r in root_ids} - set(self._roots))
         wanted = [r for r in wanted if r in self.instruments.index]
         if not wanted:
@@ -446,6 +510,13 @@ class CommodityHistory:
     def _root_prices(self, root_id: str) -> pd.DataFrame:
         """date x contract_id of RAW settles for one root (research ids), memoised. A read that
         fails gives an empty frame with `attrs['reason']`, not memoised."""
+        hit = self._roots.get(root_id)
+        if hit is not None:
+            return hit
+        with self._read_lock:
+            return self._read_root(root_id)
+
+    def _read_root(self, root_id: str) -> pd.DataFrame:
         if root_id not in self._roots:
             try:
                 df = _query(Path(self.path),
@@ -548,7 +619,7 @@ class CommodityHistory:
     def constant_maturity_series(self, root_id: str, months_ahead: int, start=None) -> pd.Series:
         """The settlement (quote units) of the `months_ahead`-th listed contract on each date,
         rolled on the contract's last trade date. `attrs['contracts']` is the contract used
-        per date. Level only: its day-on-day difference jumps at a roll; use
+        per date (a read-only `ContractMap`, cheap for pandas to carry). Level only: its day-on-day difference jumps at a roll; use
         `constant_maturity_changes` for returns."""
         frame, why = self._cm_frame(root_id, months_ahead, start)
         name = f"{root_id} #{months_ahead}"
@@ -558,7 +629,7 @@ class CommodityHistory:
         if frame.empty:
             return _empty(f"root {root_id} has no settlement for contract #{months_ahead} in the research database", name)
         out = frame["settle"].rename(name)
-        out.attrs.update(reason="", contracts=frame["contract_id"].to_dict())
+        out.attrs.update(reason="", contracts=ContractMap(frame["contract_id"]))
         return out
 
     def constant_maturity_changes(self, root_id: str, months_ahead: int, start=None, raw: bool = False) -> pd.Series:
@@ -575,7 +646,7 @@ class CommodityHistory:
         if frame.empty:
             return _empty(f"root {root_id} has no day-on-day change for contract #{months_ahead}", name)
         out = frame[col].rename(name)
-        out.attrs.update(reason="", contracts=frame["contract_id"].to_dict())
+        out.attrs.update(reason="", contracts=ContractMap(frame["contract_id"]))
         return out
 
     def months_ahead_of(self, contract_id: str, root_id: str, as_of=None) -> Tuple[Optional[int], str]:
@@ -1081,7 +1152,10 @@ def _load(path: Path) -> CommodityHistory:
             contracts = pd.read_sql_query(
                 "SELECT contract_id, instrument_id, year, month, last_trade_date FROM contract", conn)
             fx = pd.read_sql_query("SELECT pair, date, rate FROM fx_daily", conn)
-            first, last = conn.execute("SELECT MIN(date), MAX(date) FROM price_daily").fetchone()
+            # Two queries, not one: MIN and MAX together scan the whole date index (0.3 s on the
+            # dev copy), each alone is one index seek (2026-09-29, same values).
+            first = conn.execute("SELECT MIN(date) FROM price_daily").fetchone()[0]
+            last = conn.execute("SELECT MAX(date) FROM price_daily").fetchone()[0]
             source = _read_source(conn, path)
         finally:
             conn.close()
@@ -1095,7 +1169,8 @@ def _load(path: Path) -> CommodityHistory:
         fx_wide = pd.DataFrame(index=pd.DatetimeIndex([], name="date"))
     else:
         fx["date"] = pd.to_datetime(fx["date"])
-        fx_wide = fx.pivot_table(index="date", columns="pair", values="rate", aggfunc="last").sort_index().astype(float)
+        # A plain pivot: (pair, date) is fx_daily's primary key, so no cell has two rows.
+        fx_wide = fx.pivot(index="date", columns="pair", values="rate").sort_index().astype(float)
     if last is None:
         return CommodityHistory(False, str(path), f"{path} holds no settlements (price_daily is empty)",
                                 instruments=instruments, contracts=contracts, fx=fx_wide, source=source)
@@ -1105,6 +1180,7 @@ def _load(path: Path) -> CommodityHistory:
 
 _CACHE: Dict[tuple, CommodityHistory] = {}
 _CACHE_SLOTS = 4
+_LOAD_LOCK = threading.Lock()   # one load per database identity, even with warm() running
 
 
 def load_commodity_history(path: Union[str, Path, None] = None) -> CommodityHistory:
@@ -1125,10 +1201,13 @@ def load_commodity_history(path: Union[str, Path, None] = None) -> CommodityHist
     key = _cache_key(db)
     hit = _CACHE.get(key)
     if hit is None:
-        hit = _load(db)
-        if len(_CACHE) >= _CACHE_SLOTS:
-            _CACHE.clear()
-        _CACHE[key] = hit
+        with _LOAD_LOCK:
+            hit = _CACHE.get(key)
+            if hit is None:
+                hit = _load(db)
+                if len(_CACHE) >= _CACHE_SLOTS:
+                    _CACHE.clear()
+                _CACHE[key] = hit
     hit.candidates = seen
     hit.note = (f"{ENV_VAR} = {db}" if os.environ.get(ENV_VAR, "").strip() and path is None else f"using {db}") + (
         f" (settlements {hit.first_date} to {hit.last_date})" if hit.last_date else "")
@@ -1609,4 +1688,136 @@ def research_price_check(conn: sqlite3.Connection, as_of=None, threshold: float 
     if hist.source_kind != "real":
         text += f"; {hist.source_note}"
     out["sentence"] = text
+    return out
+
+
+# ------------------------------------------------------------------ light reads
+_SQL_CHUNK = 900   # bound parameters per query, under SQLite's lowest default limit
+
+
+def _db_path(db_path: Union[str, Path, None]) -> Optional[Path]:
+    seen = [Path(db_path).expanduser()] if db_path is not None else [Path(c["path"]) for c in candidates()]
+    found = [p for p in seen if p.is_file()]
+    return found[0] if found else None
+
+
+def latest_settles(contract_ids, on_or_before, db_path: Union[str, Path, None] = None) -> Dict[str, Tuple[str, float]]:
+    """Each contract's latest research settlement on or before `on_or_before`, read straight from
+    `price_daily` by its primary key, with no history load and no contract lookup built: one query
+    per 900 ids (plus one per id matched on its month, below). For a reader that needs a level or
+    two, such as a calendar's roll-down, instead of each root's whole history.
+
+    `contract_ids`: the research app's ids ('CLZ26 Comdty'; our canonical ids are the same form),
+    or a dict {id: our root_id}: with the root, an id that is not in the research app as it is (its
+    Bloomberg root is still the research app's 'ZZ' placeholder) is matched on (root, contract
+    year, month), the rule of `CommodityHistory.resolve_contract`, and an id found under another
+    root is left out, as there. Two-digit years only for that match.
+
+    Returns {id as given: (date ISO, settle)}, settle RAW (Bloomberg's quoted price as stored, the
+    unit of our FUTURE_PX marks; x price_scale for quote units). An id with no settlement on or
+    before the date, not in the research app, or anything unreadable is left out: never raises.
+    Research CONTEXT only: never a mark, never in P&L or delta (hard rule 2), nothing asked of
+    Bloomberg (hard rule 8). Whether the prices are Bloomberg's or mock: `research_source`."""
+    try:
+        day = f"{pd.Timestamp(on_or_before):%Y-%m-%d}"
+    except (TypeError, ValueError):
+        return {}
+    if day == "NaT":
+        return {}
+    roots = ({str(k): (str(v) if v else None) for k, v in contract_ids.items()} if isinstance(contract_ids, dict)
+             else {str(k): None for k in contract_ids})
+    db = _db_path(db_path)
+    if db is None or not roots:
+        return {}
+    asked: Dict[str, List[str]] = {}                     # the research id form -> the ids as given
+    for k in roots:
+        asked.setdefault(" ".join(k.split()), []).append(k)
+    out: Dict[str, Tuple[str, float]] = {}
+    sql = ("SELECT p.contract_id, c.instrument_id, MAX(p.date), p.settle FROM price_daily p "
+           "JOIN contract c ON c.contract_id = p.contract_id WHERE p.contract_id IN ({}) AND p.date <= ? "
+           "GROUP BY p.contract_id")
+    try:
+        conn = _connect(db)
+        try:
+            found = {}
+            ids = list(asked)
+            for i in range(0, len(ids), _SQL_CHUNK):
+                part = ids[i:i + _SQL_CHUNK]
+                for cid, inst, date, settle in conn.execute(sql.format(",".join("?" * len(part))), (*part, day)):
+                    found[cid] = (inst, date, settle)
+            for rid, given in ((rid, g) for rid, gs in asked.items() for g in gs):
+                root = roots[given]
+                root_key = _norm(root).replace(" ", "") if root else None
+                hit = found.get(rid)
+                if hit is not None:
+                    if root_key is None or hit[0] == root_key:
+                        out[given] = (hit[1], float(hit[2]))
+                    continue
+                if root_key is None:
+                    continue
+                exists = conn.execute("SELECT 1 FROM contract WHERE contract_id = ?", (rid,)).fetchone()
+                parts = parse_bbg_ticker(rid)
+                if exists is not None or parts is None or len(parts[2]) != 2:
+                    continue
+                twin = conn.execute("SELECT contract_id FROM contract WHERE instrument_id = ? AND year = ? AND month = ?",
+                                    (root_key, int(parts[2]) + 2000, month_from_code(parts[1]))).fetchone()
+                if twin is None:
+                    continue
+                row = conn.execute("SELECT date, settle FROM price_daily WHERE contract_id = ? AND date <= ? "
+                                   "ORDER BY date DESC LIMIT 1", (twin[0], day)).fetchone()
+                if row is not None:
+                    out[given] = (row[0], float(row[1]))
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 -- an unreadable database gives nothing, never a crash
+        return {}
+    return out
+
+
+def _book_roots(book_db: Union[str, Path]) -> List[str]:
+    """The contract roots ('NYMEX:CL', 'LME:CA') of every trade on file in our risk database."""
+    uri = f"{Path(book_db).resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=CONNECT_TIMEOUT_SECONDS)
+    try:
+        rows = conn.execute("SELECT DISTINCT i.base_ccy FROM trades t JOIN instruments i "
+                            "ON i.instrument_id = t.instrument_id WHERE i.base_ccy LIKE '%:%'").fetchall()
+    finally:
+        conn.close()
+    return sorted(r[0] for r in rows if r[0])
+
+
+def warm(root_ids=None, db_path: Union[str, Path, None] = None, book_db: Union[str, Path, None] = None) -> dict:
+    """Preload what the first Risk, Book or P&L screen would otherwise read cold: the history
+    (`load_commodity_history`), its provenance (`research_source`), the contract lookups
+    `resolve_contract` builds on first use, and the settlements of `root_ids` (or, with
+    `book_db`, our risk database, of every root with a trade on file) in one batched read. Meant
+    for a background thread at start-up (`threading.Thread(target=warm, kwargs=..., daemon=True)`);
+    a request arriving meanwhile waits for the same read rather than repeating it. Read-only on
+    both databases; never raises.
+
+    Returns {ok, seconds: {load, source, lookup, roots}, roots (the roots asked), reason}."""
+    out = {"ok": False, "seconds": {}, "roots": [], "reason": ""}
+    try:
+        t = time.perf_counter()
+        hist = load_commodity_history(db_path)
+        out["seconds"]["load"] = round(time.perf_counter() - t, 3)
+        t = time.perf_counter()
+        research_source(db_path)
+        out["seconds"]["source"] = round(time.perf_counter() - t, 3)
+        if not hist.available:
+            out["reason"] = hist.reason
+            return out
+        t = time.perf_counter()
+        hist.resolve_contract("")        # builds the id lookup
+        hist._by_month()
+        out["seconds"]["lookup"] = round(time.perf_counter() - t, 3)
+        roots = list(root_ids) if root_ids is not None else (_book_roots(book_db) if book_db is not None else [])
+        out["roots"] = sorted({str(r) for r in roots if r})
+        t = time.perf_counter()
+        if out["roots"]:
+            hist.prefetch_roots(out["roots"])
+        out["seconds"]["roots"] = round(time.perf_counter() - t, 3)
+        out["ok"] = True
+    except Exception as exc:  # noqa: BLE001 -- a warm-up that fails leaves the cold path as it was
+        out["reason"] = f"warm-up stopped ({type(exc).__name__}: {exc})"
     return out
