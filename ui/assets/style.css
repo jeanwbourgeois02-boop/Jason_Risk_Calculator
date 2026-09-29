@@ -735,19 +735,16 @@ p { margin: 8px 0; }
    Data issues drawer opening below it). No clipping box on the book card, so the heads stick under the
    top bar while the page scrolls. */
 .book-main { overflow: visible; margin: 0 0 16px; --book-head-h: 32px; }
-.book-strip { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line);
-  border-radius: 8px 8px 0 0; background: var(--card); }
+.book-strip { padding: 10px 14px; border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; background: var(--card); }
 .book-strip-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
-.book-strip-label, .book-strip-field label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+.book-strip-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
   color: var(--muted); margin: 0; white-space: nowrap; }
 .book-strip .book-switch { margin-left: 0; }
-.book-strip-search { min-width: 280px; height: 30px; }
-.book-strip-field { display: flex; align-items: center; gap: 6px; }
-.book-strip-field .blotter-filter-dropdown { min-width: 150px; }
-.book-strip .book-tool { margin-left: 0; }
+.book-strip .book-tool, .book-strip .book-strip-csv { margin-left: 0; }
 .book-strip-meta { margin-left: auto; font-size: 12px; white-space: nowrap; }
-.book-filter-nums { gap: 8px 14px; padding-top: 10px; border-top: 1px dashed var(--line); }
-.book-strip-field--num .book-filter-box { width: 76px; }
+.book-link-button { background: none; border: none; padding: 0 4px; font: inherit; font-size: 12px; color: var(--muted);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.book-link-button:hover { color: var(--navy); }
 .book-filter-box { width: 100%; min-width: 48px; box-sizing: border-box; font: inherit; font-size: 12px; height: 30px; padding: 0 8px;
   border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); font-variant-numeric: tabular-nums; }
 .book-filter-box:hover { border-color: var(--navy); }
@@ -764,8 +761,46 @@ p { margin: 8px 0; }
   border-top: none; border-bottom: 2px solid var(--navy); }
 .book-table.book-grid tr.book-total:hover td { background: var(--total-bg); }
 .book-table.book-grid td, .book-table.book-grid th { padding-left: 8px; padding-right: 8px; }
-.book-table.book-grid th.book-sortable { cursor: pointer; user-select: none; }
-.book-table.book-grid th.book-sortable:hover { background: var(--navy-2); color: var(--gold); }
+.book-table.book-grid th.book-sortable { user-select: none; }
+.book-table.book-grid th.book-sortable:hover { background: var(--navy-2); }
+/* the column filters (2026-09-29, spreadsheet style): the title sorts, the funnel opens its panel under the
+   column (a <details>, ui/assets/book_filters.js keeps one open); gold when its filter is set. The open
+   head is lifted above the other heads and the sticky Book row; nothing on the way clips the panel. */
+.book-th { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
+.book-table th.l .book-th { justify-content: flex-start; }
+.book-sort-title { cursor: pointer; }
+.book-sort-title:hover { color: var(--gold); }
+.book-pop { position: relative; display: inline-flex; }
+.book-pop > summary { list-style: none; }
+.book-pop > summary::-webkit-details-marker { display: none; }
+.book-funnel { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 4px;
+  color: rgba(255,255,255,.55); cursor: pointer; }
+.book-funnel:hover, .book-pop[open] > .book-funnel { color: #fff; background: rgba(255,255,255,.14); }
+.book-funnel.book-funnel--on { color: var(--gold); }
+.book-funnel-icon { width: 10px; height: 10px; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 2h14l-5.5 6.5V14l-3-1.6V8.5z' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 2h14l-5.5 6.5V14l-3-1.6V8.5z' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
+.book-funnel--on .book-funnel-icon {
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 2h14l-5.5 6.5V14l-3-1.6V8.5z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 2h14l-5.5 6.5V14l-3-1.6V8.5z'/%3E%3C/svg%3E") center / contain no-repeat; }
+.book-table.book-grid thead th:has(.book-pop[open]) { z-index: 8; }
+.book-pop-panel { position: absolute; top: calc(100% + 9px); left: -10px; z-index: 40; min-width: 230px; max-width: 320px;
+  padding: 10px 12px 12px; background: #fff; color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(15,31,61,.20); text-align: left; font-size: 12.5px; font-weight: 400; white-space: normal;
+  text-transform: none; letter-spacing: 0; cursor: default; }
+.book-th-pop-right .book-pop-panel { left: auto; right: -10px; }
+.book-pop-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 5px; }
+.book-pop-hint + .book-pop-label { margin-top: 12px; }
+.book-pop-text, .book-pop-search { width: 100%; }
+.book-pop-search { box-sizing: border-box; font: inherit; font-size: 12px; height: 28px; padding: 0 8px; margin: 0 0 6px;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); }
+.book-pop-search:focus { outline: none; border-color: var(--navy); }
+.book-pop-list { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; }
+.book-pop-list label { display: flex; align-items: center; gap: 7px; padding: 3px 4px; border-radius: 4px; cursor: pointer;
+  white-space: nowrap; font-weight: 400; color: var(--text); }
+.book-pop-list label:hover { background: var(--hover); }
+.book-pop-list input { accent-color: var(--navy); margin: 0; }
+.book-pop-hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
 .book-sort-arrow { font-size: 9px; margin-left: 3px; color: var(--gold); }
 .book-chevron { display: inline-block; width: 14px; color: var(--muted); cursor: pointer; user-select: none; font-size: 11px; }
 .book-chevron:hover { color: var(--gold); }

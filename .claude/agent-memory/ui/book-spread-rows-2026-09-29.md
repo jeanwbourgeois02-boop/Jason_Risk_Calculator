@@ -26,3 +26,12 @@ its good to be able to sort by"; spreads with their ratio ("feeder and live catt
 **Why:** spreads are the unit of an RV book; the boss sorts and filters by PBRoot and symbol.
 **How to apply:** any new reader of pairs loops over `legs` / `sides`, never `legs[0]` / `legs[1]`. In Git Bash
 heredocs `\\n` inside Python strings arrived as a real newline: write edit scripts with the Write tool.
+
+**Header filters (same day, user: "why are the filters just floating above the table"):** each filterable
+`th` holds `.book-th` = the title span (now the `{"type": book-sort}` id, so a funnel click never sorts) and a
+`<details class="book-pop">` whose summary `book-funnel-<col>` is the funnel; `ui/assets/book_filters.js`
+(DOM only) keeps one open, closes on outside click / Escape, focuses the box and narrows a checklist by its
+search. Categorical filters are `dcc.Checklist` (same `book-f-<key>` ids and `options`/`value` props as the
+old dropdowns); the Commodity list sits in the Name column's panel. One clientside callback paints the funnels
+gold with the summary on hover (`_funnel_js`). The strip is one line. The open head gets `z-index: 8` via
+`:has(.book-pop[open])` to sit above the sticky Book row; the popover position is unverified in a browser.

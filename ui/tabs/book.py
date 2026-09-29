@@ -7,10 +7,12 @@ code keeps `strategy` as the field name of the PBRoot label). Since 2026-09-29 (
 everything to be in a table"), one card under the title (the Needs you card left the same day,
 user: "kind of useless": expiry alerts are coloured in the Next column, liquidity is on Risk):
 
-  The book card (`book_card`): the strip (`grid_strip`: Group by Spread type | Commodity |
-  Instrument | Sector | Trade, the search, Download CSV; the multi-selects (Trade, Symbol,
-  Commodity, Type, Sector, Currency), "+ figures" for the comparison boxes, Expand all / Collapse
-  all, Clear filters, the meta), then one grouped table (group -> position -> legs -> fills), its
+  The book card (`book_card`): the strip, one line (`grid_strip`: Group by Spread type | Commodity |
+  Instrument | Sector | Trade, Expand all / Collapse all, Clear filters, the meta, Download CSV),
+  then one grouped table whose column heads hold the filters, spreadsheet style (`grid_head`: a
+  funnel per column opens its panel, a search and a checklist of the values present, the Name
+  column's text search with the Commodity list, a comparison box on a figure column; gold when
+  set, its summary on hover), (group -> position -> legs -> fills), its
   first body row the Book line ("Book · N open", = the header's Daily, MTD, YTD and LTD to the
   cent, sticky under the heads), the settled group last; a click on a name opens its chart, fills
   and legs under it. The footer: the line before the first pull, the last load (`upload_report`)
@@ -37,6 +39,7 @@ and its safety interval. `layout(default_date)` (alias `build_layout`) and
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import math
 import os
@@ -3468,75 +3471,131 @@ def grid_body(data: dict, view: str, state: Optional[dict] = None, sort: Optiona
     return out, meta
 
 
-def grid_head(sort: Optional[dict] = None) -> html.Thead:
-    """The head row: the column titles (a click sorts). The filters sit in the book card's strip above the
-    table since the look pass of 2026-09-29."""
-    titles = []
-    for key, label, cls in GRID_COLUMNS:
-        active = (sort or {}).get("key") == key
-        arrow = ("▼" if sort.get("desc") else "▲") if active else ""
-        titles.append(html.Th([label, html.Span(arrow, id={"type": SORT_ARROW_TYPE, "idx": key}, className="book-sort-arrow")],
-                              id={"type": SORT_TYPE, "idx": key}, n_clicks=0,
-                              className=" ".join(c for c in (cls, "book-sortable") if c),
-                              title=plain_words(f"{GRID_TIPS.get(key, '')}\nClick to sort (within each group)."),
-                              style={"minWidth": "280px"} if key == "name" else None))
-    return html.Thead([html.Tr(titles)])
-
-
 FILTER_LABELS = {"name": "Search", "trade": "Trade", "symbol": "Symbol", "commodity": "Commodity", "type": "Type",
                  "sector": "Sector", "local": "Currency"}
 NUMERIC_FILTERS_ABOUT = ("A comparison on the column's figure: > 0, < -10k, >= 1.5m, = 3 (Next: business days). "
                          "A fill is tested on its own figure, else on the nearest row above it that has one.")
-FIGURES_TOGGLE_ID = "book-figures-toggle"   # "+ figures": shows / hides the comparison boxes
-FIGURES_ROW_ID = "book-filter-nums"         # the comparison boxes' line, hidden unless asked for or one is set
-_FIGURES_JS = (
-    "function(n) {\n"
-    "    var vals = Array.prototype.slice.call(arguments, 1);\n"
-    "    var set = vals.filter(function(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }).length;\n"
-    "    var open = set > 0 || ((n || 0) % 2 === 1);\n"
-    "    return [open ? {} : {display: 'none'}, (open ? '− figures' : '+ figures') + (set ? ' (' + set + ')' : '')];\n"
-    "}"
-)
+FUNNEL_PREFIX = "book-funnel-"              # a column's funnel (its popover's summary): book-funnel-<column key>
+# the filters each column's funnel holds (2026-09-29, spreadsheet-style header filters): the Name column
+# its text search and the Commodity checklist (no Commodity column), the P&L local column the currency
+_COLUMN_FILTERS = {"name": ("name", "commodity"), "local": ("local",)}
 
 
-def _strip_field(key: str, label: str, control: Any, cls: str = "", tip: Optional[str] = None) -> html.Div:
-    return html.Div(className=" ".join(c for c in ("book-strip-field", cls) if c), title=tip,
-                    children=[html.Label(label, htmlFor=filter_id(key)), control])
+def column_filters(key: str) -> Tuple[str, ...]:
+    """The filter keys a column's funnel holds; () for a column with none (Ratio)."""
+    if key in _COLUMN_FILTERS:
+        return _COLUMN_FILTERS[key]
+    return (key,) if key in MULTI_FILTERS or key in NUMERIC_FILTERS else ()
+
+
+def _funnel_js() -> str:
+    """The clientside callback that paints each funnel from the filters' values: gold when one of
+    its filters is set, its summary ('Trade: CATTLE, COPAR3', 'Daily > 0') on hover. Browser-side,
+    so it costs the server nothing."""
+    labels = {k: label for k, label, _cls in GRID_COLUMNS}
+    spec = [[key, [[f, FILTER_LABELS.get(f) if f != "name" else "Search", f in MULTI_FILTERS] for f in column_filters(key)]]
+            for key, _l, _c in GRID_COLUMNS if column_filters(key)]
+    for col in spec:
+        for f in col[1]:
+            if f[1] is None:
+                f[1] = labels.get(f[0], f[0])
+    return (
+        "function() {\n"
+        f"    var keys = {json.dumps(list(FILTER_KEYS))};\n"
+        f"    var spec = {json.dumps(spec)};\n"
+        "    var vals = {};\n"
+        "    for (var i = 0; i < keys.length; i++) { vals[keys[i]] = arguments[i]; }\n"
+        "    var cls = [], tips = [];\n"
+        "    spec.forEach(function(col) {\n"
+        "        var bits = [];\n"
+        "        col[1].forEach(function(f) {\n"
+        "            var v = vals[f[0]];\n"
+        "            if (f[2]) { if (v && v.length) { bits.push(f[1] + ': ' + v.join(', ')); } }\n"
+        "            else if (v !== null && v !== undefined && String(v).trim() !== '') {\n"
+        "                bits.push(f[1] + (f[0] === 'name' ? ': ' : ' ') + String(v).trim()); }\n"
+        "        });\n"
+        "        cls.push('book-funnel' + (bits.length ? ' book-funnel--on' : ''));\n"
+        "        tips.push(bits.length ? bits.join('; ') : 'Filter this column');\n"
+        "    });\n"
+        "    return cls.concat(tips);\n"
+        "}"
+    )
+
+
+def _pop_checklist(key: str, label: str) -> List[Any]:
+    """A categorical filter in a popover: its title, a search box that narrows the list (browser-side,
+    `assets/book_filters.js`), the checklist of the values present (nothing ticked = All)."""
+    return [html.Div(label, className="book-pop-label"),
+            dcc.Input(type="text", placeholder="Search", className="book-pop-search", autoComplete="off"),
+            dcc.Checklist(id=filter_id(key), options=[], value=[], className="book-pop-list", inline=False,
+                          persistence=True, persistence_type="session"),
+            html.Div("Nothing ticked = All", className="book-pop-hint")]
+
+
+def _popover(key: str) -> Optional[html.Details]:
+    """A column's funnel and its panel: a `details` the browser opens and closes itself (one open at a
+    time, a click outside closes it: `assets/book_filters.js`), so opening it asks the server nothing.
+    The filter components keep their ids (`filter_id`): the callbacks and the session persistence are
+    those of the filter row and bar before them."""
+    keys = column_filters(key)
+    if not keys:
+        return None
+    body: List[Any] = []
+    for f in keys:
+        if f == "name":
+            body += [html.Div("Search", className="book-pop-label"),
+                     dcc.Input(id=filter_id("name"), type="text", debounce=True, placeholder="name, contract, trade id",
+                               className="book-filter-box book-pop-text", persistence=True, persistence_type="session"),
+                     html.Div("Name, contract, trade id, trade name or symbol; Enter to apply", className="book-pop-hint")]
+        elif f in MULTI_FILTERS:
+            body += _pop_checklist(f, FILTER_LABELS.get(f, f))
+        else:
+            body += [html.Div("Show rows where the figure is", className="book-pop-label"),
+                     dcc.Input(id=filter_id(f), type="text", debounce=True, placeholder="> 0", autoComplete="off",
+                               className="book-filter-box book-filter-num book-pop-text", persistence=True,
+                               persistence_type="session"),
+                     html.Div("> 0, < -10k, >= 1.5m, = 3" + (" (business days)" if f == "next" else "")
+                              + "; Enter to apply, empty for all", className="book-pop-hint")]
+    return html.Details(className="book-pop", children=[
+        html.Summary(html.Span(className="book-funnel-icon"), id=f"{FUNNEL_PREFIX}{key}", className="book-funnel",
+                     title="Filter this column"),
+        html.Div(body, className="book-pop-panel")])
+
+
+def grid_head(sort: Optional[dict] = None) -> html.Thead:
+    """The head row (2026-09-29, spreadsheet-style): each column's title (a click sorts, the arrow
+    beside it) and, on a filterable column, its funnel with the filter panel under it. Static in
+    the layout, so a filter box keeps its focus while the rows re-render."""
+    titles = []
+    half = len(GRID_COLUMNS) // 2
+    for i, (key, label, cls) in enumerate(GRID_COLUMNS):
+        active = (sort or {}).get("key") == key
+        arrow = ("▼" if sort.get("desc") else "▲") if active else ""
+        title = html.Span([label, html.Span(arrow, id={"type": SORT_ARROW_TYPE, "idx": key}, className="book-sort-arrow")],
+                          id={"type": SORT_TYPE, "idx": key}, n_clicks=0, className="book-sort-title",
+                          title=plain_words(f"{GRID_TIPS.get(key, '')}\nClick to sort (within each group)."))
+        pop = _popover(key)
+        classes = [cls, "book-sortable", "book-th-pop-right" if i > half else ""]
+        titles.append(html.Th(html.Div([title, pop] if pop is not None else [title], className="book-th"),
+                              className=" ".join(c for c in classes if c),
+                              style={"minWidth": "280px"} if key == "name" else None))
+    return html.Thead([html.Tr(titles)])
 
 
 def grid_strip() -> html.Div:
-    """The book card's top strip (2026-09-29, the look of the reference app's filter bar folded into
-    the card): line 1 the view switch, the search and Download CSV; line 2 the four multi-selects
-    ("All"), "+ figures", Expand all / Collapse all, Clear filters and the grid's meta; then the
-    comparison boxes, hidden until "+ figures" or a value in one of them. The ids of the filter row
-    this replaces; static, so a box keeps its focus while the rows re-render."""
-    labels = {k: label for k, label, _cls in GRID_COLUMNS}
-    line1 = html.Div(className="book-strip-line", children=[
+    """The book card's top strip (2026-09-29): one line, the view switch, Expand all / Collapse all,
+    Clear filters, the grid's meta and Download CSV. The filters are in the column heads."""
+    return html.Div(className="book-strip", children=[html.Div(className="book-strip-line", children=[
         html.Span("Group by", className="book-strip-label"),
         _switch(VIEW_ID, VIEW_OPTIONS, DEFAULT_VIEW),
-        dcc.Input(id=filter_id("name"), type="text", debounce=True, placeholder="Search name, contract, trade id",
-                  className="blotter-filter-search book-strip-search", persistence=True, persistence_type="session"),
-        html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
-                    title="The grid as shown (filters and sort applied, every level), at full figures"),
-        dcc.Download(id=DOWNLOAD_ID)])
-    line2 = html.Div(className="book-strip-line", children=[
-        *[_strip_field(k, FILTER_LABELS[k], dcc.Dropdown(
-            id=filter_id(k), multi=True, options=[], placeholder="All", className="blotter-filter-dropdown",
-            persistence=True, persistence_type="session"))
-          for k in ("trade", "symbol", "commodity", "type", "sector", "local")],
-        html.Button("+ figures", id=FIGURES_TOGGLE_ID, n_clicks=0, className="book-download book-tool",
-                    title=NUMERIC_FILTERS_ABOUT),
         html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="book-download book-tool"),
         html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="book-download book-tool"),
-        html.Button("Clear filters", id=CLEAR_FILTERS_ID, n_clicks=0, className="book-download book-tool"),
-        html.Span(id=GRID_META_ID, className="book-section-meta book-strip-meta")])
-    nums = [_strip_field(k, labels[k], dcc.Input(
-        id=filter_id(k), type="text", debounce=True, placeholder="any", className="book-filter-box book-filter-num",
-        persistence=True, persistence_type="session"), "book-strip-field--num",
-        "A comparison: > 0, < -10k, >= 1.5m, = 3" + (" (business days)" if k == "next" else ""))
-        for k in NUMERIC_FILTERS]
-    return html.Div(className="book-strip", children=[
-        line1, line2, html.Div(nums, id=FIGURES_ROW_ID, className="book-strip-line book-filter-nums", style=HIDDEN)])
+        html.Button("Clear filters", id=CLEAR_FILTERS_ID, n_clicks=0, className="book-link-button",
+                    title="Every column's filter back to All"),
+        html.Span(id=GRID_META_ID, className="book-section-meta book-strip-meta"),
+        html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download book-strip-csv",
+                    title="The grid as shown (filters and sort applied, every level), at full figures"),
+        dcc.Download(id=DOWNLOAD_ID)])])
 
 
 def book_card(table: html.Table, prepull: Any = None, under: Any = None, style: Optional[dict] = None) -> html.Div:
@@ -4086,8 +4145,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         nid = str(trig.get("idx") or "")
         return None if current == nid else nid
 
-    app.clientside_callback(_FIGURES_JS, Output(FIGURES_ROW_ID, "style"), Output(FIGURES_TOGGLE_ID, "children"),
-                            Input(FIGURES_TOGGLE_ID, "n_clicks"), *[Input(filter_id(k), "value") for k in NUMERIC_FILTERS])
+    funnels = [f"{FUNNEL_PREFIX}{k}" for k, _l, _c in GRID_COLUMNS if column_filters(k)]
+    app.clientside_callback(_funnel_js(), *[Output(f, "className") for f in funnels], *[Output(f, "title") for f in funnels],
+                            *[Input(filter_id(k), "value") for k in FILTER_KEYS])
 
     @app.callback(*[Output(filter_id(k), "value") for k in FILTER_KEYS], Input(CLEAR_FILTERS_ID, "n_clicks"),
                   prevent_initial_call=True)
