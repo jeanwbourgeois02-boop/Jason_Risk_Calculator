@@ -106,10 +106,11 @@ GREEKS_ABOUT = ("The open options on futures, one line per underlying commodity,
                 "Gamma, Theta and Vega are the option's official per-lot marks on file for the day × its lots, in the "
                 "contract's currency, so a line adds up figures of one unit only. A Greek with no mark is a dash with "
                 "its reason, never zero. An FX option pair shows its USD delta; its other Greeks are on "
-                "the Trades tab, Options. Futures and LME prompts carry no gamma, theta or vega.")
+                "the Blotter tab, Options. Futures and LME prompts carry no gamma, theta or vega.")
 FX_ABOUT = ("First the legs priced in a currency other than USD: their delta USD (the engine's, per exchange, added up), "
             "the FX hedge against them (the spreads engine's hedges: the USD notional of the USD/CNH position, "
-            "short = minus, the SGX USD/CNH future included), unhedged (the two added: a long China leg is hedged by a "
+            "short = minus, the SGX USD/CNH future included; an FX option on a currency pair at the USD leg of its "
+            "delta; the CNY / CNH row the engine's own figure of the hedges on a CNH / CNY pair), unhedged (the two added: a long China leg is hedged by a "
             "short USD/CNH position) and the coverage the spreads engine gives. Then delta by currency at the day's "
             "official spot: FX forwards' and spot legs still to settle, FX options at their delta, an LME ticket's "
             "USD leg; the FX net USD delta in words (long USD / short USD) with the gross beside it; and the P&L "
@@ -1060,7 +1061,7 @@ def greeks_lines(result: Dict[str, Any], marks: Dict[Tuple[str, str], float], ro
                                      else f"the per-lot {col.upper()} mark × lots, in {ccy or 'the contract currency'}"))
         lines.append(line)
     for pair, usd in sorted(((fx_options or {}).get("by_pair") or {}).items()):
-        note = "an FX option's gamma, theta and vega are on the Trades tab, Options; not summed here"
+        note = "an FX option's gamma, theta and vega are on the Blotter tab, Options; not summed here"
         lines.append({"label": f"{pair} options", "legs": "FX options at delta", "ccy": "USD", "kind": "fx",
                       "hover": f"the open FX options on {pair}, their USD delta as the book gives it",
                       "delta": _num(usd), "delta_hover": "USD delta of the pair's open FX options"
@@ -1120,8 +1121,15 @@ def greeks_card(result: Dict[str, Any], marks: Dict[Tuple[str, str], float], roo
 def fx_sources(conn: sqlite3.Connection, as_of: str) -> Dict[str, List[str]]:
     """{currency: ['2 forwards', '1 put at delta', ...]}: what the trades on file contribute to
     each currency's delta, counted (display) from the same rows the engine reads: FX legs still
-    to settle, FX options open on the pair, an LME ticket's USD leg."""
+    to settle, FX options open on the pair (the ones closed out as of the date left out, as the
+    delta leaves them out: `engine.ladder.ladder.closed_out_fx_options`), an LME ticket's USD leg."""
     out: Dict[str, List[str]] = {}
+    try:
+        from engine.ladder.ladder import closed_out_fx_options
+        closed = [str(t) for t in closed_out_fx_options(conn, as_of)]
+    except Exception as exc:  # noqa: BLE001 -- the count would then disagree with the delta: say so
+        closed = []
+        out["__error__"] = [f"the closed-out FX options could not be told apart ({type(exc).__name__}: {exc})"]
     words = {"FX_FWD": ("forward", "forwards"), "FX_SPOT": ("spot trade", "spot trades"), "FX_SWAP": ("swap leg", "swap legs")}
     try:
         for ccy, product, n in conn.execute(
@@ -1133,7 +1141,8 @@ def fx_sources(conn: sqlite3.Connection, as_of: str) -> Dict[str, List[str]]:
         for base, quote, otype, n in conn.execute(
                 "SELECT i.base_ccy, i.quote_ccy, COALESCE(o.option_type, ''), COUNT(*) FROM trades t "
                 "JOIN instruments i USING (instrument_id) LEFT JOIN instrument_options o ON o.instrument_id = t.instrument_id "
-                "WHERE t.product = 'FX_OPTION' AND i.expiry_date >= ? GROUP BY 1, 2, 3", (as_of,)):
+                "WHERE t.product = 'FX_OPTION' AND i.expiry_date >= ? "
+                f"AND t.trade_id NOT IN ({','.join('?' * len(closed))}) GROUP BY 1, 2, 3", (as_of, *closed)):
             kind = {"CALL": "call", "PUT": "put"}.get(str(otype).upper(), "option")
             text = f"{n} {kind}{'' if n == 1 else 's'} at delta"
             for ccy in (str(base), str(quote)):
@@ -1196,6 +1205,19 @@ def currency_lines(result: Dict[str, Any], strategies: Sequence[dict], roots: Di
                 if usd is not None:
                     words.append(f"{h.get('instrument_id')} {str(h.get('product') or '').replace('_', ' ').lower()} "
                                  f"{signed_money(usd, '$')}" + (f" ({_strategy_name(s)})" if s.get("name") else ""))
+        if ccy == "CNY":
+            # The China row reads the engine's own CNY / CNH hedge figure per strategy (2026-09-29:
+            # `hedge_cny_usd`, the hedges on a CNH / CNY pair only, what its coverage reads), one per
+            # strategy holding such a hedge; the hedges above stay the hover's words.
+            parts = []
+            for s in strategies or []:
+                cny = [h for h in s.get("hedges") or [] if h.get("open_trade_ids")
+                       and "CNY" in (_ccy_group(str(h.get("currency") or "")), _ccy_group(str(h.get("root_id") or "")))]
+                if not cny:
+                    continue
+                why = "; ".join(dict.fromkeys(str(h.get("notional_reason") or "") for h in cny
+                                              if _num(h.get("usd_notional")) is None)) or "no USD figure for the hedge"
+                parts.append((_num(s.get("hedge_cny_usd")), f"{_strategy_name(s)}: {why}"))
         hedge, hedge_excl, hedge_reasons = sum_known(parts)
         line = {"ccy": "CNY / CNH" if ccy == "CNY" else ccy, "exchanges": exchanges[ccy],
                 "legs": {"v": leg_total, "excl": leg_excl, "why": "; ".join(dict.fromkeys(leg_reasons))},
@@ -1239,7 +1261,9 @@ def legs_table(lines: List[dict]) -> Optional[html.Table]:
         html.Th("Currency", className="l", title="The currency the commodity legs are priced in (CNY and CNH as one)."),
         html.Th("Legs", title="The legs' net delta USD: each exchange's engine figure, added up."),
         html.Th("FX hedge", title="The open FX hedges in that currency: the USD notional of the USD/CNH position (short = "
-                                  "minus), the SGX USD/CNH future included (the spreads engine's hedges)."),
+                                  "minus), the SGX USD/CNH future included, an FX option on a currency pair at the "
+                                  "USD leg of its delta (the spreads engine's hedges). CNY / CNH: the engine's figure "
+                                  "of the hedges on a CNH / CNY pair per strategy, the one its coverage reads."),
         html.Th("Unhedged", title="Legs plus hedge: a long China leg is hedged by a short USD/CNH position."),
         html.Th("Coverage", title="The spreads engine's coverage of the China legs: minus the hedge over their net "
                                   "notional, 100% = fully hedged; several strategies on hover.")]))

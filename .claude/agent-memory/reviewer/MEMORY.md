@@ -19,3 +19,4 @@
 - [C14/C15/C17 review 2026-09-28](review-findings-c14-c15-c17-2026-09-28.md) — LME freeze at P-2, FUTURE out of delta SQL, INTERP rows dropped: no criticals; test_valuation LME pin red; open-row jump P-1..P
 - [Daily split review 2026-09-28](review-findings-daily-split-2026-09-28.md) — spreads daily_split/strategies: no criticals; settled hedge misbucketed, hedge set too wide, prev-frame fallback, no tests
 - [Series + period explain 2026-09-29, 2 passes](review-findings-series-explain-2026-09-29.md) — pass-1 items closed; open: scorecard closed+open != LTD on flat non-USD ideas, doc drift
+- [Closed-out FX options out of delta 2026-09-29](review-findings-closed-out-delta-2026-09-29.md) — no criticals; CLAUDE.md SQL drift, curve.py fx_sources count, golden 09-18 pin moves

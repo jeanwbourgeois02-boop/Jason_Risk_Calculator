@@ -496,6 +496,8 @@ SELECT ccy, SUM(delta) AS delta FROM d GROUP BY ccy;
 
 The `SPOT` join in the option quote-currency branch is a `LEFT JOIN` so that a missing spot mark surfaces as a `NULL` delta; the engine must raise if any resulting delta is `NULL`, never drop the leg silently. The join key is the **pair** (`i.base_ccy || i.quote_ccy`, e.g. `USDJPY`), not the option's own `instrument_id` (e.g. `USDJPY111926P-197571137`), which can never match a SPOT row. Because SQL `SUM()` drops individual NULL rows inside a `GROUP BY` group, the engine checks for options with a DELTA mark but no pair SPOT *before* aggregating (`engine/ladder/ladder.py::_OPTION_MISSING_SPOT_SQL`) rather than inspecting the summed output.
 
+A closed-out FX option group (`engine/pnl/valuation.py::closed_out_options`, the valuation's own grouping rule) carries no delta as of the date it is flat, marks on file or not (user, 2026-09-29): both FX_OPTION branches of `_DELTA_SQL` and of `_OPTION_MISSING_SPOT_SQL` add `AND t.trade_id NOT IN (SELECT value FROM json_each(:closed_out))` (`ladder.closed_out_fx_options`, `closed_out_param`), and `exposure_adapter.option_records_from_db` skips the same trades; a part sell-back stays live.
+
 Per-pair delta (the "Position" table) is the same union grouped by `t.instrument_id` in USD-notional terms.
 
 ## P&L conventions

@@ -795,8 +795,8 @@ ROLLS_ABOUT = ("A roll: on one day, a trade that cuts a position in one contract
                "rolls out into a later month only; a move into an earlier month is listed apart, never in it.")
 
 
-def _pct(v: Optional[float]) -> str:
-    return MISSING if v is None else f"{v * 100:.0f}%"
+def _pct(v: Optional[float], reason: str = "no closed idea yet") -> Any:
+    return missing_cell(reason) if v is None else f"{v * 100:.0f}%"
 
 
 def _days(v: Optional[float]) -> str:
@@ -851,7 +851,7 @@ def score_lines(data: dict) -> List[Any]:
                     f"{c.get('wins', 0)} of {n} closed ideas made money")
         _track_item(closed, "Avg win", money_cell(c.get("avg_win"), "no closed idea made money"))
         _track_item(closed, "Avg loss", money_cell(c.get("avg_loss"), "no closed idea lost money"))
-        _track_item(closed, "Payoff", html.Span(MISSING if c.get("payoff_ratio") is None
+        _track_item(closed, "Payoff", html.Span(missing_cell("needs a win and a loss") if c.get("payoff_ratio") is None
                                                 else f"{c['payoff_ratio']:.2f}"),
                     "the average win over the average loss (needs a win and a loss)")
         _track_item(closed, "Expectancy", html.Span([money_cell(c.get("expectancy")), " per idea"]),
@@ -949,7 +949,7 @@ def ideas_fold(data: dict) -> Any:
         body.append(html.Tr([
             html.Td(_idea_name(data, i), className="l book-name",
                     title=f"{i.get('position_id')}: trades {', '.join(i.get('trade_ids') or [])}"),
-            html.Td(i.get("trade_name") or "", className="l"),
+            html.Td("" if i.get("kind") == "strategy" else (i.get("trade_name") or ""), className="l"),
             html.Td(status, className="l", title=status_hover),
             html.Td(f"{int(i.get('holding_days') or 0)}"),
             html.Td(money_cell(i.get("pnl_usd"), i.get("reason") or "not valued", hover=_idea_pnl_hover(i))),

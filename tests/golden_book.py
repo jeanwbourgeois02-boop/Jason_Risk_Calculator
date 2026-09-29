@@ -50,7 +50,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "data" / "sample" / "blotter_sample.csv"
 GOLDEN = ROOT / "tests" / "golden" / "book.json"
 AS_OF_DATES = ("2026-08-14", "2026-09-04", "2026-09-18")
-STAMP = "T15:00:00-04:00"
 REL_TOL, ABS_TOL = 1e-9, 1e-6
 FX_PRODUCTS = ("FX_SPOT", "FX_FWD")
 METALS = {"XAUUSD", "XAGUSD"}          # spot only: no forward curve is written for them
@@ -88,7 +87,15 @@ def _mark(conn: sqlite3.Connection, as_of: str, instrument_id: str, settle_date:
     conn.execute(
         "INSERT OR REPLACE INTO marks (as_of_date, instrument_id, settle_date, mark_type, value, source, snapped_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (as_of, instrument_id, settle_date, mark_type, float(value), source, as_of + STAMP))
+        (as_of, instrument_id, settle_date, mark_type, float(value), source, _close_stamp(as_of)))
+
+
+def _close_stamp(as_of: str) -> str:
+    """The app's one close stamp, 17:00 New York of `as_of` with its offset resolved
+    (`data.bloomberg.backfill.settle_stamp`), so every fixture mark reads as that day's close
+    (until 2026-09-29 the fixture stamped 15:00, which no longer counts as a close)."""
+    from data.bloomberg.backfill import settle_stamp
+    return settle_stamp(dt.date.fromisoformat(as_of))
 
 
 def mark_dates(through: str = None) -> List[str]:
@@ -152,8 +159,12 @@ def build_book(conn: sqlite3.Connection = None, through: str = None) -> sqlite3.
         curve_dates.setdefault(base + quote, set()).add(expiry)
     futures = conn.execute(
         "SELECT instrument_id, base_ccy, expiry_date FROM instruments WHERE asset_class = 'FUTURE' ORDER BY 1").fetchall()
+    # A put's synthetic DELTA is negative, a call's positive (until 2026-09-29 every option's was
+    # 0.45 +/- 0.2, so a bought put read long).
     options = conn.execute(
-        "SELECT t.instrument_id, l.settle_date, t.price FROM trades t JOIN trade_legs l USING (trade_id) "
+        "SELECT t.instrument_id, l.settle_date, t.price, COALESCE(o.option_type, '') "
+        "FROM trades t JOIN trade_legs l USING (trade_id) "
+        "LEFT JOIN instrument_options o ON o.instrument_id = t.instrument_id "
         "WHERE t.product = 'FX_OPTION' ORDER BY 1").fetchall()
 
     with conn:
@@ -168,9 +179,11 @@ def build_book(conn: sqlite3.Connection = None, through: str = None) -> sqlite3.
             for instrument_id, root_id, expiry in futures:
                 _mark(conn, d, instrument_id, expiry, "FUTURE_PX",
                       FUTURE_BASE[root_id] * (1 + _wobble(instrument_id, "PX", d)), "BBG_BDH")
-            for instrument_id, expiry, fill in options:
+            for instrument_id, expiry, fill, option_type in options:
+                sign = -1.0 if option_type == "PUT" else 1.0
                 _mark(conn, d, instrument_id, expiry, "PREMIUM", fill * (1 + _wobble(instrument_id, "PREM", d, width=0.2)), "QL_OPTIONS_PRICER")
-                _mark(conn, d, instrument_id, expiry, "DELTA", 0.45 + _wobble(instrument_id, "DELTA", d, width=0.2), "QL_OPTIONS_PRICER")
+                _mark(conn, d, instrument_id, expiry, "DELTA", sign * (0.45 + _wobble(instrument_id, "DELTA", d, width=0.2)),
+                      "QL_OPTIONS_PRICER")
     _mark_listed_options(conn, through)
     _mark_lme_curves(conn, through)
     return conn
