@@ -69,3 +69,8 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 
 - Breaking now: every test pinned to an old lowercase or "n/a" string: tests/test_ui_smoke.py:238 ("5d n/a: …" now "5d not available: …"), and likely tests/test_header.py, test_ui_formatting.py, test_ui_blotter*.py, test_ui_market_data.py, test_ui_options.py, test_ui_ranking.py (markers now "Excl. N" / "Filled N" / "Ref <date>", sizes "Long 15 lots", "None" cells now "Not held" / "No hedge").
 - New coverage owed: `py 2_launcher.py ui-check` exit 0 as a smoke test; formatting.cap / tidy / plain_ids; size_words(capital=False).
+
+## Layout waves 1-2 (2026-09-29, 398e4a8, 549fc4c): owed, not run
+
+- Delete, don't re-pin (pinned to rebuilt screens): tests/test_ui_formatting.py 80-105 (drawer `Li` / `issue-label` structure; the drawer is now a Kind | Where | Reason table); tests/test_ui_risk.py (old headline, the not-set `Li` list, price-check "What it means" column; :480 drawer `Li` rows); tests/test_ui_market_data.py (library summary, missing_panel, diagnostics_panel, "ticker(s)"); tests/test_ui_blotter.py 253-369 (`blotter-strip-options`, "Portfolio Totals"); tests/test_ui_options.py 401, 409, 527, 937, 1249-1263, 1335, 1676, 2056 (old DISPLAY_COLUMNS, headline cards, "Portfolio Totals").
+- New coverage owed: `py 2_launcher.py ui-check` exit 0 as a smoke test (strict layout included); formatting.issues_drawer triples and same-reason merge; row_info / head_info; P&L split cells blank when empty; options Status / Size / Delta text.
