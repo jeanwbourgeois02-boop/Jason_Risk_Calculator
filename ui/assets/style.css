@@ -9,6 +9,9 @@
   /* legacy aliases kept so untouched selectors below still resolve sensibly */
   --ink: var(--text); --bg: var(--page); --panel: var(--card); --accent: var(--gold);
   --warn-bg: #fff4e5; --warn: #8a4b00; --ndf-bg: #eef2ff; --ndf: #3538cd;
+  /* the one table kit (look pass 2026-09-29, the reference app's): zebra, hover, totals, group tint */
+  --zebra: rgba(15, 31, 61, .03); --hover: #eef1f7; --total-bg: #f1f3f8; --tint: rgba(15, 31, 61, .06);
+  --neg-bg: #fdecea; --pos-bg: #e3f5ea; --top-bar-h: 44px;
 }
 
 * { box-sizing: border-box; }
@@ -39,7 +42,7 @@ p { margin: 8px 0; }
 .subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 0 0 16px; }
 .subtab { padding: 8px 14px !important; border: none !important; border-bottom: 3px solid transparent !important;
   background: transparent !important; color: var(--muted) !important; font-weight: 600; font-size: 12.5px; cursor: pointer; }
-.subtab:hover { color: #fff !important; }
+.subtab:hover { color: var(--navy) !important; }
 .subtab--selected { color: var(--navy) !important; border-bottom: 3px solid var(--gold) !important; background: #fff !important; }
 
 /* ---------------------------------------------------------------- header strip
@@ -326,13 +329,18 @@ p { margin: 8px 0; }
    *zero* custom styling -- the raw unstyled browser widget -- which is also why the
    filter bar looked broken/ugly even once the filter logic itself worked. */
 .blotter-filter-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px;
-  margin: 0 0 14px; padding: 12px 16px; background: var(--card); border: 1px solid var(--line);
+  margin: 0 0 16px; padding: 12px 16px; background: var(--card); border: 1px solid var(--line);
   border-radius: 10px; box-shadow: 0 1px 2px rgba(15,31,61,.04); }
 .blotter-filter { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
 .blotter-filter label { font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: .05em; color: var(--muted); }
 .blotter-filter-search { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; min-width: 200px; }
 .blotter-filter-search:focus { outline: none; border-color: var(--navy); }
+/* the Blotter's trade-date range in the bar: the same 32px hairline box as a dropdown */
+.blotter-filter .dash-datepicker-input-wrapper { border: 1px solid var(--line); border-radius: 6px; background: #fff; min-height: 32px;
+  padding: 0 8px; transition: border-color .1s ease; }
+.blotter-filter .dash-datepicker-input-wrapper:hover { border-color: var(--navy); }
+.blotter-filter .dash-datepicker-input { font-family: inherit; font-size: 12.5px; color: var(--text); background: transparent; }
 .blotter-filter-dropdown, .blotter-filter-dropdown .dash-dropdown {
   font-family: inherit; font-size: 12.5px; }
 .blotter-filter-dropdown .dash-dropdown-trigger { border: 1px solid var(--line); border-radius: 6px;
@@ -474,15 +482,16 @@ p { margin: 8px 0; }
   font-size: 10.5px; font-weight: 500; font-style: normal; line-height: 1.5; white-space: nowrap;
   color: var(--muted); background: rgba(15, 31, 61, .06); cursor: help; vertical-align: 1px; }
 .header-block .marker, .top-bar .marker { color: rgba(255,255,255,.7); background: rgba(255,255,255,.12); }
-.marker--amber { color: #8a4b00; background: rgba(214, 137, 16, .16); }
+.marker--amber { color: var(--warn); background: var(--warn-bg); }
 .book-table td .name-sub { margin-left: 6px; }
 .header-block .about-mark, .top-bar .about-mark { color: rgba(255,255,255,.6); }
 .header-block .about-title:hover .about-mark { color: #fff; }
-.issues-drawer { margin-top: 12px; font-size: 12px; color: var(--text); }
-.issues-drawer > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); padding: 4px 0;
+/* the drawer reads as the reference's .details: a navy summary, gold on hover, a white card when open */
+.issues-drawer { margin-top: 16px; font-size: 12.5px; color: var(--text); }
+.issues-drawer > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--navy); padding: 6px 0;
   list-style: revert; }
-.issues-drawer > summary:hover { color: var(--navy); }
-.issues-drawer[open] { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px 8px; }
+.issues-drawer > summary:hover { color: var(--gold); }
+.issues-drawer[open] { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 4px 16px 10px; }
 .issues-list { margin: 4px 0 0; padding-left: 18px; line-height: 1.45; }
 .issues-list li { margin: 1px 0; }
 .issue-label { font-weight: 600; }
@@ -512,32 +521,34 @@ p { margin: 8px 0; }
 /* ---------------------------------------------------------------- 2026-09-28: the screens tidy (wave 1)
    The display rules every screen follows (ui/tabs/formatting.py): a missing value is a grey em
    dash, a loss red and a gain green with a real minus / plus, an estimated date grey with a
-   leading "≈", table headers light grey with dark text, compact rows, sort arrows on hover only,
-   the unit a small grey suffix. The header carries the one date picker and the marks chip; the
-   top bar carries the Bloomberg state as a dot. */
+   leading "≈", table headers navy with white text (the reference's, look pass 2026-09-29; light
+   grey from 2026-09-28 until then), compact rows, sort arrows on hover only, the unit a small
+   grey suffix. The header carries the one date picker and the marks chip; the top bar carries
+   the Bloomberg state as a dot. */
 .cell-missing { color: #9ca3af; cursor: help; }
 .cell-pos { color: var(--pos); }
 .cell-neg { color: var(--neg); }
-.cell-estimated { color: #6b7280; cursor: help; }
-.cell-amber { color: #8a4b00; font-weight: 600; }
+.cell-estimated { color: var(--muted); cursor: help; }
+.cell-amber { color: var(--warn); font-weight: 600; }
 .cell-red { color: var(--neg); font-weight: 700; }
 .cell-unit { color: #8a919c; font-size: 10.5px; margin-left: 4px; }
 
-/* dash_table headers: light grey, dark text; compact rows; sort arrows only on hover */
+/* dash_table: the navy header of the kit above; compact rows; sort arrows only on hover */
 .dash-spreadsheet-container .dash-spreadsheet-inner th {
-  background: #eef1f6 !important; color: #4b5563 !important; font-weight: 600 !important; font-size: 11.5px;
-  border-bottom: 1px solid #dfe3ea !important;
+  background: var(--navy) !important; color: #fff !important; font-weight: 700 !important; font-size: 12px;
+  border-bottom: 1px solid var(--navy) !important;
 }
-.dash-spreadsheet-container .dash-spreadsheet-inner th { padding: 6px 10px; }
-.dash-spreadsheet-container .dash-spreadsheet-inner td { padding: 4px 10px; line-height: 18px; }
+.dash-spreadsheet-container .dash-spreadsheet-inner th { padding: 7px 10px; }
+.dash-spreadsheet-container .dash-spreadsheet-inner td { padding: 6px 10px; line-height: 18px; }
 .dash-spreadsheet-container .dash-spreadsheet-inner th .column-actions,
 .dash-spreadsheet-container .dash-spreadsheet-inner th .sort { opacity: 0; transition: opacity .12s; }
 .dash-spreadsheet-container .dash-spreadsheet-inner th:hover .column-actions,
 .dash-spreadsheet-container .dash-spreadsheet-inner th:hover .sort { opacity: 1; }
-.dash-spreadsheet-container .dash-spreadsheet-inner th .column-header--sort { color: #4b5563 !important; }
+.dash-spreadsheet-container .dash-spreadsheet-inner th .column-header--sort { color: #fff !important; }
 
 /* the header: one row, the picker first, the figures, the marks chip, the count at the right */
-.header-block { display: flex; flex-wrap: nowrap; align-items: center; gap: 22px; padding: 7px 24px; background: var(--navy-2); }
+.header-block { display: flex; flex-wrap: nowrap; align-items: center; gap: 22px; padding: 7px 24px; background: var(--navy);
+  border-top: 1px solid rgba(255,255,255,.08); box-shadow: 0 1px 2px rgba(15,31,61,.12); }
 .header-figures { flex: 1 1 auto; align-items: center; gap: 22px; min-height: 44px; }
 .header-figure-value { margin-top: 1px; }
 .header-asof { min-width: 150px; }
@@ -569,34 +580,61 @@ p { margin: 8px 0; }
 .book-title-row { display: flex; align-items: baseline; gap: 14px; margin: 0 0 8px; }
 .book-title-row h3 { margin: 0; font-size: 18px; }
 .book-counts { color: var(--muted); font-size: 12.5px; }
-.book-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; font-size: 12px; font-weight: 600; margin-left: 8px; }
-.book-switch label { padding: 4px 12px; color: var(--muted); background: #fff; cursor: pointer; margin: 0; display: inline-flex; align-items: center; }
+/* a view switch: a segmented control, the chosen segment navy with a gold rule under it */
+.book-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; font-size: 12px; font-weight: 600;
+  margin-left: 8px; background: #fff; }
+.book-switch label { padding: 0 12px; height: 28px; color: var(--muted); background: #fff; cursor: pointer; margin: 0; display: inline-flex;
+  align-items: center; border-right: 1px solid var(--line); transition: color .1s ease, background .1s ease; }
+.book-switch label:last-child { border-right: none; }
+.book-switch label:hover { color: var(--navy); background: var(--hover); }
 .book-switch input { display: none; }
-.book-switch label:has(input:checked) { background: var(--navy); color: #fff; }
-.book-download { margin-left: auto; font-size: 12px; color: var(--muted); background: none; border: none; cursor: pointer; padding: 0; font-family: inherit; align-self: baseline; }
-.book-download:hover { color: var(--navy); text-decoration: underline; }
+.book-switch label:has(input:checked) { background: var(--navy); color: #fff; box-shadow: inset 0 -2px 0 var(--gold); }
+/* the tabs' small secondary buttons (Download CSV, Expand all, Collapse all): the reference's ghost button */
+.book-download { margin-left: auto; height: 28px; padding: 0 12px; font-size: 12px; font-weight: 600; color: var(--muted);
+  background: #fff; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-family: inherit; align-self: center;
+  white-space: nowrap; transition: color .1s ease, border-color .1s ease; }
+.book-download:hover { color: var(--navy); border-color: var(--navy); }
 .book-movers { display: flex; gap: 8px; align-items: stretch; margin: 0 0 12px; flex-wrap: wrap; }
 .book-mover { display: flex; flex-direction: column; gap: 1px; padding: 6px 12px; border-radius: 6px; background: #fff; border: 1px solid var(--line); min-width: 150px; }
 .book-mover-name { color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
 .book-mover-value { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .book-movers-divider { width: 1px; background: var(--line); margin: 4px 6px; }
 .book-movers-label { align-self: center; margin-left: 8px; font-size: 11.5px; color: var(--muted); }
-.book-card { background: #fff; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.book-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
-.book-table th { background: #fff; color: var(--muted); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; text-align: right; padding: 7px 10px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-/* the research group over the three context columns of the Positions table (2026-09-28) */
-.book-table tr.book-head-groups th { border-bottom: none; padding: 5px 10px 0; font-weight: 500; color: #9ca3af; letter-spacing: .1em; text-align: center; height: auto; }
-.book-table th.book-research-head { border-bottom: 1px solid var(--line); }
-.book-table th.book-research, .book-table td.book-research { color: var(--muted); font-weight: 400; }
+/* ---------------------------------------------------------------- the one table kit (look pass 2026-09-29)
+   Every hand-built html.Table (.book-table: Book, Exposure, P&L, Risk, Blotter, Data) reads as the
+   reference's tables: navy header with white bold text, sticky under the top bar, zebra rows, hover,
+   6px 10px cells, tabular numbers right-aligned, a hairline outline with an 8px radius (the card's, or
+   the table's own when it stands alone), totals on #f1f3f8 under a 2px navy rule. */
+.book-card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.book-table { width: 100%; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; font-size: 12.5px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+.book-card:not(.card-pad) > .book-table, .blotter-fills-scroll > .book-table { border: none; }
+.blotter-fills-scroll { border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.book-table th { background: var(--navy); color: #fff; font-weight: 700; font-size: 12px; text-transform: none; letter-spacing: 0;
+  text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--navy); white-space: nowrap; }
+.book-table thead tr:first-child th:first-child { border-top-left-radius: 7px; }
+.book-table thead tr:first-child th:last-child { border-top-right-radius: 7px; }
+.book-table tbody tr:last-child td:first-child { border-bottom-left-radius: 7px; }
+.book-table tbody tr:last-child td:last-child { border-bottom-right-radius: 7px; }
+.book-table thead th[title] { cursor: help; }
+.book-table th.book-research, .book-table td.book-research { font-weight: 400; }
+.book-table th.book-research { color: rgba(255,255,255,.72); }
+.book-table td.book-research { color: var(--muted); }
 .book-table td.book-spark-cell { padding-top: 3px; padding-bottom: 3px; }
 .book-spark { display: block; margin-left: auto; width: 90px; height: 18px; }
 .book-table th.l, .book-table td.l { text-align: left; }
-.book-table td { padding: 4px 10px; border-bottom: 1px solid #eef1f4; text-align: right; white-space: nowrap; height: 26px; }
+.book-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; color: var(--text); }
+.book-table tbody tr:last-child td { border-bottom: none; }
+.book-table :where(tbody tr:nth-child(even)) td { background: var(--zebra); }  /* low weight: a row tint wins */
+.book-table tbody tr:hover td { background: var(--hover); }
+.book-table th .about-mark, .book-table th .cell-unit { color: rgba(255,255,255,.65); opacity: 1; }
+.book-table th.about-title:hover .about-mark, .book-table th .about-title:hover .about-mark { color: var(--gold); }
+.book-table th .marker { color: rgba(255,255,255,.8); background: rgba(255,255,255,.14); }
 .book-table tr.book-row { cursor: pointer; }
-.book-table tr.book-row:hover td { background: #f3f5f9; }
 .book-table tr.book-row--open td { background: #fbf7ea; }
-.book-table tr.book-group td { background: #f7f8fb; font-weight: 600; color: var(--navy); padding-top: 5px; padding-bottom: 5px; }
-.book-table tr.book-total td { font-weight: 700; border-top: 1px solid var(--navy); border-bottom: none; background: #fff; font-size: 13px; }
+.book-table tr.book-group td { background: var(--tint); font-weight: 700; color: var(--navy); }
+.book-table tr.book-total td, .book-table tfoot td { font-weight: 700; background: var(--total-bg); border-top: 2px solid var(--navy);
+  border-bottom: none; font-size: 12.5px; }
 .book-table .book-note { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
 /* 2026-09-28: the group line's words after its name (a commodity's net exposure, a strategy's legs) and the
    strategy's type; the tiles over the table */
@@ -604,16 +642,19 @@ p { margin: 8px 0; }
 .book-table .book-net-line .marker { font-weight: 400; }
 .book-table .book-strategy-type { margin-left: 10px; font-weight: 400; font-size: 11px; color: var(--muted); text-transform: none; }
 .book-table .book-strategy-type.marker--amber { padding: 0 4px; border-radius: 3px; }
-.book-tiles { display: flex; gap: 0 36px; margin: 4px 0 10px; flex-wrap: wrap; }
-.book-tile { padding: 2px 0 4px; min-width: 0; }
-.book-tile .k { font-size: 10.5px; font-weight: 600; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; line-height: 1.3; }
-.book-tile .v { font-size: 17px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; color: var(--navy); line-height: 1.2; }
+/* the tiles are the reference's cards: a grid of white cards, an uppercase muted label, a 20px figure */
+.book-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 16px; margin: 0 0 16px; }
+.book-tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px; }
+.book-tile .k { font-size: 11px; font-weight: 400; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
+.book-tile .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); line-height: 1.25; }
 .book-tile .v .marker { font-size: 10px; vertical-align: middle; }
 .book-table td.book-name { max-width: 330px; overflow: hidden; text-overflow: ellipsis; }
 .book-under { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
 .book-needs { flex: 0 0 640px; padding: 8px 14px 4px; }
 .book-side { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.book-h { font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+.book-h { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
 .book-need { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid #eef1f4; font-size: 12.5px; }
 .book-need:last-child { border-bottom: none; }
 .book-need-chip { font-size: 10px; font-weight: 700; letter-spacing: .04em; min-width: 64px; padding: 1px 6px; border-radius: 4px; text-align: center; flex: 0 0 auto; }
@@ -624,7 +665,7 @@ p { margin: 8px 0; }
 .book-need .tab-link { margin-left: auto; font-size: 11px; color: var(--muted); }
 .book-load { padding: 8px 14px; font-size: 12.5px; }
 .book-loaded-line { font-size: 12.5px; color: var(--muted); margin: -2px 0 12px; }
-.book-loaded-k { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--gold); margin-right: 8px; }
+.book-loaded-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--gold); margin-right: 8px; }
 .book-empty { display: flex; gap: 24px; align-items: stretch; padding: 24px 0; }
 .book-empty-main { flex: 0 0 620px; padding: 32px 36px; display: flex; flex-direction: column; gap: 16px; justify-content: center; }
 .book-empty-title { font-size: 22px; font-weight: 600; }
@@ -639,9 +680,9 @@ p { margin: 8px 0; }
 /* ---------------------------------------------------------------- 2026-09-28: the screens tidy (wave 2)
    Exposure and P&L share the Book's table kit; two cards side by side; the level chips; the
    small grey sub-label after a name. */
-.cards-row { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
+.cards-row { display: flex; gap: 16px; align-items: flex-start; margin-top: 16px; }
 .cards-row > .book-card { flex: 1 1 0; min-width: 0; }
-.card-pad { padding: 10px 14px 12px; }
+.card-pad { padding: 14px 16px 16px; }
 .card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
 .name-sub { color: #8a919c; font-size: 11px; margin-left: 6px; font-weight: 400; }
 .grid-note { color: var(--muted); font-size: 11.5px; }
@@ -654,13 +695,13 @@ p { margin: 8px 0; }
 .pnl-chart summary { font-size: 12px; color: var(--muted); cursor: pointer; }
 .section-title-line { display: flex; align-items: baseline; gap: 14px; margin: 0 0 8px; }
 .section-title-line h4 { margin: 0; }
-.level-chip { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .04em; padding: 1px 7px;
+.level-chip { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .04em; padding: 1px 8px;
   border-radius: 10px; min-width: 52px; text-align: center; cursor: help; }
 .level-chip--expired { background: #7f1d1d; color: #fff; }
-.level-chip--red { background: #c62828; color: #fff; }
-.level-chip--amber { background: #fff3e0; color: #b26a00; }
-.level-chip--green { background: #f1f5f1; color: #52705a; }
-.level-chip--estimated { background: #eef1f6; color: #6b7280; }
+.level-chip--red { background: var(--neg); color: #fff; }
+.level-chip--amber { background: var(--warn-bg); color: var(--warn); }
+.level-chip--green { background: var(--pos-bg); color: var(--pos); }
+.level-chip--estimated { background: #f1f2f4; color: var(--muted); }
 .book-table tr.roll-row td, .book-table tr.curve-row td { height: 24px; }
 .curve-grid th { text-align: right; }
 .curve-grid th.l { text-align: left; }
@@ -676,8 +717,9 @@ p { margin: 8px 0; }
 .book-table .marker--small { font-size: 10px; font-weight: 400; vertical-align: middle; }
 
 /* the Book's summary (2026-09-28): By strategy, Break it down, the Positions fold */
-.book-section-title { margin: 0; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; line-height: 1.3; color: var(--muted); }
-.book-section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 18px 0 8px; }
+/* a section title is the reference's h4: 13px, bold, uppercase, muted */
+.book-section-title { margin: 0; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; line-height: 1.3; color: var(--muted); }
+.book-section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 24px 0 8px; }
 .book-section-meta { color: var(--muted); font-size: 12.5px; line-height: 1.4; }
 .book-section-head .book-switch { margin-left: 8px; align-self: center; }
 .book-section-row { display: flex; align-items: center; gap: 12px; margin: 0 0 6px; }
@@ -697,53 +739,70 @@ p { margin: 8px 0; }
 .book-table tr.book-strategy td { background: #eef1f6; font-weight: 700; color: var(--navy); border-top: 1px solid var(--line); padding-top: 6px; padding-bottom: 6px; }
 .book-table.book-summary tr.book-summary-row td.book-name { font-weight: 600; color: var(--navy); }
 .book-table.book-summary td .marker--amber { padding: 0 4px; border-radius: 3px; font-size: 11px; }
-/* the Book's one grouped table (ui/tabs/book.py, 2026-09-29): toolbar, the tree rows with their chevrons,
-   the filter row under the column heads, the inline detail, the Needs you strip, the quiet lines */
+/* the Book's one grouped table (ui/tabs/book.py, 2026-09-29): the toolbar, the filter bar above the table
+   (look pass 2026-09-29: the reference's bar replaces the filter row under the heads), the tree rows with
+   their chevrons, the inline detail, the Needs you strip, the quiet lines */
 .book-grid-toolbar { align-items: center; }
-.book-grid-toolbar .book-tool { margin-left: 10px; }
+.book-grid-toolbar .book-tool { margin-left: 4px; }
 .book-grid-toolbar .book-section-meta { margin-left: 6px; }
+/* no clipping box, so the heads stick under the top bar while the page scrolls */
 .book-card.book-grid-wrap { overflow: visible; }
-.book-table.book-grid td, .book-table.book-grid th { padding-left: 7px; padding-right: 7px; }
+.book-table.book-grid thead th { position: sticky; top: var(--top-bar-h); z-index: 2; }
+.book-table.book-grid td, .book-table.book-grid th { padding-left: 8px; padding-right: 8px; }
 .book-table.book-grid th.book-sortable { cursor: pointer; user-select: none; }
-.book-table.book-grid th.book-sortable:hover { color: var(--navy); }
-.book-sort-arrow { font-size: 9px; margin-left: 3px; }
-.book-table.book-grid tr.book-filter-row th { padding: 3px 4px 5px; background: #fafbfc; text-transform: none; letter-spacing: 0; font-weight: 400; vertical-align: top; }
-.book-filter-box { width: 100%; min-width: 48px; box-sizing: border-box; font: inherit; font-size: 11.5px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; background: #fff; color: #1f2937; }
-.book-filter-box:focus { outline: none; border-color: var(--navy); }
+.book-table.book-grid th.book-sortable:hover { background: var(--navy-2); color: var(--gold); }
+.book-sort-arrow { font-size: 9px; margin-left: 3px; color: var(--gold); }
+/* the filter bar: the reference's .blotter-filter-bar, then a second line of small figure boxes */
+.book-filter-bar { margin: 0 0 12px; }
+.book-filter-bar .blotter-filter { min-width: 150px; }
+.book-filter-bar .blotter-filter--search { min-width: 240px; }
+.book-filter-nums { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px;
+  padding-top: 10px; border-top: 1px dashed var(--line); }
+.book-filter-nums-label { align-self: center; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); cursor: help; margin-right: 4px; }
+.book-filter-bar .blotter-filter--num { min-width: 0; width: 84px; }
+.book-filter-box { width: 100%; min-width: 48px; box-sizing: border-box; font: inherit; font-size: 12px; height: 30px; padding: 0 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); font-variant-numeric: tabular-nums; }
+.book-filter-box:hover { border-color: var(--navy); }
+.book-filter-box:focus { outline: none; border-color: var(--navy); box-shadow: inset 0 -2px 0 var(--gold); }
 .book-filter-num { text-align: right; }
-.book-filter-dd { min-width: 96px; text-align: left; margin-top: 3px; }
-.book-filter-row th:first-child .book-filter-dd { margin-top: 3px; }
-.book-filter-dd .dash-dropdown-trigger { min-height: 24px; padding: 1px 6px; }
+.blotter-filter-search { height: 32px; font-size: 12.5px; }
+.blotter-filter-search:hover { border-color: var(--navy); }
 .book-chevron { display: inline-block; width: 14px; color: var(--muted); cursor: pointer; user-select: none; font-size: 11px; }
-.book-chevron:hover { color: var(--navy); }
+.book-chevron:hover { color: var(--gold); }
 .book-chevron--none { cursor: default; }
 .book-name-link { cursor: pointer; }
 .book-name-link:hover { text-decoration: underline; }
 .book-name-link--open { font-weight: 700; }
-.book-table.book-grid td.book-d0 { padding-left: 8px; }
-.book-table.book-grid td.book-d1 { padding-left: 24px; }
-.book-table.book-grid td.book-d2 { padding-left: 40px; }
-.book-table.book-grid td.book-d3 { padding-left: 56px; }
+/* the tree: each level indented 18px; groups bold on the faint navy tint, positions semibold, legs plain,
+   fills lighter and smaller */
+.book-table.book-grid td.book-d0 { padding-left: 10px; }
+.book-table.book-grid td.book-d1 { padding-left: 28px; }
+.book-table.book-grid td.book-d2 { padding-left: 46px; }
+.book-table.book-grid td.book-d3 { padding-left: 64px; }
 .book-table.book-grid td.book-name { max-width: 420px; }
-.book-table.book-grid tr.book-grid-group td { background: #f7f8fb; font-weight: 600; color: var(--navy); }
-.book-table.book-grid tr.book-grid-leg td { color: #4b5563; }
-.book-table.book-grid tr.book-grid-trade td { color: #6b7280; font-size: 12px; height: 22px; }
+.book-table.book-grid tr.book-grid-group td { background: var(--tint); font-weight: 700; color: var(--navy);
+  border-top: 1px solid #d5dae2; }
+.book-table.book-grid tr.book-grid-position td, .book-table.book-grid tr.book-grid-instrument td { font-weight: 600; }
+.book-table.book-grid tr.book-grid-leg td { color: #374151; font-weight: 400; }
+.book-table.book-grid tr.book-grid-trade td { color: var(--muted); font-size: 12px; font-weight: 400; padding-top: 4px; padding-bottom: 4px; }
 .book-table.book-grid tr.book-grid-muted td { color: #9ca3af; }
-.book-table.book-grid tr.book-grid-row:hover td { background: #f3f5f9; }
-.book-table.book-grid tr.book-grid-group:hover td { background: #eef1f7; }
+.book-table.book-grid tr.book-grid-row:hover td { background: var(--hover); }
+.book-table.book-grid tr.book-grid-group:hover td { background: #e6eaf3; }
 .book-coverage { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 30px; }
 .book-table.book-grid tr.book-detail-row td { background: #fbfbfd; white-space: normal; height: auto; padding: 8px 14px 12px; text-align: left; }
 .book-detail-head { display: flex; align-items: baseline; gap: 10px; }
-.book-needs-strip { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 2px 12px; margin: 0 0 12px; }
+.book-needs-strip { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--gold); border-radius: 8px;
+  padding: 4px 16px; margin: 0 0 16px; }
 .book-prepull { font-size: 12.5px; color: var(--muted); margin: 0 0 8px; }
 .book-quiet { font-size: 12px; color: var(--muted); }
 .book-last-load { font-size: 12.5px; color: var(--muted); }
-.book-last-load-k { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; margin-right: 8px; }
+.book-last-load-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; margin-right: 8px; }
 .book-under.book-under--stack { flex-direction: column; gap: 8px; }
 
 /* Exposure (2026-09-29) */
 .curve-tilt { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin: 0 0 10px; font-size: 12px; }
-.curve-tilt-title { font-size: 10.5px; font-weight: 600; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.curve-tilt-title { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .curve-tilt-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .curve-tilt-label { color: var(--navy); font-weight: 600; }
 .curve-tilt-track { position: relative; width: 110px; height: 8px; background: #f1f3f6; border-radius: 4px; }
@@ -764,7 +823,7 @@ p { margin: 8px 0; }
 .curve-panel { margin-top: 12px; }
 .curve-panel-charts { display: flex; gap: 14px; flex-wrap: wrap; }
 .curve-panel-chart { flex: 1 1 420px; min-width: 0; }
-.curve-subhead { font-size: 10.5px; font-weight: 600; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; margin: 12px 0 4px; }
+.curve-subhead { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; margin: 12px 0 4px; }
 .curve-held-line { font-size: 11.5px; color: var(--muted); }
 
 /* Blotter (2026-09-29) -- ui/tabs/blotter.py: the last upload line, the rows that did not become
@@ -790,7 +849,7 @@ p { margin: 8px 0; }
 .pnl-contrib-list { display: flex; flex-direction: column; }
 .tab-link.pnl-contrib-row { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 72px; align-items: center; gap: 10px; width: 100%; padding: 4px 0; border: none; border-bottom: 1px solid #eef1f4; background: none; font: inherit; font-size: 12.5px; color: var(--text); text-align: left; text-decoration: none; cursor: pointer; }
 .tab-link.pnl-contrib-row:last-child { border-bottom: none; }
-.tab-link.pnl-contrib-row:hover { background: #f3f5f9; text-decoration: none; }
+.tab-link.pnl-contrib-row:hover { background: var(--hover); text-decoration: none; }
 .pnl-contrib-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pnl-bar-track { display: block; height: 8px; background: #f1f3f6; border-radius: 2px; }
 .pnl-bar { display: block; height: 8px; border-radius: 2px; }
@@ -800,7 +859,7 @@ p { margin: 8px 0; }
 .pnl-months-table th:not(.l), .pnl-months-table td:not(.l) { min-width: 84px; }
 .pnl-track { display: flex; flex-wrap: wrap; gap: 6px 28px; align-items: baseline; font-size: 13px; padding: 2px 0 8px; }
 .pnl-track-item { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.pnl-track-k { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-right: 8px; }
+.pnl-track-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-right: 8px; }
 
 /* Data (2026-09-29): the status line of links, the block spacing, the marks-check count */
 .data-status-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 4px; font-size: 13px; margin: 2px 0 14px; }
@@ -817,7 +876,7 @@ p { margin: 8px 0; }
 .risk-question { color: var(--muted); font-size: 13px; margin-left: 12px; }
 .risk-headline .cards { margin-bottom: 6px; }
 .risk-reach { color: var(--muted); font-size: 12px; margin: 0 0 16px; cursor: help; }
-.risk-block { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px 12px; margin: 0 0 14px; }
+.risk-block { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px 16px; margin: 0 0 16px; }
 .risk-section-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
 .risk-section-head .risk-h { margin: 0; }
 .risk-section-head .book-switch { margin-left: auto; }

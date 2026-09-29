@@ -89,7 +89,7 @@ ISSUES_ID = "market-data-issues"
 
 _MONO = {"fontFamily": "Consolas, 'Courier New', monospace", "fontSize": "12px", "padding": "3px 8px",
          "textAlign": "left", "whiteSpace": "nowrap"}
-_HEAD = {"fontWeight": "600", "backgroundColor": "#f0f2f5", "borderBottom": "1px solid #d9dee3"}
+_HEAD = {"fontWeight": "700"}  # the navy header of the one kit (ui/assets/style.css, look pass 2026-09-29)
 
 _SOURCE_LABELS = {"BNP_BVAL": "BNP file", "BBG_BFXFORWARD": "Bloomberg", "BBG_BDH": "Bloomberg (BDH)",
                   "BBG_INTERP": "Interpolated", "MANUAL": "Manual"}
@@ -1000,8 +1000,8 @@ def _panel_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict]
               "minWidth": "240px", "maxWidth": "520px"} for c in wide]
             + [{"if": {"column_id": c}, "textAlign": "right"} for c in numeric]),
         style_data_conditional=[
-            {"if": {"filter_query": "{flag} != ''"}, "backgroundColor": "#fff4f2"},
-            {"if": {"filter_query": "{flag} != ''", "column_id": "flag"}, "color": "#b42318", "fontWeight": "600"},
+            {"if": {"filter_query": "{flag} != ''"}, "backgroundColor": "#fdecea"},
+            {"if": {"filter_query": "{flag} != ''", "column_id": "flag"}, "color": "#c0392b", "fontWeight": "600"},
         ])
 
 

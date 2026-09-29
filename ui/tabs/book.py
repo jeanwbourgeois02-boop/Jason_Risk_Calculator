@@ -3252,8 +3252,8 @@ def grid_body(data: dict, view: str, state: Optional[dict] = None, sort: Optiona
 
 
 def grid_head(sort: Optional[dict] = None) -> html.Thead:
-    """The two head rows: the column titles (a click sorts) and the filter row, one control per
-    column. Static in the layout, so a filter box keeps its focus while the rows re-render."""
+    """The head row: the column titles (a click sorts). The filters sit in `filter_bar` above the
+    table since the look pass of 2026-09-29."""
     titles = []
     for key, label, cls in GRID_COLUMNS:
         active = (sort or {}).get("key") == key
@@ -3263,26 +3263,42 @@ def grid_head(sort: Optional[dict] = None) -> html.Thead:
                               className=" ".join(c for c in (cls, "book-sortable") if c),
                               title=plain_words(f"{GRID_TIPS.get(key, '')}\nClick to sort (within each group)."),
                               style={"minWidth": "280px"} if key == "name" else None))
-    filters = []
-    for key, _label, cls in GRID_COLUMNS:
-        box: List[Any] = []
-        if key == "name":
-            box = [dcc.Input(id=filter_id("name"), type="text", debounce=True, placeholder="name, contract, trade id",
-                             className="book-filter-box", persistence=True, persistence_type="session"),
-                   dcc.Dropdown(id=filter_id("commodity"), multi=True, options=[], placeholder="commodity",
-                                className="blotter-filter-dropdown book-filter-dd", persistence=True,
-                                persistence_type="session")]
-        elif key in MULTI_FILTERS:
-            box = [dcc.Dropdown(id=filter_id(key), multi=True, options=[], placeholder="currency" if key == "local" else "all",
-                                className="blotter-filter-dropdown book-filter-dd", persistence=True,
-                                persistence_type="session")]
-        else:
-            box = [dcc.Input(id=filter_id(key), type="text", debounce=True, placeholder="",
-                             className="book-filter-box book-filter-num", persistence=True, persistence_type="session")]
-        tip = ("A comparison: > 0, < -10k, >= 1.5m, = 3" + (" (business days)" if key == "next" else "")
-               if key in NUMERIC_FILTERS else None)
-        filters.append(html.Th(box, className="book-filter-cell", title=tip))
-    return html.Thead([html.Tr(titles), html.Tr(filters, className="book-filter-row")])
+    return html.Thead([html.Tr(titles)])
+
+
+FILTER_LABELS = {"name": "Search", "commodity": "Commodity", "type": "Type", "sector": "Sector", "local": "Currency"}
+NUMERIC_FILTERS_ABOUT = ("A comparison on the column's figure: > 0, < -10k, >= 1.5m, = 3 (Next: business days). "
+                         "A fill is tested on its own figure, else on the nearest row above it that has one.")
+
+
+def filter_bar() -> html.Div:
+    """The filter bar above the table (look pass 2026-09-29, the reference app's bar): the search,
+    one multi-select per category (placeholder "All", the choices from the book on file), Clear
+    filters, then a small comparison box per figure column. The same ids the filter row under the
+    heads had; static in the layout, so a box keeps its focus while the rows re-render."""
+    labels = {k: label for k, label, _cls in GRID_COLUMNS}
+
+    def field(key: str, label: str, control: Any, cls: str = "", tip: Optional[str] = None) -> html.Div:
+        return html.Div(className=" ".join(c for c in ("blotter-filter", cls) if c), title=tip,
+                        children=[html.Label(label, htmlFor=filter_id(key)), control])
+
+    children: List[Any] = [field("name", FILTER_LABELS["name"], dcc.Input(
+        id=filter_id("name"), type="text", debounce=True, placeholder="name, contract, trade id",
+        className="blotter-filter-search", persistence=True, persistence_type="session"), "blotter-filter--search")]
+    for key in ("commodity", "type", "sector", "local"):
+        children.append(field(key, FILTER_LABELS[key], dcc.Dropdown(
+            id=filter_id(key), multi=True, options=[], placeholder="All", className="blotter-filter-dropdown",
+            persistence=True, persistence_type="session")))
+    children.append(html.Button("Clear filters", id=CLEAR_FILTERS_ID, n_clicks=0, className="btn btn--ghost"))
+    nums: List[Any] = [html.Span("Figures", className="book-filter-nums-label", title=NUMERIC_FILTERS_ABOUT)]
+    for key in NUMERIC_FILTERS:
+        tip = "A comparison: > 0, < -10k, >= 1.5m, = 3" + (" (business days)" if key == "next" else "")
+        nums.append(field(key, labels[key], dcc.Input(
+            id=filter_id(key), type="text", debounce=True, placeholder="any",
+            className="book-filter-box book-filter-num", persistence=True, persistence_type="session"),
+            "blotter-filter--num", tip))
+    children.append(html.Div(nums, className="book-filter-nums"))
+    return html.Div(className="blotter-filter-bar book-filter-bar", children=children)
 
 
 def filter_id(key: str) -> str:
@@ -3635,7 +3651,7 @@ def body(data: dict, view: str = DEFAULT_VIEW, state: Optional[dict] = None, sor
     if not p["shown"]:
         return html.Div([p["top"]]), "", HIDDEN
     table = html.Table([grid_head(sort), html.Tbody(p["rows"], id=TBODY_ID)], id=TABLE_ID, className="book-table book-grid")
-    return html.Div([p["top"], p["prepull"] or html.Div(),
+    return html.Div([p["top"], p["prepull"] or html.Div(), filter_bar(),
                      html.Div(className="book-card book-grid-wrap", children=[table]),
                      html.Div(className="book-under book-under--stack", children=p["under"])]), p["meta"], {}
 
@@ -3766,9 +3782,9 @@ def render_csv(as_of: Optional[str], db_path, view: str, sort: Optional[dict] = 
 
 def layout(default_date: Optional[str] = None) -> html.Div:
     """The static shell (2026-09-29): the title, the top placeholder (tiles, Needs you), the grid's
-    toolbar (the view switch, Expand all / Collapse all / Clear filters, its meta, Download CSV),
-    the line before the first pull, the grid (its two head rows static, so a filter box keeps its
-    focus; its body a placeholder), the under-section, the session stores (open rows, sort, the
+    toolbar (the view switch, Expand all / Collapse all, its meta, Download CSV), the line before
+    the first pull, the filter bar (static, so a filter box keeps its focus; Clear filters in it),
+    the grid (its head static, its body a placeholder), the under-section, the session stores (open rows, sort, the
     row whose detail is open) and the safety interval. No date picker."""
     return html.Div(className="book-tab", children=[
         html.Div(id=TOOLBAR_ID, className="book-title-row", children=[about("Book", TITLE_ABOUT, level="h3")]),
@@ -3779,12 +3795,12 @@ def layout(default_date: Optional[str] = None) -> html.Div:
                 _switch(VIEW_ID, VIEW_OPTIONS, DEFAULT_VIEW),
                 html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="book-download book-tool"),
                 html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="book-download book-tool"),
-                html.Button("Clear filters", id=CLEAR_FILTERS_ID, n_clicks=0, className="book-download book-tool"),
                 html.Span(id=GRID_META_ID, className="book-section-meta"),
                 html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
                             title="The grid as shown (filters and sort applied, every level), at full figures"),
                 dcc.Download(id=DOWNLOAD_ID)]),
             html.Div(id=PREPULL_ID),
+            filter_bar(),
             html.Div(className="book-card book-grid-wrap", children=[
                 html.Table([grid_head(), html.Tbody(id=TBODY_ID)], id=TABLE_ID, className="book-table book-grid")]),
         ]),

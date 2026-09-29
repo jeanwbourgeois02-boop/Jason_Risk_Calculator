@@ -23,4 +23,5 @@
 - [Book one grid 2026-09-29](book-one-grid-2026-09-29.md) — Book = one grouped tree table (views, chevrons, static filter row, sibling sort, inline detail), link ids, identity rule, Chrome proof recipe
 - [Risk four blocks 2026-09-29](risk-four-blocks-2026-09-29.md) — headline / by position (+liquidity) / correlation / one stress list; clientside group switch; margin hidden while placeholder
 - [Blotter raw cells 2026-09-29](blotter-raw-cells-2026-09-29.md) — fills table shows broker_symbol / broker_price as written; '' reasons; ×100 only when price = cell × scale
+- [Look pass 2026-09-29](look-pass-2026-09-29.md) — the reference app's kit: navy table heads, :where zebra, card tiles, ghost buttons; Book filter bar above the table, same ids
 - [P&L scorecard, carry, rolls 2026-09-29](pnl-scorecard-carry-rolls-2026-09-29.md) — three P&L blocks, carry dedupe rule, precious pairs = Book outrights, CNY hedge_cny_usd, risk.py placeholder edit refused

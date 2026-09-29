@@ -103,10 +103,10 @@ MARGIN_BASIS = "estimate, not exchange SPAN"
 # limit levels (engine.limits.checks) as shown, and their colours: the Expiries tab's palette
 LEVEL_TEXT = {"BREACH": "BREACH", "WARN": "WARN", "OK": "OK", "NOT_SET": "not set yet", "N/A": NA}
 LEVEL_STYLES = {
-    "BREACH": {"backgroundColor": "#c62828", "color": "#ffffff", "fontWeight": "700"},
-    "WARN": {"backgroundColor": "#fff3e0", "color": "#b26a00", "fontWeight": "700"},
-    "OK": {"backgroundColor": "#f1f5f1", "color": "#1a7f4b"},
-    "NOT_SET": {"backgroundColor": "#eef0f3", "color": "#6b7280", "fontStyle": "italic"},
+    "BREACH": {"backgroundColor": "#c0392b", "color": "#ffffff", "fontWeight": "700"},
+    "WARN": {"backgroundColor": "#fff4e5", "color": "#8a4b00", "fontWeight": "700"},
+    "OK": {"backgroundColor": "#e3f5ea", "color": "#1a7f4b"},
+    "NOT_SET": {"backgroundColor": "#f1f2f4", "color": "#6b7280", "fontStyle": "italic"},
     "N/A": {"color": "var(--muted)", "fontStyle": "italic"},
 }
 _MONO = {"textAlign": "right", "fontFamily": "monospace", "fontVariantNumeric": "tabular-nums",
