@@ -1118,7 +1118,8 @@ def cmd_ui_check(args) -> int:
     argv = ["--json"] if args.json else []
     if args.tab:
         argv += ["--tab", args.tab]
-    argv += [f"--{flag}" for flag in ("strict", "layout", "shots") if getattr(args, flag)]
+    argv += [f"--{flag.replace('_', '-')}" for flag in ("strict", "layout", "shots", "shots_open")
+             if getattr(args, flag)]
     return ui_check.main(argv)
 
 
@@ -1215,7 +1216,11 @@ def build_parser() -> argparse.ArgumentParser:
                                                            "headline, control, chart or empty state")
     uc.add_argument("--layout", action="store_true", help="print each tab's blocks in page order")
     uc.add_argument("--shots", action="store_true",
-                    help="one full-page PNG per tab under reports/ui_shots/ (needs playwright; nothing is installed)")
+                    help="one full-page PNG per tab under reports/ui_shots/ once the late figures land "
+                         "(needs playwright; nothing is installed)")
+    uc.add_argument("--shots-open", action="store_true",
+                    help="the --shots PNGs plus <tab>_panel.png (first row opened) and <tab>_open.png "
+                         "(every fold opened); a few minutes more")
     uc.set_defaults(func=cmd_ui_check)
     return parser
 

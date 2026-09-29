@@ -580,6 +580,7 @@ DESIGNED_CLASSES = {
     "risk-reach": "Risk history-reach line",                    # risk.py, under the headline
     "book-prepull": "Book pre-pull line",                       # book.PREPULL_TEXT
     "tk-flag-lines": "Book panel flags line",                   # book.panel_tr
+    "tk-hedge-line": "Book panel hedge line",                   # book: the hedge line under the legs
     "blotter-upload-line": "Blotter last upload line",          # blotter_fills.last_upload_block
     "data-status-line": "Data status line",                     # market_data.BODY_ID
     "risk-fold-head": "fold title",                             # risk_folds: "Net by commodity", ...
@@ -1048,9 +1049,10 @@ class _Errors(logging.Handler):
         self.records.append(record)
 
 
-def run_checks(tabs: List[str], layout: bool = False, shots: bool = False) -> Tuple[List[Finding], Dict[str, float], dict]:
+def run_checks(tabs: List[str], layout: bool = False, shots: bool = False,
+               shots_open: bool = False) -> Tuple[List[Finding], Dict[str, float], dict]:
     """(findings, seconds per step, extras): extras["layout"] = {tab: inventory lines} with `layout`,
-    extras["shots"] = one sentence with `shots`."""
+    extras["shots"] = one sentence with `shots` or `shots_open` (which adds the panel and open shots)."""
     import warnings
     warnings.filterwarnings("ignore")
     from ui import app as uiapp
@@ -1094,9 +1096,9 @@ def run_checks(tabs: List[str], layout: bool = False, shots: bool = False) -> Tu
                         msg += f" ({type(rec.exc_info[1]).__name__}: {rec.exc_info[1]})"
                     findings.append(Finding(tab, "RENDER_ERROR", msg[:200], f"(log {rec.name})", False))
                 timings[tab] = time.perf_counter() - t0
-            if shots:
+            if shots or shots_open:
                 t0 = time.perf_counter()
-                extras["shots"] = take_shots(app, [t for t in tabs if t in SHOT_LABELS])
+                extras["shots"] = take_shots(app, [t for t in tabs if t in SHOT_LABELS], opened=shots_open)
                 timings["shots"] = time.perf_counter() - t0
             uiapp.set_active_db(None)
     finally:
@@ -1110,22 +1112,156 @@ SHOT_DIR = ROOT / "reports" / "ui_shots"
 SHOT_LABELS = {"book": "Book", "pnl": "P&L", "risk": "Risk", "blotter": "Blotter", "data": "Data"}
 SHOT_WIDTH = 1680
 AVOID_PORTS = {8050}                                 # the monitor's default port, and Henry's app's
+SETTLE_SECONDS = 20.0                                # the most a shot waits for a tab's late figures
+STABLE_SECONDS = 2.0                                 # the page's text unchanged this long = drawn
+PANEL_ROW_TYPES = {"book": "ROW_TYPE", "pnl": "ROW_TYPE", "risk": "ROW_TYPE"}   # the tab module's row id type
+FOLD_SKIP_TYPES = {"risk-commodity-row"}             # a single-select row (the curve on click), not a fold
+MAX_FOLD_CLICKS = 40
+
+# Dash is idle: no callback requested, queued or running, no loading flag, no `_dash-loading` element,
+# and every late-figure poll of the tab (a dcc.Interval the tab enables while a background figure is
+# still computing, and disables in the re-render that shows it) switched off again.
+_IDLE_JS = """(pollIds) => {
+  const st = window.store && window.store.getState();
+  if (!st) return false;
+  const cbs = Object.assign({}, st.callbacks || {});
+  delete cbs.stored; delete cbs.completed;
+  if ([].concat(...Object.values(cbs)).length || st.isLoading) return false;
+  if (document.querySelector('._dash-loading')) return false;
+  const strs = (st.paths && st.paths.strs) || {};
+  for (const id of pollIds) {
+    if (!strs[id]) continue;
+    let node = st.layout;
+    for (const k of strs[id]) { node = node == null ? node : node[k]; }
+    if (node && node.props && node.props.disabled === false) return false;
+  }
+  return true;
+}"""
+
+# The clickable ancestor (an element with an id) of every visible closed chevron, skipping `skip` types,
+# and every visible closed <details>.
+_CLOSED_FOLDS_JS = """(skip) => {
+  const out = [];
+  for (const chev of document.querySelectorAll('.tk-chev')) {
+    if (!chev.offsetParent || !chev.textContent.trim().startsWith('\\u25b8')) continue;
+    const el = chev.closest('[id]');
+    if (!el || skip.some(t => el.id.includes('"type":"' + t + '"'))) continue;
+    out.push(el.id);
+  }
+  for (const s of document.querySelectorAll('details:not([open]) > summary')) {
+    if (s.offsetParent) out.push('summary:' + (s.id || s.textContent.trim().slice(0, 40)));
+  }
+  return out;
+}"""
 
 
-def _free_port() -> int:
-    import socket
+def _free_server(app):
+    """A werkzeug server on a port the OS picks for it (bound atomically, so two runs at once never
+    share one), never one of AVOID_PORTS; nothing already listening is touched."""
+    from werkzeug.serving import make_server
     while True:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-        if port not in AVOID_PORTS:
-            return port
+        server = make_server("127.0.0.1", 0, app.server, threaded=True)
+        if server.port not in AVOID_PORTS:
+            return server
+        server.server_close()
 
 
-def take_shots(app, tabs: List[str]) -> str:
-    """One full-page PNG per tab under reports/ui_shots/, 1680 px wide, through playwright's own
-    headless Chromium, with the app served in this process on a free port (never 8050) and stopped
-    after. Nothing is installed: without playwright and its browser the step is skipped and says so."""
+def _late_poll_ids() -> List[str]:
+    """The ids of the tabs' late-figure polls (the Book's z and Move, Risk's VaR and daily risk)."""
+    from ui.tabs import book, risk
+    return [i for i in (getattr(book, "RISK_POLL_ID", None), getattr(risk, "RISK_POLL_ID", None)) if i]
+
+
+def _settle(page, poll_ids: List[str], budget: float = SETTLE_SECONDS) -> bool:
+    """Wait until Dash is idle with every late figure landed, then until the page's text has not changed
+    for STABLE_SECONDS; False when `budget` ran out first (the shot is taken anyway and says so)."""
+    deadline = time.monotonic() + budget
+    try:
+        page.wait_for_load_state("networkidle", timeout=budget * 1000)
+    except Exception:  # noqa: BLE001 -- an app that polls may never go network-idle: the Dash check decides
+        pass
+    try:
+        page.wait_for_function(_IDLE_JS, arg=poll_ids, timeout=max(0.1, deadline - time.monotonic()) * 1000)
+    except Exception:  # noqa: BLE001 -- playwright's TimeoutError: report it, take the shot
+        return False
+    last, since = None, time.monotonic()
+    while time.monotonic() < deadline:
+        text = page.evaluate("document.body.innerText")
+        if text != last:
+            last, since = text, time.monotonic()
+        elif time.monotonic() - since >= STABLE_SECONDS:
+            return True
+        page.wait_for_timeout(250)
+    return False
+
+
+def _save(page, name: str) -> str:
+    """A full-page PNG written whole (a temp file renamed over the old one), so a run beside this one
+    never reads half a file."""
+    import os
+    data = page.screenshot(full_page=True)
+    target = SHOT_DIR / name
+    tmp = SHOT_DIR / f".{name}.{os.getpid()}.tmp"
+    tmp.write_bytes(data)
+    for attempt in range(10):
+        try:
+            os.replace(tmp, target)
+            return name
+        except PermissionError:                       # Windows: another run is reading the old file
+            time.sleep(0.2 * (attempt + 1))
+    tmp.unlink(missing_ok=True)
+    return f"{name} (not replaced: file in use)"
+
+
+def _row_locator(page, row_type: str):
+    return page.locator(f"[id*='\"type\":\"{row_type}\"']:visible").first
+
+
+def _panel_shot(page, tab: str, poll_ids: List[str]) -> Optional[str]:
+    """`<tab>_panel.png`: the first row's panel opened, then closed again. None when the tab has no rows."""
+    import importlib
+    attr = PANEL_ROW_TYPES.get(tab)
+    row_type = getattr(importlib.import_module(f"ui.tabs.{tab}"), attr, None) if attr else None
+    if not row_type or not _row_locator(page, row_type).count():
+        return None
+    _row_locator(page, row_type).click()
+    _settle(page, poll_ids)
+    name = _save(page, f"{tab}_panel.png")
+    if _row_locator(page, row_type).count():
+        _row_locator(page, row_type).click()
+        _settle(page, poll_ids)
+    return name
+
+
+def _open_shot(page, tab: str, poll_ids: List[str]) -> str:
+    """`<tab>_open.png`: Expand all pressed and every closed fold opened, one click at a time."""
+    expand = page.locator("button[id$='expand-all']:visible").first
+    if expand.count():
+        expand.click()
+        _settle(page, poll_ids)
+    clicked: set = set()
+    for _ in range(MAX_FOLD_CLICKS):
+        todo = [k for k in page.evaluate(_CLOSED_FOLDS_JS, sorted(FOLD_SKIP_TYPES)) if k not in clicked]
+        if not todo:
+            break
+        key = todo[0]
+        clicked.add(key)
+        if key.startswith("summary:"):
+            page.locator("details:not([open]) > summary:visible").first.click()
+        else:
+            page.locator(f"[id='{key}']" if "'" not in key else f'[id="{key}"]').first.click()
+        _settle(page, poll_ids, budget=8)
+    _settle(page, poll_ids)
+    return _save(page, f"{tab}_open.png")
+
+
+def take_shots(app, tabs: List[str], opened: bool = False) -> str:
+    """Per tab under reports/ui_shots/, 1680 px wide, through playwright's own headless Chromium: the
+    page as a trader sees it (`<tab>.png`, taken once Dash is idle and the late figures have landed);
+    with `opened` also the first row's panel opened (`<tab>_panel.png`) and every fold opened
+    (`<tab>_open.png`), which adds minutes. The app
+    is served in this process on a port of its own (never 8050) and stopped after. Nothing is
+    installed: without playwright and its browser the step is skipped and says so."""
     import importlib.util
     if importlib.util.find_spec("playwright") is None:
         selenium = importlib.util.find_spec("selenium") is not None
@@ -1133,13 +1269,13 @@ def take_shots(app, tabs: List[str]) -> str:
                 if selenium else " and neither is selenium") + "; nothing was installed")
     import threading
     from playwright.sync_api import sync_playwright
-    from werkzeug.serving import make_server
 
-    port = _free_port()
-    server = make_server("127.0.0.1", port, app.server, threaded=True)
+    server = _free_server(app)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     written: List[str] = []
+    unsettled: List[str] = []
+    poll_ids = _late_poll_ids()
     try:
         with sync_playwright() as pw:
             try:
@@ -1147,28 +1283,39 @@ def take_shots(app, tabs: List[str]) -> str:
             except Exception as exc:  # noqa: BLE001 -- no browser downloaded for playwright: say so
                 return (f"screenshots skipped: playwright has no browser to launch ({type(exc).__name__}); "
                         "nothing was installed")
-            page = browser.new_page(viewport={"width": SHOT_WIDTH, "height": 1000})
-            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            SHOT_DIR.mkdir(parents=True, exist_ok=True)
-            for tab in tabs:
-                page.locator(f"#main-tabs >> text={SHOT_LABELS[tab]}").first.click()
-                page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(1500)
-                target = SHOT_DIR / f"{tab}.png"
-                page.screenshot(path=str(target), full_page=True)
-                written.append(target.name)
-            browser.close()
+            try:
+                page = browser.new_page(viewport={"width": SHOT_WIDTH, "height": 1000})
+                page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+                SHOT_DIR.mkdir(parents=True, exist_ok=True)
+                for tab in tabs:
+                    page.locator(f"#main-tabs >> text={SHOT_LABELS[tab]}").first.click()
+                    if not _settle(page, poll_ids):
+                        unsettled.append(tab)
+                    written.append(_save(page, f"{tab}.png"))
+                    if not opened:
+                        continue
+                    panel = _panel_shot(page, tab, poll_ids)
+                    if panel:
+                        written.append(panel)
+                    written.append(_open_shot(page, tab, poll_ids))
+            finally:
+                browser.close()
     finally:
         server.shutdown()
+        server.server_close()
         thread.join(timeout=10)
-    return f"screenshots written to {SHOT_DIR.relative_to(ROOT)}: {', '.join(written)}"
+    note = (f"; still changing after {SETTLE_SECONDS:.0f} s, taken anyway: {', '.join(unsettled)}"
+            if unsettled else "")
+    return f"screenshots written to {SHOT_DIR.relative_to(ROOT)}: {', '.join(written)}{note}"
 
 
 # ----------------------------------------------------------------------------- output
 RULE_ORDER = ["RENDER_ERROR", "BANNED", "ENGINE_WORD", "LOWERCASE", "LOOSE_TEXT", "DOUBLE_SPACE",
               "TRAILING_PUNCT_SPACE", PART_RULE, "LOOSE_BLOCK", "DESIGNED_LINE"]
 PAGE_ORDER_RULES = {"LOOSE_BLOCK", "DESIGNED_LINE"}  # listed in page order, not by path
-INFORMATIONAL_TABS = {"data": "Data: after the other session's push"}   # another session is changing it
+# A tab whose LOOSE_BLOCK findings never fail --strict, with the note printed beside it: none since the
+# Data tab's rebuild landed (2026-09-29); kept for the next tab another session is still changing.
+INFORMATIONAL_TABS: Dict[str, str] = {}
 
 
 def grouped(findings: List[Finding]) -> List[Tuple[Finding, int]]:
@@ -1265,7 +1412,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                                                                "headline, control, chart or empty state)")
     parser.add_argument("--layout", action="store_true", help="print each tab's blocks in page order")
     parser.add_argument("--shots", action="store_true",
-                        help=f"one full-page PNG per tab under {SHOT_DIR.relative_to(ROOT)} (needs playwright)")
+                        help=f"one full-page PNG per tab under {SHOT_DIR.relative_to(ROOT)} once the late "
+                             "figures land: <tab>.png (needs playwright)")
+    parser.add_argument("--shots-open", action="store_true",
+                        help="the --shots PNGs plus <tab>_panel.png (first row opened) and <tab>_open.png "
+                             "(every fold opened); a few minutes more")
     args = parser.parse_args(argv)
     tabs = list(TAB_ORDER)
     if args.tab:
@@ -1277,11 +1428,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
-    findings, timings, extras = run_checks(tabs, layout=args.layout, shots=args.shots)
+    findings, timings, extras = run_checks(tabs, layout=args.layout, shots=args.shots,
+                                          shots_open=args.shots_open)
     if args.layout:
         print_layout(extras["layout"])
     print_report(findings, timings, strict=args.strict)
-    if args.shots:
+    if args.shots or args.shots_open:
         print(extras.get("shots") or "screenshots: nothing to shoot")
     if args.json:
         print(f"written {write_json(findings, timings, extras)}")
