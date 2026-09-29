@@ -46,7 +46,7 @@ from ui.feed_controls import pull_timings, recalc_words, safety_refresh_ms, seco
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import data_checks
 from ui.tabs import data_kit as kit
-from ui.tabs.formatting import cap, compact, plain_ids, tidy
+from ui.tabs.formatting import cap, cap_parts, compact, plain_ids, tidy
 from ui.tabs.formatting import (MISSING, about, contract_name, fx_name, is_fx_pair, issues_drawer, lme_name,
                                 missing_cell, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
                                 short_root_name)
@@ -654,18 +654,23 @@ _STATUS_LABELS = {"pass": "PASS", "fail": "FAIL", "warning": "WARNING"}
 
 
 def _render_bbg_results(checks: list) -> html.Div:
+    # layout wave 2 (2026-09-29): one small table (Result · Check · What it found), never loose rows
+    cols: Tuple[kit.Column, ...] = (("result", "Result", "l", "Pass, warning or fail.", False),
+                                    ("name", "Check", "l", "What was checked.", False),
+                                    ("message", "What it found", "l", "The check's own sentence.", False))
     if not checks:
-        return html.Div("No diagnostic checks were returned.", className="bbg-check-empty")
-    rows = []
+        return kit.table(kit.head(cols, None, "data-bbg-none"),
+                         [kit.note_row("No diagnostic checks were returned.", len(cols), "cell-missing")],
+                         className="tk-small data-bbg-results")
+    level = {"pass": "green", "warning": "amber", "fail": "red"}
+    body = []
     for c in checks:
-        status = c.get("status", "warning")
-        label = _STATUS_LABELS.get(status, status.upper())
-        rows.append(html.Div(className="bbg-check-row", children=[
-            html.Span(label, className=f"bbg-check-status bbg-check-status--{status}"),
-            html.Span(c.get("name", ""), className="bbg-check-name"),
-            html.Span(c.get("message", ""), className="bbg-check-message"),
-        ]))
-    return html.Div(rows, className="bbg-check-list")
+        status = str(c.get("status", "warning"))
+        label = _STATUS_LABELS.get(status, status.upper()).capitalize()
+        body.append(html.Tr([kit.td(kit.chip(label, level.get(status, "grey")), left=True),
+                             kit.td(cap(str(c.get("name", ""))), left=True),
+                             kit.td(cap_parts(str(c.get("message", ""))), left=True)]))
+    return tidy(kit.table(kit.head(cols, None, "data-bbg-none"), body, className="tk-small data-bbg-results"))
 
 
 def run_bloomberg_diagnostics_safe() -> list:
@@ -1292,6 +1297,16 @@ def library_kind_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
     return sorted(rows, key=lambda r: (-r["items"], r["what"]))
 
 
+def _library_shown(row: dict) -> dict:
+    """A library row as the table shows it: dates short ("31 Dec 2026"), the time it came in as New
+    York time without seconds (layout wave 2, 2026-09-29: never an ISO stamp on screen)."""
+    from ui.feed_controls import short_time
+    until = str(row.get("needed_until") or "")
+    added = str(row.get("added_at") or "")
+    return {**row, "needed_until": (short_date(until) + f" {until[:4]}") if until[:4].isdigit() else until,
+            "added_at": short_time(added) if added else ""}
+
+
 def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     """The Bloomberg library (data/bloomberg/library.py, user decision 2026-09-21): every
     Bloomberg security a pull on `as_of` asks for, what it is for, how many trades need it
@@ -1302,19 +1317,20 @@ def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     from data.bloomberg import library
     asked, gaps = library_rows(conn, as_of)
     trades = len({r["trade_id"] for r in library.needed_on(conn, as_of)})
-    summary = (f"{LIBRARY_TITLE} · {len(asked)} ticker{'' if len(asked) == 1 else 's'} for {trades} "
-               f"trade{'' if trades == 1 else 's'} on {as_of}")
+    summary = (f"{len(asked)} ticker{'' if len(asked) == 1 else 's'} for {trades} "
+               f"trade{'' if trades == 1 else 's'}")
     if gaps:
-        summary += f" · {len(gaps)} need{'' if len(gaps) == 1 else 's'} with no Bloomberg ticker, not asked"
-    summary += " · changes only when trades come in · pulled only on request"
-    about_text = ("Everything \"Pull Bloomberg now\" asks for, and nothing else. A forward curve is one "
+        summary += f" · {len(gaps)} with no ticker"
+    about_text = (f"Everything \"Pull Bloomberg now\" asks for on {short_date(as_of)}, and nothing else. It changes "
+                  "only when trades come in, and is pulled only on request. A forward curve is one "
                   "request per pair; a vol smile and an OIS curve are one ticker per point.")
     if gaps:
         about_text += (f" The {len(gaps)} flagged row(s) at the top are gaps: the book needs them but has no "
                        "verified Bloomberg ticker to ask with, so nothing is asked and the reason is under Used for.")
     if not asked and not gaps:
-        # nothing needed: one quiet line, not a collapsible with nothing in it
-        return _quiet(LIBRARY_TITLE, f"no trade on file needs anything from Bloomberg on {as_of}", about_text)
+        # nothing needed: one title line, not a collapsible with nothing in it
+        return about(f"{LIBRARY_TITLE} · nothing needed", f"No trade on file needs anything from Bloomberg on "
+                                                          f"{short_date(as_of)}. {about_text}", level="h5")
     body = [_panel_table(LIBRARY_KINDS_TABLE_ID,
                          [("What it is for", "what"), ("Items", "items"), ("Trades", "trades"),
                           ("With no ticker", "gaps")],
@@ -1322,9 +1338,11 @@ def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
             _panel_table(LIBRARY_TABLE_ID,
                          [("Ticker", "ticker"), ("Field", "field"), ("Used for", "used_for"),
                           ("Trades", "trades"), ("Needed until", "needed_until"), ("In the library since", "added_at")],
-                         gaps + asked, wide=("used_for",) if gaps else (), numeric=("trades",))]
-    return html.Details(className="details", children=[
-        html.Summary(summary, title=about_text, className="about-title"), *body])
+                         [_library_shown(r) for r in gaps + asked], wide=("used_for",) if gaps else (),
+                         numeric=("trades",))]
+    return html.Details(className="book-fold tk-fold-block data-fold", children=[
+        html.Summary([html.Span(LIBRARY_TITLE, className="book-section-title", title=about_text),
+                      html.Span(f" · {summary}", className="book-section-meta")]), *body])
 
 
 CONTRACT_DATES_TITLE = "Contract dates"
@@ -1762,8 +1780,11 @@ def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, in
         dates_link = _link("Contract dates: none needed", CONTRACT_DATES_PANEL_ID,
                            "No open future or option needs Bloomberg's contract dates.")
     else:
-        dates_link = _link(f"Contract dates {n - estimated} from Bloomberg, {estimated} estimated",
-                           CONTRACT_DATES_PANEL_ID, f"{n - estimated} of {n} contracts on Bloomberg's own dates.",
+        dates_link = _link(f"Contract dates {estimated} estimated" if estimated else "Contract dates from Bloomberg",
+                           CONTRACT_DATES_PANEL_ID,
+                           f"{n - estimated} of {n} contracts on Bloomberg's own dates"
+                           + (f"; {estimated} on the contract master's estimate until a pull stores Bloomberg's."
+                              if estimated else "."),
                            warn=bool(estimated))
     out: list = []
     for part in (pull, marks_link, ref, dates_link):
@@ -1827,7 +1848,8 @@ def reference_closes_panel(rows: List[dict], issues: Optional[list] = None) -> h
     trades that period leaves out."""
     head = kit.strip([kit.strip_title(PAST_CLOSES_TITLE, REFERENCE_ABOUT)])
     if not rows:
-        return kit.card([head, html.P("No reference close for this date.", className="book-section-meta")])
+        return kit.card([head, kit.table(html.Thead(), [kit.note_row("No reference close for this date.", 1,
+                                                                    "cell-missing")], className="tk-small")])
     cols: Tuple[kit.Column, ...] = (
         ("period", "Period", "l", "The header's period.", False),
         ("date", "Reference close", "l", "The close the period is measured from by its own rule.", False),
@@ -1840,7 +1862,7 @@ def reference_closes_panel(rows: List[dict], issues: Optional[list] = None) -> h
     body = []
     for r in rows:
         if r["flag"] and issues is not None:
-            issues.append((f"{r['period']} close {r['date_iso']}", r["why"]))
+            issues.append((f"{r['period']} close {r['date']}", r["why"]))
         if not r["needed"]:
             complete = html.Span("Nothing needed", className="cell-missing", title=r["why"])
         elif r["flag"]:
@@ -1870,8 +1892,8 @@ def contract_dates_line(conn: sqlite3.Connection, as_of: str, ctx: tuple,
     roots, bases, _names = ctx
     rows = contract_date_rows(conn, as_of)
     if not rows:
-        return _quiet(CONTRACT_DATES_TITLE, f"no open future or option needs Bloomberg's contract dates on {as_of}",
-                      CONTRACT_DATES_ABOUT), (0, 0)
+        return about(f"{CONTRACT_DATES_TITLE} · none needed", f"No open future or option needs Bloomberg's contract "
+                     f"dates on {short_date(as_of)}. {CONTRACT_DATES_ABOUT}", level="h5"), (0, 0)
     estimated = [r for r in rows if r["flag"]]
     held: Dict[str, str] = {}
     try:
@@ -1914,10 +1936,10 @@ def contract_dates_line(conn: sqlite3.Connection, as_of: str, ctx: tuple,
          False),
         ("trades", "Trades", "", "Trades on the contract.", False),
     )
-    summary = f"{len(rows) - len(estimated)} from Bloomberg, {len(estimated)} estimated"
-    return html.Details(className="book-fold tk-fold-block", children=[
-        html.Summary([html.Span(CONTRACT_DATES_TITLE, className="book-section-title", title=CONTRACT_DATES_ABOUT),
-                      html.Span(f" · {summary}", className="cell-amber" if estimated else "book-section-meta")]),
+    # the counts ("0 from Bloomberg, 23 estimated") are said once, in the status line that links here
+    return html.Details(className="book-fold tk-fold-block data-fold", children=[
+        html.Summary([html.Span(f"{CONTRACT_DATES_TITLE} ({len(rows)})", className="book-section-title",
+                                title=CONTRACT_DATES_ABOUT)]),
         kit.table(kit.head(cols, None, "data-dates-none"), body, className="tk-small"),
     ]), (len(rows), len(estimated))
 
@@ -1927,6 +1949,7 @@ def diagnostics_body(conn: sqlite3.Connection, as_of: str, status: Optional[dict
     """The last pull step by step, the backfill's requests / errors / values that were not
     numbers, the curves' and vols' left-outs, the Bloomberg library, and everything the pull
     recorded (folded); the connection check button sits after it in the static layout."""
+    from ui.feed_controls import short_state
     left = data_checks.left_out_block(status)
     feed = status_block(status)
     try:
@@ -1934,22 +1957,36 @@ def diagnostics_body(conn: sqlite3.Connection, as_of: str, status: Optional[dict
         warm_text, warm_hover = status_line()
     except Exception as exc:  # noqa: BLE001 -- one line, never the fold
         warm_text, warm_hover = f"Warm-up: status not readable ({type(exc).__name__})", ""
-    parts = [
-        html.Div(warm_text, title=warm_hover or None, className="status-line"),
-        about("The last pull, step by step", "What the last Pull Bloomberg now did, each step's outcome.", level="h5"),
-        data_checks.steps_table(status),
-        about("Past closes (the backfill)", "What the backfill after the last pull asked, and what went wrong.",
-              level="h5"),
-        data_checks.backfill_block(status),
-    ]
+    # layout wave 2 (2026-09-29): the four states in one small key / value table, the detail on hover
+    line = top_bar_status(status)
+    pull_words, pull_hover = data_checks.pull_facts(status, no_pull=short_state(line) == "no pull yet")
+    fill_words, fill_hover = data_checks.backfill_facts(status)
+    warm_words = warm_text.split(": ", 1)[1] if warm_text.startswith("Warm-up: ") else warm_text
+    facts = [("Warm-up", warm_words, warm_hover or "Fills every screen's caches in the background after a start, "
+                                                    "an upload or a pull."),
+             ("Last pull", pull_words, pull_hover),
+             ("Backfill", fill_words, fill_hover),
+             ("Bloomberg", short_state(line), line)]
+    parts: list = [html.Table(html.Tbody([
+        html.Tr([html.Td(k, className="tk-kv-k"), html.Td(cap(v), title=plain_words(h) or None)])
+        for k, v, h in facts]), className="tk-table tk-kv data-diag-facts")]
+    steps = data_checks.steps_table(status)
+    if steps is not None:
+        parts += [about("The last pull, step by step", "What the last Pull Bloomberg now did, each step's outcome.",
+                        level="h5"), steps]
+    parts += data_checks.backfill_tables(status)
     if left is not None:
         parts += [about("Left out by the curves and vols", "Quotes the OIS curves and vol smiles did not use.",
                         level="h5"), left]
-    parts += [safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)),
-              html.Details(className="details", children=[
-                  html.Summary("Everything the last pull recorded", className="about-title"),
-                  html.Div(feed if isinstance(feed, list) else [feed], className="status-line")])]
-    return html.Div(parts)
+    parts.append(safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)))
+    # everything else the pull recorded, one row per block (the first line is the Bloomberg fact above)
+    blocks = feed[1:] if isinstance(feed, list) else []
+    if blocks:
+        parts.append(html.Details(className="book-fold tk-fold-block data-fold", children=[
+            html.Summary(html.Span("Everything the last pull recorded", className="book-section-title")),
+            html.Table(html.Tbody([html.Tr(html.Td(b, className="l")) for b in blocks]),
+                       className="tk-table tk-kv data-diag-record")]))
+    return html.Div(parts, className="data-diag")
 
 
 def _failed_panel(title: str, exc: Exception) -> html.Div:
@@ -2046,8 +2083,9 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
             issues.append((PROBLEMS_TITLE, f"The problems could not be listed ({type(exc).__name__}: {exc})."))
         n_pull = len(data_checks.pull_problems(feed_status))
         if not mark_rows:
-            marks_empty = html.P(f"The book uses no official price on {as_of_date}.", className="book-section-meta",
-                                 style={"padding": "8px 12px"})
+            marks_empty = kit.table(html.Thead(), [kit.note_row(
+                f"The book uses no official price on {short_date(as_of_date)}.", 1, "cell-missing")],
+                className="tk-small")
             tools_style = _HIDDEN
         else:
             marks_empty, tools_style = html.Div(), {"padding": "8px 12px 0"}
@@ -2141,8 +2179,9 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         ]),
         html.Div(id=PAST_CLOSES_PANEL_ID, className="data-block"),
         html.Div(id=CONTRACT_DATES_PANEL_ID, className="data-block"),
-        html.Details(id=DIAGNOSTICS_ID, className="details data-block", children=[
-            html.Summary(DIAG_TITLE, id=DIAG_SUMMARY_ID, n_clicks=0, title=DIAG_ABOUT, className="about-title"),
+        html.Details(id=DIAGNOSTICS_ID, className="book-fold tk-fold-block data-fold data-block", children=[
+            html.Summary(html.Span(DIAG_TITLE, className="book-section-title", title=DIAG_ABOUT), id=DIAG_SUMMARY_ID,
+                         n_clicks=0),
             html.Div(id=DIAG_BODY_ID),
             html.Div(className="bbg-check-block", children=[
                 html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
@@ -2212,7 +2251,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         if not rows:
             return html.Div(), ""
         red = sum(1 for r in rows if r.get("level") == "red")
-        meta = f"{len(rows):,} · {red:,} blocking" if red else f"{len(rows):,} to check"
+        n = len(rows)
+        meta = (f"{n:,} problem{'' if n == 1 else 's'}"
+                + ((", all blocking" if red == n else f", {red:,} blocking") if red else ", none blocking"))
         return compact(data_checks.problems_table(rows, sort, PROBLEM_SORT_TYPE)), meta
 
     @app.callback(Output(MARKS_TABLE_WRAP_ID, "children"), Output(MARKS_META_ID, "children"),
@@ -2223,8 +2264,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         if not rows:
             return html.Div(), ""
         shown = data_checks.filter_marks(rows, statuses, groups, search)
-        meta = f"{len(shown):,} of {len(rows):,}" if len(shown) != len(rows) else f"{len(rows):,} prices"
-        return compact(data_checks.marks_table(shown, sort, MARK_SORT_TYPE, len(rows))), meta
+        # the counts are the table's own total row ("All prices · 45 · 2 missing"): said once
+        return compact(data_checks.marks_table(shown, sort, MARK_SORT_TYPE, len(rows))), ""
 
     def _sorter(store_id: str, sort_type: str) -> None:
         @app.callback(Output(store_id, "data"), Input({"type": sort_type, "idx": ALL}, "n_clicks"),

@@ -30,7 +30,7 @@ from dash import html
 
 from ui.tabs import data_kit as kit
 from ui.tabs.formatting import (
-    cap, tidy,
+    cap, cap_parts, tidy,
     MINUS, MISSING, is_fx_pair, missing_cell, parse_contract_id, plain_words, price_text, short_date,
 )
 
@@ -349,8 +349,11 @@ def unrecognised_problems(unrecognised: Optional[List[dict]]) -> Tuple[List[dict
                   f"{_num(u.get('quantity')) if _num(u.get('quantity')) is not None else '?'} at "
                   f"{u.get('price')})" for u in items]
         names = sorted({str(u.get("trade_name") or "") for u in items} - {""})
-        out.append(_problem("red", "Not recognised", sym,
-                            cap(plain_words(reasons[0])) if reasons else "Contract not recognised",
+        # the chip already says "Not recognised": the cell starts at what is wrong with the symbol
+        words = plain_words(reasons[0]) if reasons else ""
+        if words.lower().startswith("contract not recognised: "):
+            words = words[len("contract not recognised: "):]
+        out.append(_problem("red", "Not recognised", sym, cap(words) or "Contract not recognised",
                             cap((plain_words(blocks[0]) if blocks else "no P&L: contract not recognised")
                                 + (f" · {', '.join(names)}" if names else "")),
                             price_tip=f"The file's symbol as written; {len(items)} trade{'' if len(items) == 1 else 's'}",
@@ -414,8 +417,8 @@ def _problems_table(rows: List[dict], sort: Optional[dict], sort_type: str) -> h
         body.append(html.Tr([
             kit.td(kit.chip(p["label"], p["level"]), left=True),
             kit.td(p["price"], left=True, title=p["price_tip"] or None),
-            kit.td(cap(p["problem"]), left=True, title=p["problem_tip"] or None),
-            kit.td(cap(p["blocks"]), left=True, title=p["blocks_tip"] or None),
+            kit.td(cap_parts(p["problem"]), left=True, title=p["problem_tip"] or None),
+            kit.td(cap_parts(p["blocks"]), left=True, title=p["blocks_tip"] or None),
         ]))
     return kit.table(kit.head(PROBLEM_COLUMNS, sort, sort_type), body)
 
@@ -491,13 +494,18 @@ def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: i
     n_missing = sum(1 for r in rows if r["status"] == "MISSING")
     n_check = sum(1 for r in rows if r["status"] == "CHECK")
     label = f"All prices · {total:,}" if len(rows) == total else f"Filtered · {len(rows):,} of {total:,} prices"
-    label += f" · {n_missing:,} missing · {n_check:,} to check"
+    label += "".join(f" · {n:,} {words}" for n, words in ((n_missing, "missing"), (n_check, "to check")) if n)
+    # one previous-close date for every row: said once, in the heading, not beside every figure
+    prev_dates = {r["prev_date"] for r in rows if r["prev_raw"] is not None}
+    one_prev = next(iter(prev_dates)) if len(prev_dates) == 1 else ""
+    columns = tuple((k, f"{t} {one_prev}", c, f"{h} All on {one_prev}.", srt) if k == "prev" and one_prev
+                    else (k, t, c, h, srt) for k, t, c, h, srt in MARK_COLUMNS)
     body = [kit.total_row([html.Td(label, colSpan=len(MARK_COLUMNS), className="l")])]
     for r in shown:
         mark = (html.Span(r["mark"], className="cell-estimated", title=plain_words(r["mark_tip"]))
                 if r["mark_tip"] and r["mark"] != MISSING else
                 (r["mark"] if r["mark"] != MISSING else missing_cell(r["arrived_reason"])))
-        prev = (html.Span([r["prev"], html.Span(r["prev_date"], className="cell-unit")])
+        prev = ((r["prev"] if one_prev else html.Span([r["prev"], html.Span(r["prev_date"], className="cell-unit")]))
                 if r["prev_raw"] is not None else missing_cell("no earlier close on file"))
         change = (html.Span([r["change"], html.Span(r["pct"], className="cell-unit")],
                             className="cell-amber" if r["sane"] is False else None)
@@ -521,7 +529,7 @@ def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: i
             kit.td(r["trades"] or missing_cell("no trade reads it today"), left=True,
                    title=("; ".join(filter(None, [r["blocks_what"], ", ".join(r["blocks"])]))) or None),
         ]))
-    return tidy(kit.table(kit.head(MARK_COLUMNS, sort, sort_type), body))
+    return tidy(kit.table(kit.head(columns, sort, sort_type), body))
 
 
 MARK_CSV_COLUMNS = ["status", "name", "instrument_id", "exchange", "mark_type", "settle_date", "value_raw", "mark_date",
@@ -532,87 +540,136 @@ PROBLEM_CSV_COLUMNS = ["label", "price", "price_tip", "problem", "problem_tip", 
 
 
 # ---------------------------------------------------------------------------- diagnostics
-def steps_table(status: Optional[dict]) -> html.Div:
-    """The last pull step by step: Step · Outcome · Detail · Seconds."""
+def steps_table(status: Optional[dict]) -> Optional[html.Table]:
+    """The last pull step by step: Step · Outcome · Detail · Seconds; None when the status file has
+    no step-by-step record (a pull before 29 Sep, or none yet: the Diagnostics facts say so)."""
     steps = (status or {}).get("steps") or []
     if not steps:
-        return html.P("No step-by-step record of the last pull (a pull before 29 Sep, or none yet).",
-                      className="book-section-meta")
+        return None
     cols: Tuple[kit.Column, ...] = (
         ("step", "Step", "l", "The step of the pull, in order.", False),
-        ("outcome", "Outcome", "l", "ok, partial (some of it failed), failed, or skipped (nothing to do).", False),
+        ("outcome", "Outcome", "l", "Ok, partial (some of it failed), failed, or skipped (nothing to do).", False),
         ("detail", "Detail", "l", "What the step did, in plain words.", False),
         ("seconds", "Seconds", "", "How long it took.", False),
     )
     level = {"ok": "green", "partial": "amber", "failed": "red", "skipped": "grey"}
     body = [html.Tr([
-        kit.td(str(s.get("label") or s.get("step") or ""), left=True, title=str(s.get("step") or "")),
-        kit.td(kit.chip(str(s.get("outcome") or "?"), level.get(str(s.get("outcome") or ""), "grey")), left=True),
-        kit.td(plain_words(s.get("detail")) or "", left=True),
+        kit.td(cap(str(s.get("label") or s.get("step") or "")), left=True, title=str(s.get("step") or "") or None),
+        kit.td(kit.chip(cap(str(s.get("outcome") or "unknown")), level.get(str(s.get("outcome") or ""), "grey")),
+               left=True),
+        kit.td(cap_parts(plain_words(s.get("detail")) or "") or MISSING, left=True),
         kit.td(f"{float(s.get('seconds') or 0):,.1f}"),
     ]) for s in steps]
-    when = str((status or {}).get("time") or "")
-    return html.Div([html.Div(f"The last pull{(' · ' + when[:19].replace('T', ' ')) if when else ''}",
-                              className="book-section-meta"),
-                     kit.table(kit.head(cols, None, "data-steps-none"), body, className="tk-small")])
+    return kit.table(kit.head(cols, None, "data-steps-none"), body, className="tk-small")
 
 
-def backfill_block(status: Optional[dict]) -> html.Div:
-    """The backfill's requests, errors and values that were not numbers."""
+def pull_facts(status: Optional[dict], no_pull: bool = False) -> Tuple[str, str]:
+    """(the last pull in a few words, its detail for the hover) for the Diagnostics facts:
+    "Mon 28 Sep 14:32 NY · 9 steps, all ok"; "None yet" with no status file or `no_pull` (the
+    status file says no pull has run: its time is then the status's own, not a pull's)."""
+    from ui.feed_controls import short_time
+    s = status or {}
+    when = short_time(s.get("time")) if s.get("time") else ""
+    if not s or no_pull:
+        return "None yet", "No Bloomberg pull has run with this database: press Pull Bloomberg now."
+    steps = s.get("steps") or []
+    if not steps:
+        return (when or "Recorded, time unknown",
+                "The status file of the last pull records no step-by-step outcome (a pull before 29 Sep).")
+    bad = [x for x in steps if str(x.get("outcome") or "") in ("failed", "partial")]
+    words = f"{len(steps)} step{'' if len(steps) == 1 else 's'}"
+    words += f", {len(bad)} failed or partial" if bad else ", all ok"
+    detail = "; ".join(f"{x.get('label') or x.get('step')}: {x.get('outcome')}" for x in steps)
+    return (f"{when} · {words}" if when else cap(words)), detail
+
+
+def backfill_facts(status: Optional[dict]) -> Tuple[str, str]:
+    """(the backfill in a few words, its requests in full for the hover) for the Diagnostics facts."""
     b = (status or {}).get("backfill") or {}
     if not isinstance(b, dict) or not b:
-        return html.P("No backfill recorded.", className="book-section-meta")
-    parts: list = []
+        return "None recorded", "No backfill of past closes is recorded in the last pull's status file."
     req = b.get("requests") or {}
+    hover = ""
     if isinstance(req, dict) and req:
-        parts.append(html.Div(
-            f"History requests: {int(req.get('sent') or 0):,} sent, {int(req.get('answered') or 0):,} answered, "
-            f"{int(req.get('failed') or 0):,} failed; tickers failed {int(req.get('tickers_failed') or 0):,}, not "
-            f"asked {int(req.get('tickers_not_asked') or 0):,}"
-            + ("; gave up after repeated timeouts" if req.get("gave_up") else "")
-            + (f"; no session: {req.get('no_session')}" if req.get("no_session") else ""),
-            className="book-section-meta"))
+        hover = (f"History requests: {int(req.get('sent') or 0):,} sent, {int(req.get('answered') or 0):,} answered, "
+                 f"{int(req.get('failed') or 0):,} failed; tickers failed {int(req.get('tickers_failed') or 0):,}, "
+                 f"not asked {int(req.get('tickers_not_asked') or 0):,}"
+                 + ("; gave up after repeated timeouts" if req.get("gave_up") else "")
+                 + (f"; no session: {req.get('no_session')}" if req.get("no_session") else ""))
+    errors = int(b.get("error_count") or len(b.get("errors") or []))
+    nans = int(b.get("not_number_count") or len(b.get("not_numbers") or []))
+    if b.get("running"):
+        words = (f"Running, {b['remaining']} day{'' if b['remaining'] == 1 else 's'} left"
+                 if b.get("remaining") is not None else "Running")
+    elif b.get("reason"):
+        words, hover = "Not running", "; ".join(x for x in (str(b["reason"]), hover) if x)
+    elif b.get("remaining") == 0:
+        words = "History complete"
+    else:
+        words = "Ran"
+    extra = [f"{errors:,} error{'' if errors == 1 else 's'}" if errors else "",
+             f"{nans:,} not a number" if nans else ""]
+    words = " · ".join(x for x in [words, *extra] if x)
+    return words, hover or words
+
+
+def backfill_tables(status: Optional[dict]) -> list:
+    """The backfill's errors and values that were not numbers, each a small table under its own
+    title; [] when there are none (the facts line says the rest)."""
+    from ui.tabs.formatting import about
+    b = (status or {}).get("backfill") or {}
+    if not isinstance(b, dict) or not b:
+        return []
+    parts: list = []
     errs = [e for e in b.get("errors") or [] if isinstance(e, dict)]
     if errs:
         cols: Tuple[kit.Column, ...] = (("day", "Day", "l", "The close worked on.", False),
                                         ("step", "Step", "l", "What was being asked.", False),
                                         ("reason", "Reason", "l", "Why it failed.", False))
-        parts.append(html.Div(f"Errors ({int(b.get('error_count') or len(errs)):,})", className="tk-bold"))
+        parts.append(about(f"Backfill errors ({int(b.get('error_count') or len(errs)):,})",
+                           "What the backfill after the last pull could not fill, and why.", level="h5"))
         parts.append(kit.table(kit.head(cols, None, "data-bf-none"), [html.Tr([
             kit.td(short_date(e.get("day")) if e.get("day") else MISSING, left=True),
-            kit.td(str(e.get("label") or e.get("step") or ""), left=True),
-            kit.td(plain_words(e.get("reason")), left=True)]) for e in errs], className="tk-small"))
+            kit.td(cap(str(e.get("label") or e.get("step") or "")) or MISSING, left=True),
+            kit.td(cap_parts(plain_words(e.get("reason"))) or MISSING, left=True)]) for e in errs],
+            className="tk-small"))
     nans = [n for n in b.get("not_numbers") or [] if isinstance(n, dict)]
     if nans:
         cols = (("what", "What", "l", "The value asked.", False), ("day", "Day", "l", "Its date.", False),
                 ("reason", "Reason", "l", "What Bloomberg sent.", False))
-        parts.append(html.Div(f"Values that were not numbers ({int(b.get('not_number_count') or len(nans)):,})",
-                              className="tk-bold"))
+        parts.append(about(f"Values that were not numbers ({int(b.get('not_number_count') or len(nans)):,})",
+                           "Past closes Bloomberg answered with something that is not a number: left out.",
+                           level="h5"))
         parts.append(kit.table(kit.head(cols, None, "data-nan-none"), [html.Tr([
-            kit.td(str(n.get("what") or ""), left=True),
+            kit.td(cap(str(n.get("what") or "")) or MISSING, left=True),
             kit.td(short_date(n.get("day")) if n.get("day") else MISSING, left=True),
-            kit.td(plain_words(n.get("reason")), left=True)]) for n in nans], className="tk-small"))
-    if not parts:
-        parts.append(html.P("The backfill recorded no request, error or bad value.", className="book-section-meta"))
-    return html.Div(parts)
+            kit.td(cap_parts(plain_words(n.get("reason"))) or MISSING, left=True)]) for n in nans],
+            className="tk-small"))
+    return parts
 
 
-def left_out_block(status: Optional[dict]) -> Optional[html.Div]:
-    """The OIS curves' left-out quotes and the vol smiles' rejected points, when any."""
+def left_out_block(status: Optional[dict]) -> Optional[html.Table]:
+    """The OIS curves' left-out quotes and the vol smiles' rejected points, one row each (What ·
+    Left out, the tickers and reasons on hover); None when there are none."""
     s = status or {}
-    lines: list = []
+    rows: list = []
     for ccy, entry in sorted(((s.get("curves") or {}).get("currencies") or {}).items()):
         if not isinstance(entry, dict) or not entry.get("left_out"):
             continue
         items = "; ".join(f"{x.get('ticker', '')}: {x.get('reason', '')}" for x in entry["left_out"][:12]
                           if isinstance(x, dict))
-        lines.append(html.Div([html.Span(f"OIS {ccy}: ", className="tk-bold"),
-                               plain_words(entry.get("left_out_summary") or ""), " ",
-                               html.Span(items, className="book-section-meta")]))
+        rows.append((f"OIS {ccy}", cap_parts(plain_words(entry.get("left_out_summary") or ""))
+                     or f"{len(entry['left_out'])} quotes left out", items))
     rejected = (s.get("vol") or {}).get("rejected") or []
     if rejected:
         items = "; ".join(" ".join(str(r.get(k, "")) for k in ("pair", "tenor", "ticker") if r.get(k)) +
                           f": {r.get('reason', '')}" for r in rejected[:12] if isinstance(r, dict))
-        lines.append(html.Div([html.Span(f"Vol points refused ({len(rejected)}): ", className="tk-bold"),
-                               html.Span(items, className="book-section-meta")]))
-    return html.Div(lines) if lines else None
+        rows.append(("Vol points refused", f"{len(rejected)} point{'' if len(rejected) == 1 else 's'}", items))
+    if not rows:
+        return None
+    cols: Tuple[kit.Column, ...] = (("what", "What", "l", "The OIS curve or the vol smiles.", False),
+                                    ("left", "Left out", "l", "What was not used; the tickers and reasons on hover.",
+                                     False))
+    return kit.table(kit.head(cols, None, "data-left-none"), [html.Tr([
+        kit.td(what, left=True), kit.td(words, left=True, title=items or None)]) for what, words, items in rows],
+        className="tk-small")

@@ -1145,3 +1145,73 @@ p { margin: 8px 0; }
   .tk-table td.tk-what .tk-clip { max-width: 130px; }
   .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 60px; }
 }
+
+/* wave 2: data */
+/* the Data tab's folds (Contract dates, Diagnostics, the library inside it): the kit's fold, a white card when open */
+.market-data .data-fold { margin: 10px 0 0; }
+.market-data .data-fold[open] { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 4px 14px 12px; }
+.market-data .data-fold .data-fold[open] { border-color: #eef0f4; padding: 2px 10px 10px; }
+.market-data .data-fold > summary .book-section-meta { font-weight: 400; margin-left: 2px; }
+.market-data .data-diag h5.about-title { margin: 12px 0 4px; font-size: 12.5px; color: var(--navy); }
+.market-data .tk-table.tk-kv.data-diag-facts { margin: 8px 0 4px; }
+.market-data .tk-table.tk-kv.data-diag-facts td[title] { cursor: help; }
+.market-data .tk-table.tk-kv.data-diag-record { width: 100%; }
+.market-data .tk-table.tk-kv.data-diag-record td { white-space: normal; }
+.market-data .data-bbg-results { margin-top: 6px; }
+.market-data .bbg-check-block { margin-top: 12px; }
+/* the Problems' sentences wrap inside the card instead of running past its edge */
+.market-data #market-data-missing-panel .book-table td.l:nth-child(n+3) { white-space: normal; }
+/* end wave 2: data */
+
+/* wave 2: pnl */
+.pnl-chart-card .card-head { padding: 8px 10px 0; margin-bottom: 0; }
+.pnl-track-grid { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-start; padding: 4px 0 2px; }
+.pnl-track-grid .tk-table.tk-kv { margin: 0; }
+.pnl-track-grid .tk-table.tk-kv thead th { position: static; padding: 5px 10px; }
+.pnl-track-grid .tk-table.tk-kv td:not(.tk-kv-k) { text-align: right; font-variant-numeric: tabular-nums; }
+.pnl-track-grid .tk-table.tk-small.pnl-by-type { margin-top: 0; }
+.pnl-track-grid .tk-table.pnl-by-type thead th { position: static; }
+/* end wave 2: pnl */
+/* wave 2: risk */
+/* the trade panel's facts: a compact key/value table beside the legs, text left, long reasons wrap */
+.tk-table.tk-kv.risk-kv { max-width: 520px; }
+.tk-table.tk-kv.risk-kv td { text-align: left; white-space: normal; }
+.tk-table.tk-kv.risk-kv td.tk-kv-k { white-space: nowrap; }
+/* the Currency fold's FX table: its Net USD and Gross totals in the table foot */
+.risk-fx-table { width: auto; min-width: 420px; }
+/* end wave 2: risk */
+/* wave 2: blotter */
+/* the sub-tab bar: the main tab bar's hover (navy) never reaches a sub-tab, so the selected one stays legible */
+.subtabs .subtab:hover, .subtabs .subtab--selected:hover { background: transparent !important; color: var(--navy) !important; }
+.subtabs .subtab--selected, .subtabs .subtab--selected:hover { background: #fff !important; color: var(--navy) !important; }
+/* the last upload: one light line on the headline's type scale, aligned with the cards under it */
+.blotter-last-upload-section { margin: 0 0 12px; }
+.blotter-upload-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; padding: 0 4px; margin: 0 0 10px;
+  font-size: 13px; cursor: default; }
+.blotter-upload-line .book-section-title { font-size: 10.5px; letter-spacing: .05em; margin-right: 6px; }
+.blotter-upload-line .book-section-meta { font-size: 13px; }
+.blotter-upload-line [title] { cursor: help; }
+/* a fold that reads as a closed card (the rows that need a fix, the option terms): one chevron, a title, a count chip */
+.blotter-rejects-fold.tk-fold-block, .options-terms.tk-fold-block { background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0 12px; margin: 0 0 12px; }
+.blotter-rejects-fold > summary, .options-terms > summary { display: flex; align-items: center; gap: 8px; padding: 9px 0; }
+.blotter-rejects-fold[open] > summary, .options-terms[open] > summary { border-bottom: 1px solid var(--line); }
+.blotter-fold-title { font-weight: 700; color: var(--navy); font-size: 13px; }
+.blotter-rejects-fold > .tk-table.tk-small { max-width: none; margin: 10px 0 12px; }
+.blotter-rejects-fold > .tk-table.tk-small td.l { white-space: normal; line-height: 1.35; }
+.blotter-rejects-fold > .tk-table.tk-small td.l:nth-child(4) { min-width: 320px; }
+.blotter-rejects-fold > .tk-table.tk-small td.l:nth-child(5) { min-width: 240px; }
+.blotter-rejects-fold .level-chip, .options-terms .level-chip { margin: 0; }
+/* the fills' search box: wide enough for its placeholder */
+#blotter-fills-f-search { width: 230px; box-sizing: border-box; }
+/* Options: the tables by pair, expiry and strike in cards, the option table in one card */
+.options-breakdowns { margin: 0 0 4px; }
+.options-two { display: flex; flex-wrap: wrap; gap: 0 16px; align-items: flex-start; }
+.options-two > .options-agg { flex: 1 1 560px; min-width: 0; }
+.options-agg-scroll { overflow-x: auto; padding: 8px 12px 10px; }
+.options-grid-card > .dash-table-container, .options-grid-card .dash-table-container { padding: 0 12px; }
+.options-headline-slot .tk-headline { margin: 8px 0 4px; padding: 0 12px; }
+.options-status { padding: 0 12px; margin: 6px 0 0; font-size: 12.5px; color: #4b5563; }
+.options-status:empty { display: none; }
+.options-terms-bar.toolbar { background: none; border: none; box-shadow: none; padding: 10px 0 12px; margin: 0; gap: 16px; }
+/* end wave 2: blotter */

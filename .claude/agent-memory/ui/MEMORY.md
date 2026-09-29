@@ -36,4 +36,9 @@
 - [Checker recipe 2026-09-29](checker-recipe-2026-09-29.md) — CDP check of P&L/Risk: static-block rows (tr.cells empty), DOM returnByValue falsy, cp1252 exec, hover full figures, subset_var cross-check
 - [Browser timing recipe 2026-09-29](browser-timing-recipe-2026-09-29.md) — fetch-wrapped click timing; warm clicks 0.2-0.5 s, checkers' 1.3-1.9 s was their sleep; real slow paths: Book panel, P&L YTD/All, Data
 - [Display-text pass 2026-09-29](display-text-pass-2026-09-29.md) — cap/cap_lines/tidy/plain_ids in formatting.py, where tidy runs, ui-check = 0; filter_query and heredoc-backslash traps
+- [Layout wave 1 2026-09-29](layout-wave1-kit-book-2026-09-29.md) — drawer = table, row_info "i", research_head, cap_parts, light headline, Book Move/Flags, panel kv + tk-hedge-line; z async shot trap
+- [Layout wave 2: Risk 2026-09-29](layout-wave2-risk-2026-09-29.md) — headline of 4, research_head, row "i", days_text, panel kv, FX tfoot totals, price Gap/Allowed, not-set via issues_drawer
+- [Layout wave 2: Data 2026-09-29](layout-wave2-data-2026-09-29.md) — Diagnostics kv facts, kit folds, counts said once, prev-close date in heading, no_pull trap, shot recipe
 - [Phase G fix pass 2026-09-29](phase-g-fix-pass-2026-09-29.md) — price-to-check on Book (gathered/with_checks), value_fn wiring, warm-up adds, Data rows server-side, narrow CSS, See-fills mount trap
+- [Layout wave 2: P&L 2026-09-29](layout-wave2-pnl-2026-09-29.md) — % of total cut, blank split parts, total/group badge vs row_info, lean headline, chart empty frame, kv track record
+- [Layout wave 2 Blotter 2026-09-29](layout-wave2-blotter-2026-09-29.md) — upload line + rejects card fold, Size column, Options cut to 3 cards + 14-col grid, no strip; stale tests

@@ -29,7 +29,7 @@ from dash import dcc, html
 
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
-    cap, plain_ids, MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text,
+    cap, cap_parts, plain_ids, MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text,
     short_date, sum_known, contract_name, is_fx_pair, quoted_unit,
 )
 
@@ -835,49 +835,50 @@ def fx_positions_block(pos: Optional[dict], error: str, filtered: bool) -> html.
     fx = pos.get("fx") or {}
     by_ccy = [c for c in fx.get("by_ccy") or [] if c.get("ccy") != "USD" and not c.get("metal")]
     kids: List[Any] = [head]
-    if by_ccy:
-        rows = []
-        for c in by_ccy:
-            ccy = str(c.get("ccy") or "")
-            local, usd = _num(c.get("local_delta")), _num(c.get("usd_delta"))
-            reason = plain_words(c.get("reason") or "")
-            rate = (f"{c.get('label') or ''} {_num(c.get('quoted')):,.4f}".strip()
-                    if _num(c.get("quoted")) is not None else "")
-            rows.append(html.Tr([
-                html.Td(html.Span(ccy, className="tk-name", title=f"at the day's official spot{f' ({rate})' if rate else ''}"),
-                        className="l"),
-                html.Td(html.Span(_local_text(local), title=(f"{ccy} {format_cell(local)}" if local is not None
-                                                             else reason or "no local delta"))),
-                html.Td(km_cell(usd, reason=reason or "no USD delta", hover=rate, colour=False)),
-            ]))
-        headrow = html.Thead(html.Tr([html.Th("Currency", className="l"),
-                                      html.Th("Delta (local)", title="The currency's delta in its own units."),
-                                      html.Th("Delta (USD)", title="The same at the day's official spot.")]))
-        kids.append(html.Div(html.Table([headrow, html.Tbody(rows)], className="book-table book-grid tk-table tk-small"),
-                             className="tk-table-slot"))
-    else:
-        kids.append(html.Div(plain_words(fx.get("reason") or "") or "No open FX forward, spot leg or FX option: no "
-                             "currency delta beyond the futures legs above.", className="risk-quiet"))
-    net, gross = _num(fx.get("net_usd")), _num(fx.get("gross_usd"))
-    line: List[Any] = [html.Span("Net USD", className="tk-k")]
-    if net is None:
-        line.append(missing_cell(plain_words(fx.get("reason") or "") or "no FX net"))
-    else:
-        line.append(html.B(km_text(net), title=f"USD {format_cell(net)}"))
-        line.append(html.Span(f" {'long USD' if net > 0.5 else 'short USD' if net < -0.5 else 'flat'}"))
-    if gross is not None:
-        line.append(html.Span([" · ", html.Span("Gross", className="tk-k"), km_text(gross, signed=False)],
-                              title=f"USD {format_cell(gross)}: the sum of each pair's |USD delta|"))
+    rows = []
+    for c in by_ccy:
+        ccy = str(c.get("ccy") or "")
+        local, usd = _num(c.get("local_delta")), _num(c.get("usd_delta"))
+        reason = plain_words(c.get("reason") or "")
+        rate = (f"{c.get('label') or ''} {_num(c.get('quoted')):,.4f}".strip()
+                if _num(c.get("quoted")) is not None else "")
+        rows.append(html.Tr([
+            html.Td(html.Span(ccy, className="tk-name", title=f"At the day's official spot{f' ({rate})' if rate else ''}"),
+                    className="l"),
+            html.Td(html.Span(_local_text(local), title=(f"{ccy} {format_cell(local)}" if local is not None
+                                                         else reason or "no local delta"))),
+            html.Td(km_cell(usd, reason=reason or "no USD delta", hover=rate, colour=False)),
+        ]))
+    # a metal's delta is reported apart: its own row, in ounces, outside the net and gross
     for m in fx.get("metals") or []:
         units = _num(m.get("units"))
         unit = METAL_UNITS.get(str(m.get("ccy")), "units")
-        line.append(html.Span(f" · {m.get('ccy')} {format_cell(units)} {unit}, not in the net" if units is not None
-                              else f" · {m.get('ccy')} {NA}", className="tk-sub",
-                              title=plain_words(m.get("reason") or "a metal's delta is reported apart: not in the FX "
-                                                                   "net or gross")))
-    kids.append(html.Div(line, className="risk-fx-line",
-                         title="The FX net USD delta, + = long USD, FX options' delta included; gross = the sum of "
-                               "|per-pair USD delta|."))
+        why = plain_words(m.get("reason") or "a metal's delta is reported apart: not in the FX net or gross")
+        rows.append(html.Tr([
+            html.Td(html.Span(str(m.get("ccy") or ""), className="tk-name", title=cap(why)), className="l"),
+            html.Td(html.Span(f"{format_cell(units)} {unit}", title=cap(why)) if units is not None
+                    else missing_cell(why)),
+            html.Td(html.Span("Not in the net", className="tk-sub", title=cap(why)))]))
+    if not rows:
+        rows.append(html.Tr([html.Td(cap(plain_words(fx.get("reason") or "") or "No open FX forward, spot leg or FX "
+                                     "option: no currency delta beyond the futures legs above"),
+                                     className="l tk-sub", colSpan=3)]))
+    # the totals: Net USD (+ = long USD, the engine's sign, never negated here) and gross
+    net, gross = _num(fx.get("net_usd")), _num(fx.get("gross_usd"))
+    net_words = ("" if net is None else "Long USD" if net > 0.5 else "Short USD" if net < -0.5 else "Flat")
+    net_cell = (missing_cell(plain_words(fx.get("reason") or "") or "no FX net") if net is None
+                else html.Span(km_text(net), title=f"USD {format_cell(net)}: + = long USD, FX options' delta included"))
+    totals = [html.Tr([html.Td("Net USD", className="l"), html.Td(net_words, className="tk-sub"), html.Td(net_cell)])]
+    if gross is not None:
+        totals.append(html.Tr([html.Td("Gross", className="l"), html.Td(""),
+                               html.Td(html.Span(km_text(gross, signed=False),
+                                                 title=f"USD {format_cell(gross)}: the sum of each pair's |USD delta|"))]))
+    headrow = html.Thead(html.Tr([html.Th("Currency", className="l"),
+                                  html.Th("Delta (local)", title="The currency's delta in its own units."),
+                                  html.Th("Delta (USD)", title="The same at the day's official spot.")]))
+    kids.append(html.Div(html.Table([headrow, html.Tbody(rows), html.Tfoot(totals)],
+                                    className="book-table book-grid tk-table tk-small risk-fx-table"),
+                         className="tk-table-slot"))
     return html.Div(kids, className="risk-fx-block")
 
 
@@ -1205,6 +1206,16 @@ def _pc_name(r: dict) -> str:
     return name or plain_ids(cid or str(r.get("root_id") or ""))
 
 
+def _gap_td(r: dict, flag: bool) -> html.Td:
+    """The engine's gap in percent, signed at one decimal, amber when flagged."""
+    gap = _num(r.get("gap_pct"))
+    if gap is None:
+        return html.Td(missing_cell(r.get("reason") or "not compared"))
+    body = f"{abs(gap):.1f} %"
+    text = (MINUS if gap < 0 and float(f"{abs(gap):.1f}") else "+" if gap > 0 else "") + body
+    return html.Td(html.Span(text, className="cell-amber" if flag else None))
+
+
 def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
     pc = pc or {}
     try:
@@ -1214,17 +1225,17 @@ def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
         roots = {}
     rows = pc.get("rows") or []
     flagged = sum(1 for r in rows if r.get("flagged"))
+    # the engine's sentence (how many are off, the rule) is the count's hover, never a loose line
+    sentence = cap(plain_ids(plain_words(str(pc.get("sentence") or "")))) or None
     if not pc:
-        count: Any = "not run yet"
+        count: Any = "Not run yet"
     elif not rows:
-        count = pc.get("reason") or "nothing to compare"
+        count = html.Span(cap(plain_words(str(pc.get("reason") or ""))) or "Nothing to compare", title=sentence)
     else:
         count = html.Span(f"{flagged} of {len(rows)} off" if flagged else f"{len(rows)} checked, all within range",
-                          className="cell-amber" if flagged else None)
+                          className="cell-amber" if flagged else None, title=sentence)
     body: List[Any] = []
     if is_open:
-        if pc.get("sentence"):
-            body.append(html.Div(pc["sentence"], className="risk-note-line"))
         if rows:
             head = html.Thead(html.Tr([html.Th(t, className=c or None, title=plain_words(h)) for t, c, h in (
                 ("Check", "l", "Off: the research price is further from ours than allowed."),
@@ -1233,7 +1244,9 @@ def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
                 ("Ours", "", "Our latest official price, or the average fill before a pull."),
                 ("Research", "", "The research app's latest settle or rate."),
                 ("Factor", "", "Research over ours: 1.00 is the same price."),
-                ("What it means", "l", "The check in words."))]))
+                ("Gap", "", "How far the research price is from ours, in percent (the factor less one)."),
+                ("Allowed", "", "The gap allowed before the check flags it: 20 % for futures and LME, 2 % for the "
+                                "USD/CNH rate."))]))
             body_rows = []
             for r in rows:
                 flag = bool(r.get("flagged"))
@@ -1242,7 +1255,9 @@ def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
                 unit = _pc_unit(r, roots)
                 body_rows.append(html.Tr([
                     html.Td(html.Span("Off" if flag else ("OK" if factor is not None else MISSING),
-                                      className="cell-amber tk-bold" if flag else "tk-sub"), className="l"),
+                                      className="cell-amber tk-bold" if flag else "tk-sub",
+                                      title=cap_parts(plain_ids(str(r.get("sentence") or r.get("reason") or "")))
+                                      or None), className="l"),
                     html.Td({"future": "Future", "lme": "LME", "fx": "FX"}.get(str(r.get("kind")), str(r.get("kind") or "")),
                             className="l"),
                     html.Td(html.Span(_pc_name(r),
@@ -1256,7 +1271,9 @@ def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
                     html.Td(html.Span(f"×{factor:.2f}", className="cell-amber" if flag else None,
                                       title=plain_words(r.get("hint") or "") or None) if factor is not None
                             else missing_cell(r.get("reason") or "not compared")),
-                    html.Td(cap(plain_ids(str(r.get("sentence") or r.get("reason") or ""))), className="l risk-wrap"),
+                    _gap_td(r, flag),
+                    html.Td(f"{_num(r.get('threshold')) * 100:g} %" if _num(r.get("threshold")) is not None
+                            else missing_cell("no threshold"), className="tk-sub"),
                 ]))
             body.append(html.Div(html.Table([head, html.Tbody(body_rows)],
                                             className="book-table book-grid tk-table risk-price-table"),

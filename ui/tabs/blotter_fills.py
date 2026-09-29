@@ -41,9 +41,10 @@ from dash import ALL, MATCH, Input, Output, State, dcc, html
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import data_kit as kit
 from ui.tabs.formatting import (
-    cap, tidy,
-    MISSING, amount_words, compact, day_text, fx_name, is_fx_pair, missing_cell, parse_contract_id, plain_words,
-    price_text, quoted_unit, price_decimals, decimals_of,
+    cap, cap_parts, tidy,
+    MISSING, amount_words, compact, day_text, fx_name, is_fx_pair, missing_cell, parse_contract_id, plain_ids,
+    plain_words,
+    price_text, quoted_unit, price_decimals, decimals_of, strike_text,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -101,8 +102,8 @@ COLUMNS: Tuple[kit.Column, ...] = (
     ("contract", "Contract", "l", "The contract the app read the row as, with its exchange ('COMEX Silver Dec26'); "
                                   "the broker's symbol and the Bloomberg ticker on hover.", True),
     ("side", "Side", "l", "Buy or sell, as the file gave it.", True),
-    ("lots", "Lots", "", "Contracts for a future or an option on one; an LME ticket in lots, its tonnes on hover; an "
-                         "FX trade its base-currency amount.", True),
+    ("lots", "Size", "", "The size with its unit: lots for a future, an option on one or an LME ticket (its tonnes "
+                         "on hover); the base-currency amount for an FX trade.", True),
     ("price", "Price (as in file)", "", "The file's Price cell exactly as written, in the broker's units; the price "
                                         "the app stores (Bloomberg's units) on hover.", True),
     ("trade_id", "Trade Id", "l", "The broker's Trade Id, the key an upload merges on; every upload that touched it "
@@ -224,12 +225,12 @@ def _contract_words(r: dict, root, leg_names: Dict[str, str]) -> str:
     if product in _FX_PRODUCTS:
         pair = f"{base}{quote}" if base and quote else inst
         return fx_name(pair, product, r["settle_date"] or r["expiry_date"], r["option_type"], r["strike"])
-    if tid in leg_names:
+    if tid in leg_names and product != "CMDTY_OPTION":
         return leg_names[tid]
     try:
         from engine.spreads.trades import leg_name
     except Exception:  # noqa: BLE001 -- the id as it is
-        return inst
+        return leg_names.get(tid) or inst
     if product == "LME_FWD":
         prompt = str(r["settle_date"] or "")
         return leg_name(root, prompt[:7], prompt, inst)
@@ -238,7 +239,8 @@ def _contract_words(r: dict, root, leg_names: Dict[str, str]) -> str:
         return inst
     name = leg_name(root, f"{parsed['year']:04d}-{parsed['month']:02d}", "", inst)
     if parsed["option_type"]:
-        name += f" {parsed['strike']} {parsed['option_type']}"
+        # an option on a future: the month, the strike and call / put in words ("WTI Dec26 62 put")
+        name += f" {strike_text(parsed['strike'])} {parsed['option_type']}"
     return name
 
 
@@ -248,8 +250,13 @@ def _lots(r: dict, root) -> Tuple[Optional[float], str, str, str]:
     if q is None:
         return None, MISSING, "the quantity on file is not a number", ""
     n = abs(q)
+
+    def lots_words(count: float) -> str:
+        body = f"{count:,.0f}" if abs(count - round(count)) < 1e-9 else f"{count:,.2f}"
+        return f"{body} lot" if body == "1" else f"{body} lots"
+
     if product in _LOT_PRODUCTS:
-        return n, f"{n:,.0f}" if n == int(n) else f"{n:,.2f}", "", "lots"
+        return n, lots_words(n), "", "lots"
     if product == "LME_FWD":
         tonnes_text = f"{n:,.0f} t" if n == int(n) else f"{n:,.2f} t"
         try:
@@ -259,12 +266,12 @@ def _lots(r: dict, root) -> Tuple[Optional[float], str, str, str]:
             per = 0.0
         if per > 0:
             lots = n / per
-            text = f"{lots:,.0f}" if abs(lots - round(lots)) < 1e-9 else f"{lots:,.2f}"
-            return lots, text, f"{tonnes_text} ({per:g} t a lot)", "t"
+            return lots, lots_words(lots), f"{tonnes_text} ({per:g} t a lot)", "t"
         return n, tonnes_text, "the lot size of this metal is not known: shown in tonnes", "t"
     if product in _FX_PRODUCTS:
         return n, amount_words(n, str(r["base_ccy"] or "")), f"{n:,.2f} {r['base_ccy']}".strip(), str(r["base_ccy"] or "")
-    return n, f"{n:,g}", "", ""
+    return n, f"{n:,g}", ("the unit is not known: the contract is not recognised" if product == UNRECOGNISED
+                          else ""), ""
 
 
 def _build_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, List[tuple], bool]:
@@ -621,7 +628,7 @@ def bar(state: Optional[dict], options: Dict[str, List[dict]], dates: Tuple[Opti
         html.Div(className="blotter-filter", children=[
             html.Label("Search"),
             dcc.Input(id=F_SEARCH_ID, type="text", value=s["search"], debounce=True,
-                      placeholder="Search contract, symbol or Trade Id", className="blotter-filter-search")]),
+                      placeholder="Contract, symbol or Trade Id", className="blotter-filter-search")]),
         pick(F_TRADE_ID, "trade", "Trade", 170),
         pick(F_LANDED_ID, "landed", "Landed in", 170),
         pick(F_SIDE_ID, "side", "Side", 110),
@@ -629,8 +636,8 @@ def bar(state: Optional[dict], options: Dict[str, List[dict]], dates: Tuple[Opti
             html.Label("Trade date"),
             dcc.DatePickerRange(id=F_DATES_ID, start_date=s["start"], end_date=s["end"],
                                 min_date_allowed=dates[0], max_date_allowed=dates[1], display_format="D MMM YYYY",
-                                first_day_of_week=1, clearable=True, start_date_placeholder_text="from",
-                                end_date_placeholder_text="to", className="blotter-date-range")]),
+                                first_day_of_week=1, clearable=True, start_date_placeholder_text="From",
+                                end_date_placeholder_text="To", className="blotter-date-range")]),
         html.Button("Clear", id=CLEAR_ID, n_clicks=0, className="btn btn--ghost",
                     style={} if is_filtered(s) else {"display": "none"},
                     title="Clear every filter of the fills"),
@@ -681,7 +688,7 @@ def _long_date(iso) -> str:
 def reason_words(reason) -> str:
     """The upload's reason in plain words, with no file path (`formatting.plain_words`: the
     contract list, the book filter)."""
-    return cap(plain_words(reason))
+    return cap_parts(plain_words(reason))
 
 
 def what_to_do(kind: str, reason: str) -> str:
@@ -810,8 +817,9 @@ def rejects_table(rows: List[dict], need_fix: Sequence[dict] = (), warnings: Seq
             kit.td(str(i.get("row_no") or MISSING)),
             kit.td(str(i.get("trade_id") or "") or missing_cell(NO_TRADE_ID), left=True),
             kit.td(html.Span(str(i.get("symbol") or "") or MISSING, className="cell-red"), left=True),
-            kit.td(reason_words(i.get("reason")), left=True,
-                   title="on file as a trade; its P&L is blank until the contract is mapped"),
+            kit.td(reason_words(plain_ids(i.get("reason") or "")), left=True,
+                   title=f"On file as a trade; its P&L is blank until the contract is mapped. As recorded: "
+                         f"{i.get('reason') or ''}"),
             kit.td("Check the symbol; if it is right, add the contract to the contract list. The trade then prices "
                    "without a new upload.", left=True),
         ]))
@@ -834,20 +842,17 @@ def rejects_table(rows: List[dict], need_fix: Sequence[dict] = (), warnings: Seq
                    title="loaded, on the primary field"),
             kit.td("Check the two cells in the file; nothing to do if the loaded value is right.", left=True),
         ]))
-    heads = []
-    if need_fix:
-        heads.append(html.Span(f"Rows that need a fix ({len(need_fix)})", className="cell-red"))
-    if rows:
-        heads.append(html.Span(f"Rows not loaded ({len(rows)})", className="cell-amber"))
-    if warnings:
-        heads.append(html.Span(f"Row warnings ({len(warnings)})", className="cell-amber"))
+    # the fold's title: each kind of row with its count in a level chip (one chevron, drawn by the kit)
+    heads = [(label, n, level) for label, n, level in (
+        ("Rows that need a fix", len(need_fix), "red"), ("Rows not loaded", len(rows), "amber"),
+        ("Row warnings", len(warnings), "amber")) if n]
     summary: list = []
-    for h in heads:
+    for label, n, level in heads:
         if summary:
-            summary.append(html.Span(" · ", className="data-status-sep"))
-        summary.append(h)
-    return html.Details(id=REJECTS_ID, open=False, className="book-fold tk-fold-block", children=[
-        html.Summary(summary),
+            summary.append(html.Span("·", className="data-status-sep"))
+        summary += [html.Span(label, className="blotter-fold-title"), kit.chip(f"{n:,}", level)]
+    return html.Details(id=REJECTS_ID, open=False, className="book-fold tk-fold-block blotter-rejects-fold", children=[
+        html.Summary(summary, title="The rows of the file that need you: click to open the list"),
         kit.table(kit.head(cols, None, SORT_TYPE + "-none"), body, className="tk-small"),
     ])
 
@@ -867,7 +872,8 @@ def last_upload_block(conn: sqlite3.Connection) -> html.Div:
                             "row of the file that needs a fix.")
     if report is None and not issues:
         return html.Div(id=LAST_UPLOAD_ID, className="blotter-last-upload-section",
-                        children=[html.Div([title, ": ", html.Span(cap(NO_HISTORY) + ".", className="book-section-meta")])])
+                        children=[html.Div([title, html.Span(cap(NO_HISTORY), className="book-section-meta")],
+                                           className="blotter-upload-line")])
     kinds = [str(i.get("kind") or "") for i in issues]
     need = [i for i, k in zip(issues, kinds) if k == UNRECOGNISED]
     rejects = [i for i, k in zip(issues, kinds) if k not in ("WARNING", UNRECOGNISED)]
@@ -878,10 +884,13 @@ def last_upload_block(conn: sqlite3.Connection) -> html.Div:
     n_older = sum(1 for i in need if not _of_upload(i, report))
     children: list = []
     if report is not None:
-        children.append(html.Div([title, " ", *last_upload_line(report, len(rejects), n_fix, n_older)],
+        children.append(html.Div([title, *last_upload_line(report, len(rejects), n_fix, n_older)],
                                  className="blotter-upload-line"))
     else:
-        children.append(html.Div([title, ": ", html.Span("No summary recorded", className="book-section-meta")]))
+        children.append(html.Div([title, html.Span("No summary recorded", className="book-section-meta",
+                                                   title="The upload that loaded these trades kept no summary: the "
+                                                         "next upload records one")],
+                                 className="blotter-upload-line"))
     if need or rejects or row_warnings:
         children.append(rejects_table(rejects, need, row_warnings))
     for w in file_warnings:

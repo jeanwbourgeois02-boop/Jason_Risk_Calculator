@@ -45,7 +45,7 @@ from ui.tabs.book import empty_state, trades_on_file
 from ui.tabs.formatting import (
     cap, tidy,
     MINUS, MISSING, about, compact, format_cell, issues_drawer, km_cell, km_text, marker, missing_cell, pct_text,
-    plain_words,
+    plain_words, row_info,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs.risk_limits import plain_reason  # noqa: F401 -- re-exported: the Risk tab's plain-words pass
@@ -124,6 +124,16 @@ def _num(value: Any) -> Optional[float]:
 
 def _lines(*parts: Any) -> str:
     return "\n".join(str(p) for p in parts if p)
+
+
+def days_text(days: float) -> str:
+    """Days to exit at one decimal everywhere; under a tenth of a day '< 0.1' (never '0.0')."""
+    return "< 0.1" if days < 0.05 else f"{days:,.1f}"
+
+
+def days_exact(days: float) -> str:
+    """The hover's figure: two decimals, 'Under 0.01 days' below that."""
+    return f"{days:,.2f} days" if days >= 0.005 else "Under 0.01 days"
 
 
 def _plural(n: int, noun: str) -> str:
@@ -459,7 +469,8 @@ def _leftover_td(t: dict) -> html.Td:
     if v is None:
         return html.Td(missing_cell(_lines(why, *lines)))
     if abs(v) < 0.5:
-        return html.Td(html.Span("0", className="tk-sub", title=plain_words(why) or "every lot is in a spread"))
+        # nothing left over reads blank, as FX unhedged does where it does not apply (one rule per column)
+        return html.Td("", title=cap(plain_words(why) or "every lot is in a spread"))
     return html.Td(km_cell(v, hover=_lines("USD per 1 % move", *lines), colour=False))
 
 
@@ -489,7 +500,7 @@ def _exit_td(data: dict, t: dict, r: Optional[dict], ready: bool) -> html.Td:
                    f"{pct_text(adv)} of a day's average volume" if adv is not None else "",
                    f"level {level.lower()}" + (" (placeholder thresholds)" if liq.get("placeholder") else ""))
     cls = {"RED": "cell-red", "AMBER": "cell-amber"}.get(level)
-    return html.Td(html.Span(f"{days:,.1f}", className=cls, title=plain_words(hover)))
+    return html.Td(html.Span(days_text(days), className=cls, title=plain_words(_lines(days_exact(days), hover))))
 
 
 def _type_td(t: dict) -> html.Td:
@@ -497,13 +508,27 @@ def _type_td(t: dict) -> html.Td:
                              title=plain_words(t.get("type_note") or "") or None), className="l")
 
 
+def row_reasons(t: dict, r: Optional[dict], ready: bool) -> List[str]:
+    """The reasons behind the row's "i": why the trade is not in the risk figures (its dashes then
+    all share that reason), or that it is counted without its currency hedge (layout wave 2: one
+    marker per row, never a badge beside the name)."""
+    if not ready:
+        return []
+    if r is None:
+        return ["Not in the risk figures: no risk row for this trade"]
+    out = []
+    if not r.get("included", True):
+        out.append("Not in the risk figures: " + (plain_reason(r.get("reason")) or "no price history"))
+    if r.get("partial"):
+        out.append("Counted without its currency hedge: " + (plain_reason(r.get("partial_reason")) or "no history"))
+    return out
+
+
 def trade_tr(data: dict, t: dict, r: Optional[dict], ready: bool, opened: bool) -> html.Tr:
     name = str(t.get("trade") or "")
-    partial = bool((r or {}).get("partial"))
     name_cell = [html.Span("▾ " if opened else "▸ ", className="tk-chev"),
                  html.Span(name, className="tk-name", title=plain_words(t.get("what_it_is") or "") or None),
-                 html.Span(" without hedge", className="tk-sub", title=plain_words(r.get("partial_reason") or ""))
-                 if partial else None]
+                 row_info(row_reasons(t, r, ready))]
     return html.Tr([html.Td(name_cell, className="l"), _type_td(t), _risk_td(r, ready), _share_td(r, ready),
                     _hedge_td(r, ready), _ratio_td(r, ready), _leftover_td(t), _fx_td(t), _exit_td(data, t, r, ready)],
                    id={"type": ROW_TYPE, "idx": name}, n_clicks=0,
@@ -569,17 +594,18 @@ def group_tr(label: str, rows: Sequence[tuple], sub: Optional[dict], ready: bool
 
 def head(sort: Optional[dict], research: dict) -> html.Thead:
     ths = []
-    mark = tf.research_mark(research)
     for key, title, cls, tip, sortable, from_history in COLUMNS:
+        # one "i" per research column, never a badge per heading or cell (layout wave 2)
+        mark = tf.research_head(research) if from_history else None
         arrow = ""
         if (sort or {}).get("key") == key:
             arrow = " ▼" if (sort or {}).get("dir") != "asc" else " ▲"
         inner: Any = [title, html.Span(arrow, className="book-sort-arrow")]
         if sortable:
             inner = html.Span(inner, id={"type": SORT_TYPE, "idx": key}, n_clicks=0, className="tk-sort")
-        kids = [inner, mark] if (from_history and mark is not None) else [inner]
+        kids = [inner, mark] if mark is not None else [inner]
         ths.append(html.Th(kids, className=" ".join(c for c in (cls, "tk-sortable" if sortable else "") if c) or None,
-                           title=plain_words(tip + (f" {tf.research_words(research)}" if from_history else ""))))
+                           title=plain_words(tip)))
     return html.Thead(html.Tr(ths))
 
 
@@ -644,7 +670,8 @@ def legs_table(data: dict, t: dict, r: Optional[dict]) -> Optional[html.Table]:
                     else missing_cell(why or "no volume"),
                     title=f"over {leg.get('adv_days')} days" if leg and leg.get("adv_days") else None),
             html.Td(pct_text(oi_pct) if oi_pct is not None else missing_cell(why or "no open interest")),
-            html.Td(f"{days:,.1f}" if days is not None else missing_cell(why or "no volume data"),
+            html.Td(html.Span(days_text(days), title=days_exact(days)) if days is not None
+                    else missing_cell(why or "no volume data"),
                     className={"RED": "cell-red", "AMBER": "cell-amber"}.get(level)),
             html.Td(cap(level.lower().replace("no_data", "no data")) or NA, className="l tk-sub"),
         ], className="tk-leg" + (" tk-leg--hedge" if hedge else "")))
@@ -657,7 +684,9 @@ def panel_tr(data: dict, t: dict, r: Optional[dict]) -> html.Tr:
     facts: List[Any] = []
 
     def fact(k, v, hover=""):
-        facts.append(html.Span([html.Span(f"{k} ", className="tk-k"), v], title=plain_words(hover) or None))
+        # one row of the key/value facts table (layout wave 2: a table, never a run of loose spans)
+        facts.append(html.Tr([html.Td(k, className="tk-kv-k"),
+                              html.Td(cap(v) if isinstance(v, str) else v, title=cap(plain_words(hover)) or None)]))
 
     if r is not None:
         alone, contrib = _num(r.get("standalone_var")), _num(r.get("contribution_var"))
@@ -686,12 +715,14 @@ def panel_tr(data: dict, t: dict, r: Optional[dict]) -> html.Tr:
         cov = _num(h.get("coverage"))
         fact("Hedge", f"{h.get('currency') or ''} {pct_text(cov)} covered".strip() if cov is not None
              else (h.get("reason") or "coverage not read"), fx_hover(t))
-    parts: List[Any] = [html.Div(facts, className="tk-facts risk-facts")]
+    kv = (html.Table(html.Tbody(facts), className="tk-table tk-kv risk-kv") if facts else None)
     table = legs_table(data, t, r)
-    if table is not None:
-        parts.append(html.Div(table, className="tk-panel-legs"))
-    elif r is not None:
-        parts.append(html.Div(missing_cell("no leg figures for this trade"), className="risk-quiet"))
+    if table is None and r is not None:
+        fact("Legs", missing_cell("no leg figures for this trade"))
+        kv = html.Table(html.Tbody(facts), className="tk-table tk-kv risk-kv")
+    # the legs table and the facts side by side, as on the Book's panel
+    parts: List[Any] = [html.Div([html.Div(table, className="tk-legs-main") if table is not None else None, kv],
+                                 className="tk-panel-legs")]
     if not t.get("pseudo"):
         n = len(t.get("trade_ids") or [])
         parts.append(html.Div(className="tk-links", children=[
@@ -783,43 +814,30 @@ def vs_target(sub: Optional[dict], ready: bool, config: dict) -> Tuple[Any, str]
 
 
 def headline(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> html.Div:
-    research = data.get("research") or {}
-    mark = tf.research_mark(research)
+    """One light line of what neither the header nor the table's Book row shows (layout wave 2,
+    one place per number): the VaR of the rows showing, its share of the vol target, how much the
+    trades diversify each other and the lowest hedge %. The trade count, the daily risk together,
+    the leftover and the FX unhedged are the Book row's; the mock-history caveat is said once, in
+    the grey history line under it."""
     config = data.get("config") or {}
     ready = risk is not None
-    all_named = [t for t, _r in v["rows"] if not t.get("pseudo")]
-    shown_named = [t for t, _r in v["shown_rows"] if not t.get("pseudo")]
-    every = [t for t in (data.get("trade_book") or {}).get("trades") or [] if not t.get("pseudo")]
-    count = (f"{len(shown_named)} of {len(all_named)} open" if v["filtered"]
-             else f"{_plural(len(every), 'trade')} · {len(all_named)} open")
 
     def pending():
         return missing_cell(COMPUTING)
 
-    def history_figure(key, reason_key, signed=False):
+    def history_figure(key, reason_key, excl=True):
         if not ready:
             return pending()
         val = _num((sub or {}).get(key))
         if val is None:
             return missing_cell(plain_reason((sub or {}).get(reason_key)) or "no figure")
         left = (sub or {}).get("left_out") or []
-        return html.Span([km_cell(val, signed=signed, colour=False),
+        return html.Span([km_cell(val, signed=False, colour=False),
                           marker(f"excl. {len(left)}", _lines(*(f"{x.get('trade')}: {plain_reason(x.get('reason'))}"
-                                                               for x in left)), "marker--small") if left else None,
-                          mark])
+                                                               for x in left)), "marker--small")
+                          if (left and excl) else None])
 
     target_value, target_hover = vs_target(sub, ready, config)
-    s = _sums(v["shown_rows"])
-
-    def summed(tot, hover):
-        val, n, why = tot
-        if val is None and not why:
-            return html.Span("Not held", className="tk-sub", title="No row showing has one")
-        if val is None:
-            return missing_cell(_lines(*why[:8]) or "no figure")
-        return html.Span([km_cell(val, hover=hover, colour=False),
-                          marker(f"excl. {n}", _lines(*why[:8]), "marker--small") if n else None])
-
     lowest: Any = NA
     lowest_hover = "no hedge % among the rows showing"
     known = [(t, _num(r.get("hedge_pct"))) for t, r in v["shown_rows"] if r and _num(r.get("hedge_pct")) is not None]
@@ -828,21 +846,17 @@ def headline(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> 
     elif known:
         t, hp = min(known, key=lambda x: x[1])
         lowest = html.Span([f"{t.get('trade')} ", html.Span(pct_text(hp / 100.0),
-                                                           className="cell-amber" if hp < HEDGE_AMBER else None), mark])
+                                                           className="cell-amber" if hp < HEDGE_AMBER else None)])
         lowest_hover = "the single worst row's hedge %, named (hedge % is never totalled)"
-    div = (_num((sub or {}).get("diversification_usd")))
+    alone, together = _num((sub or {}).get("sum_daily_risk_usd")), _num((sub or {}).get("daily_risk_usd"))
+    div_hover = _lines("How much the trades offset each other: each trade's daily risk on its own, added up, less "
+                       "their daily risk together (the Book row)",
+                       f"Alone, added: {format_cell(alone)} USD" if alone is not None else "",
+                       f"Together: {format_cell(together)} USD" if together is not None else "")
     items = [
-        ("Trades", count, "the trades showing (a trade is a PBRoot name); the top bar is always the whole book"),
         ("VaR 1 day 95 %", history_figure("var_usd", "var_reason"), _var_definition(config)),
         ("Of vol target", target_value, target_hover),
-        ("Daily risk", history_figure("daily_risk_usd", "daily_risk_reason"),
-         "one standard deviation of the trades' summed daily P&L: the trades together"),
-        ("Alone, added", history_figure("sum_daily_risk_usd", "sum_daily_risk_reason"),
-         "each trade's daily risk on its own, added up; the gap to the figure together is what they diversify"
-         + (f": {format_cell(div)} USD" if div is not None else "")),
-        ("Leftover", summed(s["leftover"], "USD per 1 % move, the rows showing added"),
-         "the directional exposure no spread covers, USD per 1 % move"),
-        ("FX unhedged", summed(s["fx"], "the rows showing added"), "the China legs' exposure plus their hedge"),
+        ("Diversification", history_figure("diversification_usd", "sum_daily_risk_reason", excl=False), div_hover),
         ("Lowest hedge", lowest, lowest_hover),
     ]
     reach = source_line(data, risk, sub)
@@ -871,37 +885,41 @@ def source_line(data: dict, risk: Optional[dict], sub: Optional[dict]) -> html.D
 
 # --------------------------------------------------------------------------- issues and CSV
 def issue_items(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> List[Any]:
-    items: List[Any] = list(data.get("errors") or [])
+    """The drawer's rows as (kind, where, reason): the kind of problem, the trade or contract it is
+    about, the reason (`formatting.issues_drawer` draws them as its table)."""
+    items: List[Any] = [(str(label), "", sentence) for label, sentence in data.get("errors") or []]
     for n in (data.get("trade_book") or {}).get("notes") or []:
-        items.append(("Trades", str(n)))
+        items.append(("Trades", "", str(n)))
     if risk is not None and not risk.get("available"):
-        items.append(("Risk", f"no risk figures: {plain_reason(risk.get('reason')) or 'no history'}"))
+        items.append(("Risk", "", f"no risk figures: {plain_reason(risk.get('reason')) or 'no history'}"))
     for t, r in v["shown_rows"]:
         if r is not None and not r.get("included", True):
-            items.append((str(t.get("trade")), "not in the VaR: " + (plain_reason(r.get("reason")) or "no history")))
+            items.append(("Not in the VaR", str(t.get("trade")), plain_reason(r.get("reason")) or "no history"))
         elif r is not None and r.get("partial"):
-            items.append((str(t.get("trade")), "counted without its currency hedge: " + plain_reason(r.get("partial_reason"))))
+            items.append(("Without hedge", str(t.get("trade")),
+                          "counted without its currency hedge: " + plain_reason(r.get("partial_reason"))))
     if risk is not None and risk.get("partial_note"):
-        items.append(("Without hedge", plain_reason(risk["partial_note"])))
+        items.append(("Without hedge", "", plain_reason(risk["partial_note"])))
     for m in (risk or {}).get("missing") or []:
-        items.append(("Positions", plain_reason(m)))
+        items.append(("Positions", "", plain_reason(m)))
     liq = data.get("liquidity") or {}
     if liq and not liq.get("available"):
-        items.append(("Liquidity", plain_reason(liq.get("reason")) or "not computed"))
-    items += [(str(x.get("instrument_id") or x.get("trade_id")), "not in the liquidity check: " + plain_reason(x.get("reason")))
+        items.append(("Liquidity", "", plain_reason(liq.get("reason")) or "not computed"))
+    items += [("Liquidity", str(x.get("instrument_id") or x.get("trade_id")),
+               "not in the liquidity check: " + plain_reason(x.get("reason")))
               for x in liq.get("skipped") or []]
     if liq.get("placeholder"):
-        items.append(("Liquidity", "the thresholds are placeholders until Jason gives his"))
+        items.append(("Liquidity", "", "the thresholds are placeholders until Jason gives his"))
     for reason in (data.get("curve") or {}).get("reasons") or []:
-        items.append(("Exposure", plain_reason(reason)))
+        items.append(("Exposure", "", plain_reason(reason)))
     pc = (risk or {}).get("price_check") or {}
     if pc.get("flagged"):
-        items.append(("Research prices", str(pc.get("sentence") or "")))
+        items.append(("Research prices", "", str(pc.get("sentence") or "")))
     research = data.get("research") or {}
     if research.get("kind") != "real":
-        items.append(("Research", research.get("note") or "the research history is not verified as real"))
+        items.append(("Research", "", research.get("note") or "the research history is not verified as real"))
     if data.get("margin") is not None and risk_limits.margin_limits_real(data.get("margin"), data.get("checks")):
-        items += [("Not in the margin", plain_reason(x)) for x in (data.get("margin") or {}).get("reasons") or [] if x]
+        items += [("Not in the margin", "", plain_reason(x)) for x in (data.get("margin") or {}).get("reasons") or [] if x]
     return items
 
 
@@ -962,13 +980,14 @@ def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, so
                if risk is not None else None)
         out.update(shown=True, headline=headline(data, v, risk, sub), table=tbl, names=names,
                    risk_ready=risk is not None)
-        margin_line = (risk_limits.margin_limits_section(data.get("margin"), data.get("checks"))
-                       if risk_limits.margin_limits_real(data.get("margin"), data.get("checks"))
-                       else html.Div(risk_limits.MARGIN_HIDDEN_WORDS, className="risk-quiet",
-                                     title="The margin rates in the limits file are placeholders and no desk or exchange "
-                                           "limit is set yet: the block shows once either is real."))
-        out["foot"] = html.Div([margin_line, issues_drawer(issue_items(data, v, risk, sub), id=ISSUES_ID)],
-                               className="tk-foot")
+        # margin and limits: their block once either is real, else one row of the drawer (never a loose line)
+        real = risk_limits.margin_limits_real(data.get("margin"), data.get("checks"))
+        items = issue_items(data, v, risk, sub)
+        if not real:
+            items.append(("Margin and limits", "", "Shown once real margin rates or limits are set: the margin rates "
+                          "in the limits file are placeholders and no desk or exchange limit is set yet"))
+        out["foot"] = html.Div([risk_limits.margin_limits_section(data.get("margin"), data.get("checks")) if real else None,
+                                issues_drawer(items, id=ISSUES_ID)], className="tk-foot")
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
         log.exception("Risk could not be built for %s", as_of)
         out["body"] = html.Div(className="status-panel status-panel--down", children=[
@@ -1055,11 +1074,11 @@ def layout(default_date: Optional[str] = None) -> html.Div:
             html.Div(id=HEADLINE_ID),
             html.Div(className="book-card book-main tk-card", children=[
                 html.Div(className="tk-strip", children=[
-                    about("Risk by trade", "One row per open trade, by its share of the book's VaR; the trades with no "
-                                           "price history at the bottom with their reasons. Click a row for its legs. "
-                                           "The first row is the rows showing together: their daily risk recomputed, "
-                                           "never added.", level="span", className="tk-title"),
-                    html.Span(QUESTION, className="risk-question"),
+                    about("Risk by trade", f"{QUESTION} One row per open trade, by its share of the book's VaR; the "
+                                           "trades with no price history at the bottom, their reason on the row's "
+                                           "\"i\". Click a row for its legs. The first row is the rows showing "
+                                           "together: their daily risk recomputed, never added.", level="span",
+                          className="tk-title"),
                     html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="btn btn--ghost"),
                     html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="btn btn--ghost"),
                     html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",

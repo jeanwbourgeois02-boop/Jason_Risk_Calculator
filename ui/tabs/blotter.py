@@ -206,13 +206,13 @@ _MARKS_REBUILD_SCOPES: tuple = ()
 # could wipe a strike being typed into a cell. A genuine book change (an upload --
 # `_update` compares `revision.trade_set_signature`) and a date
 # or sub-tab change still rebuild it; a saved term does NOT, although it is published as a
-# book revision too. The one piece of the sub-tab built HERE, the P&L strip above the
-# table, follows new marks through `_register_strip_refresh`.
+# book revision too.
 _SELF_REFRESHING_SCOPES = ("options",)
 # Table scopes with no P&L strip of their own (Screens redesign Phase A, 2026-09-25): the
 # header above every tab IS the total book, so the Total book shows no cards; no strip
-# callback is registered for it.
-_STRIPLESS_SCOPES = ("total",)
+# callback is registered for it. Options left the strip too (layout wave 2, 2026-09-29: its eleven
+# P&L tiles repeated the header; its Greeks are the totals row of "By pair or underlying").
+_STRIPLESS_SCOPES = ("total", "options")
 # Kept (empty) so the placeholder path stays available for a future scope.
 PLACEHOLDER_SCOPES: dict = {}
 
@@ -1699,14 +1699,9 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
     display_columns, column_labels = scope_columns(scope)
 
     if scope == "options":
-        def _strip():
-            # Only the cards that have a value, and one caption for the ones that are
-            # waiting for an earlier close's option marks (`options_strip`).
-            return html.Div(id=strip_id, children=scope_strip(scope, conn, as_of))
-        return html.Div([
-            _safe_section("P&L strip", _strip, conn),
-            _safe_section("Options", lambda: options_ui.build_layout(conn, as_of), conn),
-        ])
+        # No P&L strip (layout wave 2, 2026-09-29): the header holds the P&L, the option book's
+        # totals are the "By pair or underlying" table's totals row.
+        return _safe_section("Options", lambda: options_ui.build_layout(conn, as_of), conn)
 
     if scope in PLACEHOLDER_SCOPES:
         def _placeholder():
@@ -2142,7 +2137,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 conn.close()
 
     for _scope in _SELF_REFRESHING_SCOPES:
-        _register_strip_refresh(_scope)
+        if _scope not in _STRIPLESS_SCOPES:   # Options has no strip since 2026-09-29
+            _register_strip_refresh(_scope)
 
     @app.callback(
         Output(NOTICES_ID, "children"),

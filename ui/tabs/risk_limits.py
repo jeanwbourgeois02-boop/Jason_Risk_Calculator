@@ -16,7 +16,7 @@ from dash import dash_table, html
 from dash.dash_table.Format import Format, Scheme, Symbol
 
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import MISSING, about, format_cell, short_money
+from ui.tabs.formatting import MISSING, about, cap, format_cell, issues_drawer, short_money
 
 NA = MISSING
 MARGIN_TABLE_ID = "risk-margin-table"
@@ -396,28 +396,28 @@ def _not_set_value(check: Dict[str, Any]) -> Tuple[str, str]:
     return f"{_lots(v)} {unit}".strip(), f"{_lots(v)} {unit}".strip()
 
 
-def _not_set_item(check: Dict[str, Any], rest: str) -> html.Span:
-    """One not-set check as a short inline item ("spot month Z26 5 lots"), its definition,
-    scope, full position and the limits-file setting that fixes it on hover (the file named in
+def _not_set_item(check: Dict[str, Any], rest: str) -> Tuple[str, str]:
+    """(text, why) of one not-set check: the short item ("Spot month Z26 5 lots") and its
+    definition, scope, full position and the limits-file setting that fixes it (the file named in
     words, `_limits_words`)."""
     limit = str(check.get("limit") or "")
     short, full = _not_set_value(check)
-    rest = re.sub(r"\s*\(.*\)\s*$", "", rest or "").strip()      # "(last trade ...)" goes to the hover
+    rest = re.sub(r"\s*\(.*\)\s*$", "", rest or "").strip()      # "(last trade ...)" goes to the reason
     label = _NOT_SET_LABEL.get(limit, "" if limit in ("net_usd_sector", "lots_per_contract_month")
                                else limit.replace("_", " "))
     text = " ".join(p for p in (label, rest, short) if p)
-    hover = " ".join(p for p in (
+    why = " ".join(p for p in (
         f"{limit.replace('_', ' ')}: {_limits_words(check['basis'])}." if check.get("basis") else "",
         f"Scope: {check.get('scope') or 'book'}.", f"Position: {full}.",
         (_limits_words(check.get("reason")) or "no limit set in the limits file yet") + ".") if p)
-    return html.Span(text, className="limit-not-set-item", title=hover)
+    return text, why
 
 
-def _not_set_groups(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, List[html.Span]]]:
+def _not_set_groups(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
     """source -> group label -> items, in the engine's order: the desk's book, sector and per
     root (net USD, then the contract months), the exchange's per root. Only regrouped: every
     not-set check is one item."""
-    groups: Dict[str, Dict[str, List[html.Span]]] = {}
+    groups: Dict[str, Dict[str, List[Tuple[str, str]]]] = {}
     for c in rows:
         limit, scope = str(c.get("limit") or ""), str(c.get("scope") or "")
         source = c.get("source") or "other"
@@ -434,30 +434,22 @@ def _not_set_groups(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, List[html
     return groups
 
 
-def not_set_drawer(checks: Optional[List[Dict[str, Any]]]) -> Optional[html.Details]:
-    """Every NOT_SET check, collapsed into one line "Not set (N)" (the Phase A drawers' style);
-    opened, one compact line per group (desk: book, sectors, each root; exchange: each root),
-    each check an inline item with its position. None when every limit is set."""
+def not_set_drawer(checks: Optional[List[Dict[str, Any]]]):
+    """Every NOT_SET check in the kit's drawer, "Not set (N)" (layout wave 2, 2026-09-29: the
+    shared `issues_drawer` table, never a list of its own): one row per check, the source (desk or
+    exchange) as its kind, the group (book, a sector, a root) as where, the item and its
+    definition as the reason. None when every limit is set."""
     rows = [c for c in checks or [] if _is_not_set(c)]
     if not rows:
         return None
     groups = _not_set_groups(rows)
     order = [s for s, _ in _NOT_SET_SOURCES] + [s for s in groups if s not in dict(_NOT_SET_SOURCES)]
-    body: List[Any] = []
+    items: List[Tuple[str, str, str]] = []
     for source in order:
-        if source not in groups:
-            continue
-        lines = []
-        for group, items in groups[source].items():
-            joined: List[Any] = []
-            for i, item in enumerate(items):
-                joined += ([_SEP] if i else []) + [item]
-            lines.append(html.Li([html.Span(group, className="issue-label"), " "] + joined))
-        n = sum(len(items) for items in groups[source].values())
-        body += [html.Div(f"{dict(_NOT_SET_SOURCES).get(source, source.capitalize())} ({n})", className="issue-label"),
-                 html.Ul(lines, className="issues-list")]
-    return html.Details([html.Summary(f"Not set ({len(rows)})", title=NOT_SET_HOVER)] + body,
-                        className="issues-drawer", open=False, id=LIMITS_NOT_SET_ID)
+        for group, entries in (groups.get(source) or {}).items():
+            kind = dict(_NOT_SET_SOURCES).get(source, source.capitalize())
+            items += [(kind, group, f"{cap(text)}: {why}") for text, why in entries]
+    return issues_drawer(items, title="Not set", id=LIMITS_NOT_SET_ID)
 
 
 def limits_section(checks: Optional[List[Dict[str, Any]]]) -> html.Div:
