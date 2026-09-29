@@ -442,6 +442,10 @@ def _estimated_level(t: dict) -> bool:
 
 
 def closed_on(data: dict, t: dict) -> str:
+    """The day a closed trade went flat: the engine's close_date, else its last fill's date."""
+    got = str((t.get("closed") or {}).get("close_date") or "")
+    if got:
+        return got
     fills = data.get("fills") or {}
     return max(((fills.get(str(i)) or {}).get("trade_date", "") for i in t.get("trade_ids") or []), default="")
 
@@ -452,9 +456,8 @@ def risk_rows(risk: Optional[dict]) -> Dict[str, dict]:
 
 # --------------------------------------------------------------------------- the cells
 def _type_td(t: dict) -> html.Td:
-    code = tf.type_code(t)
     mismatch = str(t.get("type_mismatch") or "")
-    words = tf.type_label(code, short=True) if not t.get("pseudo") else MISSING
+    words = tf.trade_type_label(t, short=True) if not t.get("pseudo") else MISSING
     hover = _lines(t.get("type_note") or "", mismatch and f"Type mismatch: {mismatch}")
     return html.Td([html.Span(words, title=plain_words(hover) or None),
                     html.Span("●", className="tk-flag-dot", title=plain_words(mismatch)) if mismatch else None],
@@ -576,7 +579,26 @@ def _z_td(r: Optional[dict], ready: bool, research: dict) -> html.Td:
                     tf.research_mark(research)])
 
 
-def _today_td(t: dict) -> html.Td:
+def sigma_words(r: Optional[dict], ready: bool, level: dict) -> str:
+    """'Move in σ: +1.4 (a daily σ of 0.21 $/bbl over 251 changes, research history)' from
+    `trade_risk`'s move_sigma / level_sd, or the engine's reason."""
+    if not ready:
+        return "Move in σ: the risk figures are still being computed"
+    if r is None:
+        return "Move in σ: no risk row for this trade"
+    ms, sd = _num(r.get("move_sigma")), _num(r.get("level_sd"))
+    if ms is None:
+        return f"Move in σ: not given ({r.get('move_sigma_reason') or r.get('level_sd_reason') or 'no figure'})"
+    sd_text = ""
+    if sd is not None:
+        unit = unit_words(r.get("level_unit") or level.get("unit"))
+        days = r.get("level_sd_days")
+        sd_text = (f" (a daily σ of {level_text(sd, level)}{' ' + unit if unit else ''}"
+                   + (f" over {days} daily changes" if days else "") + ", research history)")
+    return f"Move in σ: {z_text(ms)}{sd_text}"
+
+
+def _today_td(t: dict, r: Optional[dict] = None, ready: bool = True) -> html.Td:
     level = t.get("level") or {}
     ch = _num(level.get("change"))
     if ch is None:
@@ -586,7 +608,7 @@ def _today_td(t: dict) -> html.Td:
     cls = sign_class(effect) if effect is not None else ""
     hover = _lines(f"Since the {level.get('prev_date') or 'previous'} close ({level_text(level.get('prev'), level)})",
                    f"Worth {full_signed(effect)} USD to the trade" if effect is not None else "",
-                   "Move in σ: not given by the engine yet")
+                   sigma_words(r, ready, level))
     return html.Td(html.Span(level_text(ch, level, signed=True), className=cls or None, title=plain_words(hover)))
 
 
@@ -616,15 +638,75 @@ def _next_td(t: dict, as_of: str) -> html.Td:
     return html.Td(html.Span(text, className=cls or None, title=plain_words(hover)), className="l")
 
 
+def is_red(flag: dict) -> bool:
+    """A red flag (the engine's `severity`: a contract not recognised); amber otherwise."""
+    return str(flag.get("severity") or "") == "red"
+
+
+def flag_sentence(flag: dict) -> str:
+    """The flag in one sentence: the engine's sentence, which names the flag itself when it is a
+    red one ('contract not recognised: XYZ6-USAA: P&L can't be computed until it is mapped')."""
+    label, sentence = str(flag.get("label") or ""), str(flag.get("sentence") or "")
+    if not label or sentence.lower().startswith(label.lower()):
+        return sentence or label
+    return f"{label}: {sentence}"
+
+
+def _closed_td(t: dict, as_of: str) -> html.Td:
+    """A closed trade's Next cell: the day it went flat (the engine's close_date), grey."""
+    c = t.get("closed") or {}
+    if not c.get("close_date"):
+        return html.Td(missing_cell(c.get("reason") or "no close date"), className="l")
+    hover = _lines(f"Closed on {c['close_date']}: its last fill, or a leg's settlement after it",
+                   f"Last open close: {c['open_date']}" if c.get("open_date") else "")
+    return html.Td(html.Span(f"closed {day_text(c['close_date'], as_of)}", className="tk-sub", title=hover), className="l")
+
+
 def _flags_td(t: dict) -> html.Td:
     flags = t.get("flags") or []
     if not flags:
         return html.Td("")
-    hover = _lines(*(f"{f.get('label')}: {f.get('sentence')}" for f in flags))
-    return html.Td(html.Span(f"● {len(flags)}", className="tk-flags", title=plain_words(hover)))
+    red = any(is_red(f) for f in flags)
+    hover = _lines(*(flag_sentence(f) for f in sorted(flags, key=lambda f: not is_red(f))))
+    return html.Td(html.Span(f"● {len(flags)}", className="tk-flags" + (" tk-flags--red" if red else ""),
+                             title=plain_words(hover)))
 
 
 # --------------------------------------------------------------------------- rows
+def _price_leg(t: dict) -> Optional[dict]:
+    """The one non-hedge contract of an outright read at its price (`level.mode` 'price'): the
+    open leg, or for a closed trade the leg it held."""
+    legs = [leg for leg in t.get("legs") or [] if not leg.get("hedge") and not leg.get("unrecognised")]
+    open_ = [leg for leg in legs if leg.get("status") == "open"]
+    return (open_ or legs or [None])[0]
+
+
+def display_level(data: dict, t: dict) -> dict:
+    """The level the row's Entry / Now / Today read, as the engine gave it: `level` for an open
+    trade, the closed block's entry and exit for a closed one (Now = the exit level, no move), and
+    for a price level (one contract, `mode` 'price') the unit of that contract's quote, so the
+    price shows at its tick. Display only: no figure is changed."""
+    closed = t.get("closed") if t.get("status") == "closed" else None
+    if closed:
+        why = str(closed.get("reason") or "")
+        close = day_text(closed.get("close_date"), data.get("as_of")) if closed.get("close_date") else "its close"
+        lv = {"unit": closed.get("unit") or "", "mode": closed.get("mode") or "", "entry": closed.get("entry"),
+              "entry_reason": closed.get("entry_reason") or why or "no entry level",
+              "now": closed.get("exit"), "now_reason": why or "no exit level", "change": None,
+              "change_reason": f"closed on {close}: no move today", "prev": None, "closed": True,
+              "sources": {"entry": (f"read as the trade stood on {day_text(closed.get('open_date'), data.get('as_of'))}, "
+                                    "the last close it was open" if closed.get("open_date") else ""),
+                          "now": _lines(f"Exit level: {closed.get('exit_basis')}" if closed.get("exit_basis") else "",
+                                        f"Closed {close} (its last fill or a leg's settlement)")}}
+    else:
+        lv = dict(t.get("level") or {})
+    if lv.get("mode") == "price":
+        leg = _price_leg(t)
+        if leg is not None:
+            lv["unit"] = _leg_unit(data, leg)
+    return lv
+
+
 def trade_tr(data: dict, t: dict, r: Optional[dict], ready: bool, opened: bool) -> html.Tr:
     ids = [str(i) for i in t.get("trade_ids") or []]
     daily = fill_sum(data, "daily", ids)
@@ -633,14 +715,18 @@ def trade_tr(data: dict, t: dict, r: Optional[dict], ready: bool, opened: bool) 
     name = str(t.get("trade") or "")
     pbs = t.get("pb_roots") or []
     name_hover = _lines(f"PBRoot: {', '.join(pbs)}" if pbs else "", f"{_plural(len(ids), 'fill')}")
+    tv = dict(t, level=display_level(data, t))
+    closed = bool(tv["level"].get("closed"))
     cells = [
         html.Td([html.Span("▾ " if opened else "▸ ", className="tk-chev"),
                  html.Span(name, className="tk-name", title=name_hover or None)], className="l"),
-        _type_td(t), _what_td(t), _size_td(t, r, data.get("research") or {}), _entry_td(t), _now_td(t),
-        _z_td(r, ready, data.get("research") or {}), _today_td(t),
+        _type_td(t), _what_td(t), _size_td(t, r, data.get("research") or {}), _entry_td(tv), _now_td(tv),
+        html.Td(missing_cell("closed: no z")) if closed else _z_td(r, ready, data.get("research") or {}),
+        _today_td(tv, r, ready),
         money_td(*daily, hover=_split_hover(t)),
-        money_td(*ltd, hover=_lines(f"MTD {km_text(mtd[0])}", f"YTD {km_text(ytd[0])}")),
-        _next_td(t, data["as_of"]), _flags_td(t),
+        money_td(*ltd, hover=_lines(f"MTD {km_text(mtd[0])}", f"YTD {km_text(ytd[0])}",
+                                    "the final P&L: the trade is flat" if closed else "")),
+        _closed_td(t, data["as_of"]) if closed else _next_td(t, data["as_of"]), _flags_td(t),
     ]
     return html.Tr(cells, id={"type": ROW_TYPE, "idx": name}, n_clicks=0,
                    className="tk-row" + (" tk-row--open" if opened else "") + (" tk-row--pseudo" if t.get("pseudo") else ""))
@@ -676,6 +762,7 @@ def totals(data: dict, shown: Sequence[dict]) -> dict:
                            for t in shown if not t.get("pseudo"))
     out["next"] = nearest_next(shown)
     out["flags"] = sum(len(t.get("flags") or []) for t in shown)
+    out["red_flags"] = [flag_sentence(f) for t in shown for f in t.get("flags") or [] if is_red(f)]
     return out
 
 
@@ -830,10 +917,60 @@ def _fills_hover(data: dict, leg: dict) -> Tuple[str, str]:
     return lots_hover, _lines(*lines[:12], f"... and {len(lines) - 12} more" if len(lines) > 12 else "")
 
 
-def leg_tr(data: dict, leg: dict, level_note: str, prev_rows: Dict[str, dict]) -> html.Tr:
+def _stamp_words(iso: Any) -> str:
+    """'Fri 18 Sep 17:00 NY' from an official mark's stamp ('' when there is none)."""
+    if not iso:
+        return ""
+    from ui.tabs.blotter_fills import ny_time
+    return ny_time(iso)
+
+
+def mark_hover(data: dict, leg: dict, unit: str, fill: Optional[float], level_note: str) -> str:
+    """The Mark cell's hover from the leg's own fields (`trade_book`): the source and time of the
+    mark, the close it is from when the filled reader carried an earlier one, the previous close
+    (its price, date and source, or why there is none) and the legs' closing hours."""
+    src = str(leg.get("mark_source") or "")
+    stamp = _stamp_words(leg.get("mark_snapped_at"))
+    as_of_mark = str(leg.get("mark_as_of") or "")
+    lines = [f"Source: {plain_words(src)}" + (f", {stamp}" if stamp else
+                                              " (an estimate or a frozen figure: no official stamp)")] if src else []
+    if as_of_mark and as_of_mark != data.get("as_of"):
+        lines.append(f"Carried from the {day_text(as_of_mark, data.get('as_of'))} close: no price of its own on "
+                     f"{day_text(data.get('as_of'), data.get('as_of'))}")
+    prev = _num(leg.get("prev_mark"))
+    pdate = day_text(leg.get("prev_mark_date"), data.get("as_of")) if leg.get("prev_mark_date") else "the previous"
+    if prev is not None:
+        psrc = plain_words(leg.get("prev_mark_source") or "")
+        lines.append(f"Previous close ({pdate}): {price_text(prev, unit, fill)}" + (f", {psrc}" if psrc else ""))
+    else:
+        lines.append(f"Previous close ({pdate}): not on file ({leg.get('prev_mark_reason') or 'no reason given'})")
+    if level_note and not leg.get("hedge"):
+        lines.append(level_note)
+    return _lines(*lines)
+
+
+def value_hover(data: dict, leg: dict, rows: pd.DataFrame) -> str:
+    """The Value USD cell's hover: the local value (`value_local`, open quantity x multiplier x
+    mark in the leg's currency) and the spot the engine converted at."""
+    ccy = str(leg.get("currency") or "")
+    local = _num(leg.get("value_local"))
+    lines = []
+    if local is not None:
+        lines.append(" ".join(x for x in ("Local:", ccy, full_signed(local)) if x))
+    elif leg.get("value_local_reason"):
+        lines.append(f"Local value: {leg.get('value_local_reason')}")
+    if ccy not in ("", "USD") and not rows.empty and "spot" in rows:
+        spot = next((_num(s) for s in rows["spot"] if _num(s) is not None), None)
+        if spot is not None:
+            lines.append(f"Spot {spot:g} USD per {ccy}")
+    return _lines(*lines)
+
+
+def leg_tr(data: dict, leg: dict, level_note: str) -> html.Tr:
     ids = [str(i) for i in leg.get("trade_ids") or []]
     hedge = bool(leg.get("hedge"))
-    unit = _leg_unit(data, leg)
+    unrec = bool(leg.get("unrecognised"))
+    unit = "" if unrec else _leg_unit(data, leg)
     lots = _num(leg.get("lots"))
     product = str(leg.get("product") or "")
     if lots is None:
@@ -844,32 +981,25 @@ def leg_tr(data: dict, leg: dict, level_note: str, prev_rows: Dict[str, dict]) -
         lots_text = (MINUS if lots < 0 else "+") + f"{abs(lots):,.0f}" if lots else "0"
     lots_hover, fill_hover = _fills_hover(data, leg)
     rows = _df_rows(data, ids)
-    spot = next((_num(s) for s in rows.get("spot", []) if _num(s) is not None), None) if not rows.empty else None
     value = _num(leg.get("value_usd"))
-    value_cell = (html.Span(full_signed(value), title=f"spot {spot:g} USD per {leg.get('currency') or 'unit'}"
-                            if spot is not None and leg.get("currency") not in ("", "USD") else None)
-                  if value is not None else missing_cell(leg.get("value_reason") or "no value"))
+    v_hover = value_hover(data, leg, rows)
+    value_cell = (html.Span(full_signed(value), title=plain_words(v_hover) or None)
+                  if value is not None else missing_cell(_lines(leg.get("value_reason") or "no value",
+                                                                "" if unrec else v_hover)))
     fill = _num(leg.get("avg_fill"))
     fill_cell = (html.Span(price_text(fill, unit, fill), title=plain_words(fill_hover) or None) if fill is not None
                  else missing_cell(leg.get("avg_fill_reason") or "no open lots"))
     mark = _num(leg.get("mark"))
-    prev = None
-    for t in leg.get("open_trade_ids") or ids:
-        pr = prev_rows.get(str(t))
-        if pr is not None and _num(pr.get("mark")) is not None:
-            prev = _num(pr.get("mark"))
-            break
     est = is_estimated_mark(leg.get("mark_source"))
-    mark_hover = _lines(f"Source: {plain_words(leg.get('mark_source') or '')}",
-                        f"Previous close: {price_text(prev, unit, fill)}" if prev is not None else "Previous close: not on file",
-                        level_note if not hedge else "", "Mark time: not given by the engine yet")
-    mark_cell = (html.Span(("≈ " if est else "") + price_text(mark, unit, fill), title=plain_words(mark_hover),
+    m_hover = mark_hover(data, leg, unit, fill, level_note)
+    mark_cell = (html.Span(("≈ " if est else "") + price_text(mark, unit, fill), title=plain_words(m_hover),
                            className="cell-estimated" if est else None)
-                 if mark is not None else missing_cell(leg.get("mark_reason") or "no mark"))
+                 if mark is not None else missing_cell(_lines(leg.get("mark_reason") or "no mark",
+                                                              "" if unrec else m_hover)))
     daily = fill_sum(data, "daily", ids)
     ltd = fill_sum(data, "ltd", ids)
     local = None
-    if not rows.empty and leg.get("currency") not in ("", "USD"):
+    if not rows.empty and leg.get("currency") not in ("", "USD") and "pnl_local" in rows:
         loc = [(_num(v), "") for v in rows["pnl_local"]]
         local = sum_known(loc)[0]
     realised = sum_known((_num(v), "") for v, s in zip(rows.get("pnl_usd", []), rows.get("status", [])) if s == "SETTLED")[0] \
@@ -893,14 +1023,21 @@ def leg_tr(data: dict, leg: dict, level_note: str, prev_rows: Dict[str, dict]) -
                   tf.research_mark(data.get("research") or {})] if roll is not None
                  else missing_cell(leg.get("roll_down_reason") or "no roll-down"))
     side = str(leg.get("side") or "")
+    name = str(leg.get("name") or leg.get("contract_id") or "")
+    if unrec:
+        name_cell = html.Span([name, html.Span(" not recognised", className="tk-red")],
+                              title=plain_words(_lines(leg.get("unrecognised_reason") or "contract not recognised",
+                                                       _leg_hover(data, leg))))
+    else:
+        name_cell = html.Span(name + (" (hedge)" if hedge else ""), title=plain_words(_leg_hover(data, leg)))
     return html.Tr([
-        html.Td(html.Span(str(leg.get("name") or leg.get("contract_id") or "") + (" (hedge)" if hedge else ""),
-                          title=plain_words(_leg_hover(data, leg))), className="l"),
+        html.Td(name_cell, className="l"),
         html.Td(side, className="l"),
         html.Td(html.Span(lots_text, title=plain_words(lots_hover))),
         html.Td(value_cell), html.Td(fill_cell), html.Td(mark_cell),
         full_td(daily), full_td(ltd, ltd_hover), html.Td(roll_cell),
-    ], className="tk-leg" + (" tk-leg--hedge" if hedge else "") + (" tk-leg--flat" if side == "flat" else ""))
+    ], className="tk-leg" + (" tk-leg--hedge" if hedge else "") + (" tk-leg--flat" if side == "flat" else "")
+       + (" tk-leg--unrec" if unrec else ""))
 
 
 def _leg_head() -> html.Thead:
@@ -929,7 +1066,7 @@ def _leg_order(t: dict) -> List[dict]:
     return sorted(t.get("legs") or [], key=key)
 
 
-def panel_legs(data: dict, t: dict, prev_rows: Dict[str, dict]) -> html.Table:
+def panel_legs(data: dict, t: dict) -> html.Table:
     level = t.get("level") or {}
     note = str(level.get("note") or "")
     legs = _leg_order(t)
@@ -947,17 +1084,17 @@ def panel_legs(data: dict, t: dict, prev_rows: Dict[str, dict]) -> html.Table:
             what = str(sub.get("what_it_is") or "")
             kind = tf.type_label(sub.get("type") or "").lower()
             body.append(_sub_tr(what if kind.split("-")[0] in what.lower() else f"{what} · {kind}", ids, data))
-            body.extend(leg_tr(data, leg, note, prev_rows) for leg in mine)
+            body.extend(leg_tr(data, leg, note) for leg in mine)
         rest = [leg for leg in legs if not leg.get("hedge") and leg.get("contract_id") not in taken]
         if rest:
             body.append(_sub_tr("Other legs", [str(i) for leg in rest for i in leg.get("trade_ids") or []], data))
-            body.extend(leg_tr(data, leg, note, prev_rows) for leg in rest)
+            body.extend(leg_tr(data, leg, note) for leg in rest)
     else:
-        body.extend(leg_tr(data, leg, note, prev_rows) for leg in legs if not leg.get("hedge"))
+        body.extend(leg_tr(data, leg, note) for leg in legs if not leg.get("hedge"))
     hedges = [leg for leg in legs if leg.get("hedge")]
     if hedges:
         body.append(_sub_tr("Hedge", [str(i) for leg in hedges for i in leg.get("trade_ids") or []], data))
-        body.extend(leg_tr(data, leg, note, prev_rows) for leg in hedges)
+        body.extend(leg_tr(data, leg, note) for leg in hedges)
     ids = [str(i) for i in t.get("trade_ids") or []]
     carry = _num(t.get("carry_per_month"))
     carry_cell = (html.Span(full_signed(carry), title=plain_words(tf.research_words(data.get("research") or {})) or None)
@@ -1097,21 +1234,13 @@ def panel_tr(conn: sqlite3.Connection, data: dict, t: dict) -> html.Tr:
     flags = t.get("flags") or []
     parts: List[Any] = []
     if flags:
-        parts.append(html.Div([html.Div(f"{f.get('label')}: {f.get('sentence')}", className="tk-flag-line")
-                               for f in flags], className="tk-flag-lines"))
+        parts.append(html.Div([html.Div(flag_sentence(f), className="tk-flag-line" + (" tk-flag-line--red" if is_red(f) else ""))
+                               for f in sorted(flags, key=lambda f: not is_red(f))], className="tk-flag-lines"))
     if t.get("pseudo"):
         parts.append(pseudo_fills(data, t))
     else:
-        prev_day = str((t.get("level") or {}).get("prev_date") or ((t.get("pnl") or {}).get("ref_dates") or {}).get("daily") or "")
-        prev_rows: Dict[str, dict] = {}
-        if prev_day:
-            try:
-                from ui.tabs.blotter_pricing import priced_value_book
-                prev_rows = {str(r["trade_id"]): r for r in priced_value_book(conn, prev_day)[0].to_dict("records")}
-            except Exception:  # noqa: BLE001 -- the hover says the previous close is not on file
-                prev_rows = {}
         parts.append(html.Div(className="tk-panel-body", children=[
-            html.Div([panel_legs(data, t, prev_rows), panel_facts(t)], className="tk-panel-legs"),
+            html.Div([panel_legs(data, t), panel_facts(t)], className="tk-panel-legs"),
             panel_chart(conn, data, t)]))
     n = len(t.get("trade_ids") or [])
     parts.append(html.Div(className="tk-links", children=[
@@ -1245,8 +1374,11 @@ def headline(data: dict, state: Optional[dict]) -> html.Div:
         ("Gross USD", notional("gross"), "the rows' gross USD notional, summed"),
         ("Net USD", notional("net"), "the rows' net USD notional, summed"),
         ("Next", nx_value, nx_hover),
-        ("Flags", html.Span(_plural(flags, "flag"), className="cell-amber" if flags else None),
-         "flags on the rows showing: unbalanced, hedge oversized, type mismatch, a leg without a price"),
+        ("Flags", html.Span([_plural(flags, "flag"),
+                             html.Span(f" · {len(tot['red_flags'])} red", className="tk-red") if tot["red_flags"] else None],
+                            className=("cell-red" if tot["red_flags"] else "cell-amber") if flags else None),
+         _lines("flags on the rows showing: unbalanced, hedge oversized, type mismatch, a leg without a price; red: a "
+                "contract not recognised (its P&L can't be computed until it is mapped)", *tot["red_flags"][:8])),
     ])
 
 
@@ -1275,16 +1407,19 @@ def csv_frame(data: dict, state: Optional[dict], sort: Optional[dict], risk: Opt
     rows = []
     for t in sort_rows(data, visible(data, state), sort, rrows):
         ids = [str(i) for i in t.get("trade_ids") or []]
-        level = t.get("level") or {}
+        level = display_level(data, t)
         r = rrows.get(str(t.get("trade"))) or {}
         nx = t.get("next") or {}
+        closed = t.get("closed") if t.get("status") == "closed" else None
         rows.append({
-            "Trade": t.get("trade"), "Status": t.get("status"), "Type": tf.type_label(tf.type_code(t)),
+            "Trade": t.get("trade"), "Status": t.get("status"), "Type": tf.trade_type_label(t),
             "Commodity": tf.family_label(t), "What it is": t.get("what_it_is"), "Size": size_text(t)[0],
             "Gross USD": t.get("gross_usd"), "Net USD": t.get("net_usd"),
             "Value gap": (t.get("size") or {}).get("value_gap"),
             "Entry": level.get("entry"), "Now": level.get("now"), "Previous close level": level.get("prev"),
-            "Today": level.get("change"), "Level unit": level.get("unit"),
+            "Today": level.get("change"), "Level unit": level.get("unit"), "Level mode": level.get("mode"),
+            "Move in sigma": r.get("move_sigma"), "Level daily sd": r.get("level_sd"),
+            "Closed on": (closed or {}).get("close_date"), "Exit basis": (closed or {}).get("exit_basis"),
             "USD per 1 unit of the level": level.get("usd_per_unit"),
             "z": r.get("z"), "Percentile": r.get("percentile"), "z at entry": r.get("z_entry"),
             "Hedge %": r.get("hedge_pct"), "Leg correlation": r.get("leg_correlation"),
@@ -1292,7 +1427,9 @@ def csv_frame(data: dict, state: Optional[dict], sort: Optional[dict], risk: Opt
             "YTD": fill_sum(data, "ytd", ids)[0], "LTD": fill_sum(data, "ltd", ids)[0],
             "Carry per month": t.get("carry_per_month"), "Hedge coverage": (t.get("hedge") or {}).get("coverage"),
             "Next event": nx.get("event"), "Next date": nx.get("date"), "Next estimated": nx.get("estimated"),
-            "Flags": "; ".join(f"{f.get('label')}: {f.get('sentence')}" for f in t.get("flags") or []),
+            "Flags": "; ".join(("RED " if is_red(f) else "") + flag_sentence(f) for f in t.get("flags") or []),
+            "Unrecognised fills": " ".join(str(i) for leg in t.get("legs") or [] if leg.get("unrecognised")
+                                           for i in leg.get("trade_ids") or []),
             "PBRoot": ", ".join(t.get("pb_roots") or []), "Fills": len(ids), "Trade ids": " ".join(ids),
         })
     return pd.DataFrame(rows)

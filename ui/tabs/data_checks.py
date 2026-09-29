@@ -320,12 +320,41 @@ def pull_problems(status: Optional[dict]) -> List[dict]:
     return out
 
 
+def unrecognised_problems(unrecognised: Optional[List[dict]]) -> Tuple[List[dict], set]:
+    """(one red problem per symbol the parser could not identify, the trade ids they cover) from
+    `data.bloomberg.inventory.unrecognised(conn)`: the trade is on file (every row loads) with no
+    P&L until the symbol is added to the contract list; the trades on hover."""
+    by_symbol: Dict[str, List[dict]] = {}
+    for u in unrecognised or []:
+        by_symbol.setdefault(str(u.get("broker_symbol") or u.get("instrument_id") or "?"), []).append(u)
+    out, covered = [], set()
+    for sym, items in sorted(by_symbol.items()):
+        covered.update(str(u.get("trade_id")) for u in items)
+        reasons = list(dict.fromkeys(str(u.get("reason") or "") for u in items if u.get("reason")))
+        blocks = list(dict.fromkeys(str(u.get("blocks_what") or "") for u in items if u.get("blocks_what")))
+        trades = [f"{u.get('trade_id')} ({u.get('trade_name') or 'no trade name'}, {u.get('trade_date')}, "
+                  f"{_num(u.get('quantity')) if _num(u.get('quantity')) is not None else '?'} at "
+                  f"{u.get('price')})" for u in items]
+        names = sorted({str(u.get("trade_name") or "") for u in items} - {""})
+        out.append(_problem("red", "Not recognised", sym,
+                            plain_words(reasons[0]) if reasons else "contract not recognised",
+                            (plain_words(blocks[0]) if blocks else "no P&L: contract not recognised")
+                            + (f" · {', '.join(names)}" if names else ""),
+                            price_tip=f"the file's symbol as written; {len(items)} trade(s)",
+                            problem_tip="; ".join(reasons), blocks_tip="Trades: " + "; ".join(trades), rank=0.5))
+    return out, covered
+
+
 def problem_rows(mark_records: List[dict], status: Optional[dict], unpriced: Dict[str, Tuple[str, str]],
-                 as_of: str, today: str) -> List[dict]:
-    """Every problem: the missing and flagged marks (missing first), the pull's and the backfill's
-    failures, and the trades left out of the P&L that no listed mark explains; red before amber."""
+                 as_of: str, today: str, unrecognised: Optional[List[dict]] = None) -> List[dict]:
+    """Every problem: the missing and flagged marks (missing first), the contracts the parser could
+    not identify (`unrecognised`, red), the pull's and the backfill's failures, and the trades left
+    out of the P&L that nothing above explains; red before amber."""
     out: List[dict] = []
     covered: set = set()
+    unrec, unrec_ids = unrecognised_problems(unrecognised)
+    out += unrec
+    covered |= unrec_ids
     for r in mark_records:
         if r["status"] not in ("MISSING", "CHECK"):
             continue
@@ -352,7 +381,8 @@ def problem_rows(mark_records: List[dict], status: Optional[dict], unpriced: Dic
 
 PROBLEM_COLUMNS: Tuple[kit.Column, ...] = (
     ("label", "Status", "l", "Missing: no official price for the date. Check: a price arrived but failed a check. "
-                             "Failed / Partial: a step of the last pull. No P&L: a trade nothing can price.", True),
+                             "Failed / Partial: a step of the last pull. No P&L: a trade nothing can price. Not recognised: a "
+                             "row of the blotter whose contract the app does not know (on file, no P&L until mapped).", True),
     ("price", "Price", "l", "The price with its exchange, or the pull step.", True),
     ("problem", "Problem", "l", "What is wrong, in plain words; the full sentence on hover.", True),
     ("blocks", "What it blocks", "l", "What the problem does to the book's figures, and which trades.", True),

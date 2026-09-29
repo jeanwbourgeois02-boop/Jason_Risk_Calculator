@@ -384,8 +384,13 @@ def _trade_risk_compute(conn: sqlite3.Connection, as_of: str):
         curve = shared_curve(conn, as_of)
     except Exception:  # noqa: BLE001
         curve = None
+    try:
+        # the Book's own trades: each trade's level is then THE level, and its move gives move_sigma
+        book = shared_trade_book(conn, as_of)
+    except Exception:  # noqa: BLE001 -- move_sigma then says the level move was not passed
+        book = None
     with pricing_snapshot(conn, "Trade risk"):
-        return trade_risk(conn, as_of, spreads=spreads, curve=curve)
+        return trade_risk(conn, as_of, spreads=spreads, curve=curve, trade_book=book)
 
 
 def shared_trade_risk(conn: sqlite3.Connection, as_of: str, wait: bool = True) -> Optional[dict]:

@@ -259,7 +259,12 @@ def _base(conn: sqlite3.Connection, as_of: str) -> dict:
             data["errors"].append((title, f"could not be built ({type(exc).__name__}: {exc})"))
     try:
         from engine.spreads import scorecard
-        data["scorecard"] = scorecard(conn, as_of, series=series, spreads=data["spreads"])
+        try:
+            from ui.tabs.blotter_pricing import shared_trade_book
+            tb = shared_trade_book(conn, as_of) if data["spreads"] is not None else None
+        except Exception:  # noqa: BLE001 -- the scorecard then reads the rule types itself
+            tb = None
+        data["scorecard"] = scorecard(conn, as_of, series=series, spreads=data["spreads"], trades=tb)
     except Exception as exc:  # noqa: BLE001
         log.exception("P&L tab: the scorecard failed for %s", as_of)
         data["scorecard"] = None
@@ -530,7 +535,7 @@ def table(b: dict, p: dict, state: Optional[dict], mode: str, opened: Sequence[s
             is_open = key in opened
             first = [html.Td([html.Span("▾ " if is_open else "▸ ", className="tk-chev"), html.Span(value, className="tk-name")],
                              className="l"),
-                     html.Td(tf.type_label(tf.type_code(t), short=True) if not t.get("pseudo") else "", className="l")]
+                     html.Td(tf.trade_type_label(t, short=True) if not t.get("pseudo") else "", className="l")]
             body.append(html.Tr(first + _cells(p, b, ids, cols, grand, mode, months), id=_row_id(key), n_clicks=0,
                                 className="tk-row" + (" tk-row--open" if is_open else "")))
             if is_open:
@@ -647,6 +652,73 @@ def chart(b: dict, p: dict, state: Optional[dict]) -> Any:
 
 
 # --------------------------------------------------------------------------- the track record
+def _days(v: Any) -> str:
+    n = _num(v)
+    return MISSING if n is None else f"{n:.0f}"
+
+
+def hold_text(closed: dict) -> str:
+    """'12 / 30': the engine's median holding days of the closed winners / losers (a dash for a
+    side with none)."""
+    hw, hl = closed.get("median_hold_days_win"), closed.get("median_hold_days_loss")
+    if _num(hw) is None and _num(hl) is None:
+        return MISSING
+    return f"{_days(hw)} / {_days(hl)}"
+
+
+def hold_hover(closed: dict) -> str:
+    parts = []
+    for side, key in (("winners", "win"), ("losers", "loss")):
+        med, avg = _num(closed.get(f"median_hold_days_{key}")), _num(closed.get(f"avg_hold_days_{key}"))
+        parts.append(f"{side}: median {_days(med)}, average {_days(avg)} days" if med is not None
+                     else f"{side}: none closed")
+    return _lines(*parts)
+
+
+BY_TYPE_COLUMNS = (("type", "Type", "l", "The trade's type by rule from its legs, as on the Book."),
+                   ("closed", "Closed", "", "Trades of this type that are flat."),
+                   ("win", "Win rate", "", "Closed winners over closed trades of the type (a scratch within a few "
+                                           "dollars counts as neither)."),
+                   ("avg", "Avg win / loss", "", "Average P&L of the closed winners / losers of the type."),
+                   ("hold", "Hold days win / loss", "", "Median holding days of the closed winners / losers."),
+                   ("closed_pnl", "Closed P&L", "", "The closed trades' P&L, summed (LTD on the as-of)."),
+                   ("open", "Open", "", "Trades of this type still open."),
+                   ("open_pnl", "Open P&L", "", "The open trades' LTD, summed."))
+
+
+def by_type_table(sc: dict) -> Optional[html.Table]:
+    """The track record by the trade-book rule type (`scorecard`'s `by_type`: Calendar,
+    Cross-exchange, Cross-product, Mixed, Outright), each type's closed and open summary as the
+    engine gives it."""
+    by = sc.get("by_type") or {}
+    if not by:
+        return None
+    order = {c: n for n, c in enumerate(tf.TYPE_ORDER)}
+    rows = []
+    for code in sorted(by, key=lambda c: (order.get(c, 99), c)):
+        summ = by[code] or {}
+        c, o = summ.get("closed") or {}, summ.get("open") or {}
+        excl = len(c.get("excluded") or []) + len(o.get("excluded") or [])
+        why = _lines(*(f"{pid}: {w}" for pid, w in (list(c.get("excluded") or []) + list(o.get("excluded") or []))[:8]))
+        avg = (html.Span([km_cell(c.get("avg_win")), " / ", km_cell(c.get("avg_loss"))])
+               if c.get("count") else missing_cell("no closed trade of this type"))
+        rows.append(html.Tr([
+            html.Td(tf.type_label(code) if code else html.Span("Not typed", title="hedges only, or legs the app does "
+                                                                                    "not recognise"), className="l"),
+            html.Td(str(c.get("count") or 0)),
+            html.Td(pct_text(c.get("win_rate")) if _num(c.get("win_rate")) is not None
+                    else missing_cell("no closed trade of this type")),
+            html.Td(avg),
+            html.Td(hold_text(c) if c.get("count") else missing_cell("no closed trade of this type"),
+                    title=plain_words(hold_hover(c)) if c.get("count") else None),
+            html.Td(km_cell(c.get("total")) if c.get("count") else missing_cell("no closed trade of this type")),
+            html.Td([str(o.get("count") or 0), marker(f"excl. {excl}", why, "marker--small") if excl else None]),
+            html.Td(km_cell(o.get("unrealised_usd")) if o.get("count") else missing_cell("no open trade of this type")),
+        ]))
+    head = html.Thead(html.Tr([html.Th(t, className=c or None, title=h) for _k, t, c, h in BY_TYPE_COLUMNS]))
+    return html.Table([head, html.Tbody(rows)], className="book-table tk-table tk-small pnl-by-type")
+
+
 def track_block(b: dict, as_of: str) -> html.Details:
     tr = b.get("track")
     items: List[Any] = []
@@ -681,26 +753,12 @@ def track_block(b: dict, as_of: str) -> html.Details:
         item("Average win / loss", html.Span([km_cell(closed.get("avg_win")), " / ", km_cell(closed.get("avg_loss"))]))
         payoff = _num(closed.get("payoff_ratio"))
         item("Payoff", f"{payoff:.2f}" if payoff is not None else MISSING, "average win over average loss")
-        hw, hl = _num(closed.get("avg_hold_days_win")), _num(closed.get("avg_hold_days_loss"))
-        item("Holding days, winners / losers",
-             f"{hw:.0f} / {hl:.0f}" if hw is not None and hl is not None else MISSING,
-             "average holding days (the engine gives averages, not medians)")
+        item("Holding days, winners / losers", hold_text(closed),
+             _lines("median holding days of the closed winners / losers (calendar days from the first fill to "
+                    "the day the trade went flat)", hold_hover(closed)))
     else:
         item("Closed trades", "none yet", "the win rate needs a closed trade")
-    by = sc.get("by_spread_type") or {}
-    rows = []
-    for code, summ in sorted(by.items()):
-        c = (summ or {}).get("closed") or {}
-        o = (summ or {}).get("open") or {}
-        rows.append(html.Tr([html.Td(tf.type_label({"TERM_STRUCTURE": "CALENDAR"}.get(code, code)) if code else "No type",
-                                     className="l"),
-                             html.Td(str(c.get("count") or 0)), html.Td(pct_text(c.get("win_rate"))),
-                             html.Td(km_cell(c.get("total"))), html.Td(str(o.get("count") or 0)),
-                             html.Td(km_cell(o.get("unrealised_usd")))]))
-    type_table = (html.Table([html.Thead(html.Tr([html.Th("Type (the PBRoot's)", className="l"), html.Th("Closed"),
-                                                  html.Th("Win rate"), html.Th("Closed P&L"), html.Th("Open"),
-                                                  html.Th("Open P&L")])), html.Tbody(rows)],
-                             className="book-table tk-table tk-small") if rows else None)
+    type_table = by_type_table(sc)
     return html.Details([html.Summary(about("Track record", "The whole book since the first trade: each day by the "
                                                             "header's own Daily rule; win rate over the closed trades.",
                                             level="span")),
@@ -732,7 +790,7 @@ def csv_frame(b: dict, p: dict, state: Optional[dict], mode: str) -> pd.DataFram
         for t in trades:
             for leg in t.get("legs") or []:
                 ids = [str(i) for i in leg.get("trade_ids") or []]
-                row = {"Slice": value, "Trade": t.get("trade"), "Type": tf.type_label(tf.type_code(t)),
+                row = {"Slice": value, "Trade": t.get("trade"), "Type": tf.trade_type_label(t),
                        "Commodity": tf.family_label(t), "Leg": leg.get("name"), "Hedge": bool(leg.get("hedge")),
                        "Period": p.get("title"), "From close": p.get("ref_used") or p.get("start_ref"),
                        "To": p.get("end")}

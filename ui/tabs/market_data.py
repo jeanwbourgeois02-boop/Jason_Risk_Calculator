@@ -1416,33 +1416,50 @@ def period_only_rows(conn: sqlite3.Connection, as_of: str, df_today: pd.DataFram
     return out
 
 
-UPLOAD_ISSUES_TITLE = "Rows of the blotter file that did not become trades"
+UPLOAD_ISSUES_TITLE = "Rows of the blotter file that need a fix"
 UPLOAD_ISSUES_TABLE_ID = "market-data-upload-issues-table"
+UPLOAD_KIND_WORDS = {"UNRECOGNISED": "needs a fix: on file, no P&L", "WARNING": "loaded, with a warning",
+                     "REJECTED": "not loaded: could not be read", "NOT LOADED": "not loaded: a kind the app skips"}
 
 
 def upload_issue_rows(conn: sqlite3.Connection) -> List[dict]:
+    """The last upload's rows that need the user (`data.ingest.upload.last_upload_issues`): kind
+    UNRECOGNISED (on file as a trade, P&L blank until the contract is mapped: every row loads,
+    2026-09-29), WARNING (loaded on the primary field), REJECTED / NOT LOADED (an older upload's
+    rows that did not become trades); the needs-a-fix rows first."""
     try:
-        found = conn.execute("SELECT row_no, symbol, kind, reason, filename, uploaded_at FROM upload_issues "
-                             "ORDER BY row_no").fetchall()
-    except sqlite3.Error:      # no upload since this panel was added: no table yet
-        return []
-    return [{"row_no": n, "symbol": sym, "kind": kind, "reason": why, "filename": name, "uploaded_at": at,
-             "flag": "x"} for n, sym, kind, why, name, at in found]
+        from data.ingest.upload import last_upload_issues
+        found = last_upload_issues(conn)
+    except Exception:  # noqa: BLE001 -- an older database or a reader mid-change: the table as it is
+        try:
+            found = [{"row_no": n, "symbol": sym, "kind": kind, "reason": why, "filename": name, "uploaded_at": at,
+                      "trade_id": ""} for n, sym, kind, why, name, at in conn.execute(
+                "SELECT row_no, symbol, kind, reason, filename, uploaded_at FROM upload_issues ORDER BY row_no")]
+        except sqlite3.Error:      # no upload since this panel was added: no table yet
+            return []
+    rank = {"UNRECOGNISED": 0, "REJECTED": 1, "NOT LOADED": 2, "WARNING": 3}
+    rows = [{"row_no": r.get("row_no"), "symbol": r.get("symbol"), "kind": UPLOAD_KIND_WORDS.get(str(r.get("kind")),
+                                                                                                  str(r.get("kind") or "")),
+             "code": str(r.get("kind") or ""), "trade_id": str(r.get("trade_id") or ""), "reason": r.get("reason"),
+             "filename": r.get("filename"), "uploaded_at": r.get("uploaded_at"), "flag": "x"} for r in found]
+    return sorted(rows, key=lambda r: (rank.get(r["code"], 9), r["row_no"] or 0))
 
 
 def upload_issues_panel(conn: sqlite3.Connection) -> html.Div:
-    """What the last upload left out of the book entirely, row by row, with the parser's own
-    reason -- these are not in any table or count elsewhere in the app."""
+    """What the last upload could not price or read, row by row, with the parser's own reason: a
+    row that needs a fix is on file as a trade (every row loads) with blank P&L until its contract
+    is mapped; a warning loaded on the primary field."""
     rows = upload_issue_rows(conn)
-    about_text = ("Rows of your blotter file that are NOT in the book: no P&L, no position, not in any count. "
-                  "REJECTED = the row could not be read; NOT LOADED = a type the app does not handle yet.")
+    about_text = ("Rows of your blotter file that need you. Needs a fix: on file as a trade, its P&L blank until the "
+                  "contract is mapped (red on the Book and the Blotter). Warning: loaded, but two cells disagreed or "
+                  "one was doubtful. Not loaded: an older upload's row that did not become a trade.")
     if not rows:
-        return _quiet(UPLOAD_ISSUES_TITLE, "none on file: every row of the last upload became a trade (or no blotter "
-                                           "has been uploaded since this list was added; upload the file again to "
-                                           "fill it).", about_text)
+        return _quiet(UPLOAD_ISSUES_TITLE, "none on file: every row of the last upload loaded cleanly (or no blotter "
+                                           "has been uploaded since this list was added).", about_text)
     return _panel(f"{UPLOAD_ISSUES_TITLE} · {len(rows)} in {rows[0]['filename']}", [
         _panel_table(UPLOAD_ISSUES_TABLE_ID,
-                     [("File row", "row_no"), ("Symbol", "symbol"), ("What happened", "kind"), ("Why", "reason")],
+                     [("File row", "row_no"), ("Symbol", "symbol"), ("Trade Id", "trade_id"), ("What happened", "kind"),
+                      ("Why", "reason")],
                      rows, wide=("reason",), numeric=("row_no",)),
     ], about_text=about_text)
 
@@ -1956,7 +1973,15 @@ def render(as_of_date: Optional[str], db_path) -> tuple:
             left = df_today[df_today["reason"] != ""]
             unpriced = {str(t): (ctx[2].get(str(t), str(t)), str(r)) for t, r in zip(left["trade_id"], left["reason"])}
         try:
-            problems = data_checks.problem_rows(mark_rows, feed_status, unpriced, as_of_date, today)
+            from data.bloomberg.inventory import unrecognised as read_unrecognised
+            unrec = read_unrecognised(conn)
+        except Exception as exc:  # noqa: BLE001 -- the problems still list the rest
+            log.exception("Data tab: the unrecognised trades could not be read")
+            unrec = []
+            issues.append((PROBLEMS_TITLE, f"The trades whose contract is not recognised could not be listed "
+                                           f"({type(exc).__name__}: {exc})."))
+        try:
+            problems = data_checks.problem_rows(mark_rows, feed_status, unpriced, as_of_date, today, unrec)
         except Exception as exc:  # noqa: BLE001
             log.exception("Data tab: the problems failed for %s", as_of_date)
             problems = []

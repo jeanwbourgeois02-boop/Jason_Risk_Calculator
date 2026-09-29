@@ -129,6 +129,24 @@ def build_tab_bodies(selected) -> list:
     return children + styles
 
 
+def _reresolve_unrecognised(conn: sqlite3.Connection) -> None:
+    """Every row loads (hard rule 6, 2026-09-29): a trade on file whose contract was not
+    recognised is tried again through the parser at start-up (`data.ingest.upload.
+    reresolve_unrecognised`, which never raises), so a fix to the contract list prices it with no
+    re-upload. Only when such a trade exists; one line printed when something changed."""
+    try:
+        if not conn.execute("SELECT 1 FROM trades WHERE product = 'UNRECOGNISED' LIMIT 1").fetchone():
+            return
+        from data.ingest.upload import reresolve_unrecognised
+        out = reresolve_unrecognised(conn) or {}
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 -- a start-up never fails on it: the trades stay as they are
+        print(f"re-resolution of unrecognised trades skipped ({type(exc).__name__}: {exc})", flush=True)
+        return
+    if out.get("resolved") or out.get("error"):
+        print(out.get("sentence") or f"re-resolution: {out.get('error')}", flush=True)
+
+
 def ensure_schema(path: Union[str, Path]) -> None:
     """Make sure the database and the Bloomberg status file exist so a fresh computer
     can launch with nothing copied across. Creates an EMPTY database with the schema
@@ -152,6 +170,7 @@ def ensure_schema(path: Union[str, Path]) -> None:
             purged = schema.purge_retired_sources(conn)
             if any(purged.values()):
                 print(f"purged retired BNP/workbook data from {p}: {purged}", flush=True)
+            _reresolve_unrecognised(conn)
         finally:
             conn.close()
         if created:

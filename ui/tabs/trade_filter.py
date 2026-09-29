@@ -105,6 +105,20 @@ def type_label(code: str, short: bool = False) -> str:
     return (TYPE_SHORT if short else TYPE_WORDS).get(str(code or ""), str(code or "").replace("_", " ").capitalize())
 
 
+NOT_TYPED = "Not typed"
+
+
+def trade_type_label(trade: dict, short: bool = False) -> str:
+    """The trade's type in words; 'Not typed' for a trade whose only legs are contracts the app
+    does not recognise (the engine's type '' there means "not typed until they are mapped", not
+    "hedges only"; every row loads, 2026-09-29)."""
+    code = type_code(trade)
+    legs = trade.get("legs") or []
+    if not code and any(leg.get("unrecognised") for leg in legs) and not any(leg.get("hedge") for leg in legs):
+        return NOT_TYPED
+    return type_label(code, short=short)
+
+
 def family_label(trade: dict) -> str:
     """The trade's commodity family in words ('Copper', 'Ferrous', 'Cross-product', 'FX'); 'Other'
     when the engine gives none."""
@@ -155,7 +169,7 @@ def apply(trades: Iterable[dict], state: Optional[dict]) -> List[dict]:
 def group_of(trade: dict, group: str) -> str:
     """The group label a trade is shown under ('' when not grouped)."""
     if group == GROUP_BY_TYPE:
-        return type_label(type_code(trade))
+        return trade_type_label(trade)
     if group == GROUP_BY_COMMODITY:
         return family_label(trade)
     return ""

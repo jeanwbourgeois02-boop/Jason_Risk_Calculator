@@ -9,8 +9,7 @@ What is read, never recomputed:
     lots, physical units and USD, and the trades on it. The fold sums the rows of the trades
     showing per commodity and per sign (display); a contract two trades share is counted only
     when both are showing, else left out with its reason ("excl. N"): the engine does not split
-    a contract's delta per trade. "USD per 1 % move" is the engine's delta USD over 100 (the same
-    figure per 1 % of the price, not a new one);
+    a contract's delta per trade. "USD per 1 % move" is the engine's own `usd_per_pct` per row;
   - `engine.spreads.trade_book` (`shared_trade_book`): the leftover per leg (USD per 1 % move),
     the currency hedge per trade (exposure, hedge, coverage) and the legs' USD values;
   - `engine.stress.commodity_stress` on the same positions and spreads: each scenario's P&L per
@@ -41,7 +40,6 @@ FUTURE, OPTION, LME = "FUTURE", "CMDTY_OPTION", "LME_FWD"
 FX_SECTOR = "fx"
 SECTOR_ORDER = ("energy", "metals", "agriculture", "ferrous", "softs", "livestock")
 CHINA_CCYS = ("CNY", "CNH")
-PCT = 0.01                               # USD per 1 % move = the engine's delta USD x 1 %
 STRESS_SHOWN = 5
 
 FOLD_TYPE = "risk-fold"                  # a fold's title: {"type", "idx": fold key}
@@ -52,7 +50,7 @@ UNITS = (("lots", "Lots"), ("usd", "USD"), ("physical", "Physical"))
 DEFAULT_UNIT = "lots"
 
 NET_ABOUT = ("The book's exposure by commodity across exchanges, from the trades showing: long and short in USD per 1 % "
-             "move of the price (the engine's delta USD over 100; lots and physical units on hover), net, the part of "
+             "move of the price (the engine's USD per 1 % move; lots and physical units on hover), net, the part of "
              "the net that no spread covers (leftover) and gross. Click a commodity for its months and curves.")
 GRID_ABOUT = ("One row per exchange of the commodity, one column per contract month held (months more than 12 months "
               "out added under Later), then Net. Every product at its delta: an option at its official delta, an LME "
@@ -228,15 +226,16 @@ def _leftover_by_sub(ctx: dict) -> Dict[str, dict]:
 
 
 def _side_sums(rows: Sequence[dict]) -> dict:
-    """Long, short, net and gross of the rows in USD per 1 % (the delta USD summed by sign, x 1 %),
-    each with its excluded count and reasons; lots and physical per sign for the hover."""
+    """Long, short, net and gross of the rows in USD per 1 % move (the engine's `usd_per_pct` of
+    each row, summed by sign: display), each with its excluded count and reasons; lots and
+    physical per sign for the hover."""
     longs, shorts, whys = [], [], []
     for r in rows:
-        d = _num(r.get("delta_usd"))
+        d = _num(r.get("usd_per_pct"))
         if d is None:
-            whys.append(f"{r.get('contract_id')}: {r.get('reason') or 'no USD delta (no price or conversion)'}")
+            whys.append(f"{r.get('contract_id')}: {r.get('usd_per_pct_reason') or r.get('reason') or 'no USD figure (no price or conversion)'}")
             continue
-        (longs if d > 0 else shorts).append(d * PCT)
+        (longs if d > 0 else shorts).append(d)
     n = len(whys)
     long_v = float(sum(longs)) if longs or not n else None
     short_v = float(sum(shorts)) if shorts or not n else None
@@ -382,8 +381,8 @@ def _months(rows: Sequence[dict], as_of: str) -> Tuple[List[str], List[str]]:
 
 def _unit_value(r: dict, unit: str) -> Tuple[Optional[float], str]:
     if unit == "usd":
-        d = _num(r.get("delta_usd"))
-        return (None if d is None else d * PCT), (r.get("reason") or "no USD delta (no price or conversion)")
+        return _num(r.get("usd_per_pct")), (r.get("usd_per_pct_reason") or r.get("reason")
+                                             or "no USD figure (no price or conversion)")
     if unit == "physical":
         return _num(r.get("delta_units")), (r.get("reason") or "no physical figure")
     return _num(r.get("delta_lots")), (r.get("reason") or "no delta in lots")
@@ -753,7 +752,7 @@ CCY_COLUMNS = (("ccy", "Currency", "l", "The currency the legs are priced in (CN
                                             "over 150 %."))
 
 
-def currency_fold(ctx: dict, is_open: bool) -> html.Div:
+def currency_fold(ctx: dict, is_open: bool, conn: Optional[sqlite3.Connection] = None) -> html.Div:
     lines = currency_lines(ctx)
     china = next((line for line in lines if line["china"]), None)
     count: Any = (f"{len(lines)} {'currency' if len(lines) == 1 else 'currencies'}" if lines else "USD only")
@@ -781,22 +780,312 @@ def currency_fold(ctx: dict, is_open: bool) -> html.Div:
                     _coverage_td(line["coverage"], line["china"], line["ccy"])]))
             body.append(html.Div(html.Table([head, html.Tbody(rows)], className="book-table book-grid tk-table risk-ccy-table"),
                                  className="tk-table-slot"))
+        if conn is not None:
+            pos, err = book_positions(conn, ctx["as_of"])
+            body.append(fx_positions_block(pos, err, ctx["filtered"]))
     return fold(FOLD_CCY, "Currency", count, CCY_ABOUT, is_open, body)
 
 
+# --------------------------------------------------------------------------- FX forwards (the Currency fold)
+FX_POS_ABOUT = ("The whole book's currency delta at the day's official spot (book-positions): FX forwards' and spot legs "
+                "still to settle, FX options at their delta, an LME ticket's USD leg. Net USD is the USD position "
+                "(+ = long USD), gross the sum of each pair's USD delta. A futures leg is not currency delta: it is in "
+                "the table above. Not split per trade.")
+METAL_UNITS = {"XAU": "oz", "XAG": "oz", "XPT": "oz", "XPD": "oz"}
+
+
+def book_positions(conn: sqlite3.Connection, as_of: str) -> Tuple[Optional[dict], str]:
+    """(`engine.ladder.positions.book_positions`, why None): the FX net / gross USD delta, the
+    delta by currency and the FX options' USD delta by pair, once per database revision."""
+    from ui.tabs.blotter_pricing import screen_memo
+    try:
+        from engine.ladder.positions import book_positions as build
+        return screen_memo("risk-book-positions", conn, as_of, lambda: build(conn, as_of)), ""
+    except Exception as exc:  # noqa: BLE001 -- the fold says why
+        log.exception("risk: book positions failed for %s", as_of)
+        return None, f"the currency delta could not be built ({type(exc).__name__}: {exc})"
+
+
+def _local_text(v: Optional[float]) -> str:
+    if v is None:
+        return NA
+    text = km_text(v)
+    return text
+
+
+def fx_positions_block(pos: Optional[dict], error: str, filtered: bool) -> html.Div:
+    """The FX forwards and options by currency: one row per currency (local delta, USD delta), then
+    the Net USD line in words with the gross beside it and any metal reported apart. The engine's
+    `fx.net_usd` is already the USD position (+ = long USD: book-positions negates
+    `portfolio_totals`' net non-USD delta once); shown as it is, never negated here."""
+    head = html.Div([about("FX forwards and options", FX_POS_ABOUT, level="span", className="risk-fold-title"),
+                     html.Span(" · whole book, not split per trade" if filtered else " · whole book",
+                               className="risk-fold-count")], className="risk-subhead")
+    if error or not pos:
+        return html.Div([head, html.Div(missing_cell(error or "no currency delta"), className="risk-quiet")])
+    fx = pos.get("fx") or {}
+    by_ccy = [c for c in fx.get("by_ccy") or [] if c.get("ccy") != "USD" and not c.get("metal")]
+    kids: List[Any] = [head]
+    if by_ccy:
+        rows = []
+        for c in by_ccy:
+            ccy = str(c.get("ccy") or "")
+            local, usd = _num(c.get("local_delta")), _num(c.get("usd_delta"))
+            reason = plain_words(c.get("reason") or "")
+            rate = (f"{c.get('label') or ''} {_num(c.get('quoted')):,.4f}".strip()
+                    if _num(c.get("quoted")) is not None else "")
+            rows.append(html.Tr([
+                html.Td(html.Span(ccy, className="tk-name", title=f"at the day's official spot{f' ({rate})' if rate else ''}"),
+                        className="l"),
+                html.Td(html.Span(_local_text(local), title=(f"{ccy} {format_cell(local)}" if local is not None
+                                                             else reason or "no local delta"))),
+                html.Td(km_cell(usd, reason=reason or "no USD delta", hover=rate, colour=False)),
+            ]))
+        headrow = html.Thead(html.Tr([html.Th("Currency", className="l"),
+                                      html.Th("Delta (local)", title="The currency's delta in its own units."),
+                                      html.Th("Delta (USD)", title="The same at the day's official spot.")]))
+        kids.append(html.Div(html.Table([headrow, html.Tbody(rows)], className="book-table book-grid tk-table tk-small"),
+                             className="tk-table-slot"))
+    else:
+        kids.append(html.Div(plain_words(fx.get("reason") or "") or "No open FX forward, spot leg or FX option: no "
+                             "currency delta beyond the futures legs above.", className="risk-quiet"))
+    net, gross = _num(fx.get("net_usd")), _num(fx.get("gross_usd"))
+    line: List[Any] = [html.Span("Net USD", className="tk-k")]
+    if net is None:
+        line.append(missing_cell(plain_words(fx.get("reason") or "") or "no FX net"))
+    else:
+        line.append(html.B(km_text(net), title=f"USD {format_cell(net)}"))
+        line.append(html.Span(f" {'long USD' if net > 0.5 else 'short USD' if net < -0.5 else 'flat'}"))
+    if gross is not None:
+        line.append(html.Span([" · ", html.Span("Gross", className="tk-k"), km_text(gross, signed=False)],
+                              title=f"USD {format_cell(gross)}: the sum of each pair's |USD delta|"))
+    for m in fx.get("metals") or []:
+        units = _num(m.get("units"))
+        unit = METAL_UNITS.get(str(m.get("ccy")), "units")
+        line.append(html.Span(f" · {m.get('ccy')} {format_cell(units)} {unit}, not in the net" if units is not None
+                              else f" · {m.get('ccy')} {NA}", className="tk-sub",
+                              title=plain_words(m.get("reason") or "a metal's delta is reported apart: not in the FX "
+                                                                   "net or gross")))
+    kids.append(html.Div(line, className="risk-fx-line",
+                         title="The FX net USD delta, + = long USD, FX options' delta included; gross = the sum of "
+                               "|per-pair USD delta|."))
+    return html.Div(kids, className="risk-fx-block")
+
+
+# --------------------------------------------------------------------------- Option Greeks
+FOLD_GREEKS = "greeks"
+GREEKS_ABOUT = ("The open options, one line per underlying commodity, scaled to the position: Delta the delta lots (lots x "
+                "the option's official delta per lot, futures-equivalent lots); Gamma, Theta and Vega the option's "
+                "official per-lot marks x its lots, in the contract's currency. A Greek with no mark is a dash with its "
+                "reason, never zero. An FX option pair shows its USD delta (its other Greeks are on the Blotter's "
+                "Options sub-tab).")
+GREEK_MARK_TYPES = (("gamma", "GAMMA"), ("theta", "THETA"), ("vega", "VEGA"))
+
+
+def option_rows(ctx: dict) -> Tuple[List[dict], List[Tuple[dict, str]]]:
+    """(the curve's option rows of the trades showing, [(row, why)] left out)."""
+    counted, left = _curve_rows(ctx)
+    return ([r for r in counted if str(r.get("product") or "") == OPTION],
+            [(r, w) for r, w in left if str(r.get("product") or "") == OPTION])
+
+
+def fx_options_held(conn: sqlite3.Connection, as_of: str) -> int:
+    """How many FX option trades are on file and not expired on `as_of` (only to show the fold)."""
+    try:
+        (n,) = conn.execute("SELECT COUNT(*) FROM trades t JOIN instruments i USING (instrument_id) "
+                            "WHERE t.product = 'FX_OPTION' AND t.trade_date <= ? AND i.expiry_date >= ?",
+                            (as_of, as_of)).fetchone()
+        return int(n or 0)
+    except sqlite3.Error:
+        return 0
+
+
+def greek_marks(conn: sqlite3.Connection, as_of: str, instruments: Sequence[str]) -> Dict[Tuple[str, str], float]:
+    """{(instrument, mark type): value}: the official GAMMA / THETA / VEGA marks on `as_of`, as they are."""
+    ids = sorted({str(i) for i in instruments if i})
+    if not ids:
+        return {}
+    rows = conn.execute(
+        f"SELECT instrument_id, mark_type, value FROM marks_official WHERE as_of_date = ? "
+        f"AND mark_type IN ('GAMMA','THETA','VEGA') AND instrument_id IN ({','.join('?' * len(ids))})",
+        (as_of, *ids)).fetchall()
+    return {(str(i), str(mt)): float(v) for i, mt, v in rows if _num(v) is not None}
+
+
+def greeks_lines(ctx: dict, marks: Dict[Tuple[str, str], float], fx_options: Optional[dict]) -> List[dict]:
+    """One line per underlying commodity of the options showing (each Greek summed over the options
+    that have it: a line with one missing is a dash with the reasons, never a partial figure), then
+    one per FX option pair (its USD delta, whole book)."""
+    from ui.tabs.formatting import contract_name, short_root_name, size_words
+    rows, _left = option_rows(ctx)
+    roots = ctx.get("roots") or {}
+    by_root: Dict[str, List[dict]] = {}
+    for r in rows:
+        by_root.setdefault(str(r.get("root_id") or ""), []).append(r)
+    lines = []
+    for root_id, rs in by_root.items():
+        root = roots.get(root_id)
+        ccy = str(rs[0].get("currency") or "")
+        legs = ", ".join(f"{contract_name(r.get('contract_id'), root, root_id)} {size_words(_num(r.get('lots')))}" for r in rs)
+        line = {"label": short_root_name(root, root_id), "legs": legs, "ccy": ccy, "kind": "commodity",
+                "hover": f"{_plural(len(rs), 'option')} on {root_id}: {legs}"}
+        pairs: Dict[str, list] = {k: [] for k in ("delta", "gamma", "theta", "vega")}
+        for r in rs:
+            cid = str(r.get("contract_id") or "")
+            lots, dl = _num(r.get("lots")), _num(r.get("delta_lots"))
+            name = contract_name(cid, root, root_id)
+            pairs["delta"].append((dl, f"{name}: {plain_words(r.get('reason')) or 'no delta mark'}"))
+            for col, mt in GREEK_MARK_TYPES:
+                per_lot = marks.get((cid, mt))
+                if per_lot is None or lots is None:
+                    pairs[col].append((None, f"{name}: no {mt.lower()} mark on file for this date" if lots is not None
+                                       else f"{name}: {r.get('reason') or 'no lots'}"))
+                else:
+                    pairs[col].append((per_lot * lots, ""))
+        for col, items in pairs.items():
+            total, excluded, reasons = sum_known(items)
+            line[col] = None if excluded else total
+            line[f"{col}_hover"] = (_lines(*reasons) if excluded else
+                                    ("lots x the option's official delta per lot, futures-equivalent lots" if col == "delta"
+                                     else f"the per-lot {col} mark x lots, in {ccy or 'the contract currency'}"))
+        lines.append(line)
+    for pair, usd in sorted(((fx_options or {}).get("by_pair") or {}).items()):
+        note = "an FX option's gamma, theta and vega are on the Blotter's Options sub-tab; not summed here"
+        v = _num(usd)
+        lines.append({"label": f"{pair} options", "legs": "FX options at delta, whole book", "ccy": "USD", "kind": "fx",
+                      "hover": f"the open FX options on {pair}, their USD delta as the book gives it",
+                      "delta": v, "delta_hover": "USD delta of the pair's open FX options" if v is not None
+                      else ((fx_options or {}).get("reason") or "no delta"),
+                      "gamma": None, "gamma_hover": note, "theta": None, "theta_hover": note, "vega": None,
+                      "vega_hover": note, "delta_usd": True})
+    return lines
+
+
+def _greek_td(value: Optional[float], hover: str, unit: str, money: bool = False, decimals: int = 2) -> html.Td:
+    if value is None:
+        return html.Td(missing_cell(hover))
+    if money:
+        return html.Td(km_cell(value, hover=hover, colour=False))
+    text = f"{abs(value):,.{decimals}f}" if decimals else f"{abs(value):,.0f}"
+    if float(text.replace(",", "") or 0) == 0:
+        text = "0"
+    else:
+        text = (MINUS if value < 0 else "+") + text
+    return html.Td([text, html.Span(unit, className="cell-unit") if unit else None], title=plain_words(hover))
+
+
+def greeks_fold(conn: sqlite3.Connection, ctx: dict, is_open: bool, n_options: int) -> Optional[html.Div]:
+    """The Option Greeks fold, only when an option is held (None otherwise)."""
+    if not n_options:
+        return None
+    count = _plural(n_options, "option") + " held"
+    body: List[Any] = []
+    if is_open:
+        rows, left = option_rows(ctx)
+        pos, err = book_positions(conn, ctx["as_of"]) if fx_options_held(conn, ctx["as_of"]) else (None, "")
+        try:
+            marks = greek_marks(conn, ctx["as_of"], [r.get("contract_id") for r in rows])
+        except sqlite3.Error as exc:
+            marks = {}
+            body.append(html.Div(missing_cell(f"the option Greeks could not be read ({exc})"), className="risk-quiet"))
+        lines = greeks_lines(ctx, marks, (pos or {}).get("fx_options"))
+        if err:
+            body.append(html.Div(missing_cell(err), className="risk-quiet"))
+        if not lines:
+            body.append(html.Div("No option among the trades showing.", className="risk-quiet"))
+        else:
+            head = html.Thead(html.Tr([
+                html.Th("Underlying", className="l"),
+                html.Th("Delta", title="Options on futures: futures-equivalent lots (lots x the official delta per lot). "
+                                       "FX options: USD delta."),
+                html.Th("Gamma", title="The gamma mark per lot x lots, in the contract's currency, per 1.0 move of the "
+                                       "future."),
+                html.Th("Theta / day", title="The theta mark per lot x lots, in the contract's currency, per calendar day."),
+                html.Th("Vega / vol pt", title="The vega mark per lot x lots, in the contract's currency, per vol point.")]))
+            trs = []
+            for line in lines:
+                cells: List[Any] = [html.Td([html.Span(line["label"], className="tk-name"), " ",
+                                             html.Span(line["legs"], className="tk-sub")], className="l",
+                                            title=plain_words(line["hover"]))]
+                if line.get("delta_usd"):
+                    cells.append(_greek_td(line["delta"], line["delta_hover"], "", money=True))
+                else:
+                    cells.append(_greek_td(line["delta"], line["delta_hover"], "lots"))
+                for col in ("gamma", "theta", "vega"):
+                    cells.append(_greek_td(line[col], line[f"{col}_hover"], line["ccy"], decimals=2 if col == "gamma" else 0))
+                trs.append(html.Tr(cells))
+            body.append(html.Div(html.Table([head, html.Tbody(trs)], className="book-table book-grid tk-table tk-greeks"),
+                                 className="tk-table-slot"))
+        if left:
+            body.append(html.Div(missing_cell(_lines(*(f"{r.get('contract_id')}: {w}" for r, w in left))),
+                                 className="risk-quiet"))
+    return fold(FOLD_GREEKS, "Option Greeks", count, GREEKS_ABOUT, is_open, body)
+
+
 # --------------------------------------------------------------------------- Stress
-def _contract_names(ctx: dict) -> Dict[str, List[str]]:
-    out: Dict[str, List[str]] = {}
-    for r in (ctx.get("curve") or {}).get("rows") or []:
-        names = names_of(r.get("trade_ids") or [], ctx["name_of_fill"])
-        for key in {str(r.get("contract_id") or ""), str(r.get("instrument_id") or "")} - {""}:
-            out[key] = sorted(set(out.get(key, [])) | set(names))
+def shown_positions(ctx: dict) -> Dict[str, str]:
+    """{position_id: trade name} of the rows showing (the trade book's position id, else the risk
+    row's for a position with no trade name)."""
+    out: Dict[str, str] = {}
+    for t, r in ctx.get("shown_rows") or []:
+        pid = str(t.get("position_id") or (r or {}).get("position_id") or "")
+        if pid:
+            out[pid] = str(t.get("trade") or "")
     return out
+
+
+def _stress_by_position(e: dict, s: dict, ctx: dict, shown_pids: Dict[str, str]) -> None:
+    """A positional scenario's P&L of the rows showing: the engine's `by_position` (a shared
+    contract already split by each trade's own quantity) summed over the positions showing
+    (display); unfiltered the whole book, the contracts the engine could not attribute to one
+    position added (so the line is the scenario's total). A position with a contract the scenario
+    could not price is "excl."; the hardest hit is the worst position showing, named."""
+    bp = s.get("by_position")
+    det = s.get("by_position_detail") or {}
+    names = det.get("names") or {}
+    filtered = ctx["filtered"]
+    if bp is None:
+        why = det.get("reason") or "the scenario's P&L per position is not known"
+        if filtered:
+            e["why"] = [f"not split per trade: {why}"]
+        else:
+            e["total"] = _num(s.get("total_usd"))
+            e["why"] = [s.get("reason") or "no figure"] if e["total"] is None else []
+        e["hit_reason"] = f"not split per trade: {why}"
+        return
+    keep = [pid for pid in bp if (not filtered or pid in shown_pids)]
+    parts = [_num(bp[pid]) for pid in keep]
+    known = [v for v in parts if v is not None]
+    whys = [f"{names.get(m.get('position_id'), m.get('position_id'))}: {m.get('contract_id') or 'a contract'}: "
+            f"{m.get('reason') or 'no figure'}" for m in det.get("missing") or []
+            if not filtered or str(m.get("position_id") or "") in shown_pids]
+    notes = []
+    total = float(sum(known)) if known else None
+    if not filtered:
+        un = [(_num(u.get("pnl_usd")), u) for u in det.get("unattributed") or []]
+        un_known = [v for v, _u in un if v is not None]
+        if un_known:
+            total = (total or 0.0) + float(sum(un_known))
+            notes.append(f"includes {_plural(len(un_known), 'contract')} not attributed to one position: "
+                         f"{format_cell(float(sum(un_known)))} USD ("
+                         + "; ".join(f"{u.get('contract_id')}: {u.get('reason') or 'not attributed'}" for _v, u in un[:4])
+                         + ")")
+    e["total"], e["excl"], e["why"] = total, len(whys), whys
+    e["note"] = _lines(*notes)
+    if e["total"] is None and not whys:
+        e["why"] = [s.get("reason") or "the scenario moves none of the trades showing"]
+    losers = [(pid, _num(bp[pid])) for pid in keep if _num(bp[pid]) is not None and _num(bp[pid]) <= -0.5]
+    if losers:
+        pid, v = min(losers, key=lambda x: x[1])
+        e["hit"], e["hit_value"] = shown_pids.get(pid) or names.get(pid) or pid, v
+    else:
+        e["hit_reason"] = ("no trade loses in this scenario" if known
+                           else "the scenario moves none of the trades showing")
 
 
 def stress_entries(ctx: dict, stress: Optional[dict]) -> List[dict]:
     """Every scenario, worst P&L of the rows showing first (none last)."""
-    owners = _contract_names(ctx)
+    shown_pids = shown_positions(ctx)
     out = []
     for s in (stress or {}).get("scenarios") or []:
         kind = str(s.get("kind") or "")
@@ -826,41 +1115,7 @@ def stress_entries(ctx: dict, stress: Optional[dict]) -> List[dict]:
                 e["hit_reason"] = "no currency loses in this scenario" if valued else "no currency figure"
             out.append(e)
             continue
-        per_trade: Dict[str, float] = {}
-        parts, whys, unattributed = [], [], 0
-        for c in s.get("by_contract") or []:
-            names = owners.get(str(c.get("contract_id") or "")) or owners.get(str(c.get("instrument_id") or "")) or []
-            inside, partial = row_in_view(names, ctx) if names else (not ctx["filtered"], False)
-            pnl = _num(c.get("pnl_usd"))
-            if partial:
-                whys.append(f"{c.get('contract_id')}: {_shared_reason(names, ctx)}")
-                continue
-            if not inside:
-                continue
-            parts.append(pnl)
-            if len(names) == 1 and pnl is not None:
-                per_trade[names[0]] = per_trade.get(names[0], 0.0) + pnl
-            elif len(names) > 1:
-                unattributed += 1
-        for m in s.get("missing") or []:
-            names = owners.get(str(m.get("contract_id") or "")) or owners.get(str(m.get("instrument_id") or "")) or []
-            inside, _p = row_in_view(names, ctx) if names else (not ctx["filtered"], False)
-            if inside:
-                whys.append(f"{m.get('contract_id') or m.get('currency') or 'a position'}: {m.get('reason') or 'no figure'}")
-        if not ctx["filtered"]:
-            e["total"] = _num(s.get("total_usd"))
-        else:
-            e["total"] = float(sum(p for p in parts if p is not None)) if parts else None
-        e["excl"], e["why"] = len(whys), whys
-        if e["total"] is None and not whys:
-            e["why"] = [s.get("reason") or "the scenario moves none of the trades showing"]
-        losers = [(n, v) for n, v in per_trade.items() if v <= -0.5]
-        if losers:
-            e["hit"], e["hit_value"] = min(losers, key=lambda x: x[1])
-        else:
-            e["hit_reason"] = "no trade loses in this scenario" if per_trade else "the scenario moves none of the trades showing"
-        if unattributed:
-            e["hit_note"] = f"{_plural(unattributed, 'contract')} two trades share are not attributed to either"
+        _stress_by_position(e, s, ctx, shown_pids)
         out.append(e)
     return sorted(out, key=lambda e: (e["total"] is None, e["total"] if e["total"] is not None else 0.0))
 
@@ -870,8 +1125,8 @@ def _stress_tr(e: dict) -> html.Tr:
     if e["total"] is None:
         total = html.Td(missing_cell(_lines(*e["why"][:8]) or "no figure"))
     else:
-        total = html.Td([km_cell(e["total"]), marker(f"excl. {e['excl']}", _lines(*e["why"][:8]), "marker--small")
-                         if e["excl"] else None])
+        total = html.Td([km_cell(e["total"], hover=e.get("note") or ""),
+                         marker(f"excl. {e['excl']}", _lines(*e["why"][:8]), "marker--small") if e["excl"] else None])
     if e["hit_value"] is None:
         hit = html.Td(missing_cell(e["hit_reason"] or "no figure"), className="l")
     else:

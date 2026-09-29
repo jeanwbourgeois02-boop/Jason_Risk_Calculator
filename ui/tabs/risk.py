@@ -104,8 +104,12 @@ COLUMNS: Tuple[Tuple[str, str, str, str, bool, bool], ...] = (
                                  "red at the liquidity check's levels (placeholders). Research volume data.", True, True),
 )
 SORTABLE = {k for k, _t, _c, _h, s, _r in COLUMNS if s}
-LEG_HEAD = (("Leg", "l"), ("Lots", ""), ("Open interest", ""), ("20-day volume", ""), ("% of OI", ""),
-            ("Days to exit", ""), ("Level", "l"))
+LEG_HEAD = (("Leg", "l", "The contract held; hedges last."), ("Lots", "", "Net lots held (at delta for an option)."),
+            ("Daily risk", "", "One standard deviation of the leg's own daily P&L in USD (research history)."),
+            ("Corr. other side", "", "The leg's daily P&L against the other side's, as held: a working spread reads "
+                                     "negative."),
+            ("Open interest", "", ""), ("20-day volume", "", ""), ("% of OI", "", ""),
+            ("Days to exit", "", "Lots over 20 % of the 20-day average volume."), ("Level", "l", ""))
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -435,7 +439,9 @@ def _ratio_td(r: Optional[dict], ready: bool) -> html.Td:
                    if r.get("lots_a") is not None else "",
                    f"Correlation {corr:.2f}" if corr is not None else "",
                    f"{r.get('best_fit_moves')} moves over {r.get('best_fit_days')} days" if r.get("best_fit_days") else "",
-                   r.get("best_fit_reason") or "", "R²: not given by the engine")
+                   r.get("best_fit_reason") or "",
+                   f"R² {_num(r.get('best_fit_r2')):.2f} (the fit's, the legs' correlation squared)"
+                   if _num(r.get("best_fit_r2")) is not None else "")
     his_text = _ratio_text(his) if his is not None else MISSING
     fit_part: Any = (html.Span(_ratio_text(fit), className="cell-amber" if apart else None) if fit is not None
                      else missing_cell(r.get("best_fit_reason") or "no fit"))
@@ -576,6 +582,70 @@ def _leg_names(t: dict) -> Dict[str, str]:
     return {str(lg.get("contract_id")): str(lg.get("name") or "") for lg in t.get("legs") or []}
 
 
+def _leg_risk_cells(lr: Optional[dict], ready: bool) -> List[Any]:
+    """The Daily risk and Correlation cells of a leg from `trade_risk`'s `legs_risk` entry."""
+    if lr is None:
+        why = COMPUTING if not ready else "no risk figure for this leg"
+        return [html.Td(missing_cell(why)), html.Td(missing_cell(why))]
+    v = _num(lr.get("daily_risk_usd"))
+    risk = (km_cell(v, hover=_lines(f"one standard deviation of the leg's own daily P&L over {lr.get('days')} days"
+                                    if lr.get("days") else "", f"{lr.get('moves')} moves" if lr.get("moves") else ""),
+                    signed=False, colour=False)
+            if v is not None else missing_cell(plain_reason(lr.get("daily_risk_reason")) or "no daily risk"))
+    c = _num(lr.get("corr_other_side"))
+    corr = (html.Span(f"{c:.2f}".replace("-", MINUS),
+                      title=plain_words(_lines(f"with {lr.get('corr_with')}" if lr.get("corr_with") else "",
+                                               "the P&L as held: a leg the other side offsets reads negative "
+                                               "(a working spread about -0.7 to -1)")))
+            if c is not None else missing_cell(plain_reason(lr.get("corr_reason")) or "no correlation"))
+    return [html.Td(risk), html.Td(corr)]
+
+
+def legs_table(data: dict, t: dict, r: Optional[dict]) -> Optional[html.Table]:
+    """The trade's legs: each leg's own daily risk and its correlation with the other side
+    (`trade_risk`'s `legs_risk`), then its open interest, volume, share of the open interest and
+    days to exit (`engine.limits.liquidity`); one row per contract, hedges last."""
+    ready = r is not None
+    names = _leg_names(t)
+    legs_risk = {str(x.get("contract_id")): x for x in (r or {}).get("legs_risk") or []}
+    p = liq_of(data, r)
+    liq = {str(x.get("contract_id")): x for x in (p or {}).get("legs") or []}
+    order = list(dict.fromkeys(list(legs_risk) + list(liq)))
+    if not order:
+        return None
+    order.sort(key=lambda cid: bool((legs_risk.get(cid) or {}).get("hedge")))
+    body = []
+    for cid in order:
+        lr, leg = legs_risk.get(cid), liq.get(cid)
+        why = plain_reason((leg or {}).get("reason")) or ("not in the liquidity check" if leg is None else "")
+        days, oi_pct = _num((leg or {}).get("days_to_exit")), _num((leg or {}).get("pct_of_oi"))
+        level = str((leg or {}).get("level") or "")
+        note = str((leg or {}).get("note") or "")
+        lots = _num((leg or {}).get("lots"))
+        if lots is None:
+            lots = _num((lr or {}).get("lots"))
+        name = names.get(cid) or str((lr or {}).get("name") or "") or cid
+        hedge = bool((lr or {}).get("hedge"))
+        body.append(html.Tr([
+            html.Td(html.Span(name + (" (hedge)" if hedge else ""), title=plain_words(_lines(cid, note)) or None),
+                    className="l"),
+            html.Td(rf.lots_text(lots)),
+            *_leg_risk_cells(lr, ready),
+            html.Td(format_cell(_num(leg.get("open_interest"))) if leg and _num(leg.get("open_interest")) is not None
+                    else missing_cell(why or "no open interest"),
+                    title=f"on {leg.get('oi_date')}" if leg and leg.get("oi_date") else None),
+            html.Td(f"{_num(leg.get('adv')):,.0f}" if leg and _num(leg.get("adv")) is not None
+                    else missing_cell(why or "no volume"),
+                    title=f"over {leg.get('adv_days')} days" if leg and leg.get("adv_days") else None),
+            html.Td(pct_text(oi_pct) if oi_pct is not None else missing_cell(why or "no open interest")),
+            html.Td(f"{days:,.1f}" if days is not None else missing_cell(why or "no volume data"),
+                    className={"RED": "cell-red", "AMBER": "cell-amber"}.get(level)),
+            html.Td(level.lower().replace("no_data", "no data") or NA, className="l tk-sub"),
+        ], className="tk-leg" + (" tk-leg--hedge" if hedge else "")))
+    return html.Table([html.Thead(html.Tr([html.Th(x, className=c or None, title=h or None) for x, c, h in LEG_HEAD])),
+                       html.Tbody(body)], className="book-table tk-table tk-legs risk-legs")
+
+
 def panel_tr(data: dict, t: dict, r: Optional[dict]) -> html.Tr:
     name = str(t.get("trade") or "")
     facts: List[Any] = []
@@ -611,37 +681,11 @@ def panel_tr(data: dict, t: dict, r: Optional[dict]) -> html.Tr:
         fact("Hedge", f"{h.get('currency') or ''} {pct_text(cov)} covered".strip() if cov is not None
              else (h.get("reason") or "coverage not read"), fx_hover(t))
     parts: List[Any] = [html.Div(facts, className="tk-facts risk-facts")]
-    p = liq_of(data, r)
-    names = _leg_names(t)
-    if p and p.get("legs"):
-        body = []
-        for leg in p["legs"]:
-            cid = str(leg.get("contract_id") or "")
-            days, oi_pct = _num(leg.get("days_to_exit")), _num(leg.get("pct_of_oi"))
-            level = str(leg.get("level") or "")
-            why = plain_reason(leg.get("reason"))
-            note = str(leg.get("note") or "")
-            body.append(html.Tr([
-                html.Td(html.Span(names.get(cid) or cid, title=plain_words(_lines(cid, note)) or None), className="l"),
-                html.Td(rf.lots_text(_num(leg.get("lots")))),
-                html.Td(format_cell(_num(leg.get("open_interest"))) if _num(leg.get("open_interest")) is not None
-                        else missing_cell(why or "no open interest"),
-                        title=f"on {leg.get('oi_date')}" if leg.get("oi_date") else None),
-                html.Td(f"{_num(leg.get('adv')):,.0f}" if _num(leg.get("adv")) is not None
-                        else missing_cell(why or "no volume"),
-                        title=f"over {leg.get('adv_days')} days" if leg.get("adv_days") else None),
-                html.Td(pct_text(oi_pct) if oi_pct is not None else missing_cell(why or "no open interest")),
-                html.Td(f"{days:,.1f}" if days is not None else missing_cell(why or "no volume data"),
-                        className={"RED": "cell-red", "AMBER": "cell-amber"}.get(level)),
-                html.Td(level.lower().replace("no_data", "no data") or NA, className="l tk-sub"),
-            ], className="tk-leg"))
-        parts.append(html.Div(html.Table([html.Thead(html.Tr([html.Th(x, className=c or None) for x, c in LEG_HEAD])),
-                                          html.Tbody(body)], className="book-table tk-table tk-legs risk-legs"),
-                              className="tk-panel-legs"))
+    table = legs_table(data, t, r)
+    if table is not None:
+        parts.append(html.Div(table, className="tk-panel-legs"))
     elif r is not None:
-        parts.append(html.Div(missing_cell("no exchange contract to test for liquidity"), className="risk-quiet"))
-    parts.append(html.Div("Each leg's own daily risk and its correlation with the other side are not given by the "
-                          "engine yet.", className="risk-quiet"))
+        parts.append(html.Div(missing_cell("no leg figures for this trade"), className="risk-quiet"))
     if not t.get("pseudo"):
         n = len(t.get("trade_ids") or [])
         parts.append(html.Div(className="tk-links", children=[
@@ -702,6 +746,36 @@ def _var_definition(config: dict) -> str:
             "a loss. Recomputed for the trades showing, never the rows added.")
 
 
+def vs_target(sub: Optional[dict], ready: bool, config: dict) -> Tuple[Any, str]:
+    """(the headline's "Of vol target" cell, its hover): the engine's `subset_var` against the vol
+    target for the trades showing: their blended annual vol as a share of the target (the book's
+    `vol_vs_target_pct` rule), the 1-day VaR's share on hover; "placeholder" while the target is
+    Jason's stand-in."""
+    if not ready:
+        return missing_cell(COMPUTING), "the risk figures are still being computed"
+    sub = sub or {}
+    target = _num(sub.get("vol_target_usd"))
+    if target is None:
+        target = _num(config.get("vol_target_usd"))
+    placeholder = bool(sub.get("vol_target_placeholder") if "vol_target_placeholder" in sub
+                       else config.get("vol_target_placeholder"))
+    note = str(sub.get("vol_target_note") or config.get("vol_target_note") or "")
+    vol_pct, var_pct = _num(sub.get("vol_vs_target_pct")), _num(sub.get("var_vs_target_pct"))
+    vol = _num(sub.get("vol_blended_ann_usd"))
+    why = plain_reason(sub.get("vs_target_reason")) or "not given"
+    of = html.Span(f" of {km_text(target, signed=False)}" if target is not None else "", className="tk-sub")
+    tag = html.Span(" placeholder", className="risk-grey", title=plain_words(note)) if placeholder else None
+    main = (html.Span(pct_text(vol_pct / 100.0)) if vol_pct is not None else missing_cell(why))
+    hover = _lines(
+        f"The trades showing: blended annual vol {format_cell(vol)} USD against a vol target of {format_cell(target)} USD "
+        "a year" if vol is not None and target is not None else f"Vol against target: {why}",
+        f"The 1-day VaR is {pct_text(var_pct / 100.0)} of the target" if var_pct is not None else "",
+        str(sub.get("vol_note") or ""),
+        "blended vol: 2/3 the trailing 500 days + 1/3 the 2008-2010 window (trailing alone where the history "
+        "does not reach it)", note)
+    return html.Span([main, of, tag]), hover
+
+
 def headline(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> html.Div:
     research = data.get("research") or {}
     mark = tf.research_mark(research)
@@ -726,14 +800,7 @@ def headline(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> 
                                                                for x in left)), "marker--small") if left else None,
                           mark])
 
-    target = _num(config.get("vol_target_usd"))
-    target_value = html.Span([missing_cell("the VaR's share of the vol target for the trades showing is not given by the "
-                                           "engine yet (requested of risk-metrics)"),
-                              html.Span(f" of {km_text(target, signed=False)}" if target is not None else "",
-                                        className="tk-sub"),
-                              html.Span(" placeholder", className="risk-grey",
-                                        title=plain_words(config.get("vol_target_note") or ""))
-                              if config.get("vol_target_placeholder") else None])
+    target_value, target_hover = vs_target(sub, ready, config)
     s = _sums(v["shown_rows"])
 
     def summed(tot, hover):
@@ -759,8 +826,7 @@ def headline(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> 
     items = [
         ("Trades", count, "the trades showing (a trade is a PBRoot name); the top bar is always the whole book"),
         ("VaR 1 day 95 %", history_figure("var_usd", "var_reason"), _var_definition(config)),
-        ("Of vol target", target_value, f"The vol target: {format_cell(target)} USD a year. "
-                                        + (config.get("vol_target_note") or "")),
+        ("Of vol target", target_value, target_hover),
         ("Daily risk", history_figure("daily_risk_usd", "daily_risk_reason"),
          "one standard deviation of the trades' summed daily P&L: the trades together"),
         ("Alone, added", history_figure("sum_daily_risk_usd", "sum_daily_risk_reason"),
@@ -840,13 +906,19 @@ def csv_frame(data: dict, v: dict, risk: Optional[dict], sort: Optional[dict]) -
         p = liq_of(data, r) or {}
         h = t.get("hedge") or {}
         rows.append({
-            "Trade": t.get("trade"), "Type": tf.type_label(tf.type_code(t)), "Commodity": tf.family_label(t),
+            "Trade": t.get("trade"), "Type": tf.trade_type_label(t), "Commodity": tf.family_label(t),
             "What it is": t.get("what_it_is"), "In the VaR": r.get("included"), "Why not": r.get("reason"),
             "Daily risk USD": r.get("daily_risk_usd"), "VaR alone USD": r.get("standalone_var"),
             "Share of book": r.get("share_of_book"), "Part of book VaR USD": r.get("contribution_var"),
             "Hedge %": r.get("hedge_pct"), "Bigger leg": r.get("hedge_leg"), "Hedge moves": r.get("hedge_moves"),
             "Lot ratio held": r.get("lot_ratio"), "Best-fit ratio": r.get("best_fit_ratio"),
-            "Legs' correlation": r.get("leg_correlation"), "Ratio legs": " / ".join(r.get("ratio_legs") or []),
+            "Legs' correlation": r.get("leg_correlation"), "Best-fit R2": r.get("best_fit_r2"),
+            "Ratio legs": " / ".join(r.get("ratio_legs") or []),
+            "Legs' daily risk USD": "; ".join(f"{x.get('name') or x.get('contract_id')}: {x.get('daily_risk_usd')}"
+                                              for x in r.get("legs_risk") or []),
+            "Legs' correlation with the other side": "; ".join(
+                f"{x.get('name') or x.get('contract_id')}: {x.get('corr_other_side')}" for x in r.get("legs_risk") or []),
+            "Move in sigma": r.get("move_sigma"),
             "Leftover USD per 1 %": lo_v, "Leftover legs": "; ".join(lo_lines), "Leftover note": lo_why,
             "FX unhedged USD": fx_v, "FX note": fx_why, "China exposure USD": h.get("exposure_usd"),
             "Hedge USD": h.get("hedge_usd"), "Coverage": h.get("coverage"),
@@ -915,14 +987,20 @@ def render_folds(as_of: Optional[str], db_path, state: Optional[dict], folds: Se
         risk = _risk(conn, as_of, False)
         v = view(data, risk, state)
         open_set = set(folds or [])
+        n_options = (len({str(r.get("contract_id")) for r in (v["curve"].get("rows") or [])
+                          if str(r.get("product") or "") == rf.OPTION})
+                     + rf.fx_options_held(conn, as_of))
         kids = []
         for key, build in ((rf.FOLD_NET, lambda o: rf.net_fold(conn, v, o, commodity, unit or rf.DEFAULT_UNIT)),
-                           (rf.FOLD_CCY, lambda o: rf.currency_fold(v, o)),
+                           (rf.FOLD_CCY, lambda o: rf.currency_fold(v, o, conn)),
+                           (rf.FOLD_GREEKS, lambda o: rf.greeks_fold(conn, v, o, n_options)),
                            (rf.FOLD_STRESS, lambda o: rf.stress_fold(v, stress_result(conn, as_of) if o else None, o,
                                                                     rf.FOLD_STRESS_MORE in open_set)),
                            (rf.FOLD_PRICE, lambda o: rf.price_check_fold((risk or {}).get("price_check"), o))):
             try:
-                kids.append(build(key in open_set))
+                built = build(key in open_set)
+                if built is not None:
+                    kids.append(built)
             except Exception as exc:  # noqa: BLE001 -- one fold's reason, never the tab
                 log.exception("Risk: the %s fold failed for %s", key, as_of)
                 kids.append(html.Div(missing_cell(f"the {key} fold could not be built ({type(exc).__name__}: {exc})"),
@@ -940,7 +1018,7 @@ def render(as_of: Optional[str], db_path, state: Optional[dict] = None) -> html.
     p = render_parts(as_of, db_path, state, wait_risk=True)
     if not p["shown"]:
         return html.Div([p["body"]])
-    folds = render_folds(as_of, db_path, state, [rf.FOLD_NET, rf.FOLD_CCY, rf.FOLD_STRESS, rf.FOLD_PRICE], None,
+    folds = render_folds(as_of, db_path, state, [rf.FOLD_NET, rf.FOLD_CCY, rf.FOLD_GREEKS, rf.FOLD_STRESS, rf.FOLD_PRICE], None,
                          rf.DEFAULT_UNIT)
     return html.Div([p["headline"], html.Div(p["table"], className="book-card book-main tk-card"), folds, p["foot"]])
 

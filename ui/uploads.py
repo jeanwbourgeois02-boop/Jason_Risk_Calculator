@@ -51,7 +51,8 @@ Structured import report (2026-09-18, coordinator contract). `run_import` prefer
 "rejects", "warnings", "notes"}` when the ingest module has it, and otherwise calls
 `import_blotter` exactly as before, so either side can land first. With the structure:
 
-  * the box is `--warning` (sticky) when `rejects > 0` OR `warnings > 0` (cells the parser
+  * the box is `--warning` (sticky) when `rejects > 0` OR `need_fix > 0` (rows on file whose
+    contract is not recognised, 2026-09-29) OR `warnings > 0` (cells the parser
     had to rebuild, ignore or distrust), else `--info` (dismisses itself). The old
     `REJECTS_PHRASE` rule still applies on top, so a sentence that says rows could not
     be read is never auto-dismissed even if a counter disagrees with it;
@@ -170,7 +171,7 @@ def normalise_report(raw) -> dict:
     if not isinstance(raw, dict):
         message = "" if raw is None else str(raw)
         return {"message": message, "rejects": int(REJECTS_PHRASE in message.lower()),
-                "warnings": 0, "notes": [], "structured": False}
+                "warnings": 0, "need_fix": 0, "notes": [], "structured": False}
     message = str(raw.get("message") or "")
     rejects = _count(raw.get("rejects"))
     notes = raw.get("notes") or []
@@ -179,14 +180,17 @@ def normalise_report(raw) -> dict:
     return {"message": message,
             "rejects": int(REJECTS_PHRASE in message.lower()) if rejects is None else rejects,
             "warnings": _count(raw.get("warnings")) or 0,
+            # every row loads (2026-09-29): rows on file whose contract is not recognised
+            "need_fix": _count(raw.get("need_fix")) or 0,
             "notes": [str(n).strip() for n in notes if str(n).strip()],
             "structured": True}
 
 
 def is_sticky(report: dict) -> bool:
-    """Rejects or parser warnings keep the box open until the user closes it. The phrase
-    rule stays on top: a sentence saying rows could not be read wins over a counter."""
-    return (report["rejects"] > 0 or report["warnings"] > 0
+    """Rejects, rows that need a fix (on file, contract not recognised) or parser warnings keep
+    the box open until the user closes it. The phrase rule stays on top: a sentence saying rows
+    could not be read wins over a counter."""
+    return (report["rejects"] > 0 or report["warnings"] > 0 or report.get("need_fix", 0) > 0
             or REJECTS_PHRASE in report["message"].lower())
 
 
