@@ -173,7 +173,7 @@ from dash.dash_table.Format import Format, Group, Scheme, Sign, Trim
 
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import ranking as rk
-from ui.tabs.formatting import format_cell, plain_words
+from ui.tabs.formatting import MISSING, cap, format_cell, plain_ids, plain_words
 from ui.tabs.header import AS_OF_STORE_ID
 
 TABLE_ID = "options-datatable"
@@ -777,7 +777,7 @@ def _futures_option_leg(conn: sqlite3.Connection, as_of: str, rec: dict, book: O
 
     return {
         "trade_id": rec["trade_id"], "package_id": rec["package_id"], "asset_class": FUTURES_OPTIONS_CLASS,
-        "label": f"{future_id or inst} - {payoff_word}",
+        "label": f"{plain_ids(future_id) if future_id else inst} - {payoff_word}",
         "instrument": inst, "payoff_word": payoff_word,
         "side": "Buy" if quantity >= 0 else "Sell",
         "option_type": TYPE_WORDS.get(option_type, option_type.title()), "payoff": payoff_word,
@@ -1024,9 +1024,9 @@ TEXT_COLUMNS = ("label", "side", "option_type", "payoff", "note", "premium_ccy",
 
 # The hint shown in each column's filter box.
 _FILTER_HINTS = {
-    "label": "contains, e.g. eursek", "side": "buy / sell", "option_type": "call / put",
-    "payoff": "e.g. digital", "note": "e.g. no strike", "premium_ccy": "e.g. eur",
-    "expiry": ">= 2026-11", "underlying": "e.g. usdjpy", "instrument": "contains",
+    "label": "Contains, e.g. eursek", "side": "Buy / sell", "option_type": "Call / put",
+    "payoff": "E.g. digital", "note": "E.g. no strike", "premium_ccy": "E.g. eur",
+    "expiry": ">= 2026-11", "underlying": "E.g. usdjpy", "instrument": "Contains",
     "position": "< 0 = sold", "notional": "> 1000000", "pnl_usd": "< 0", "pnl_ccy": "< 0",
     "strike": "> 11", "premium_paid": "> 0.01", "mktpx": "> 0.01",
 }
@@ -1099,7 +1099,7 @@ def format_rows(df: pd.DataFrame, collapsed: Optional[Iterable[str]] = None) -> 
         }
         for col in TEXT_COLUMNS:
             if col != "label":
-                out[col] = _text(rec.get(col))
+                out[col] = cap(_text(rec.get(col))) if col == "note" else _text(rec.get(col))
         for col in NUMERIC_COLUMNS:
             out[col] = _num(rec.get(col))
         records.append({col: out[col] for col in HIDDEN_COLUMNS[:4] + DISPLAY_COLUMNS + HIDDEN_COLUMNS[4:]})
@@ -1126,7 +1126,7 @@ FILTER_ROW_CSS = [
 # future's terms come from its symbol (`terms_fixed`) -- and the ones still waiting for a strike.
 OWN_ROW_QUERY = "{is_leg} = 1 && {terms_fixed} = 0"
 READ_ONLY_TERMS_QUERY = "{is_leg} = 0 || {terms_fixed} = 1"
-NEEDS_STRIKE_QUERY = "{is_leg} = 1 && {terms_fixed} = 0 && {note} contains 'no strike'"
+NEEDS_STRIKE_QUERY = "{is_leg} = 1 && {terms_fixed} = 0 && {note} contains 'o strike'"
 
 
 def table_styles() -> List[dict]:
@@ -1155,7 +1155,7 @@ def table_styles() -> List[dict]:
     # An option with no strike on file cannot be priced: the whole row is flagged so it
     # is impossible to miss (user request 2026-09-18). The strike is typed in its cell.
     styles.append(
-        {"if": {"filter_query": "{terms_fixed} = 0 && {note} contains 'no strike'"},
+        {"if": {"filter_query": "{terms_fixed} = 0 && {note} contains 'o strike'"},
          "backgroundColor": "rgba(178, 59, 59, 0.14)", "color": "var(--neg)", "fontWeight": "700"})
     for key in SIGNED_FIELDS:
         styles += [
@@ -1238,10 +1238,10 @@ def tooltip_rows(records: Optional[Iterable[dict]]) -> List[dict]:
     out = []
     for rec in records or []:
         tip = {}
-        greeks = _text((rec or {}).get("greeks_hover"))
+        greeks = cap(_text((rec or {}).get("greeks_hover")))
         if greeks:
             tip.update({col: {"value": greeks, "type": "text"} for col in GREEK_FIELDS})
-        underlying = _text((rec or {}).get("underlying_hover"))
+        underlying = cap(_text((rec or {}).get("underlying_hover")))
         if underlying:
             tip.update({col: {"value": underlying, "type": "text"} for col in UNDERLYING_HOVER_COLUMNS})
         out.append(tip)
@@ -1349,9 +1349,9 @@ HEADLINE_FIELDS = (
     ("vega", "Vega", "USD per vol point"),
     ("theta", "Theta", "USD per calendar day"),
     ("rho", "Rho", "USD per 1% of the quote-ccy rate"),
-    ("start_priced_usd", "Start value", "premium paid on the priced options, USD at today's spot"),
+    ("start_priced_usd", "Start value", "Premium paid on the priced options, USD at today's spot"),
     ("mktval", "Current value", "MktVal of the priced options, USD at today's spot"),
-    ("pnl_usd", "P&L USD", "the book's own per-trade P&L"),
+    ("pnl_usd", "P&L USD", "The book's own per-trade P&L"),
 )
 
 
@@ -1416,13 +1416,13 @@ def headline_strip(totals: dict, filtered: bool = False) -> html.Div:
                               "var(--pos)" if v >= 0 else "var(--neg)"}) for u, v in by_unit.items()]
             cards.append(html.Div(className="card", children=[
                 html.Div(title, className="card-label"), html.Div(lines, className="card-value"),
-                html.Small("by unit: options in different units are not added", className="card-note")]))
+                html.Small("By unit: options in different units are not added", className="card-note")]))
             continue
         if len(by_unit) == 1:
             unit = next(iter(by_unit)) or unit
         if value is None:
-            value_div = html.Div("n/a", className="card-value card-value--muted",
-                                 title=why or "no priced option carries this figure")
+            value_div = html.Div(MISSING, className="card-value card-value--muted",
+                                 title=cap(why) or "No priced option carries this figure")
         else:
             style = {"color": "var(--pos)" if value >= 0 else "var(--neg)"} if field in SIGNED_FIELDS else {}
             text = _fmt_greek(value, unit) if field in GREEK_FIELDS else format_cell(value)
@@ -1434,14 +1434,14 @@ def headline_strip(totals: dict, filtered: bool = False) -> html.Div:
         html.Div("Options priced", className="card-label"),
         html.Div(f"{n} of {m}", className="card-value",
                  style={"color": "var(--neg)"} if n < m else {}),
-        html.Small("rows shown by the filter" if filtered else "whole option book", className="card-note"),
+        html.Small("Rows shown by the filter" if filtered else "Whole option book", className="card-note"),
     ]))
     children = [html.Div(cards, className="cards")]
     if why:
         children.append(html.P(why[0].upper() + why[1:] + ".", className="section-kicker",
                                style={"fontStyle": "italic"}))
     if unpriced:
-        shown = "; ".join(plain_words(u) for u in unpriced[:6]) + (f"; and {len(unpriced) - 6} more" if len(unpriced) > 6 else "")
+        shown = "; ".join(plain_ids(plain_words(u)) for u in unpriced[:6]) + (f"; and {len(unpriced) - 6} more" if len(unpriced) > 6 else "")
         children.append(html.P(f"Not priced, so not in the totals: {shown}", className="section-kicker",
                                style={"fontStyle": "italic"}))
     return html.Div(children)
@@ -1744,7 +1744,7 @@ def futures_option_instruments(conn: sqlite3.Connection) -> List[str]:
 
 
 def _terms_dropdown_options(insts: List[dict]) -> List[dict]:
-    return [{"label": (f"{i['instrument_id']}  (exp {i['expiry']}" + (", NO STRIKE" if not i["strike"] else "") + ")"),
+    return [{"label": (f"{i['instrument_id']} (exp {i['expiry']}" + (", NO STRIKE" if not i["strike"] else "") + ")"),
              "value": i["instrument_id"]} for i in insts]
 
 
@@ -1842,7 +1842,7 @@ def _sum_group(name: str, g: pd.DataFrame) -> dict:
         out[k], _unit = _unit_sum(records, k)
     labels = {_text(r.get("greeks_in")) for r in records} - {""}
     out["greeks_in"] = (labels.pop() if len(labels) == 1 else
-                        "mixed: Greeks in different units are not added" if labels else "")
+                        "Mixed: Greeks in different units are not added" if labels else "")
     out["pnl_pct"] = (out["pnl"] / abs(out["paid"]) * 100.0) if out["pnl"] is not None and out["paid"] else None
     return out
 
@@ -1927,7 +1927,7 @@ def _agg_table(title: str, kicker: str, first: str, columns: List[Tuple[str, str
     named 'Total' is the pinned footer, never ranked with the rest. `key` names the table's id
     (default: from `first`), so a heading that changes with the book keeps its sort state."""
     def record(r: dict) -> dict:
-        rec = {"group": r["group"] + (f" ({r['unpriced']} unpriced)" if r.get("unpriced") else "")
+        rec = {"group": plain_ids(r["group"]) + (f" ({r['unpriced']} unpriced)" if r.get("unpriced") else "")
                + (f" (incl. {r['closed']} closed out)" if r.get("closed") else "")}
         for _heading, col, kind in columns:
             v = r.get(col)

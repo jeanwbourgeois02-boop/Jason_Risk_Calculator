@@ -152,6 +152,7 @@ from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import compact
 from ui.tabs.formatting import (
+    cap, tidy,
     MISSING, about, format_cell, is_fx_pair, issues_drawer, marker,
     plain_words, price_text, quoted_unit, short_money, short_root_name, trade_type_words,
 )
@@ -597,12 +598,12 @@ def render_headline_strip(headline: dict, hidden: tuple = (), caption: str = "")
         value = entry.get("value")
         ref_date = entry.get("ref_date", "")
         if key == "trades":
-            value_div = html.Div(f"{int(value)}" if value == value and value is not None else "n/a",
+            value_div = html.Div(f"{int(value)}" if value == value and value is not None else MISSING,
                                  className="card-value", title=ref_date)
         elif not available:
             reason = entry.get("reason", "")
-            value_div = html.Div("n/a", className="card-value card-value--muted",
-                                 title=reason or "unavailable")
+            value_div = html.Div(MISSING, className="card-value card-value--muted",
+                                 title=cap(reason) or "Unavailable")
         else:
             colour = "var(--pos)" if value >= 0 else "var(--neg)"
             full = f"{format_cell(value)} USD" + (f", {ref_date}" if ref_date else "")
@@ -1032,7 +1033,7 @@ def commodity_positions_rows(block: Optional[dict]) -> dict:
     n_missing = len(block.get("missing") or [])
     # The short visible form of `caption` beside the section title (Phase A): "excl. N" when
     # commodities were left out of the sums, else "n/a" (nothing to show, and why on hover).
-    caption_marker = (f"excl. {n_missing}" if n_missing else "n/a" if not records else "note") if caption else ""
+    caption_marker = (f"Excl. {n_missing}" if n_missing else "None held" if not records else "Note") if caption else ""
     return {"records": records, "tooltips": tips, "footer": footer, "footer_tooltips": footer_tips,
             "ccy_records": ccy_records, "ccy_tooltips": ccy_tips, "caption": caption,
             "caption_marker": caption_marker}
@@ -1913,8 +1914,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         subtabs = {} if with_options else SUBTABS_HIDDEN
         if isinstance(content, tuple):          # the fills scope: last upload, history, drawer
             top, fold, drawer = content
-            return compact(top), (trade_set or no_update), subtabs, {}, compact(fold), drawer
-        return compact(content), (trade_set or no_update), subtabs, SUBTABS_HIDDEN, None, None
+            return tidy(compact(top)), (trade_set or no_update), subtabs, {}, tidy(compact(fold)), tidy(drawer)
+        return tidy(compact(content)), (trade_set or no_update), subtabs, SUBTABS_HIDDEN, None, None
 
     def _options_shown(db_path, as_of_date) -> bool:
         """Whether the Options sub-tab shows: the book holds an open option (`has_open_option`)."""

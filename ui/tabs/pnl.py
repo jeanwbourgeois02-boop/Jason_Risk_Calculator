@@ -844,7 +844,8 @@ def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, ch
                    className="status-line status-line--bad")])
     finally:
         conn.close()
-    return out
+    from ui.tabs.book import _tidy_parts
+    return _tidy_parts(out)
 
 
 def render(as_of: Optional[str], db_path, state: Optional[dict] = None, choice: str = DEFAULT_PERIOD,

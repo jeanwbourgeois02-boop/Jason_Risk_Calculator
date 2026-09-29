@@ -46,6 +46,7 @@ from ui import sample_book
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
+    cap, tidy,
     MINUS, MISSING, about, compact, contract_name, day_text, format_cell, full_signed, fx_name, is_fx_pair,
     issues_drawer, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text, quoted_unit,
     sign_class, sum_known, z_text,
@@ -476,7 +477,7 @@ def _what_td(t: dict) -> html.Td:
     cov = coverage_words(t.get("hedge") or {})
     legs = [str(leg.get("name") or "") for leg in t.get("legs") or []]
     hover = _lines(what, *(f"· {n}" for n in legs if n))
-    return html.Td([html.Span(what, title=plain_words(hover) or None),
+    return html.Td([html.Span(cap(what), title=plain_words(hover) or None),
                     html.Span(f" · {cov}", className="tk-sub") if cov else None], className="l tk-what")
 
 
@@ -648,8 +649,8 @@ def flag_sentence(flag: dict) -> str:
     red one ('contract not recognised: XYZ6-USAA: P&L can't be computed until it is mapped')."""
     label, sentence = str(flag.get("label") or ""), str(flag.get("sentence") or "")
     if not label or sentence.lower().startswith(label.lower()):
-        return sentence or label
-    return f"{label}: {sentence}"
+        return cap(sentence or label)
+    return cap(f"{label}: {sentence}")
 
 
 def _closed_td(t: dict, as_of: str) -> html.Td:
@@ -659,7 +660,7 @@ def _closed_td(t: dict, as_of: str) -> html.Td:
         return html.Td(missing_cell(c.get("reason") or "no close date"), className="l")
     hover = _lines(f"Closed on {c['close_date']}: its last fill, or a leg's settlement after it",
                    f"Last open close: {c['open_date']}" if c.get("open_date") else "")
-    return html.Td(html.Span(f"closed {day_text(c['close_date'], as_of)}", className="tk-sub", title=hover), className="l")
+    return html.Td(html.Span(f"Closed {day_text(c['close_date'], as_of)}", className="tk-sub", title=hover), className="l")
 
 
 def _flags_td(t: dict) -> html.Td:
@@ -1032,7 +1033,7 @@ def leg_tr(data: dict, leg: dict, level_note: str) -> html.Tr:
         name_cell = html.Span(name + (" (hedge)" if hedge else ""), title=plain_words(_leg_hover(data, leg)))
     return html.Tr([
         html.Td(name_cell, className="l"),
-        html.Td(side, className="l"),
+        html.Td(cap(side), className="l"),
         html.Td(html.Span(lots_text, title=plain_words(lots_hover))),
         html.Td(value_cell), html.Td(fill_cell), html.Td(mark_cell),
         full_td(daily), full_td(ltd, ltd_hover), html.Td(roll_cell),
@@ -1045,7 +1046,7 @@ def _leg_head() -> html.Thead:
 
 
 def _sub_tr(text: str, ids: Sequence[str], data: dict) -> html.Tr:
-    return html.Tr([html.Td(text, className="l tk-subhead", colSpan=6),
+    return html.Tr([html.Td(cap(text), className="l tk-subhead", colSpan=6),
                     html.Td(full_signed(fill_sum(data, "daily", ids)[0])),
                     html.Td(full_signed(fill_sum(data, "ltd", ids)[0])), html.Td("")], className="tk-legsub")
 
@@ -1098,7 +1099,7 @@ def panel_legs(data: dict, t: dict) -> html.Table:
     ids = [str(i) for i in t.get("trade_ids") or []]
     carry = _num(t.get("carry_per_month"))
     carry_cell = (html.Span(full_signed(carry), title=plain_words(tf.research_words(data.get("research") or {})) or None)
-                  if carry is not None else html.Span("not summed", className="tk-sub",
+                  if carry is not None else html.Span("Not summed", className="tk-sub",
                                                       title=plain_words(str(t.get("carry_reason") or "not given"))))
     gross = _num(t.get("gross_usd"))
     foot = [html.Tr([html.Td("Trade total", className="l", colSpan=3),
@@ -1184,7 +1185,7 @@ def level_figure(hist: dict, t: dict) -> dict:
         if entry is not None and xs:
             shapes.append({"type": "line", "xref": "paper", "x0": 0, "x1": 1, "y0": entry, "y1": entry,
                            "line": {"color": "#c9a227", "width": 1.5, "dash": "dash"}})
-            annotations.append({"xref": "paper", "x": 0, "y": entry, "text": "entry", "showarrow": False,
+            annotations.append({"xref": "paper", "x": 0, "y": entry, "text": "Entry", "showarrow": False,
                                 "xanchor": "left", "yanchor": "bottom", "font": {"size": 10, "color": "#8a6d0b"}})
         last = next(((x, y) for x, y in zip(reversed(xs), reversed(ys)) if y is not None), None)
         if last:
@@ -1475,6 +1476,14 @@ def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, so
                    className="status-line status-line--bad")])
     finally:
         conn.close()
+    return _tidy_parts(out)
+
+
+def _tidy_parts(out: dict) -> dict:
+    """Every hover in the parts starting with a capital (`formatting.tidy`)."""
+    for key in ("body", "headline", "table", "chart", "track", "foot"):
+        if out.get(key) is not None:
+            tidy(out[key])
     return out
 
 

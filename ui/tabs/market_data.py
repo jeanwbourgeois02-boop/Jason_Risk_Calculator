@@ -46,7 +46,7 @@ from ui.feed_controls import pull_timings, recalc_words, safety_refresh_ms, seco
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import data_checks
 from ui.tabs import data_kit as kit
-from ui.tabs.formatting import compact
+from ui.tabs.formatting import cap, compact, plain_ids, tidy
 from ui.tabs.formatting import (MISSING, about, contract_name, fx_name, is_fx_pair, issues_drawer, lme_name,
                                 missing_cell, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
                                 short_root_name)
@@ -1218,9 +1218,9 @@ def library_rows(conn: sqlite3.Connection, as_of: str) -> Tuple[List[dict], List
     asked, gaps = [], []
     for r in library.tickers(conn, as_of):
         if r.get("requestable", True):
-            asked.append({**r, "flag": ""})
+            asked.append({**r, "flag": "", "used_for": cap(plain_ids(r.get("used_for")))})
         else:
-            gaps.append({**r, "ticker": LIBRARY_GAP_TICKER, "flag": "gap"})
+            gaps.append({**r, "ticker": LIBRARY_GAP_TICKER, "flag": "gap", "used_for": cap(plain_ids(r.get("used_for")))})
     return asked, gaps
 
 
@@ -1267,7 +1267,7 @@ def library_kind_rows(conn: sqlite3.Connection, as_of: str) -> List[dict]:
         g["trades"].add(r.get("trade_id"))
         if not r.get("requestable", True):
             g["gaps"].add(item)
-    rows = [{"what": what, "items": len(g["items"]), "trades": len(g["trades"]), "gaps": len(g["gaps"]),
+    rows = [{"what": cap(what), "items": len(g["items"]), "trades": len(g["trades"]), "gaps": len(g["gaps"]),
              "flag": "gap" if g["gaps"] else ""} for what, g in groups.items()]
     return sorted(rows, key=lambda r: (-r["items"], r["what"]))
 
@@ -1282,9 +1282,10 @@ def library_panel(conn: sqlite3.Connection, as_of: str) -> html.Details:
     from data.bloomberg import library
     asked, gaps = library_rows(conn, as_of)
     trades = len({r["trade_id"] for r in library.needed_on(conn, as_of)})
-    summary = f"{LIBRARY_TITLE} · {len(asked)} ticker(s) for {trades} trade(s) on {as_of}"
+    summary = (f"{LIBRARY_TITLE} · {len(asked)} ticker{'' if len(asked) == 1 else 's'} for {trades} "
+               f"trade{'' if trades == 1 else 's'} on {as_of}")
     if gaps:
-        summary += f" · {len(gaps)} need(s) with no Bloomberg ticker, not asked"
+        summary += f" · {len(gaps)} need{'' if len(gaps) == 1 else 's'} with no Bloomberg ticker, not asked"
     summary += " · changes only when trades come in · pulled only on request"
     about_text = ("Everything \"Pull Bloomberg now\" asks for, and nothing else. A forward curve is one "
                   "request per pair; a vol smile and an OIS curve are one ticker per point.")
@@ -1820,7 +1821,7 @@ def reference_closes_panel(rows: List[dict], issues: Optional[list] = None) -> h
         if r["flag"] and issues is not None:
             issues.append((f"{r['period']} close {r['date_iso']}", r["why"]))
         if not r["needed"]:
-            complete = html.Span("nothing needed", className="cell-missing", title=r["why"])
+            complete = html.Span("Nothing needed", className="cell-missing", title=r["why"])
         elif r["flag"]:
             complete = html.Span(f"{kit.CROSS} {r['missing']:,} of {r['needed']:,} missing", className="cell-amber",
                                  title=plain_words(r["why"]) or None)
@@ -1875,12 +1876,13 @@ def contract_dates_line(conn: sqlite3.Connection, as_of: str, ctx: tuple,
             kit.td(last, left=True, title=r["last_trade_date"] or None),
             kit.td(short_date(r["first_notice_date"]) if r["first_notice_date"] else missing_cell(
                 r["why"] or "no first notice for this contract"), left=True, title=r["first_notice_date"] or None),
-            kit.td(html.Span("estimated", className="cell-amber", title=plain_words(r["why"]))
+            kit.td(html.Span("Estimated", className="cell-amber", title=plain_words(r["why"]))
                    if r["flag"] else (r["source"] or "Bloomberg"), left=True),
             kit.td(str(r["trades"] if r["trades"] is not None else MISSING)),
         ]))
     if estimated and issues is not None:
-        issues.append((CONTRACT_DATES_TITLE, f"{len(estimated)} contract(s) run on the contract master's estimated "
+        issues.append((CONTRACT_DATES_TITLE, f"{len(estimated)} contract{'' if len(estimated) == 1 else 's'} run on "
+                                             "the contract master's estimated "
                                              "dates until Bloomberg's own are on file: "
                                              + ", ".join(str(r["contract_id"]) for r in estimated)))
     cols: Tuple[kit.Column, ...] = (
@@ -2018,6 +2020,7 @@ def render(as_of_date: Optional[str], db_path) -> tuple:
     finally:
         conn.close()
     drawer = issues_drawer(issues, id=f"{ISSUES_ID}-drawer") or blank
+    tidy([line, marks_empty, closes_panel, dates_panel, diag, drawer])
     return (line, problems, {} if problems else _HIDDEN, mark_rows, marks_filter_options(mark_rows), marks_empty,
             tools_style, closes_panel, dates_panel, diag, drawer)
 
@@ -2040,7 +2043,7 @@ def _marks_controls() -> list:
         html.Div(className="blotter-filter", children=[
             html.Label("Search"),
             dcc.Input(id=MARKS_SEARCH_ID, type="text", value="", debounce=True, persistence=True,
-                      persistence_type="session", placeholder="price, trade or source",
+                      persistence_type="session", placeholder="Search price, trade or source",
                       className="blotter-filter-search")]),
         html.Div(className="blotter-filter", style={"minWidth": "170px"}, children=[
             html.Label("Status"),

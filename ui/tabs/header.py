@@ -152,7 +152,7 @@ from typing import Callable, Optional
 from dash import Input, Output, dcc, html
 
 from ui.tabs.controls import today_ny
-from ui.tabs.formatting import MISSING, marker, plain_words, short_money
+from ui.tabs.formatting import MISSING, marker, plain_words, short_money, tidy
 
 HEADER_ID = "header-block"
 # The LTD chart's ids (the chart is on the P&L tab since 2026-09-28, `ui/tabs/pnl.py`; these
@@ -531,8 +531,10 @@ _MISSING_TAG_RE = re.compile(r"no (\S+) mark")
 
 _PRODUCT_LABELS = {
     "FX_SPOT": "spot", "FX_FWD": "forward", "FX_SWAP": "swap",
-    "FUTURE": "future", "FX_OPTION": "option",
+    "FUTURE": "future", "FX_OPTION": "option", "CMDTY_OPTION": "option on a future",
+    "EQ_OPTION": "listed option", "LME_FWD": "LME forward", "UNRECOGNISED": "unrecognised contract",
 }
+_PRODUCT_PLURALS = {"option on a future": "options on futures"}
 
 
 def _reason_tag(reason: str) -> str:
@@ -569,8 +571,8 @@ def _reason_tag(reason: str) -> str:
 
 
 def _product_label(product: str, count: int) -> str:
-    label = _PRODUCT_LABELS.get(product, str(product).lower() or "trade")
-    return label if count == 1 else f"{label}s"
+    label = _PRODUCT_LABELS.get(product, str(product).lower().replace("_", " ") or "trade")
+    return label if count == 1 else _PRODUCT_PLURALS.get(label, f"{label}s")
 
 
 def _unpriced_breakdown(unpriced) -> str:
@@ -833,7 +835,7 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         cards.append(trades_count(as_of, n_total, n_open))
     else:
         cards.append(trades_count(as_of, names, names_open, unit="trade names", fills=n_total))
-    return cards
+    return tidy(cards)
 
 
 def trade_name_counts(conn: sqlite3.Connection, as_of: str) -> tuple:
@@ -869,7 +871,7 @@ def _entry_sentence(title: str, entry: dict) -> str:
     """One sentence for a P&L entry on another figure's hover: "5d $12,300" (with what it
     leaves out or the close it stepped back to), or "5d n/a: <reason>"."""
     if not entry.get("available"):
-        return f"{title} n/a: {entry.get('reason') or 'no figure'}"
+        return f"{title} not available: {entry.get('reason') or 'no figure'}"
     words = [f"{title} {_fmt_usd(entry['value'])}"]
     words += [f"{short} ({sentence.splitlines()[0]})" for short, sentence, *_rest in _entry_markers(entry) if short]
     return "; ".join(words)
@@ -1174,7 +1176,7 @@ def _business_days_short(row: dict) -> str:
     if row.get("level") == "EXPIRED":
         return "expired"
     if n is None:
-        return "bd n/a"
+        return "bd unknown"
     return "today" if n == 0 else f"{n} bd"
 
 
@@ -1315,7 +1317,7 @@ def marks_chip(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple], n_t
         try:
             needs = _needs_cached(conn, as_of)
         except Exception as exc:  # noqa: BLE001 -- the chip says why
-            return _chip(f"Marks: {when} \u00b7 missing count n/a", "amber",
+            return _chip(f"Marks: {when} \u00b7 missing count unknown", "amber",
                          _failure_reason(f"the marks the book needs on {as_of} could not be listed", exc, conn))
     needed, missing = needs
     if not missing:

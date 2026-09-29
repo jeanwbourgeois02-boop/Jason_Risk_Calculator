@@ -43,6 +43,7 @@ from ui.tabs import risk_limits
 from ui.tabs import trade_filter as tf
 from ui.tabs.book import empty_state, trades_on_file
 from ui.tabs.formatting import (
+    cap, tidy,
     MINUS, MISSING, about, compact, format_cell, issues_drawer, km_cell, km_text, marker, missing_cell, pct_text,
     plain_words,
 )
@@ -640,7 +641,7 @@ def legs_table(data: dict, t: dict, r: Optional[dict]) -> Optional[html.Table]:
             html.Td(pct_text(oi_pct) if oi_pct is not None else missing_cell(why or "no open interest")),
             html.Td(f"{days:,.1f}" if days is not None else missing_cell(why or "no volume data"),
                     className={"RED": "cell-red", "AMBER": "cell-amber"}.get(level)),
-            html.Td(level.lower().replace("no_data", "no data") or NA, className="l tk-sub"),
+            html.Td(cap(level.lower().replace("no_data", "no data")) or NA, className="l tk-sub"),
         ], className="tk-leg" + (" tk-leg--hedge" if hedge else "")))
     return html.Table([html.Thead(html.Tr([html.Th(x, className=c or None, title=h or None) for x, c, h in LEG_HEAD])),
                        html.Tbody(body)], className="book-table tk-table tk-legs risk-legs")
@@ -806,7 +807,7 @@ def headline(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> 
     def summed(tot, hover):
         val, n, why = tot
         if val is None and not why:
-            return html.Span("none", className="tk-sub", title="no row showing has one")
+            return html.Span("Not held", className="tk-sub", title="No row showing has one")
         if val is None:
             return missing_cell(_lines(*why[:8]) or "no figure")
         return html.Span([km_cell(val, hover=hover, colour=False),
@@ -856,7 +857,7 @@ def source_line(data: dict, risk: Optional[dict], sub: Optional[dict]) -> html.D
     note = (risk or {}).get("source_note") or research.get("note")
     if kind != "real" and note:
         parts.append(str(note))
-    return html.Div(" · ".join(parts), className="risk-reach",
+    return html.Div(" · ".join(cap(str(p)) for p in parts), className="risk-reach",
                     title=plain_words("The price history every risk figure here is drawn from: the research app's "
                                       "daily settlements, read-only, never a mark or a P&L figure."))
 
@@ -968,7 +969,8 @@ def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, so
                    className="status-line status-line--bad")])
     finally:
         conn.close()
-    return out
+    from ui.tabs.book import _tidy_parts
+    return _tidy_parts(out)
 
 
 def render_folds(as_of: Optional[str], db_path, state: Optional[dict], folds: Sequence[str],
@@ -1005,7 +1007,7 @@ def render_folds(as_of: Optional[str], db_path, state: Optional[dict], folds: Se
                 log.exception("Risk: the %s fold failed for %s", key, as_of)
                 kids.append(html.Div(missing_cell(f"the {key} fold could not be built ({type(exc).__name__}: {exc})"),
                                      className="book-card risk-fold"))
-        return html.Div(kids, className="risk-folds")
+        return tidy(html.Div(kids, className="risk-folds"))
     except Exception as exc:  # noqa: BLE001
         log.exception("Risk folds could not be built for %s", as_of)
         return message_box(f"The folds could not be built ({type(exc).__name__}: {exc}).")

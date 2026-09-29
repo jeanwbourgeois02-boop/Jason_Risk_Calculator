@@ -41,6 +41,7 @@ from dash import ALL, MATCH, Input, Output, State, dcc, html
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import data_kit as kit
 from ui.tabs.formatting import (
+    cap, tidy,
     MISSING, amount_words, compact, day_text, fx_name, is_fx_pair, missing_cell, parse_contract_id, plain_words,
     price_text, quoted_unit,
 )
@@ -574,7 +575,7 @@ def fills_table(df: pd.DataFrame, total: int, sort: Optional[dict], state: Optio
     if n > drawn:
         children.append(html.P(f"The first {drawn:,} of {n:,} are drawn; narrow them with the filters, or Download "
                                "CSV for every one.", className="book-section-meta"))
-    return html.Div(children)
+    return tidy(html.Div(children))
 
 
 CSV_COLUMNS = (("trade_date", "Trade date"), ("strategy", "Trade"), ("pb_root", "PBRoot"), ("contract", "Contract"),
@@ -619,7 +620,7 @@ def bar(state: Optional[dict], options: Dict[str, List[dict]], dates: Tuple[Opti
         html.Div(className="blotter-filter", children=[
             html.Label("Search"),
             dcc.Input(id=F_SEARCH_ID, type="text", value=s["search"], debounce=True,
-                      placeholder="contract, symbol or Trade Id", className="blotter-filter-search")]),
+                      placeholder="Search contract, symbol or Trade Id", className="blotter-filter-search")]),
         pick(F_TRADE_ID, "trade", "Trade", 170),
         pick(F_LANDED_ID, "landed", "Landed in", 170),
         pick(F_SIDE_ID, "side", "Side", 110),
@@ -674,7 +675,7 @@ def reason_words(reason) -> str:
     text = plain_words(reason)
     for path, words in (("config/contracts.csv", "the contract universe"), ("config/book.yaml", "the book filter")):
         text = text.replace(f"not in {path}", f"not in {words}").replace(path, words)
-    return text
+    return cap(text)
 
 
 def what_to_do(kind: str, reason: str) -> str:
@@ -840,12 +841,12 @@ def last_upload_block(conn: sqlite3.Connection) -> html.Div:
         return html.Div(id=LAST_UPLOAD_ID, className="book-section-head", children=[
             html.Span("Last upload", className="book-section-title"), " ",
             missing_cell(f"the upload record could not be read ({type(exc).__name__}: {exc})")])
-    title = html.Span("Last upload ", className="book-section-title",
+    title = html.Span("Last upload", className="book-section-title",
                       title="What the last blotter upload did, as it was recorded: the merge by Trade Id and every "
                             "row of the file that needs a fix.")
     if report is None and not issues:
-        return html.Div(id=LAST_UPLOAD_ID, children=[html.Div([title, html.Span(NO_HISTORY + ".",
-                                                                                className="book-section-meta")])])
+        return html.Div(id=LAST_UPLOAD_ID, className="blotter-last-upload-section",
+                        children=[html.Div([title, ": ", html.Span(cap(NO_HISTORY) + ".", className="book-section-meta")])])
     kinds = [str(i.get("kind") or "") for i in issues]
     need = [i for i, k in zip(issues, kinds) if k == UNRECOGNISED]
     rejects = [i for i, k in zip(issues, kinds) if k not in ("WARNING", UNRECOGNISED)]
@@ -855,16 +856,16 @@ def last_upload_block(conn: sqlite3.Connection) -> html.Div:
     n_fix = need_fix_count(report, issues)
     children: list = []
     if report is not None:
-        children.append(html.Div([title, *last_upload_line(report, len(rejects), n_fix)],
+        children.append(html.Div([title, " ", *last_upload_line(report, len(rejects), n_fix)],
                                  className="blotter-upload-line"))
     else:
-        children.append(html.Div([title, html.Span("no summary recorded", className="book-section-meta")]))
+        children.append(html.Div([title, ": ", html.Span("No summary recorded", className="book-section-meta")]))
     if need or rejects or row_warnings:
         children.append(rejects_table(rejects, need, row_warnings))
     for w in file_warnings:
         children.append(html.Div([html.Span("About the file", className="marker marker--amber"), " ",
                                   plain_words(w.get("reason"))], className="blotter-file-warning"))
-    return html.Div(id=LAST_UPLOAD_ID, children=children)
+    return html.Div(id=LAST_UPLOAD_ID, className="blotter-last-upload-section", children=children)
 
 
 # ---- the upload history

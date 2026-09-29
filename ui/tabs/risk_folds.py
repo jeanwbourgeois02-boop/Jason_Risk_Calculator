@@ -29,7 +29,7 @@ from dash import dcc, html
 
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
-    MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text,
+    cap, plain_ids, MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text,
     short_date, sum_known,
 )
 
@@ -68,8 +68,8 @@ PRICE_ABOUT = ("Whether the research app's prices, which every risk figure here 
                "app's settle, flagged beyond 20 % (2 % for the USD/CNH rate, which converts every China trade's history).")
 PLACEHOLDER_WORDS = ("placeholder: the stress file holds stand-in scenarios until Jason sets his own "
                      "(docs/open-questions.md)")
-KIND_WORDS = {"outright": "designed", "curve": "designed", "spread": "designed", "replay": "historical replay",
-              "fx": "currency"}
+KIND_WORDS = {"outright": "Designed", "curve": "Designed", "spread": "Designed", "replay": "Historical replay",
+              "fx": "Currency"}
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -773,8 +773,8 @@ def currency_fold(ctx: dict, is_open: bool, conn: Optional[sqlite3.Connection] =
                     html.Td(html.Span(line["ccy"], className="tk-name", title=plain_words(_lines(*line["trades"]))),
                             className="l"),
                     _usd_td(ex_v, ex_n, ex_r),
-                    _usd_td(h_v, h_n, h_r) if line["has_hedge"] else html.Td(html.Span("none", className="tk-sub",
-                                                                                       title="no currency hedge in "
+                    _usd_td(h_v, h_n, h_r) if line["has_hedge"] else html.Td(html.Span("No hedge", className="tk-sub",
+                                                                                       title="No currency hedge in "
                                                                                              "these trades")),
                     _usd_td(u_v, u_n, u_r),
                     _coverage_td(line["coverage"], line["china"], line["ccy"])]))
@@ -926,7 +926,7 @@ def greeks_lines(ctx: dict, marks: Dict[Tuple[str, str], float], fx_options: Opt
     for root_id, rs in by_root.items():
         root = roots.get(root_id)
         ccy = str(rs[0].get("currency") or "")
-        legs = ", ".join(f"{contract_name(r.get('contract_id'), root, root_id)} {size_words(_num(r.get('lots')))}" for r in rs)
+        legs = ", ".join(f"{contract_name(r.get('contract_id'), root, root_id)} {size_words(_num(r.get('lots')), capital=False)}" for r in rs)
         line = {"label": short_root_name(root, root_id), "legs": legs, "ccy": ccy, "kind": "commodity",
                 "hover": f"{_plural(len(rs), 'option')} on {root_id}: {legs}"}
         pairs: Dict[str, list] = {k: [] for k in ("delta", "gamma", "theta", "vega")}
@@ -1208,12 +1208,13 @@ def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
                 factor = _num(r.get("factor"))
                 ours_hover = _lines(f"{r.get('ours_kind') or ''} of {r.get('ours_date') or ''}".strip(), r.get("note") or "")
                 body_rows.append(html.Tr([
-                    html.Td(html.Span("off" if flag else ("ok" if factor is not None else MISSING),
+                    html.Td(html.Span("Off" if flag else ("OK" if factor is not None else MISSING),
                                       className="cell-amber tk-bold" if flag else "tk-sub"), className="l"),
                     html.Td({"future": "Future", "lme": "LME", "fx": "FX"}.get(str(r.get("kind")), str(r.get("kind") or "")),
                             className="l"),
-                    html.Td(html.Span(str(r.get("contract_id") or r.get("root_id") or ""),
-                                      title=plain_words(f"research: {r.get('research_contract_id') or ''}")), className="l"),
+                    html.Td(html.Span(plain_ids(str(r.get("contract_id") or r.get("root_id") or "")),
+                                      title=_lines(str(r.get("contract_id") or r.get("root_id") or ""),
+                                                   f"Research: {r.get('research_contract_id') or ''}")), className="l"),
                     html.Td(html.Span(price_text(_num(r.get("ours"))), title=plain_words(ours_hover) or None)
                             if _num(r.get("ours")) is not None else missing_cell(r.get("reason") or "no price of ours")),
                     html.Td(html.Span(price_text(_num(r.get("research"))),
@@ -1222,7 +1223,7 @@ def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
                     html.Td(html.Span(f"×{factor:.2f}", className="cell-amber" if flag else None,
                                       title=plain_words(r.get("hint") or "") or None) if factor is not None
                             else missing_cell(r.get("reason") or "not compared")),
-                    html.Td(str(r.get("sentence") or r.get("reason") or ""), className="l risk-wrap"),
+                    html.Td(cap(plain_ids(str(r.get("sentence") or r.get("reason") or ""))), className="l risk-wrap"),
                 ]))
             body.append(html.Div(html.Table([head, html.Tbody(body_rows)],
                                             className="book-table book-grid tk-table risk-price-table"),

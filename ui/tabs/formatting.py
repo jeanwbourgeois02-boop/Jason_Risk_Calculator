@@ -27,6 +27,86 @@ MINUS = "\u2212"          # a real minus sign, not a hyphen
 INFO_MARK = "\u24d8"      # the small circled "i" beside a title with definitions on hover
 
 
+# ----------------------------------------------------------------------------- capitals (2026-09-29)
+# Every text a screen draws, hover included, starts with a capital letter (user, 2026-09-29: "so
+# many things not capitalised ... its not acceptable"). The engine's reasons are sentences that
+# start lowercase, so the screens capitalise them once, where they are drawn: `cap` on a text,
+# `tidy` over a rendered tree's hovers. A first word that is a symbol drawn beside a figure (a
+# ratio's "x0.71", "vs", a z-score's "z") keeps its case.
+_CAP_LEAD = "\u25b8\u25be\u25b4\u25b9\u25ba\u25c2\u25c3\u2022\u00b7\u2713\u2717\u2714\u2718\u26a0\u24d8 \u00a0\t\n\"'(["
+_CAP_KEEP = {"vs", "x", "z"}
+_CAP_NEVER = {"nan", "none", "null", "nat", "n/a", "undefined", "inf"}   # a missing value: left for the checker to see
+_CAP_WORD = re.compile(r"[A-Za-z\u00c0-\u024f]+")
+
+
+def cap(text):
+    """`text` with its first letter a capital ("no mark" -> "No mark"), leading glyphs and spaces
+    kept; a first word in `_CAP_KEEP`, None, '' and a non-string pass through unchanged."""
+    if not isinstance(text, str) or not text or text.strip().lower() in _CAP_NEVER:
+        return text
+    i = 0
+    while i < len(text) and text[i] in _CAP_LEAD:
+        i += 1
+    if i >= len(text) or not text[i].isalpha() or not text[i].islower():
+        return text
+    m = _CAP_WORD.match(text, i)
+    if m and m.group(0).lower() in _CAP_KEEP:
+        return text
+    return text[:i] + text[i].upper() + text[i + 1:]
+
+
+def cap_lines(text, sep: str = "\n"):
+    """`cap` on every line of a hover of several lines."""
+    if not isinstance(text, str) or sep not in text:
+        return cap(text)
+    return sep.join(cap(line) for line in text.split(sep))
+
+
+def tidy(tree):
+    """`tree` (a rendered component, a list of them) with every hover (`title`) and every table
+    tooltip (`tooltip_data`, `tooltip_header`) starting with a capital (`cap`), and each static
+    block's markup likewise; edited in place and returned. Display only: no figure, no id, no
+    visible text is touched."""
+    seen = set()
+
+    def visit(obj):
+        if isinstance(obj, (list, tuple)):
+            for x in obj:
+                visit(x)
+            return
+        if not hasattr(obj, "_prop_names") or id(obj) in seen:
+            return
+        seen.add(id(obj))
+        title = getattr(obj, "title", None)
+        if isinstance(title, str):
+            obj.title = cap_lines(title)
+        if type(obj).__name__ == "Markdown" and getattr(obj, "dangerously_allow_html", False):
+            src = getattr(obj, "children", None)
+            if isinstance(src, str) and 'title="' in src:
+                obj.children = _TITLE_ATTR.sub(lambda m: m.group(1) + cap_lines(m.group(2), "&#10;") + '"', src)
+            return
+        for prop in ("tooltip_data", "tooltip_header"):
+            value = getattr(obj, prop, None) if prop in getattr(obj, "_prop_names", ()) else None
+            if value:
+                setattr(obj, prop, _cap_tooltips(value))
+        visit(getattr(obj, "children", None))
+    visit(tree)
+    return tree
+
+
+_TITLE_ATTR = re.compile(r'(\btitle=")([^"]*)"')
+
+
+def _cap_tooltips(value):
+    if isinstance(value, list):
+        return [_cap_tooltips(v) for v in value]
+    if isinstance(value, dict):
+        if "value" in value and isinstance(value.get("value"), str):
+            return {**value, "value": cap_lines(value["value"])}
+        return {k: _cap_tooltips(v) for k, v in value.items()}
+    return cap_lines(value) if isinstance(value, str) else value
+
+
 def format_cell(value) -> str:
     """Format a single numeric cell: round to whole units, thousands separators, a negative
     with a real minus sign (U+2212, never parentheses: the display rule of 2026-09-28), blank
@@ -151,7 +231,60 @@ _PLAIN_PHRASES: Tuple[Tuple[str, str], ...] = (
     ("THETA mark", "theta mark"), ("VEGA mark", "vega mark"), ("RHO mark", "rho mark"),
     ("official DELTA", "official delta"), ("official GAMMA", "official gamma"), ("official THETA", "official theta"),
     ("official VEGA", "official vega"),
+    ("book_positions gives the currency delta per currency, not per trade, so its risk is in the currency rows "
+     "of the headline VaR", "its currency risk is counted under the currencies of the headline VaR, not per trade"),
+    ("book_positions", "the currency positions"),
+    ("UNRECOGNISED:", "contract not recognised: "), ("UNRECOGNISED", "contract not recognised"),
 )
+
+
+# ----------------------------------------------------------------------------- plain names in a sentence
+# A Bloomberg contract id ('CLZ26 Comdty', 'C Z26 Comdty', 'CLZ26C 75 Comdty') or a contract
+# root id ('CBOT:ZC', 'LME:CA') inside a sentence the engine wrote, put as the plain name the
+# screens use ('WTI Dec26', 'WTI Dec26 75c', 'Corn', 'LME copper') where the text is drawn
+# (user, 2026-09-29: no Bloomberg tickers or root ids in visible text; the id stays on hover).
+_BBG_ID = re.compile(r"\b([A-Z][A-Z0-9]{0,4}?) ?([FGHJKMNQUVXZ])(\d{2})(?:([CP]) ?([\d.]+))? Comdty\b")
+_ROOT_ID = re.compile(r"\b([A-Z]{2,8}):([A-Z0-9]{1,6})\b")
+_ROOT_CACHE: dict = {}
+
+
+def _root_maps() -> Tuple[dict, dict]:
+    """(root id -> root, Bloomberg root code -> root), read once per process."""
+    if "maps" not in _ROOT_CACHE:
+        try:
+            from data.contracts import load_roots
+            roots = dict(load_roots())
+        except Exception:  # noqa: BLE001 -- the ids stay as they are
+            roots = {}
+        by_code = {}
+        for root in roots.values():
+            code = str(getattr(root, "bbg_root", "") or "").strip()
+            if code and code not in by_code:
+                by_code[code] = root
+        _ROOT_CACHE["maps"] = (roots, by_code)
+    return _ROOT_CACHE["maps"]
+
+
+def plain_ids(text) -> str:
+    """`text` with each Bloomberg contract id and each contract root id it names put as the plain
+    name ('C Z26 Comdty' -> 'Corn Dec26', 'CBOT:ZC' -> 'Corn'); an id no root knows keeps its
+    code without the yellow key. None -> ''."""
+    s = "" if text is None else str(text)
+    if not s:
+        return s
+    roots, by_code = _root_maps()
+
+    def contract(m) -> str:
+        code, mcode, yy, opt, strike = m.groups()
+        root = by_code.get(code)
+        name = f"{short_root_name(root, getattr(root, 'root_id', '') or code) if root is not None else code} " \
+               f"{month_label(_MONTH_CODES.index(mcode) + 1, int(yy))}"
+        return name + (f" {strike_text(strike)}{opt.lower()}" if opt else "")
+
+    def root_id(m) -> str:
+        rid = m.group(0)
+        return short_root_name(roots[rid], rid) if rid in roots else rid
+    return _ROOT_ID.sub(root_id, _BBG_ID.sub(contract, s))
 
 
 def plain_words(text) -> str:
@@ -179,7 +312,7 @@ def about(title, text: Optional[str] = None, level: str = "h4", className: str =
     heading (nothing to hover). Extra `props` (an `id`, `style`) go on the heading."""
     tag = _HEADINGS[level.lower()]
     classes = " ".join(c for c in ("about-title", className) if c)
-    text = plain_words(text)
+    text = cap(plain_words(text))
     if not text:
         return tag(title, className=classes, **props)
     return tag([title, html.Span(INFO_MARK, className="about-mark", title=text)],
@@ -193,8 +326,9 @@ def marker(short: str, reason: Optional[str] = None, className: str = ""):
     if not short:
         return None
     classes = " ".join(c for c in ("marker", className) if c)
+    short = cap(short)
     if reason:
-        return html.Span(short, className=classes, title=plain_words(reason))
+        return html.Span(short, className=classes, title=cap(plain_words(reason)))
     return html.Span(short, className=classes)
 
 
@@ -244,7 +378,7 @@ def _to_jsx(node, out: list) -> bool:
         elif isinstance(v, (int, float)):
             out.append(f" {k}={{{json.dumps(v)}}}")
         elif isinstance(v, str):
-            out.append(f' {k}="{_jsx_text(v)}"')
+            out.append(f' {k}="{_jsx_text(cap_lines(v) if k == "title" else v)}"')
         else:
             return False
     children = props.get("children")
@@ -285,6 +419,9 @@ def compact(node):
         return [compact(x) for x in node]
     if not hasattr(node, "_prop_names") or "children" not in getattr(node, "_prop_names", ()):
         return node
+    title = getattr(node, "title", None) if "title" in getattr(node, "_prop_names", ()) else None
+    if isinstance(title, str):
+        node.title = cap_lines(title)
     ch = getattr(node, "children", None)
     if ch is None or isinstance(ch, (str, int, float)):
         return node
@@ -386,10 +523,12 @@ def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issue
             label, sentence = item
             if not label and not sentence:
                 continue
-            rows.append(html.Li([html.Span(str(label), className="issue-label"), " ", plain_words(sentence)]
-                                if label else plain_words(sentence)))
+            rows.append(html.Li([html.Span(cap(plain_ids(str(label))), className="issue-label", title=str(label)
+                                           if plain_ids(str(label)) != str(label) else None),
+                                 " ", plain_ids(plain_words(sentence))]
+                                if label else cap(plain_ids(plain_words(sentence)))))
         elif isinstance(item, str):
-            rows.append(html.Li(plain_words(item)))
+            rows.append(html.Li(cap(plain_ids(plain_words(item)))))
         else:
             rows.append(html.Li(item))
     if not rows:
@@ -461,7 +600,7 @@ def missing_cell(reason: Optional[str] = None, className: str = ""):
     """The em dash of a value the engine could not give, grey, the reason on hover. Never the
     text "n/a", never a zero."""
     classes = " ".join(c for c in ("cell-missing", className) if c)
-    return html.Span(MISSING, className=classes, title=plain_words(reason) or "not available")
+    return html.Span(MISSING, className=classes, title=cap(plain_words(reason)) or "Not available")
 
 
 def sum_known(values_with_reasons: Iterable) -> Tuple[Optional[float], int, list]:
@@ -535,7 +674,7 @@ def money_cell(value, reason: Optional[str] = None, hover: Optional[str] = None,
         return missing_cell(reason, className)
     classes = " ".join(c for c in (sign_class(value), className) if c)
     title = "\n".join(t for t in (full_money(value, ccy), hover) if t)
-    return html.Span(signed_money(value), className=classes or None, title=title)
+    return html.Span(signed_money(value), className=classes or None, title=cap(title))
 
 
 # --- prices at tick precision
@@ -917,15 +1056,16 @@ def amount_words(value: float, ccy: str = "") -> str:
     return f"{body} {ccy}".strip()
 
 
-def size_words(quantity, unit: str = "lots", ccy: str = "") -> str:
-    """'long 15 lots', 'short 30 lots', 'long 5,000 bbl', 'long 100 t', 'long 2.0m USD', 'short
-    1 lot': the sign as a word, never a signed number."""
+def size_words(quantity, unit: str = "lots", ccy: str = "", capital: bool = True) -> str:
+    """'Long 15 lots', 'Short 30 lots', 'Long 5,000 bbl', 'Long 100 t', 'Long 2.0m USD', 'Short
+    1 lot': the sign as a word, never a signed number; lowercase ('long 15 lots') with
+    `capital=False`, for use inside a sentence."""
     if _is_missing(quantity):
         return MISSING
     q = float(quantity)
     if q == 0:
-        return "flat"
-    side = "long" if q >= 0 else "short"
+        return "Flat" if capital else "flat"
+    side = ("Long" if q >= 0 else "Short") if capital else ("long" if q >= 0 else "short")
     if ccy:
         return f"{side} {amount_words(q, ccy)}"
     n = abs(q)
@@ -965,14 +1105,14 @@ def date_cell(iso: Optional[str], business_days: Optional[int] = None, estimated
     lvl = str(level or "").upper()
     if estimated:
         text = f"{ESTIMATED} {f'{prefix} ' if prefix else ''}{words}"
-        return html.Span(text, className="cell-estimated", title=estimated_hover(business_days, alert_date, lvl, hover))
+        return html.Span(text, className="cell-estimated", title=cap(estimated_hover(business_days, alert_date, lvl, hover)))
     if business_days is not None:
         words += " · " + ("today" if business_days == 0 else f"{business_days} bd")
     if prefix:
         words = f"{prefix} {words}"
     cls = {"RED": "cell-red", "AMBER": "cell-amber", "EXPIRED": "cell-red"}.get(lvl, "")
     title = "\n".join(t for t in (lvl.lower() if lvl in ("RED", "AMBER", "EXPIRED") else "", hover) if t)
-    return html.Span(words, className=cls or None, title=title or None)
+    return html.Span(words, className=cls or None, title=cap(title) or None)
 
 
 def unit_suffix(unit: str):
@@ -1025,7 +1165,7 @@ def km_cell(value, reason: Optional[str] = None, hover: Optional[str] = None, si
         return missing_cell("\n".join(t for t in (reason, hover) if t) or None, className)
     classes = " ".join(c for c in ((sign_class(value) if colour else ""), className) if c)
     title = "\n".join(t for t in (f"USD {full_signed(value) if signed else format_cell(value)}", hover) if t)
-    return html.Span(km_text(value, signed), className=classes or None, title=plain_words(title))
+    return html.Span(km_text(value, signed), className=classes or None, title=cap(plain_words(title)))
 
 
 def pct_text(fraction, signed: bool = False) -> str:

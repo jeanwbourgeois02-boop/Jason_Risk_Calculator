@@ -30,6 +30,7 @@ from dash import html
 
 from ui.tabs import data_kit as kit
 from ui.tabs.formatting import (
+    cap, tidy,
     MINUS, MISSING, is_fx_pair, missing_cell, parse_contract_id, plain_words, price_text, short_date,
 )
 
@@ -337,10 +338,10 @@ def unrecognised_problems(unrecognised: Optional[List[dict]]) -> Tuple[List[dict
                   f"{u.get('price')})" for u in items]
         names = sorted({str(u.get("trade_name") or "") for u in items} - {""})
         out.append(_problem("red", "Not recognised", sym,
-                            plain_words(reasons[0]) if reasons else "contract not recognised",
-                            (plain_words(blocks[0]) if blocks else "no P&L: contract not recognised")
-                            + (f" · {', '.join(names)}" if names else ""),
-                            price_tip=f"the file's symbol as written; {len(items)} trade(s)",
+                            cap(plain_words(reasons[0])) if reasons else "Contract not recognised",
+                            cap((plain_words(blocks[0]) if blocks else "no P&L: contract not recognised")
+                                + (f" · {', '.join(names)}" if names else "")),
+                            price_tip=f"The file's symbol as written; {len(items)} trade{'' if len(items) == 1 else 's'}",
                             problem_tip="; ".join(reasons), blocks_tip="Trades: " + "; ".join(trades), rank=0.5))
     return out, covered
 
@@ -392,13 +393,17 @@ PROBLEM_SORT = {"label": lambda p: (p["rank"], p["label"]), "price": lambda p: p
 
 
 def problems_table(rows: List[dict], sort: Optional[dict], sort_type: str) -> html.Table:
+    return tidy(_problems_table(rows, sort, sort_type))
+
+
+def _problems_table(rows: List[dict], sort: Optional[dict], sort_type: str) -> html.Table:
     body = []
     for p in kit.sort_records(rows, sort, PROBLEM_SORT):
         body.append(html.Tr([
             kit.td(kit.chip(p["label"], p["level"]), left=True),
             kit.td(p["price"], left=True, title=p["price_tip"] or None),
-            kit.td(p["problem"], left=True, title=p["problem_tip"] or None),
-            kit.td(p["blocks"], left=True, title=p["blocks_tip"] or None),
+            kit.td(cap(p["problem"]), left=True, title=p["problem_tip"] or None),
+            kit.td(cap(p["blocks"]), left=True, title=p["blocks_tip"] or None),
         ]))
     return kit.table(kit.head(PROBLEM_COLUMNS, sort, sort_type), body)
 
@@ -458,6 +463,15 @@ def filter_marks(rows: Optional[List[dict]], statuses: Optional[list], groups: O
     return out
 
 
+def _tip(value) -> Optional[str]:
+    """A hover from a stored value: None for a blank or a missing one (None, NaN), never the
+    text "nan"."""
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    text = str(value).strip()
+    return text if text and text.lower() not in ("nan", "none", "nat") else None
+
+
 def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: int) -> html.Table:
     """The marks check: the total row first (the count showing and the checks failed), then one
     row per price."""
@@ -483,19 +497,19 @@ def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: i
                             r["arrived_reason"] if r["status"] == "MISSING" else None), left=True),
             kit.td(r["name"], left=True, title=r["name_tip"]),
             kit.td(mark),
-            kit.td(r["source"], left=True, title=r["source_code"] or None),
-            kit.td(r["time"], left=True, title=r["snapped_at"] or None),
-            kit.td(prev, title=r["prev_date_iso"] or None),
+            kit.td(r["source"], left=True, title=_tip(r["source_code"])),
+            kit.td(r["time"], left=True, title=_tip(r["snapped_at"])),
+            kit.td(prev, title=_tip(r["prev_date_iso"])),
             kit.td(change),
             kit.td(kit.check_cell(r["arrived"], r["arrived_reason"])),
             kit.td(kit.check_cell(r["fresh"] if r["arrived"] else None, r["fresh_reason"])),
             kit.td(kit.check_cell(sane_ok, r["sane_reason"])),
             kit.td(kit.check_cell(units_ok, r["units_reason"],
-                                  ok_hover=(f"average fill {r['avg_fill']:,.6g}" if r["avg_fill"] else ""))),
+                                  ok_hover=(f"Average fill {r['avg_fill']:,.6g}" if r["avg_fill"] else ""))),
             kit.td(r["trades"] or missing_cell("no trade reads it today"), left=True,
                    title=("; ".join(filter(None, [r["blocks_what"], ", ".join(r["blocks"])]))) or None),
         ]))
-    return kit.table(kit.head(MARK_COLUMNS, sort, sort_type), body)
+    return tidy(kit.table(kit.head(MARK_COLUMNS, sort, sort_type), body))
 
 
 MARK_CSV_COLUMNS = ["status", "name", "instrument_id", "exchange", "mark_type", "settle_date", "value_raw", "mark_date",

@@ -244,7 +244,7 @@ def bar(tab: str, state: Optional[dict], options: Optional[Dict[str, List[dict]]
         html.Div(className="blotter-filter tf-filter", children=[
             html.Label(about("Search", FILTER_ABOUT, level="span")),
             dcc.Input(id=_cid(SEARCH_TYPE, tab), type="text", value=s["search"], debounce=True,
-                      placeholder="trade, contract, symbol", className="blotter-filter-search")]),
+                      placeholder="Search trade, contract, symbol", className="blotter-filter-search")]),
         pick("type", "Type", 170),
         pick("commodity", "Commodity", 170),
         pick("trade", "Trade", 180),
