@@ -7,7 +7,8 @@ loaded into an in-memory database, every mark the book can read is written with 
 deterministic value (a fixed base per pair, contract root or metal, moved by a hash of the
 mark's key, so the numbers are stable across machines and Python versions), then for each
 as-of date in AS_OF_DATES, in order, the ledger realises what has settled and the book is
-valued: every value_book row, LTD, the period P&L, the cash ladder, the delta per currency,
+valued: every value_book row, LTD, the period P&L (and both again over the priced trades
+only, `priced_figures`, with the trades left out), the cash ladder, the delta per currency,
 the per-pair delta, the spot table, the curve positions and the expiry schedule (the
 ledger's wall-clock `frozen_at` replaced by a placeholder, so the file does not depend on
 the day it is built).
@@ -267,6 +268,49 @@ def _without_wall_clock(schedule: dict) -> dict:
     return schedule
 
 
+def priced_figures(conn: sqlite3.Connection, as_of: str) -> dict:
+    """The whole-book LTD and period P&L over the priced trades only, with the trades left out.
+
+    `ledger.ltd` is blank as soon as one trade is (the engine's rule), so a sample row that
+    cannot be priced would leave the book's LTD and periods pinned as blanks. These figures
+    keep them pinned as numbers: LTD = the sum of the priced rows' pnl_usd; a period (the
+    ledger's own reference dates) = the difference of the two dates' sums over the trades
+    priced on both, a trade unpriced on either date left out of both; trading = the priced
+    rows dealt on the day. Each carries the count and ids of the trades it leaves out, so a
+    trade that stops pricing shows up here too. With every trade priced they equal `ltd` and
+    `period_pnl` exactly (tests/test_golden_book.py checks it)."""
+    from engine.pnl import ledger
+    from engine.pnl.valuation import value_book
+
+    def book(day: str) -> Dict[str, tuple]:
+        vb = value_book(conn, day)
+        if vb.empty:
+            return {}
+        return {str(r["trade_id"]): (_plain(r["pnl_usd"]), str(r["trade_date"])) for r in vb.to_dict("records")}
+
+    def unpriced(rows: Dict[str, tuple]) -> set:
+        return {t for t, (pnl, _) in rows.items() if pnl is None}
+
+    def total(rows: Dict[str, tuple], left_out: set) -> float:
+        return float(sum(pnl for t, (pnl, _) in rows.items() if t not in left_out and pnl is not None))
+
+    def entry(value: float, left_out: set, **extra) -> dict:
+        return {**extra, "value": value, "excluded": len(left_out), "excluded_ids": sorted(left_out)}
+
+    today = book(as_of)
+    out_today = unpriced(today)
+    periods = {}
+    for key, ref in ledger.period_reference_dates(as_of).items():
+        if key == "previous_day":            # a reference of the Daily's own reference, not a period
+            continue
+        ref_rows = book(ref)
+        left_out = out_today | unpriced(ref_rows)
+        periods[key] = entry(total(today, left_out) - total(ref_rows, left_out), left_out, ref_date=ref)
+    dealt = {t: row for t, row in today.items() if row[1] == as_of}
+    periods["trading"] = entry(total(dealt, set()), unpriced(dealt), ref_date=as_of)
+    return {"ltd_priced": entry(total(today, set()), out_today), "period_pnl_priced": periods}
+
+
 def snapshot(conn: sqlite3.Connection) -> dict:
     from engine.curve import curve_positions
     from engine.expiry import expiry_schedule
@@ -284,6 +328,7 @@ def snapshot(conn: sqlite3.Connection) -> dict:
             "value_book": _rows(value_book(conn, d)),
             "ltd": _plain(ledger.ltd(conn, d)),
             "period_pnl": {k: {kk: _plain(vv) for kk, vv in v.items()} for k, v in ledger.period_pnl(conn, d).items()},
+            **priced_figures(conn, d),
             "cash_ladder": _rows(ladder.cash_ladder(conn, d)),
             "delta_per_ccy": _rows(ladder.delta_per_ccy(conn, d)),
             "per_pair_delta": _rows(ladder.per_pair_delta(conn, d)),

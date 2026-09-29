@@ -73,7 +73,55 @@ def test_the_synthetic_marks_still_price_the_book(actual):
         priced = sum(1 for r in rows if r["pnl_usd"] is not None)
         assert priced >= 0.95 * len(rows), f"{d}: only {priced} of {len(rows)} rows priced; unpriced reasons: " + \
             "; ".join(sorted({r["reason"] for r in rows if r["pnl_usd"] is None})[:5])
-    assert actual["days"][gb.AS_OF_DATES[-1]]["ltd"] is not None
+        # the only trades the marks leave unpriced are the sample's rows the parser could not
+        # recognise (the "needs a fix" rows, blank P&L with their reason): every real trade prices
+        unpriced = {r["trade_id"]: r["product"] for r in rows if r["pnl_usd"] is None}
+        assert set(unpriced.values()) <= {"UNRECOGNISED"}, unpriced
+        assert day["ltd_priced"]["excluded_ids"] == sorted(unpriced)
+        assert day["ltd_priced"]["value"] is not None
+
+
+def test_the_priced_figures_equal_the_whole_book_where_every_trade_is_priced(actual):
+    """ltd_priced / period_pnl_priced are the book's LTD and periods over the priced trades; where
+    nothing is left out they are exactly the ledger's own figures, on every pinned date."""
+    checked = 0
+    for d, day in actual["days"].items():
+        if day["ltd"] is not None:
+            assert day["ltd_priced"]["excluded"] == 0, d
+            assert gb.compare(day["ltd"], day["ltd_priced"]["value"]) == [], d
+            checked += 1
+        for key, period in day["period_pnl"].items():
+            priced = day["period_pnl_priced"][key]
+            assert priced["ref_date"] == period["ref_date"], (d, key)
+            if period["available"]:
+                assert priced["excluded"] == 0, (d, key, priced["excluded_ids"])
+                assert gb.compare(period["value"], priced["value"]) == [], (d, key)
+                checked += 1
+    assert checked, "no date of the fixture has every trade priced: the check proves nothing"
+
+
+def test_priced_figures_leave_out_a_trade_unpriced_on_either_date():
+    import sqlite3
+    from unittest import mock
+
+    import pandas as pd
+
+    frames = {
+        "2026-09-18": pd.DataFrame({"trade_id": ["a", "b", "c"], "pnl_usd": [10.0, float("nan"), 5.0],
+                                    "trade_date": ["2026-09-01", "2026-09-18", "2026-09-18"]}),
+        "2026-09-17": pd.DataFrame({"trade_id": ["a", "b"], "pnl_usd": [4.0, 1.0],
+                                    "trade_date": ["2026-09-01", "2026-09-18"]}),
+    }
+    refs = {"daily": "2026-09-17", "previous_day": "2026-09-16"}
+    with mock.patch("engine.pnl.valuation.value_book", lambda conn, day: frames.get(day, frames["2026-09-17"])), \
+            mock.patch("engine.pnl.ledger.period_reference_dates", lambda as_of: refs):
+        out = gb.priced_figures(sqlite3.connect(":memory:"), "2026-09-18")
+    assert out["ltd_priced"] == {"value": 15.0, "excluded": 1, "excluded_ids": ["b"]}
+    assert out["period_pnl_priced"]["daily"] == {"ref_date": "2026-09-17", "value": 15.0 - 4.0,
+                                                 "excluded": 1, "excluded_ids": ["b"]}
+    assert "previous_day" not in out["period_pnl_priced"]
+    assert out["period_pnl_priced"]["trading"] == {"ref_date": "2026-09-18", "value": 5.0,
+                                                   "excluded": 1, "excluded_ids": ["b"]}
 
 
 def test_compare_tolerates_float_noise_and_reports_real_differences():
