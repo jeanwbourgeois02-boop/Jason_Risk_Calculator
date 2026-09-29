@@ -1107,6 +1107,20 @@ def cmd_health(args) -> int:
     return health.main(argv)
 
 
+def cmd_ui_check(args) -> int:
+    """Display-text check of the screens (tools/ui_check.py): every tab rendered on the synthetic
+    sample book in a throw-away database, its text checked for lowercase labels, n/a and other
+    banned tokens, engine words, text outside any container and stray spaces. Exit 1 on any
+    visible-text finding. Runs inside .venv, where Dash is installed; asks Bloomberg nothing."""
+    if not in_venv() and VENV_PY.exists():
+        return reexec_in_venv(sys.argv[1:])
+    from tools import ui_check
+    argv = ["--json"] if args.json else []
+    if args.tab:
+        argv += ["--tab", args.tab]
+    return ui_check.main(argv)
+
+
 # ----------------------------------------------------------------------------- cli
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1190,6 +1204,13 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--update-baseline", nargs="?", const="", metavar="PATH", help="record the current measures as the baseline")
     h.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), help="print what changed from report A to report B")
     h.set_defaults(func=cmd_health)
+
+    uc = sub.add_parser("ui-check", help="display-text check of the screens on the sample book: lowercase labels, "
+                                         "n/a, engine words, loose text, stray spaces (tools/ui_check.py; exit 1 "
+                                         "on a visible-text finding)")
+    uc.add_argument("--tab", help="one screen: top, header, book, pnl, risk, blotter, data")
+    uc.add_argument("--json", action="store_true", help="also write the findings to reports/ui_check.json")
+    uc.set_defaults(func=cmd_ui_check)
     return parser
 
 
