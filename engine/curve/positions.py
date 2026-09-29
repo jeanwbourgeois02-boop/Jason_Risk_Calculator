@@ -35,6 +35,7 @@ import sqlite3
 from typing import Dict, List, Optional, Tuple
 
 from data.contracts import load_roots
+from engine.curve.leftover import Leftover, leftover_by_root, row_month
 from engine.curve.rows import FUTURE, LME, OPTION, future_row, lme_row, month_key, number, option_row, root_key
 from engine.pnl.valuation import value_book
 
@@ -71,6 +72,7 @@ _LABEL = {"notional_usd": "USD notional", "delta_usd": "USD delta"}
 _KG_PER = {"t": 1000.0, "kg": 1.0, "g": 0.001, "lb": 0.45359237, "st": 907.18474, "lt": 1016.0469088,
            "cwt": 45.359237, "oz": 0.0311034768}
 _PREFERRED_MASS = ("t", "kg")   # a subsector's unit when any of its roots is sized in it, in this order
+_FX_SECTOR = "fx"               # a subsector of this sector is an FX hedge (SGX:XUC), never commodity leftover
 
 # Plain words for a subsector key of config/contracts.csv where "capitalise and drop the
 # underscores" is not the name a trader uses.
@@ -183,33 +185,118 @@ def _gross_key(gross: Optional[float]) -> Tuple[bool, float]:
     return (gross is None, -(gross or 0.0))
 
 
-def _subsector_units(split: List[dict]) -> Tuple[Optional[float], str, str]:
-    """(net_units, unit, units_note) of a subsector's roots, ``split`` ordered by gross USD:
-    one unit shared by every root is kept as it is; mass units convert through ``_KG_PER`` to
-    tonnes when any root is sized in t, else kg when any is, else the largest root's unit (a
+def _unit_rule(split: List[dict]) -> Tuple[str, Optional[Dict[str, float]], str]:
+    """(unit, {root unit: factor to it}, note) of a subsector's roots, ``split`` ordered by gross
+    USD: one unit shared by every root is kept as it is; mass units convert through ``_KG_PER``
+    to tonnes when any root is sized in t, else kg when any is, else the largest root's unit (a
     fixed choice, so a line's unit never flips with the day's marks); anything else does not
-    add, and says so in the note."""
+    add: unit '', factor None, and the note says so."""
     units = list(dict.fromkeys(c["unit"] for c in split))
-    unknown = [c["root_id"] for c in split if c["net_units"] is None]
     if len(units) == 1:
-        unit, note = units[0], ""
-        factor = {unit: 1.0}
-    elif all(u in _KG_PER for u in units):
+        return units[0], {units[0]: 1.0}, ""
+    if all(u in _KG_PER for u in units):
         unit = next((u for u in _PREFERRED_MASS if u in units), split[0]["unit"])
-        factor = {u: _KG_PER[u] / _KG_PER[unit] for u in units}
         note = ", ".join(f"{exch} lots in {u}" + ("" if u == unit else f" converted to {unit}")
                          for exch, u in dict.fromkeys((c["exchange"], c["unit"]) for c in split))
         if unit not in _PREFERRED_MASS:
             note += " (unit of the largest position)"
-    else:
-        named = ", ".join(f"{c['root_id']} in {c['unit'] or '?'}" for c in split)
-        return None, "", f"units do not add across exchanges: {named}"
+        return unit, {u: _KG_PER[u] / _KG_PER[unit] for u in units}, note
+    named = ", ".join(f"{c['root_id']} in {c['unit'] or '?'}" for c in split)
+    return "", None, f"units do not add across exchanges: {named}"
+
+
+def _subsector_units(split: List[dict]) -> Tuple[Optional[float], str, str]:
+    """(net_units, unit, units_note) of a subsector's roots by ``_unit_rule``."""
+    unit, factor, note = _unit_rule(split)
+    if factor is None:
+        return None, unit, note
+    unknown = [c["root_id"] for c in split if c["net_units"] is None]
     if unknown:
         return None, unit, (note + "; " if note else "") + f"no units for {', '.join(unknown)}"
     return float(sum(c["net_units"] * factor[c["unit"]] for c in split)), unit, note
 
 
-def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict]) -> Dict[str, dict]:
+def _unit_months(rows: List[dict], factor: Optional[Dict[str, float]], unit_note: str) -> dict:
+    """The delta in one physical unit: ``months_units`` {'YYYY-MM': sum of the rows' delta_units
+    x factor}, ``net_delta_units``, ``gross_units`` (the sum of |delta_units| per position),
+    ``months_units_missing`` (the contract ids with no figure) and ``months_units_reason``. A
+    month with a row that has no delta units is None; a row with no contract month leaves the
+    net and gross None (it has no column, and a sum never leaves it out silently)."""
+    months: Dict[str, Optional[float]] = {}
+    net: Optional[float] = 0.0
+    gross: Optional[float] = 0.0
+    missing: List[str] = []
+    why: List[str] = []
+    for r in rows:
+        key = row_month(r)
+        value = r["delta_units"]
+        if factor is None:
+            value, reason = None, unit_note
+        elif value is not None and r["unit"] not in factor:
+            value, reason = None, f"{r['unit'] or '?'} does not convert"
+        else:
+            value = None if value is None else value * factor[r["unit"]]
+            reason = r["reason"] or "no delta"
+        if key is None:
+            net = gross = None
+            missing.append(r["contract_id"])
+            why.append(f"{r['contract_id']}: no contract month" + (f" ({r['reason']})" if r["reason"] else ""))
+            continue
+        if value is None:
+            months[key] = None
+            net = gross = None
+            missing.append(r["contract_id"])
+            why.append(f"{r['contract_id']}: {reason}")
+            continue
+        if not (key in months and months[key] is None):
+            months[key] = months.get(key, 0.0) + value
+        if net is not None:
+            net += value
+            gross += abs(value)
+    if factor is None:
+        why = [unit_note]
+    return {"months_units": dict(sorted(months.items())), "net_delta_units": net, "gross_units": gross,
+            "months_units_missing": missing, "months_units_reason": "; ".join(dict.fromkeys(why))}
+
+
+def _leftover_units(root_ids: List[str], months: List[str], left: Optional[Leftover], roots: dict,
+                    factor: Optional[Dict[str, float]], unit_note: str, fx: bool) -> dict:
+    """``leftover_months_units`` {'YYYY-MM': units, every month of the line, 0.0 where nothing is
+    left}, ``leftover_units`` (their sum) and ``leftover_reason`` over ``root_ids``, in the
+    subsector's unit."""
+    if fx:
+        return {"leftover_months_units": {}, "leftover_units": None,
+                "leftover_reason": "an FX hedge: not commodity leftover"}
+    if left is None or left.failure:
+        return {"leftover_months_units": {m: None for m in months}, "leftover_units": None,
+                "leftover_reason": left.failure if left is not None else "the spreads were not read"}
+    if factor is None:
+        return {"leftover_months_units": {m: None for m in months}, "leftover_units": None,
+                "leftover_reason": unit_note}
+    cells: Dict[str, Optional[float]] = {m: 0.0 for m in months}
+    why: List[str] = []
+    total_known = True
+    for rid in root_ids:
+        root = roots.get(rid)
+        per_unit = None if root is None or root.size_unit not in factor else root.contract_size * factor[root.size_unit]
+        for month, lots in left.months.get(rid, {}).items():
+            if lots is None or per_unit is None:
+                cells[month] = None
+                why += left.reasons[rid].get(month, []) or [f"{rid}: {root.size_unit if root else 'no unit'} "
+                                                           "does not convert"]
+            elif cells.get(month, 0.0) is not None:
+                cells[month] = cells.get(month, 0.0) + lots * per_unit
+        if left.unplaced.get(rid):
+            total_known = False
+            why += left.unplaced[rid]
+    cells = {m: (None if v is None else (0.0 if abs(v) < 1e-9 else v)) for m, v in sorted(cells.items())}
+    known = total_known and all(v is not None for v in cells.values())
+    return {"leftover_months_units": cells, "leftover_units": float(sum(cells.values())) if known else None,
+            "leftover_reason": "; ".join(dict.fromkeys(why))}
+
+
+def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict], roots: dict,
+                  left: Optional[Leftover]) -> Dict[str, dict]:
     """One line per commodity across its exchanges (the universe's ``subsector``: 'copper' for
     COMEX:HG and LME:CA), netted where the figures add (USD, delta USD, and physical units in
     one mass unit) and split per root where they do not (lots). A subsector of sector 'fx'
@@ -230,6 +317,14 @@ def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict]) -> Dict[str, 
         outright = [r for r in mine if r["product"] in _OUTRIGHT]
         net_usd, gross_usd, missing, why = _usd_totals(outright, "notional_usd")
         net_units, unit, units_note = _subsector_units(split)
+        _unit, factor, _note = _unit_rule(split)
+        fx = first_of[sub]["sector"] == _FX_SECTOR
+        for c in split:
+            theirs = [r for r in mine if r["root_id"] == c["root_id"]]
+            c["subsector_unit"] = unit
+            c.update(_unit_months(theirs, factor, units_note))
+            c.update(_leftover_units([c["root_id"]], list(c["months_units"]), left, roots, factor, units_note, fx))
+        in_units = _unit_months(mine, factor, units_note)
         out[sub] = {
             "name": subsector_name(sub), "sector": first_of[sub]["sector"],
             "exchanges": sorted(by_exchange, key=lambda e: _gross_key(by_exchange[e])),
@@ -239,6 +334,8 @@ def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict]) -> Dict[str, 
             "months": _months(outright, "notional_usd"), "delta_months": _months(mine, "delta_usd"),
             "products": [p for p in _PRODUCT_ORDER if any(r["product"] == p for r in mine)],
             **{k: v for k, v in _delta_totals(mine).items() if k != "net_delta_lots"},
+            **in_units,
+            **_leftover_units(root_ids, list(in_units["months_units"]), left, roots, factor, units_note, fx),
         }
     return out
 
@@ -309,7 +406,29 @@ def _lme_groups(conn, as_of: str, reasons: List[str]) -> List[Tuple[dict, object
     return out
 
 
-def curve_positions(conn: sqlite3.Connection, as_of: str) -> dict:
+def _leftover(conn, as_of: str, rows: List[dict], roots: dict, spreads: Optional[dict]) -> Tuple[Leftover, List[str]]:
+    """The leftover per root and month from spreads-engine's strategies (``engine.curve.leftover``);
+    ``spreads`` is a ``book_spreads(conn, as_of)`` result the caller already holds, else it is read."""
+    reasons: List[str] = []
+    try:
+        if spreads is None:
+            from engine.spreads import book_spreads     # layer 4, read here; spreads never reads the curve
+            spreads = book_spreads(conn, as_of)
+        strategies = spreads.get("strategies")
+        if not strategies and rows:
+            failed = [r for r in spreads.get("reasons") or [] if "strategies could not be built" in r]
+            raise ValueError(failed[0] if failed else "the spreads engine found no strategies")
+        left = leftover_by_root(rows, strategies or [], roots, as_of)
+    except Exception as exc:  # noqa: BLE001 -- the leftover is beside the positions, never in their way
+        left = Leftover()
+        left.failure = f"the leftover could not be read from the spreads ({type(exc).__name__}: {exc})"
+        reasons.append(left.failure)
+    reasons += [why for rid in sorted(left.reasons) for m in sorted(left.reasons[rid])
+                for why in left.reasons[rid][m] if "the spreads account for" in why or "the spreads hold" in why]
+    return left, reasons
+
+
+def curve_positions(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = None) -> dict:
     """The book's commodity futures, options on them and LME forwards by contract month on `as_of`.
 
     Returns ``{as_of, available, note, rows, flat_contracts, by_commodity, by_subsector,
@@ -361,6 +480,28 @@ def curve_positions(conn: sqlite3.Connection, as_of: str) -> dict:
       MWh contract) None with the reason in ``units_note``. A subsector of sector 'fx'
       (SGX:XUC, 'usdcnh': one lot is 100,000 USD, so its units are USD) only ever holds its own
       roots and is its own line, never netted into a commodity.
+      Added 2026-09-29 (the Exposure grid in physical units), on the subsector line and on each
+      ``split`` entry (one per root: the exchange rows, which add up to the line), all in the
+      subsector's ``unit`` by the same conversion as ``net_units`` (a ``split`` entry carries it
+      as ``subsector_unit``, its own ``unit`` staying the root's): ``months_units`` {'YYYY-MM':
+      net delta in physical units}, the rows' ``delta_units`` converted (the same exposure as
+      ``delta_months`` in lots: an averaging contract's shrinking delta, an LME ticket's tonnes
+      under its prompt month, an option at its DELTA mark under its underlying's month);
+      ``net_delta_units`` (their sum) and ``gross_units`` (the sum of |delta units| per
+      position); ``months_units_missing`` (the contract ids with no figure) and
+      ``months_units_reason``. A month holding a position with no delta, or every month when the
+      roots' units do not add (``units_note``), is None; a position with no contract month
+      leaves ``net_delta_units`` and ``gross_units`` None; never a partial sum. And the
+      **leftover**, the part of the net that belongs to no spread, read from
+      ``engine.spreads.book_spreads``' ``strategies`` (``engine.curve.leftover``: a residual in
+      full; a pair's ``residual_units`` on the leg whose units carry its sign, in that leg's
+      month; an option residual at its delta; a hedge never), in delta units like
+      ``months_units``: ``leftover_months_units`` {'YYYY-MM': units; every month of
+      ``months_units``, 0.0 where nothing is left, None with the reason where a part has no
+      figure or the strategies and the curve disagree on the lots}, ``leftover_units`` (their
+      sum; None when any month is None or a leftover has no month) and ``leftover_reason`` (''
+      or why). A subsector of sector 'fx' is a hedge: ``leftover_months_units`` {},
+      ``leftover_units`` None, ``leftover_reason`` 'an FX hedge: not commodity leftover'.
     - ``by_sector``: ``{sector: {net_usd, gross_usd, missing, reason, commodities,
       net_delta_lots, net_delta_usd, gross_delta_usd, delta_missing, delta_reason}}``, same rules.
     - ``currency_exposure``: ``{ccy: {pnl_local, pnl_usd, contracts, missing, reason}}`` for the
@@ -368,7 +509,11 @@ def curve_positions(conn: sqlite3.Connection, as_of: str) -> dict:
       trade has none.
     - ``months``: sorted 'YYYY-MM' keys that appear in ``rows``.
     - ``products_present``: the products among ``rows``, in the order FUTURE, LME_FWD, CMDTY_OPTION.
-    - ``reasons``: what could not be computed, in plain words.
+    - ``reasons``: what could not be computed, in plain words (a leftover that could not be read
+      from the spreads, or lots the strategies and the curve disagree on, included).
+
+    ``spreads``: a ``book_spreads(conn, as_of)`` result the caller already holds, to save
+    reading it again for the leftover; read here when None.
     """
     try:
         roots = load_roots()
@@ -411,8 +556,10 @@ def curve_positions(conn: sqlite3.Connection, as_of: str) -> dict:
     months = sorted({month_key(r["year"], r["month"]) for r in rows if r["year"] is not None})
     note = "" if rows else f"every open commodity future is flat on {as_of}"
     by_commodity = _by_commodity(rows)
+    left, left_reasons = _leftover(conn, as_of, rows, roots, spreads)
+    reasons += left_reasons
     return {"as_of": as_of, "available": True, "note": note, "rows": rows, "flat_contracts": flat,
-            "by_commodity": by_commodity, "by_subsector": _by_subsector(rows, by_commodity),
+            "by_commodity": by_commodity, "by_subsector": _by_subsector(rows, by_commodity, roots, left),
             "by_sector": _by_sector(rows),
             "currency_exposure": exposure, "months": months,
             "products_present": [p for p in _PRODUCT_ORDER if any(r["product"] == p for r in rows)],

@@ -43,7 +43,7 @@ def _make_conn():
 
 def _insert_trade(conn, trade_id, instrument_id, quantity, price, settle_date, trade_date="2026-08-01"):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "MANUAL", instrument_id, "FX_FWD", trade_id, trade_date, quantity, price,
          "ACC", "CPTY", "STRAT", "TRADER", "test trade", "", "", ""),
     )
@@ -92,7 +92,7 @@ def _insert_future_instrument(conn, instrument_id="CLZ6 Comdty", multiplier=1000
 def _insert_future_trade(conn, trade_id, instrument_id, contracts, fill, settle_date, trade_date="2026-08-01",
                          multiplier=1000.0):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "XLSX", instrument_id, "FUTURE", trade_id, trade_date, contracts, fill,
          "ACC", "CPTY", "STRAT", "TRADER", "test future", "", "", ""),
     )
@@ -154,7 +154,7 @@ def _insert_cny_future(conn, trade_id="SC1", instrument_id="SCZ6 Comdty", contra
                  (instrument_id, "FUTURE", "SC", "CNY", multiplier, 0, instrument_id, expiry))
     conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  ("USDCNY", "FX", "USD", "CNY", 1.0, 0, "USDCNY Curncy", "9999-12-31"))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (trade_id, "XLSX", instrument_id, "FUTURE", trade_id, "2026-08-01", contracts, fill,
                   "ACC", "CPTY", "STRAT", "TRADER", "test CNY future", "", "", ""))
     conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
@@ -210,7 +210,7 @@ def test_fx_blotter_fx_swap_is_one_row_per_trade_marked_on_its_own_value_dates()
     """FX_SWAP stays a product after the blotter's package rule left (2026-09-24): manual
     entry books one, 4 legs under one trade_id. It is one row carrying value_book's P&L."""
     conn = _make_conn()
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("SW1", "MANUAL", "USDJPY", "FX_SWAP", "SW1", "2026-08-01", 1_000_000, 147,
                   "ACC", "CPTY", "STRAT", "TRADER", "manual swap", "", "", ""))
     for leg_no, leg_type, ccy, amount, settle, rate in (
@@ -308,7 +308,7 @@ def _vb_conn():
 
 def _vb_fx_trade(conn, trade_id, instrument_id, base_ccy, quote_ccy, quantity, fill, settle=VB_SETTLE):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "MANUAL", instrument_id, "FX_FWD", trade_id, "2026-05-01", quantity, fill,
          "ACC", "CPTY", "STRAT", "TRADER", "test", "", "", ""),
     )
@@ -501,7 +501,7 @@ def test_value_book_gold_with_no_forward_takes_spot_as_the_only_pillar():
 def test_value_book_future():
     conn = _vb_conn()
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ("T4", "MANUAL", "CLU6 Comdty", "FUTURE", "T4", "2026-05-01", 6, 71.25,
          "ACC", "CPTY", "STRAT", "TRADER", "test", "", "", ""),
     )
@@ -521,7 +521,7 @@ def _vb_option(conn, trade_id, instrument_id, base_ccy, quote_ccy, quantity, fil
     conn.execute("INSERT OR IGNORE INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  (instrument_id, "FX_OPTION", base_ccy, quote_ccy, 1.0, 0, instrument_id, expiry))
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "XLSX", instrument_id, "FX_OPTION", trade_id, "2026-05-01", quantity, fill,
          "ACC", "CPTY", "", "TRADER", "test", "", "", ""),
     )
@@ -796,7 +796,7 @@ REF_HOLIDAYS = frozenset({"2026-09-07"})
 
 def _ref_trade(conn, trade_id, trade_date="2026-05-01", quantity=1_000_000.0, fill=1.1000):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "MANUAL", "EURUSD", "FX_FWD", trade_id, trade_date, quantity, fill,
          "ACC", "CPTY", "STRAT", "TRADER", "test", "", "", ""),
     )
@@ -850,7 +850,7 @@ def test_reference_minority_blocked_walks_back_for_that_trade_and_leaves_it_out_
     conn = _ref_book({REF_AS_OF: 1.1100, REF_D5: 1.1050}, n_trades=2)
     conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  ("GBPUSD", "FX", "GBP", "USD", 1.0, 0, "GBPUSD Curncy", "9999-12-31"))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("G1", "MANUAL", "GBPUSD", "FX_FWD", "G1", "2026-05-01", 1e6, 1.30,
                   "ACC", "CPTY", "STRAT", "TRADER", "test", "", "", ""))
     conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
@@ -873,7 +873,7 @@ def test_reference_single_trade_with_no_price_on_the_close_takes_its_own_last_ea
     conn = _ref_book({REF_AS_OF: 1.1100, REF_D5: 1.1050}, n_trades=2)
     conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  ("GBPUSD", "FX", "GBP", "USD", 1.0, 0, "GBPUSD Curncy", "9999-12-31"))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("G1", "MANUAL", "GBPUSD", "FX_FWD", "G1", "2026-05-01", 1e6, 1.30,
                   "ACC", "CPTY", "STRAT", "TRADER", "test", "", "", ""))
     conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",

@@ -1,119 +1,58 @@
-"""Data tab (the Market data tab until 2026-09-25): "Can I trust the numbers?" (BUILD_PLAN.md section 5).
+"""Data tab (the Market data tab until 2026-09-25): "Can I trust today's numbers?"
 
-Screens redesign, Phase A (user, 2026-09-25): the tab is "Data" and reads in the order a
-commodity book needs it (`build_layout`): the top bar (date, Pull now, feed status); data
-health (the one "Data issues (N)" drawer, rows not loaded, trades left out of the headline,
-what is missing, marks that look wrong); the futures curves; the FX pair section (its pair
-dropdown, spot and forward curve); the Bloomberg library and contract dates
-(`reference_panels`); close completeness and the past closes the header needs; manual mark
-entry; the Bloomberg connection check last. Every definitions paragraph is on hover of its
-section title (`ui.tabs.formatting.about`), a section with nothing to report is one quiet line
-(`_quiet`), and the reasons given on hover are also gathered in the drawer; nothing is dropped.
-The numbered layout below is the history of how each part came in, not the order on screen.
+Rebuilt 2026-09-29 (user: the layout approved piece by piece, each part put through four tests:
+it answers a real question, it changes a decision, it is not derivable from another figure on
+screen, it is trustworthy). Top to bottom (`build_layout`, filled by `render`):
 
-Screens redesign, Phase C (user, 2026-09-25): the futures curves became "Market data by
-commodity" (`commodity_section`): a strip counting every listed commodity's prices as
-official / estimated / missing, a selector grouped by sector (`commodity_options`, default the
-largest gross position), and for the chosen commodity one chart (our official prices of the
-date and the previous close by contract month; the research app's settlement curve left the
-chart on 2026-09-28, the screens tidy, wave 2) over its table. The FX pair section follows under
-an "FX" heading.
+  1. One status line: the last Bloomberg pull, marks complete ("43 of 47 marks"), reference
+     closes complete, contract dates; each part a link to its block (`status_line`).
+  2. Missing, and what it blocks (`missing_block`): each official mark the book needs that is not
+     on file, the trades it leaves unpriced and the trades reading it (names on hover), their face
+     notional, the reason on hover; then the trades left out of the P&L for another reason. One
+     quiet line when nothing is missing.
+  3. Marks check (`marks_check_rows`): every official mark the book uses on the date, futures,
+     options, LME and FX together, its source and snap time, the previous close and the change,
+     flagged by the "marks that look wrong" rule (`suspect_rows`); a filter by commodity / sector,
+     a search box and Download CSV, in their own callbacks over a store of the rows.
+  4. Reference closes (`reference_close_rows`): Daily, 5d, MTD, YTD, each close's marks needed
+     and present, the backfill's reason when incomplete, the trades that period leaves out.
+  5. Contract dates (`contract_dates_line`): one line, the list on click.
+  6. Diagnostics, one closed fold: the Bloomberg library, the feed status in detail, the
+     Bloomberg connection check.
+Then the one Data issues drawer.
 
-User decision 2026-09-15: this tab is organised BY CURRENCY PAIR, not by a flat
-inventory table. Layout:
+Removed on 2026-09-29: the tab's own Pull now (the top bar's Pull Bloomberg now is the one
+action), the rows of the blotter file that did not become trades (the Trades tab's; their reader
+`upload_issue_rows` / `upload_issues_panel` stays here for it), the commodity strip, picker, chart
+and per-commodity table, the FX pair section, the completeness squares, and manual mark entry (a
+MANUAL mark is never official, so nothing read it; `data/bloomberg/manual.py` is untouched).
 
-  1. Top bar: as-of date picker, a pair dropdown (every FX instrument with trades or
-     marks, default = the pair with the most open trades) -- the only dropdown on the
-     tab -- the "Pull now" button and a one-line feed status, with a second compact line
-     giving the last pull's seconds per step, slowest first, when the status file
-     carries `timings` (`pull_timings_line`; nothing when absent). When the last press
-     found no Bloomberg and re-priced the FX options from the marks on file instead
-     (2026-09-22, status["recalc"]), `recalc_block` adds the pull's own sentence, its
-     error if it stopped, and a collapsed day-by-day list with each skipped trade's reason.
-  1b. Whole-book checks (2026-09-21, user-approved), above the per-pair section and
-     independent of the pair dropdown: "What is missing" (`missing_panel`: every needed
-     mark with no official mark, trades and notional blocked, Bloomberg's own reason from
-     the last pull) and "Marks that look wrong" (`suspect_panel`: today's official marks
-     against the previous business day's, flagged above BAD_TICK_PCT, when exactly
-     unchanged, or when the snap is old on the live date). "Past closes the header needs"
-     (`past_closes_panel`) sits under the completeness strip and follows the HEADER's
-     as-of date. All three are filled by `_update_body` through `whole_book_panels`.
-  2. For the selected pair: spot (value/source/snapped time), the forward curve as a
-     table (one row per settle_date with a FWD_OUTRIGHT mark on the as-of date, all
-     sources, official first), and a line chart of outright vs settle date.
-  3. Bottom, compact: the close-completeness strip (`data.bloomberg.inventory
-     .close_completeness`) as a row of small squares for the trailing 20 business
-     days, and the manual mark-entry form pre-filled with the selected pair.
-
-Removed from the previous version of this tab: the whole-book inventory table and the
-old detailed Bloomberg diagnostics panel (still reachable via `2_launcher.py doctor`). The
-"Check Bloomberg connection" button (click-only pass/fail/warning check) moved here
-from `ui/tabs/header.py` on 2026-09-16 (user decision: it belongs on this tab only,
-not shown above every tab) -- see `BBG_CHECK_BUTTON_ID` / `BBG_RESULTS_ID` below. It
-calls `tools/bbg_diagnostics.py::run_bloomberg_diagnostics` through the
-`data.bloomberg.bbg_diagnostics` shim (`run_bloomberg_diagnostics_safe`); the placeholder
-that stood in before that module landed is gone.
-`feed_headline`
-and `backfill_headline` are folded into the single top-bar status line.
-`diagnostics_panel` is still defined but no screen renders it any more (no caller left).
-
-Commodity conversion, Phase 2 (user approval 2026-09-24): the macro trader's products left
-the app, so this tab no longer shows the swap pricing, the fixings or the swap marks in the
-manual form (PAR_RATE / PV_USD / DV01_USD). The pull's OIS step is now `status["curves"]`
-(the option pricers still discount on those curves), shown in brief by `curves_block`.
-Added the same day: Bloomberg's
-contract dates of the commodity futures (`contract_dates_panel`, and the pull's
-`status["contract_dates"]` block in the feed status), the futures never asked of Bloomberg
-for want of a verified ticker (`status["not_requestable"]`), the library's gaps (a need with
-no ticker, listed as a gap, not as a ticker) and the needs with no ticker in the
-completeness strip's hover.
-
-No calculation happens in this module beyond plain display formatting (tenor
-labelling from calendar-day distance, forward points as an outright/spot difference):
-every value is read straight from `marks` / `marks_official` / `trade_legs` /
-`trades` / `instruments`, or from `data.bloomberg.inventory` / `data.bloomberg.live` /
-`data.bloomberg.manual`. Engine and data imports stay lazy (inside callbacks / render
-helpers) so `import ui.app` and `import ui.tabs.market_data` always succeed even if
-those modules are mid-edit.
-
-Commodity conversion, Phase 3 (2026-09-24): a "Futures curves" section under the pair
-section (`futures_curves_panel`): one block per commodity root with an open future, grouped
-by sector, each contract month with its official FUTURE_PX, source, snap time, the previous
-official close and the change, open positions first (lots from `engine.curve.curve_positions`),
-a missing price named "missing" with its reason, and a small price-by-month chart per root.
-Absent when no commodity future is open.
-
-Rows of a retired source (BNP_BVAL) are purged from the database at every startup
-(`data.ingest.schema.purge_retired_sources`); the "BNP file" label is kept only so an old
-row read before the purge is never shown under a bare code.
+No calculation happens here beyond display: every value is read from `marks_official` /
+`trades` / `trade_legs` / `instruments`, the status file, `data.bloomberg.inventory` /
+`library`, or the shared pricing reader. Nothing is asked of Bloomberg from a render (hard rule 8).
+Engine and data imports stay lazy so `import ui.tabs.market_data` always succeeds.
 """
 from __future__ import annotations
 
-import re
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from ui.tabs import ranking as rk
 from dash import Input, Output, State, dash_table, dcc, html
 
-from ui.feed_controls import (PullGuard, click_outcome, pull_timings, recalc_words, safety_refresh_ms,
-                              seconds_words)
+from ui.feed_controls import pull_timings, recalc_words, safety_refresh_ms, seconds_words
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
-from ui.tabs.formatting import MISSING, about, is_fx_pair, issues_drawer, marker, price_text, quoted_unit
+from ui.tabs.formatting import (MINUS, MISSING, about, contract_name, fx_name, is_fx_pair, issues_drawer, lme_name,
+                                marker, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
+                                short_root_name, signed_number)
 
 BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"
 BBG_RESULTS_ID = "market-data-bbg-check-results"
 
-PAIR_DROPDOWN_ID = "market-data-pair"
-TOOLBAR_ID = "market-data-toolbar"
-STATUS_ID = "market-data-status"
 BODY_ID = "market-data-body"
 REFRESH_ID = "market-data-refresh"
-PULL_NOW_ID = "market-data-pull-now"
-PULL_NOW_STATUS_ID = "market-data-pull-now-status"
-PULL_REVISION_ID = "market-data-pull-revision"
 PULL_TIMINGS_ID = "market-data-pull-timings"
 RECALC_BLOCK_ID = "market-data-recalc"          # what a press did on a machine with no Bloomberg (2026-09-22)
 RECALC_DAYS_ID = "market-data-recalc-days"
@@ -131,59 +70,26 @@ BACKFILL_OPTIONS_ID = "market-data-backfill-options"            # the backfill's
 # redraws the tab within seconds through ui/revision.py's DATA_REVISION_ID.
 REFRESH_MS = safety_refresh_ms()
 
-CURVE_TABLE_ID = "market-data-curve-table"
-CURVE_CHART_ID = "market-data-curve-chart"
-COMPLETENESS_STRIP_ID = "market-data-completeness-strip"
-COMPLETENESS_DAYS = 20  # trailing business days shown in the calendar strip; not specified in BUILD_PLAN.md
-
-# Whole-book checks (2026-09-21), none of which depends on the pair dropdown.
+# The blocks of the tab (2026-09-29; the ids of 2026-09-21 kept where the block lives on).
 MISSING_PANEL_ID = "market-data-missing-panel"
 MISSING_TABLE_ID = "market-data-missing-table"
-SUSPECT_PANEL_ID = "market-data-suspect-panel"
-SUSPECT_FLAGGED_TABLE_ID = "market-data-suspect-flagged-table"
-SUSPECT_ALL_TABLE_ID = "market-data-suspect-all-table"
 PAST_CLOSES_PANEL_ID = "market-data-past-closes-panel"
 PAST_CLOSES_TABLE_ID = "market-data-past-closes-table"
-MISSING_TITLE = "What is missing"
-SUSPECT_TITLE = "Marks that look wrong"
-PAST_CLOSES_TITLE = "Past closes the header needs"
+MISSING_TITLE = "Missing, and what it blocks"
+SUSPECT_TITLE = "Marks check"
+PAST_CLOSES_TITLE = "Reference closes"
 # "Marks that look wrong": one rule for every instrument, stated in the panel's caption.
 # A day's move above this is flagged. 2.5 % is loose for a G10 pair and tight for TRY, and
 # is meant to be: a flag asks for a look, it does not say the mark is wrong.
 BAD_TICK_PCT = 2.5
 PANEL_PAGE_SIZE = 15   # rows per page in the two exception tables, so a bad day stays a bounded height
 
-# Screens redesign, Phase A (2026-09-25): the tab's one "Data issues (N)" drawer, gathering the
-# reasons the sections below give on hover (why no Bloomberg reason is shown, why a price is
-# missing, why a mark could not be compared), and the Bloomberg library / contract dates block,
-# now below the FX pair section.
+# The tab's one "Data issues (N)" drawer, gathering every reason given on hover.
 ISSUES_ID = "market-data-issues"
-REFERENCE_PANEL_ID = "market-data-reference"
-HEALTH_TITLE = "Data health"
-FX_SECTION_TITLE = "Spot and forward curve"
-
-MANUAL_INSTRUMENT_ID = "market-data-manual-instrument"
-MANUAL_SETTLE_ID = "market-data-manual-settle"
-MANUAL_MARK_TYPE_ID = "market-data-manual-mark-type"
-MANUAL_VALUE_ID = "market-data-manual-value"
-MANUAL_SUBMIT_ID = "market-data-manual-submit"
-MANUAL_STATUS_ID = "market-data-manual-status"
 
 _MONO = {"fontFamily": "Consolas, 'Courier New', monospace", "fontSize": "12px", "padding": "3px 8px",
          "textAlign": "left", "whiteSpace": "nowrap"}
 _HEAD = {"fontWeight": "600", "backgroundColor": "#f0f2f5", "borderBottom": "1px solid #d9dee3"}
-
-MANUAL_MARK_TYPE_OPTIONS = [
-    {"label": t, "value": t}
-    for t in ("SPOT", "FWD_OUTRIGHT", "FUTURE_PX", "DELTA", "PREMIUM")
-]
-
-# Standard tenor buckets: label -> (approx calendar days, tolerance). Anything outside
-# every bucket's tolerance is labelled "broken" (a broken date, per the module docstring).
-_TENORS: List[Tuple[str, int, int]] = [
-    ("1W", 7, 2), ("2W", 14, 2), ("1M", 30, 4), ("2M", 61, 4),
-    ("3M", 91, 5), ("6M", 182, 6), ("9M", 273, 7), ("1Y", 365, 8),
-]
 
 _SOURCE_LABELS = {"BNP_BVAL": "BNP file", "BBG_BFXFORWARD": "Bloomberg", "BBG_BDH": "Bloomberg (BDH)",
                   "BBG_INTERP": "Interpolated", "MANUAL": "Manual"}
@@ -193,34 +99,6 @@ def source_label(source: Optional[str]) -> str:
     if not source:
         return ""
     return _SOURCE_LABELS.get(source, source)
-
-
-def tenor_label(as_of: str, settle_date: str) -> str:
-    """Standard tenor bucket from calendar days between `as_of` (treated as the spot
-    date) and `settle_date`; "broken" when it does not match any bucket's tolerance."""
-    try:
-        days = (date.fromisoformat(settle_date) - date.fromisoformat(as_of)).days
-    except ValueError:
-        return "broken"
-    for label, target, tol in _TENORS:
-        if abs(days - target) <= tol:
-            return label
-    return "broken"
-
-
-def is_jpy_pair(pair: str) -> bool:
-    return "JPY" in (pair or "").upper()
-
-
-def decimals_for_pair(pair: str) -> int:
-    return 2 if is_jpy_pair(pair) else 4
-
-
-def forward_points(outright: Optional[float], spot: Optional[float], pair: str) -> Optional[float]:
-    """Outright minus spot, rounded to the pair's convention (4 dp, 2 dp for JPY)."""
-    if outright is None or spot is None:
-        return None
-    return round(float(outright) - float(spot), decimals_for_pair(pair))
 
 
 # --------------------------------------------------------------------------- feed status pieces
@@ -755,94 +633,6 @@ def status_block(status: Optional[dict]):
     return parts + extras
 
 
-def _options_step_lines(options_status: Optional[dict]) -> List[str]:
-    """Same idea for the options step (data.bloomberg.live._options_step / status["options"]):
-    engine/options never raises, it reports a per-trade skip reason instead, so a trade
-    priced to nothing must show that reason here rather than just silently having no
-    PREMIUM/DELTA mark."""
-    if not options_status:
-        return []
-    if options_status.get("error"):
-        return [f"Options: {options_status['error']}"]
-    skipped = options_status.get("skipped")
-    if isinstance(skipped, str):  # "no FX_OPTION trades to price" -- nothing was skipped, nothing to do
-        return [f"Options: {skipped}."]
-    lines = [f"Options: {options_status.get('priced', 0)} option(s) priced this cycle."]
-    closed = closed_out_words(closed_out_count(options_status))
-    if closed:
-        # the pull's "closed_out" list (2026-09-22): kept out of "skipped" by the pricer, said
-        # once as a count here; nothing when the key is absent or empty
-        lines.append(f"Options: {closed}.")
-    for s in skipped or []:
-        lines.append(f"Options {s.get('trade_id', '')}: not priced -- {s.get('reason') or 'no reason given'}.")
-    return lines
-
-
-def diagnostics_panel(status: Optional[dict], rates: Dict[str, dict], open_by_default: bool = False) -> html.Details:
-    items: List[dict] = list((status or {}).get("items", []))
-    failed = [i for i in items if i.get("status") == "FAILED"]
-    rows = [{"status": i.get("status", ""), "instrument_id": i.get("instrument_id", ""),
-             "mark_type": i.get("mark_type", ""), "settle_date": i.get("settle_date", ""),
-             "value": rk.value(i.get("value")),
-             "source": i.get("source", ""), "detail": i.get("detail", "")} for i in items]
-    rate_rows = [{"currency": c, "pair": v.get("pair", ""), "rate": rk.value(v["rate"]),
-                  "inverted": "1/rate" if v["inverted"] else "direct", "source": v["source"],
-                  "timestamp": v["timestamp"], "stale": "STALE" if v["stale"] else "fresh"}
-                 for c, v in sorted(rates.items())]
-    summary_bits = [feed_headline(status)]
-    bf_line = backfill_headline(status)
-    if bf_line:
-        summary_bits.append(bf_line)
-    if status and status.get("as_of_date"):
-        summary_bits.append(f"requests built for as-of {status['as_of_date']}; live marks stamped {status.get('as_of_marks', '')}")
-    if status and status.get("warnings"):
-        summary_bits.append(f"{len(status['warnings'])} warning(s) from the pull")
-    children = [
-        html.Summary(f"Bloomberg diagnostics · {len(items) - len(failed)} OK / {len(failed)} failed"
-                     if items else "Bloomberg diagnostics"),
-        html.Div(id="market-data-diag-summary", className="status-line", children=" · ".join(summary_bits)),
-    ]
-    if status and status.get("traceback"):
-        children.append(html.Pre(status["traceback"], className="diag-trace"))
-    children += [
-        html.H4("Requested marks: pulled vs failed"),
-        dash_table.DataTable(
-            id="market-data-diag-table",
-            columns=[rk.numeric(n, i, rk.rate(8, trim=True)) if i == "value" else rk.text(n, i)
-                     for n, i in [("Status", "status"), ("Pair", "instrument_id"),
-                                  ("Mark", "mark_type"), ("Settle date", "settle_date"),
-                                  ("Value", "value"), ("Source", "source"), ("Detail", "detail")]],
-            **rk.sortable("market-data-diag-table"),   # ranks on a header click (ui.tabs.ranking)
-            data=rows, page_size=40,
-            style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
-            style_data_conditional=[
-                {"if": {"filter_query": "{status} = 'OK'", "column_id": "status"}, "color": "#1a7f4b", "fontWeight": "600"},
-                {"if": {"filter_query": "{status} = 'FAILED'", "column_id": "status"}, "color": "#b42318", "fontWeight": "600"},
-                {"if": {"filter_query": "{status} = 'FAILED'"}, "backgroundColor": "#fff4f2"},
-                {"if": {"filter_query": "{status} = 'SKIPPED'"}, "color": "#616e7c"},
-            ]),
-        html.H4("Spot rates in use (the latest official spot per currency)"),
-        dash_table.DataTable(
-            id="market-data-rates-table",
-            columns=[rk.numeric(n, i, rk.rate(8, trim=True)) if i == "rate" else rk.text(n, i)
-                     for n, i in [("Currency", "currency"), ("Pair", "pair"), ("Rate", "rate"),
-                                  ("USD per local", "inverted"), ("Source", "source"),
-                                  ("Marked at", "timestamp"), ("Freshness", "stale")]],
-            **rk.sortable("market-data-rates-table"),
-            data=rate_rows, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
-            style_data_conditional=[{"if": {"filter_query": "{stale} = 'STALE'"}, "color": "#8a4b00",
-                                     "backgroundColor": "#fff4e5"}]),
-    ]
-    pricing_lines = _options_step_lines((status or {}).get("options"))
-    if pricing_lines:
-        children += [html.H4("Options pricing (this pull's cycle)"),
-                     html.Ul([html.Li(ln, className="status-line") for ln in pricing_lines])]
-    if status and status.get("warnings"):
-        children += [html.H4("Pull warnings"), html.Ul([html.Li(w, className="status-line") for w in status["warnings"]])]
-    return html.Details(id="market-data-diag", className="details details--diag",
-                        open=open_by_default or bool(failed), children=children)
-
-
 # ---------------------------------------------------------------------------
 # Bloomberg diagnostics button + panel
 # ---------------------------------------------------------------------------
@@ -895,815 +685,6 @@ def run_bloomberg_diagnostics_safe() -> list:
         }]
 
 
-# --------------------------------------------------------------------------- pair selection
-def pair_options(conn: sqlite3.Connection, as_of: str) -> Tuple[List[dict], Optional[str]]:
-    """Every FX instrument with a trade (any date) or a mark on `as_of`, as dropdown
-    options, plus the default value: the pair with the most open trades (trade_date
-    <= as_of and at least one leg settling >= as_of), ties broken alphabetically.
-    Falls back to the pair with any trade, then the pair with any mark, then None."""
-    pairs = {row[0] for row in conn.execute(
-        "SELECT DISTINCT i.instrument_id FROM instruments i JOIN trades t USING (instrument_id) "
-        "WHERE i.asset_class='FX'")}
-    pairs |= {row[0] for row in conn.execute(
-        "SELECT DISTINCT i.instrument_id FROM instruments i JOIN marks m USING (instrument_id) "
-        "WHERE i.asset_class='FX' AND m.as_of_date=?", (as_of,))}
-    if not pairs:
-        return [], None
-    options = [{"label": p, "value": p} for p in sorted(pairs)]
-
-    open_counts = dict(conn.execute(
-        "SELECT i.instrument_id, COUNT(DISTINCT t.trade_id) FROM trades t "
-        "JOIN instruments i USING (instrument_id) JOIN trade_legs l USING (trade_id) "
-        "WHERE i.asset_class='FX' AND t.trade_date<=? AND l.settle_date>=? "
-        "GROUP BY i.instrument_id", (as_of, as_of)).fetchall())
-    if open_counts:
-        default = sorted(open_counts, key=lambda p: (-open_counts[p], p))[0]
-    else:
-        any_trade = dict(conn.execute(
-            "SELECT i.instrument_id, COUNT(*) FROM trades t JOIN instruments i USING (instrument_id) "
-            "WHERE i.asset_class='FX' GROUP BY i.instrument_id").fetchall())
-        default = sorted(any_trade, key=lambda p: (-any_trade[p], p))[0] if any_trade else sorted(pairs)[0]
-    return options, default
-
-
-# --------------------------------------------------------------------------- spot + curve
-def spot_info(conn: sqlite3.Connection, as_of: str, pair: str) -> Optional[dict]:
-    """Official SPOT mark for the pair on `as_of`, falling back to the latest row of
-    any source, labelled with that source (a MANUAL row is never official)."""
-    row = conn.execute(
-        "SELECT value, source, snapped_at FROM marks_official WHERE as_of_date=? "
-        "AND instrument_id=? AND mark_type='SPOT'", (as_of, pair)).fetchone()
-    if row is None:
-        row = conn.execute(
-            "SELECT value, source, snapped_at FROM marks WHERE as_of_date=? AND instrument_id=? "
-            "AND mark_type='SPOT' ORDER BY snapped_at DESC LIMIT 1", (as_of, pair)).fetchone()
-    if row is None:
-        return None
-    return {"value": row[0], "source": row[1], "snapped_at": row[2]}
-
-
-def _official_settle_dates(conn: sqlite3.Connection, as_of: str, pair: str) -> set:
-    return {row[0] for row in conn.execute(
-        "SELECT settle_date FROM marks_official WHERE as_of_date=? AND instrument_id=? "
-        "AND mark_type='FWD_OUTRIGHT'", (as_of, pair))}
-
-
-def used_by_book(conn: sqlite3.Connection, as_of: str, pair: str) -> Dict[str, int]:
-    """settle_date -> number of open trades (trade_date <= as_of, a leg settling on
-    that date) in this pair, for the curve table's "used by book" marker."""
-    rows = conn.execute(
-        "SELECT l.settle_date, COUNT(DISTINCT t.trade_id) FROM trade_legs l "
-        "JOIN trades t USING (trade_id) JOIN instruments i USING (instrument_id) "
-        "WHERE i.instrument_id=? AND t.trade_date<=? GROUP BY l.settle_date", (pair, as_of)).fetchall()
-    return {settle: count for settle, count in rows}
-
-
-def forward_curve(conn: sqlite3.Connection, as_of: str, pair: str) -> pd.DataFrame:
-    """One row per (settle_date, source) FWD_OUTRIGHT mark for `pair` on `as_of`,
-    official rows first, columns: settle_date, tenor, outright, points, source,
-    status, used_by_book (trade count, blank when none)."""
-    rows = conn.execute(
-        "SELECT settle_date, value, source FROM marks WHERE as_of_date=? AND instrument_id=? "
-        "AND mark_type='FWD_OUTRIGHT' ORDER BY settle_date", (as_of, pair)).fetchall()
-    if not rows:
-        return pd.DataFrame(columns=["settle_date", "tenor", "outright", "points", "source", "status", "used_by_book"])
-    official = _official_settle_dates(conn, as_of, pair)
-    spot = spot_info(conn, as_of, pair)
-    spot_value = spot["value"] if spot else None
-    book = used_by_book(conn, as_of, pair)
-    out = []
-    for settle_date, value, source in rows:
-        is_official = settle_date in official
-        out.append({
-            "settle_date": settle_date,
-            "tenor": tenor_label(as_of, settle_date),
-            "outright": value,
-            "points": forward_points(value, spot_value, pair),
-            "source": source_label(source),
-            "status": "official" if is_official else "reconciliation only",
-            "used_by_book": book.get(settle_date, 0) or "",
-            "_official": is_official,
-        })
-    out.sort(key=lambda r: (r["settle_date"], not r["_official"]))
-    for r in out:
-        del r["_official"]
-    return pd.DataFrame(out, columns=["settle_date", "tenor", "outright", "points", "source", "status", "used_by_book"])
-
-
-def curve_table(df: pd.DataFrame, pair: str) -> dash_table.DataTable:
-    dp = decimals_for_pair(pair)
-    formatted = df.copy().astype(object)
-    for col in ("outright", "points", "used_by_book"):
-        if col in formatted.columns:
-            formatted[col] = pd.Series([rk.value(v) for v in df[col].tolist()], dtype=object, index=formatted.index)
-    formats = {"outright": rk.rate(dp), "points": rk.rate(dp), "used_by_book": rk.count()}
-    columns = [rk.numeric(n, i, formats[i]) if i in formats else rk.text(n, i) for n, i in [
-        ("Settle date", "settle_date"), ("Tenor", "tenor"), ("Outright", "outright"),
-        ("Fwd points", "points"), ("Source", "source"), ("Status", "status"),
-        ("Used by book", "used_by_book"),
-    ]]
-    return dash_table.DataTable(
-        id=CURVE_TABLE_ID, columns=columns, data=formatted.to_dict("records"), **rk.sortable(CURVE_TABLE_ID),
-        page_size=25, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
-        style_data_conditional=[
-            {"if": {"filter_query": "{status} = 'official'", "column_id": "status"}, "color": "#1a7f4b", "fontWeight": "600"},
-            {"if": {"filter_query": "{used_by_book} > 0"}, "backgroundColor": "#eef4ff"},
-        ],
-    )
-
-
-def curve_chart(df: pd.DataFrame, spot: Optional[dict], pair: str, as_of: str):
-    """dcc.Graph of outright vs settle date: official marks as a line, other sources
-    as markers, spot as the first point; empty (hidden) when there is no curve."""
-    import plotly.graph_objects as go
-
-    if df.empty:
-        return html.Div()
-    dp = decimals_for_pair(pair)
-    fig = go.Figure()
-    x = list(df["settle_date"])
-    y = list(df["outright"])
-    if spot is not None:
-        x = [as_of] + x
-        y = [spot["value"]] + y
-    official_mask = list(df["status"] == "official")
-    fig.add_trace(go.Scatter(x=[as_of] + [d for d, o in zip(df["settle_date"], official_mask) if o],
-                             y=([spot["value"]] if spot is not None else []) + [v for v, o in zip(df["outright"], official_mask) if o],
-                             mode="lines+markers", name="official"))
-    other_x = [d for d, o in zip(df["settle_date"], official_mask) if not o]
-    other_y = [v for v, o in zip(df["outright"], official_mask) if not o]
-    if other_x:
-        fig.add_trace(go.Scatter(x=other_x, y=other_y, mode="markers",
-                                 marker_symbol="diamond", name="not official"))
-    used_dates = list(df.loc[df["used_by_book"] != "", "settle_date"])
-    fig.update_layout(
-        title=f"{pair} forward curve, {as_of}",
-        yaxis=dict(tickformat=f".{dp}f"),
-        xaxis=dict(tickangle=-90, tickvals=used_dates or None, showgrid=False),
-        yaxis_showgrid=False,
-        showlegend=True,
-        height=300,
-        margin=dict(t=40, b=60),
-    )
-    return dcc.Graph(id=CURVE_CHART_ID, figure=fig, config={"displayModeBar": False})
-
-
-def pair_body(conn: sqlite3.Connection, as_of: str, pair: str) -> html.Div:
-    spot = spot_info(conn, as_of, pair)
-    df = forward_curve(conn, as_of, pair)
-    spot_line = (message_box(f"No spot mark for {pair} on {as_of}.") if spot is None else
-                html.P(f"Spot: {spot['value']:.{decimals_for_pair(pair)}f} · {source_label(spot['source'])} · "
-                       f"{spot.get('snapped_at', '')}", className="status-line"))
-    if df.empty:
-        return html.Div([spot_line, message_box(f"No forward marks for {pair} on {as_of}")])
-    return html.Div([spot_line, curve_table(df, pair), curve_chart(df, spot, pair, as_of)])
-
-
-# --------------------------------------------------------------------------- futures curves (Phase 3, 2026-09-24)
-# The commodity book's own curves: one block per contract root with an open future on the
-# as-of date, grouped by sector. Each row is a contract month on file for that root, open
-# positions first, with the official FUTURE_PX of the day (its source and snap time), the
-# previous official close and the change between the two. Lots are the engine's
-# (`engine.curve.curve_positions`), names the contract master's (`data.contracts.load_roots`),
-# prices `marks_official` read the way the rest of the tab reads marks. Nothing is estimated.
-# Since Phase C (2026-09-25) the section is "Market data by commodity", one commodity at a time
-# (see `commodity_section` below); FUTURES_CURVES_PANEL_ID holds the chosen commodity's view.
-FUTURES_CURVES_TITLE = "Market data by commodity"
-FUTURES_CURVES_PANEL_ID = "market-data-futures-curves"
-FUTURES_CURVE_TABLE_ID_PREFIX = "market-data-futures-curve-"
-MISSING_PRICE = "missing"
-
-_FUTURE_CONTRACTS_SQL = """
-SELECT instrument_id, base_ccy, expiry_date, bbg_ticker FROM instruments
-WHERE asset_class = 'FUTURE' ORDER BY expiry_date, instrument_id
-"""
-
-_FUTURE_PX_ON_SQL = """
-SELECT value, source, snapped_at FROM marks_official
-WHERE as_of_date = ? AND instrument_id = ? AND settle_date = ? AND mark_type = 'FUTURE_PX'
-"""
-
-_FUTURE_PX_BEFORE_SQL = """
-SELECT as_of_date, value FROM marks_official
-WHERE as_of_date < ? AND instrument_id = ? AND settle_date = ? AND mark_type = 'FUTURE_PX'
-ORDER BY as_of_date DESC LIMIT 1
-"""
-
-# anything on file for the key that is not official (a MANUAL row): shown as "on file instead"
-_FUTURE_PX_OTHER_SQL = """
-SELECT value, source FROM marks
-WHERE as_of_date = ? AND instrument_id = ? AND settle_date = ? AND mark_type = 'FUTURE_PX'
-ORDER BY snapped_at DESC LIMIT 1
-"""
-
-
-def _root_key(base_ccy) -> str:
-    return re.sub(r"\s+", "", str(base_ccy or "")).upper()
-
-
-def _number_or_none(value) -> Optional[float]:
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        return None
-    return v if v == v and v not in (float("inf"), float("-inf")) else None
-
-
-def _change_words(price: Optional[float], previous: Optional[float]) -> str:
-    """'+0.7500' / '-12.00': today's official price less the previous official close, with
-    as many digits as the price itself shows (`_fmt_mark`'s rule) and a sign. An em dash when
-    either is missing: never a zero."""
-    if price is None or previous is None:
-        return MISSING
-    digits = 2 if abs(price) >= 1000 else 4 if abs(price) >= 10 else 6
-    return f"{price - previous:+,.{digits}f}"
-
-
-def _lots_words(lots, flat: bool) -> str:
-    if flat:
-        return "flat"
-    value = _number_or_none(lots)
-    if value is None:
-        return "no position"
-    return f"{value:+,.0f}" if value == int(value) else f"{value:+,.2f}"
-
-
-def _missing_price_reason(key: MarkKey, has_ticker: bool, library_need: Optional[dict], reasons: Dict[MarkKey, str],
-                          asked_today: bool, is_past: bool, past_sentence: Callable[[], str], as_of: str) -> str:
-    """Why a contract has no official FUTURE_PX on `as_of`, in the order that decides it: the
-    library says it cannot be asked (no verified ticker); no trade needs it, so no pull asks;
-    Bloomberg's own word from the last pull of that date; on a past date the backfill's
-    sentence; else not pulled yet."""
-    if library_need is not None and not library_need.get("requestable", True):
-        return str(library_need.get("reason") or "no Bloomberg ticker to ask with")
-    if library_need is None:
-        if not has_ticker:
-            return "no Bloomberg ticker for this contract yet, and no trade on file needs it"
-        return f"no trade on file needs it on {as_of}, so no pull asks Bloomberg for it"
-    if key in reasons:
-        return reasons[key]
-    if is_past:
-        return f"a past close arrives only through the Bloomberg backfill: {past_sentence()}"
-    if asked_today:
-        return "not requested by the last pull"
-    return f"not pulled for {as_of} yet: the next Pull Bloomberg now asks for it"
-
-
-def _is_future_row(r: dict) -> bool:
-    return r.get("product", "FUTURE") == "FUTURE"   # rows before Phase 5 carry no product
-
-
-def _curve_roots(curve: dict) -> Tuple[Dict[str, dict], Dict[str, dict], set, Dict[str, Dict[str, float]]]:
-    """(open futures by contract id, flat futures by contract id, the future roots listed, the
-    LME roots listed with their open prompts' lots) from `engine.curve.curve_positions`: the one
-    rule that decides which commodities the Market data by commodity section lists, read by the
-    section and by its selector alike."""
-    positions = {r["contract_id"]: r for r in curve.get("rows") or [] if _is_future_row(r)}
-    flat = {f["contract_id"]: f for f in curve.get("flat_contracts") or [] if _is_future_row(f)}
-    lme_prompts: Dict[str, Dict[str, float]] = {}
-    for r in list(curve.get("rows") or []) + list(curve.get("flat_contracts") or []):
-        if r.get("product") in _LME_PRODUCTS:
-            prompts = lme_prompts.setdefault(_root_key(r.get("root_id")), {})
-            prompts[str(r.get("expiry") or "")] = prompts.get(str(r.get("expiry") or ""), 0.0) + \
-                (_number_or_none(r.get("lots")) or 0.0)
-    wanted_roots = {_root_key(r.get("root_id")) for r in positions.values()} | \
-        {_root_key(f.get("root_id")) for f in flat.values()}
-    return positions, flat, wanted_roots, lme_prompts
-
-
-def futures_curve_rows(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
-                       today: Optional[str] = None) -> List[dict]:
-    """One block per commodity root with an open future on `as_of`, sectors then roots in
-    order: [{root_id, name, sector, exchange, currency, rows: [...], open, missing}].
-
-    A root is in when `curve_positions` lists an open contract of it (a position or a flat
-    one). Its rows are every contract of that root on file in `instruments` that has not
-    expired by `as_of`, or that has a mark that day, plus the open ones: open positions first
-    (by expiry), then the rest by expiry. Each row: contract_id, month, expiry (with "(est.)"
-    while the contract master still carries its estimate), lots (the engine's net; "flat" /
-    "no position"), price (the official FUTURE_PX of `as_of` at the contract's expiry, or
-    "missing"), source, snapped_at, previous (the latest official FUTURE_PX before `as_of`,
-    with its date), change (price less previous; an em dash with either missing), why (the
-    reason a price is missing, '' otherwise), and the raw `_price` / `_previous` numbers
-    for the chart. No price is estimated or filled.
-
-    Phase 5 (2026-09-24): a metal with an open LME forward (curve_positions' LME_FWD rows)
-    gets a block of its own, `lme_curve_block`, sorted with the other roots of its sector.
-    The options on futures are not listed here: their underlying's month is."""
-    from data.contracts import UnknownContract, contract_for, load_roots
-    from engine.curve import curve_positions
-    curve = curve_positions(conn, as_of)
-    positions, flat, wanted_roots, lme_prompts = _curve_roots(curve)
-    if not wanted_roots and not lme_prompts:
-        return []
-    roots = load_roots()
-
-    from data.bloomberg import library
-    in_force = library.needed_on(conn, as_of, include_unrequestable=True)
-    needs = {(r["key"], r["settle_date"]): r for r in in_force if r["kind"] == "FUTURE_PX"}
-    reasons = last_pull_reasons(status, as_of)
-    asked_today = _pull_date(status) == as_of and bool((status or {}).get("connected"))
-    is_past = as_of < (today or _book_today_iso())
-    past_cache: Dict[str, str] = {}
-
-    def past_sentence() -> str:
-        if "s" not in past_cache:
-            from ui.tabs.header import backfill_status, past_close_explanation
-            past_cache["s"] = past_close_explanation(backfill_status(conn), as_of)
-        return past_cache["s"]
-
-    marked_today = {row[0] for row in conn.execute(
-        "SELECT DISTINCT instrument_id FROM marks WHERE as_of_date = ? AND mark_type = 'FUTURE_PX'", (as_of,))}
-    contracts: Dict[str, List[tuple]] = {}
-    for instrument_id, base, expiry, ticker in conn.execute(_FUTURE_CONTRACTS_SQL):
-        root_id = _root_key(base)
-        if root_id not in wanted_roots:
-            continue
-        if instrument_id in positions or instrument_id in flat or (expiry or "") >= as_of \
-                or instrument_id in marked_today:
-            contracts.setdefault(root_id, []).append((instrument_id, expiry, ticker))
-
-    blocks = []
-    for root_id in wanted_roots:
-        root = roots.get(root_id)
-        out = []
-        for instrument_id, expiry_on_file, ticker in contracts.get(root_id, []):
-            pos = positions.get(instrument_id)
-            flat_row = flat.get(instrument_id)
-            expiry = (pos or flat_row or {}).get("expiry") or expiry_on_file
-            month, estimated = "", False
-            try:
-                cm = contract_for(root_id, instrument_id, conn=conn)
-                month, estimated = f"{cm.year:04d}-{cm.month:02d}", cm.estimated
-            except (UnknownContract, KeyError, ValueError):
-                pass
-            key = (instrument_id, "FUTURE_PX", expiry)
-            hit = conn.execute(_FUTURE_PX_ON_SQL, (as_of, instrument_id, expiry)).fetchone()
-            price = _number_or_none(hit[0]) if hit else None
-            before = conn.execute(_FUTURE_PX_BEFORE_SQL, (as_of, instrument_id, expiry)).fetchone()
-            previous = _number_or_none(before[1]) if before else None
-            if hit is None:
-                why = _missing_price_reason(key, bool(ticker), needs.get((instrument_id, expiry)), reasons,
-                                            asked_today, is_past, past_sentence, as_of)
-                other = conn.execute(_FUTURE_PX_OTHER_SQL, (as_of, instrument_id, expiry)).fetchone()
-                if other is not None:
-                    why += f"; on file instead: {source_label(other[1]).lower()} {_fmt_mark(other[0])} (not official)"
-            elif price is None:
-                why = f"the official FUTURE_PX on file is not a number ({hit[0]!r}): a data error, never filled"
-            else:
-                why = ""
-            is_open = pos is not None and abs(_number_or_none(pos.get("lots")) or 0.0) > 0
-            out.append({
-                "contract_id": instrument_id, "month": month,
-                "expiry": f"{expiry} (est.)" if estimated else str(expiry or ""),
-                "lots": _lots_words(pos.get("lots") if pos else None, flat_row is not None and pos is None),
-                "price": _fmt_mark(price) if price is not None else MISSING_PRICE,
-                "source": source_label(hit[1]) if hit else "",
-                "snapped_at": str(hit[2] or "").replace("T", " ") if hit else "",
-                "previous": (f"{_fmt_mark(previous)} ({before[0]})" if previous is not None
-                             else "no earlier close on file" if before is None
-                             else f"not a number ({before[1]!r})"),
-                "change": _change_words(price, previous),
-                "why": why, "flag": "missing" if price is None else "",
-                "_open": is_open, "_expiry": str(expiry or ""), "_price": price, "_previous": previous,
-                "_previous_date": before[0] if previous is not None else None,
-                "_source": str(hit[1] or "") if hit else "", "_x": month or str(expiry or "")[:7],
-            })
-        out.sort(key=lambda r: (not r["_open"], r["_expiry"], r["contract_id"]))
-        blocks.append({
-            "root_id": root_id, "name": root.name if root else root_id,
-            "sector": root.sector if root else "", "exchange": root.exchange if root else "",
-            "currency": root.currency if root else "", "rows": out,
-            "open": sum(1 for r in out if r["_open"]), "missing": sum(1 for r in out if r["flag"]),
-        })
-    for root_id, prompts in lme_prompts.items():
-        blocks.append(lme_curve_block(conn, root_id, roots.get(root_id), prompts, as_of, status, in_force,
-                                      asked_today, is_past, past_sentence))
-    blocks.sort(key=lambda b: (b["sector"], b["name"], b["root_id"]))
-    return blocks
-
-
-_LME_PILLAR_WORDS = {"CASH": "cash", "3M": "3M", "MONTHLY": "monthly prompt"}
-_LME_COLUMNS = [
-    ("Pillar", "pillar"), ("Ticker", "ticker"), ("Prompt date", "expiry"), ("Lots", "lots"),
-    ("Price", "price"), ("Source", "source"), ("Marked at", "snapped_at"),
-    ("Previous close", "previous"), ("Change", "change"), ("Why missing", "why"),
-]
-
-
-def _official_value(conn: sqlite3.Connection, day: str, root_id: str, mark_type: str, settle: str):
-    return conn.execute(
-        "SELECT value, source, snapped_at FROM marks_official WHERE as_of_date = ? AND instrument_id = ? "
-        "AND mark_type = ? AND settle_date = ? ORDER BY snapped_at DESC LIMIT 1",
-        (day, root_id, mark_type, settle)).fetchone()
-
-
-def lme_curve_block(conn: sqlite3.Connection, root_id: str, root, prompts: Dict[str, float], as_of: str,
-                    status: Optional[dict], in_force: List[dict], asked_today: bool, is_past: bool,
-                    past_sentence: Callable[[], str]) -> dict:
-    """An LME metal's curve on `as_of` (Phase 5), as a Futures curves block: the pillars the
-    library asks for (`library.lme_curve_pillars`, trimmed to the furthest open prompt: cash,
-    3M, the monthly prompts) and each open prompt's own outright, by date. Each row's price is
-    the official mark (the cash SPOT keyed on `as_of`, a FWD_OUTRIGHT at its prompt date; an
-    open prompt between pillars is BBG_INTERP, the official fallback) with its source and snap
-    time; the previous close is the same pillar on the latest earlier day with the metal's
-    marks on file (the cash and the 3M of that day, which sit on other dates; a monthly prompt
-    or an open prompt at the same date); a missing one says why: the last pull's own reason
-    (`status["lme"]["missing"]`), the library's when it cannot be asked, the backfill's on a
-    past date, else not pulled yet. Nothing is read off the curve here."""
-    from data.bloomberg import library
-    through = max(prompts) if prompts else None
-    pillars = library.lme_curve_pillars(root_id, as_of, through=through)
-    lme_status = (status or {}).get("lme") if _pull_date(status) == as_of else None
-    pulled_missing = [m for m in ((lme_status or {}).get("missing") or []) if isinstance(m, dict)
-                      and _root_key(m.get("root_id")) == root_id]
-    curve_need = next((r for r in in_force if r["kind"] == "LME_CURVE" and _root_key(r["key"]) == root_id), None)
-    prev_row = conn.execute(
-        "SELECT MAX(as_of_date) FROM marks_official WHERE instrument_id = ? AND as_of_date < ? "
-        "AND mark_type IN ('SPOT', 'FWD_OUTRIGHT')", (root_id, as_of)).fetchone()
-    prev_day = prev_row[0] if prev_row else None
-    prev_anchor = {}
-    if prev_day:
-        for p in library.lme_curve_pillars(root_id, prev_day):
-            if p["kind"] in ("CASH", "3M"):
-                prev_anchor[p["kind"]] = p["settle_date"]
-
-    items: Dict[Tuple[str, str], dict] = {}
-    for p in pillars:
-        items[(p["mark_type"], p["settle_date"])] = {"kind": p["kind"], "ticker": p["ticker"],
-                                                     "date": p["pillar_date"]}
-    for prompt in prompts:
-        items.setdefault(("FWD_OUTRIGHT", prompt), {"kind": "PROMPT", "ticker": "", "date": prompt})
-
-    def why_missing(mark_type: str, settle: str, ticker: str) -> str:
-        for m in pulled_missing:
-            if (ticker and m.get("ticker") == ticker) or (not m.get("ticker") and m.get("settle_date") == settle):
-                return str(m.get("reason") or "").strip() or "the last pull wrote no mark for it"
-        if curve_need is not None and not curve_need.get("requestable", True):
-            return str(curve_need.get("reason") or "no Bloomberg ticker to ask with")
-        if is_past:
-            return f"a past close arrives only through the Bloomberg backfill: {past_sentence()}"
-        if asked_today:
-            return "the last pull wrote no mark for it"
-        return f"not pulled for {as_of} yet: the next Pull Bloomberg now asks for it"
-
-    out = []
-    for (mark_type, settle), item in items.items():
-        hit = _official_value(conn, as_of, root_id, mark_type, settle)
-        price = _number_or_none(hit[0]) if hit else None
-        before, before_day = None, None
-        if prev_day:
-            prev_settle = prev_day if item["kind"] == "CASH" else prev_anchor.get("3M") if item["kind"] == "3M" else settle
-            if prev_settle:
-                before = _official_value(conn, prev_day, root_id, mark_type, prev_settle)
-                before_day = prev_day
-        previous = _number_or_none(before[0]) if before else None
-        if hit is None:
-            why = why_missing(mark_type, settle, item["ticker"])
-        elif price is None:
-            why = f"the official {mark_type} on file is not a number ({hit[0]!r}): a data error, never filled"
-        else:
-            why = ""
-        lots = prompts.get(settle) if item["kind"] != "CASH" else None
-        is_open = lots is not None and abs(lots) > 0
-        label = _LME_PILLAR_WORDS.get(item["kind"], "open prompt")
-        if item["kind"] != "PROMPT" and settle in prompts:
-            label += " (an open prompt)"
-        out.append({
-            "pillar": label, "ticker": item["ticker"] or "none: an open prompt, read off the curve",
-            "expiry": item["date"],
-            "lots": _lots_words(lots, lots is not None and not is_open),
-            "price": _fmt_mark(price) if price is not None else MISSING_PRICE,
-            "source": source_label(hit[1]) if hit else "",
-            "snapped_at": str(hit[2] or "").replace("T", " ") if hit else "",
-            "previous": (f"{_fmt_mark(previous)} ({before_day})" if previous is not None
-                         else "no earlier close on file" if before is None
-                         else f"not a number ({before[0]!r})"),
-            "change": _change_words(price, previous),
-            "why": why, "flag": "missing" if price is None else "",
-            "contract_id": f"{root_id} {item['date']}",
-            "_open": is_open, "_expiry": item["date"], "_price": price, "_previous": previous,
-            "_previous_date": before_day if previous is not None else None,
-            "_source": str(hit[1] or "") if hit else "", "_x": item["date"],
-        })
-    out.sort(key=lambda r: (r["_expiry"], r["pillar"]))
-    return {"root_id": root_id, "name": root.name if root else root_id, "sector": root.sector if root else "metals",
-            "exchange": root.exchange if root else "LME", "currency": root.currency if root else "USD",
-            "rows": out, "open": sum(1 for r in out if r["_open"]), "missing": sum(1 for r in out if r["flag"]),
-            "lme": True, "columns": _LME_COLUMNS}
-
-
-_FUTURES_COLUMNS = [
-    ("Contract", "contract_id"), ("Month", "month"), ("Expiry", "expiry"), ("Lots", "lots"),
-    ("Price", "price"), ("Source", "source"), ("Marked at", "snapped_at"),
-    ("Previous close", "previous"), ("Change", "change"), ("Why missing", "why"),
-]
-
-# ---------------------------------------------------------------- market data by commodity (Phase C, 2026-09-25)
-# Screens redesign Phase C ("ui-market-data: market data by commodity", user-approved 2026-09-25):
-# the Futures curves section became one commodity at a time, chosen in a selector grouped by
-# sector (default: the largest gross position), with a strip above it counting every listed
-# commodity's prices as official / estimated / missing so nothing hides behind the selector.
-# The chosen commodity shows one chart (our official prices of the as-of date and the previous
-# close, by contract month; the research app's settlement curve left the chart on 2026-09-28,
-# wave 2 of the screens tidy) and its table. Nothing here is a mark, nothing is filled, and the
-# substitute for a missing one (hard rule 2); it is read for the chosen commodity only.
-COMMODITY_DROPDOWN_ID = "market-data-commodity"
-COMMODITY_PICKER_ID = "market-data-commodity-picker"
-COMMODITY_STRIP_ID = "market-data-commodity-strip"
-COMMODITY_SECTION_ID = "market-data-commodity-section"
-COMMODITY_CHART_ID = "market-data-commodity-chart"
-RESEARCH_LABEL = "research"
-ESTIMATED_SOURCES = ("BBG_INTERP",)   # an official row Bloomberg's curve was interpolated for (LME prompts)
-_SECTOR_OPTION_PREFIX = "sector:"
-
-
-def price_counts(block: dict) -> Dict[str, int]:
-    """{official, estimated, missing}: the block's table rows by what their price is. Missing =
-    no official price (or one that is not a number), shown "missing" in the table; estimated =
-    an official row that is Bloomberg-interpolated (source BBG_INTERP, the table's
-    "Interpolated"); official = every other priced row. The three add up to the table's rows."""
-    counts = {"official": 0, "estimated": 0, "missing": 0}
-    for r in block.get("rows") or []:
-        if r.get("flag"):
-            counts["missing"] += 1
-        elif r.get("_source") in ESTIMATED_SOURCES:
-            counts["estimated"] += 1
-        else:
-            counts["official"] += 1
-    return counts
-
-
-def _counts_words(counts: Dict[str, int]) -> str:
-    return f"{counts['official']} official, {counts['estimated']} estimated, {counts['missing']} missing"
-
-
-def _short_code(root_id: str) -> str:
-    """'NYMEX:CL' -> 'CL', 'LME:CA' -> 'LME CA' (an LME code alone reads like a future's)."""
-    exchange, _, code = str(root_id).partition(":")
-    if not code:
-        return str(root_id)
-    return f"LME {code}" if exchange.upper() == "LME" else code
-
-
-def commodity_strip(blocks: List[dict]) -> html.Div:
-    """One line across every listed commodity, sector by sector: its code and how many of its
-    prices are official, with "est." and "missing" counts where there are any; the name and
-    the three counts on hover. The at-a-glance check across all roots."""
-    parts: list = [html.Span("Prices on file:", style={"fontWeight": "600", "marginRight": "6px"})]
-    sector = None
-    for block in blocks:
-        if block["sector"] != sector:
-            sector = block["sector"]
-            parts.append(html.Span((sector or "no sector").capitalize(),
-                                   style={"marginLeft": "10px", "marginRight": "4px", "color": "#5b6776",
-                                          "textTransform": "uppercase", "fontSize": "10.5px"}))
-        counts = price_counts(block)
-        text = f"{_short_code(block['root_id'])} {counts['official']}"
-        if counts["estimated"]:
-            text += f" · {counts['estimated']} est."
-        if counts["missing"]:
-            text += f" · {counts['missing']} missing"
-        colour = "#b42318" if counts["missing"] else "#8a5a00" if counts["estimated"] else "#1a7f4b"
-        parts.append(html.Span(
-            text, className="commodity-count", title=f"{block['name']} ({block['root_id']}): {_counts_words(counts)}",
-            style={"display": "inline-block", "margin": "1px 3px", "padding": "0 6px", "borderRadius": "3px",
-                   "border": f"1px solid {colour}", "color": colour, "fontSize": "11px", "whiteSpace": "nowrap",
-                   "cursor": "help"}))
-    return html.Div(className="status-line", style={"display": "flex", "flexWrap": "wrap", "alignItems": "center"},
-                    children=parts)
-
-
-def commodity_options(conn: sqlite3.Connection, as_of: str) -> Tuple[List[dict], Optional[str]]:
-    """(dropdown options, default value) for the commodity selector: every commodity the
-    section lists on `as_of` (`_curve_roots`, the same rule as `futures_curve_rows`), grouped by
-    sector under a disabled sector heading, sectors then names in the section's order. The
-    default is the largest gross position: gross USD notional (`curve_positions`'
-    by_commodity), a commodity whose USD is missing after those, by gross lots. ([], None) when
-    nothing is listed."""
-    from data.contracts import load_roots
-    from engine.curve import curve_positions
-    curve = curve_positions(conn, as_of)
-    _positions, _flat, wanted, lme = _curve_roots(curve)
-    listed = wanted | set(lme)
-    if not listed:
-        return [], None
-    roots = load_roots()
-    by_commodity = curve.get("by_commodity") or {}
-    entries = []
-    for root_id in listed:
-        root = roots.get(root_id)
-        entries.append({"root_id": root_id, "name": root.name if root else root_id,
-                        "sector": (root.sector if root else "metals" if root_id in lme else "") or ""})
-    entries.sort(key=lambda e: (e["sector"], e["name"], e["root_id"]))
-    options, sector = [], None
-    for e in entries:
-        if e["sector"] != sector:
-            sector = e["sector"]
-            options.append({"label": (sector or "no sector").upper(), "value": _SECTOR_OPTION_PREFIX + sector,
-                            "disabled": True})
-        options.append({"label": f"{e['name']} ({e['root_id']})", "value": e["root_id"]})
-
-    def size(e):
-        c = by_commodity.get(e["root_id"]) or {}
-        usd, lots = _number_or_none(c.get("gross_usd")), _number_or_none(c.get("gross_lots"))
-        return (usd is not None, abs(usd or 0.0), abs(lots or 0.0))
-
-    best = max(entries, key=size)   # max keeps the first of equals: the section's order breaks a tie
-    return options, best["root_id"]
-
-
-def _estimated(r: dict) -> bool:
-    return r.get("_price") is not None and r.get("_source") in ESTIMATED_SOURCES
-
-
-def commodity_figure(block: dict, as_of: str):
-    """The chosen commodity's chart: our official price of `as_of` by contract month (an LME
-    metal by prompt date) and the previous official close of each contract, in Bloomberg's
-    quoted price (the unit of our FUTURE_PX). A missing price is a gap in our line with
-    "missing" at its month and the reason on hover; an estimated (Bloomberg-interpolated)
-    price is an open marker. Nothing is filled. None when there is nothing to draw."""
-    import plotly.graph_objects as go
-    rows = sorted((r for r in block.get("rows") or [] if r.get("_x")), key=lambda r: (r["_x"], r["contract_id"]))
-    if not any(r["_price"] is not None or r["_previous"] is not None for r in rows):
-        return None
-    fig = go.Figure()
-    xs = [r["_x"] for r in rows]
-    fig.add_trace(go.Scatter(
-        x=xs, y=[r["_price"] for r in rows], mode="lines+markers", name=f"official {as_of}",
-        connectgaps=False,
-        text=[f"{r['contract_id']}<br>{'estimated: Bloomberg-interpolated' if _estimated(r) else r['source']}"
-              if r["_price"] is not None else f"{r['contract_id']}: missing" for r in rows],
-        hovertemplate="%{text}<br>%{y}<extra></extra>",
-        line=dict(color="#1f5fbf", width=2),
-        marker=dict(size=[10 if r["_open"] else 6 for r in rows],
-                    symbol=["circle-open" if _estimated(r) else "circle" for r in rows])))
-    if any(r["_previous"] is not None for r in rows):
-        dates = sorted({r["_previous_date"] for r in rows if r["_previous"] is not None})
-        fig.add_trace(go.Scatter(
-            x=xs, y=[r["_previous"] for r in rows], mode="lines+markers", connectgaps=False,
-            name="previous close" + (f" {dates[0]}" if len(dates) == 1 else ""),
-            text=[f"{r['contract_id']}<br>close of {r['_previous_date']}" if r["_previous"] is not None else ""
-                  for r in rows],
-            hovertemplate="%{text}<br>%{y}<extra></extra>",
-            line=dict(color="#8a94a6", width=1.5, dash="dash"), marker=dict(size=5, color="#8a94a6")))
-    for r in rows:
-        if r["_price"] is None:
-            fig.add_annotation(x=r["_x"], y=0, yref="paper", yanchor="bottom", showarrow=False, text="missing",
-                               hovertext=f"{r['contract_id']}: {r['why'] or 'no official price'}",
-                               font=dict(color="#b42318", size=10))
-    fig.update_layout(height=260, margin=dict(t=10, b=30, l=60, r=10),
-                      legend=dict(orientation="h", y=1.08, x=0, font=dict(size=11)),
-                      xaxis=dict(showgrid=False, type="date"),
-                      yaxis=dict(showgrid=True, gridcolor="#eef0f3",
-                                 title=dict(text="price as quoted", font=dict(size=11))))
-    return fig
-
-
-def _futures_table(block: dict) -> dash_table.DataTable:
-    """One commodity's table. The "Why missing" column is shown only when a row has no price
-    (2026-09-25: an empty column of blanks is noise); each missing price also carries its
-    reason on hover of the price cell."""
-    rows = [{k: v for k, v in r.items() if not k.startswith("_")} for r in block["rows"]]
-    columns = list(block.get("columns", _FUTURES_COLUMNS))
-    if not block["missing"]:
-        columns = [(n, i) for n, i in columns if i != "why"]
-    table_id = (FUTURES_CURVE_TABLE_ID_PREFIX + ("lme-" if block.get("lme") else "")
-                + re.sub(r"[^A-Za-z0-9]+", "-", block["root_id"]).strip("-").lower())
-    return dash_table.DataTable(
-        id=table_id, columns=[{"name": n, "id": i} for n, i in columns],
-        data=rows,
-        tooltip_data=[{"price": {"value": r["why"], "type": "text"}} if r.get("why") else {} for r in rows],
-        tooltip_delay=0, tooltip_duration=None,
-        page_size=24, style_table={"overflowX": "auto"}, style_cell=_MONO, style_header=_HEAD,
-        style_cell_conditional=(
-            [{"if": {"column_id": "why"}, "whiteSpace": "normal", "height": "auto",
-              "minWidth": "240px", "maxWidth": "520px"}]
-            + [{"if": {"column_id": c}, "textAlign": "right"} for c in ("lots", "price", "previous", "change")]),
-        style_data_conditional=[
-            {"if": {"filter_query": "{flag} != ''"}, "backgroundColor": "#fff4f2"},
-            {"if": {"filter_query": "{flag} != ''", "column_id": "price"}, "color": "#b42318", "fontWeight": "600"},
-            {"if": {"filter_query": "{lots} != 'no position' && {lots} != 'flat'"}, "backgroundColor": "#eef4ff"},
-        ])
-
-
-def _block_summary(block: dict) -> str:
-    rows = block["rows"]
-    if block.get("lme"):
-        text = (f"{block['name']} ({block['root_id']}) · LME curve · {block['currency']} · "
-                f"{len(rows)} pillar(s) and prompt(s), {block['open']} open prompt(s)")
-    else:
-        text = (f"{block['name']} ({block['root_id']}) · {block['exchange']} · {block['currency']} · "
-                f"{len(rows)} contract(s), {block['open']} with a position")
-    return text + f" · {_counts_words(price_counts(block))}"
-
-
-def commodity_view(block: dict, as_of: str) -> html.Div:
-    """The chosen commodity: its summary line, the chart and the table."""
-    fig = commodity_figure(block, as_of)
-    chart = ([dcc.Graph(id=COMMODITY_CHART_ID, figure=fig, config={"displayModeBar": False},
-                        style={"maxWidth": "900px"})] if fig is not None
-             else [html.Div(className="status-line", children=marker(
-                 "no chart", f"no official price of {as_of} or earlier close on file for {block['name']}: "
-                             "the table says why each price is missing"))])
-    return html.Div(children=[
-        html.Div(_block_summary(block), className="status-line", style={"fontWeight": "600", "margin": "4px 0"}),
-        *chart, _futures_table(block)])
-
-
-def futures_curves_about(as_of: str) -> str:
-    """The Market data by commodity section's definitions, shown on hover of its title."""
-    return (f"One commodity at a time; the strip counts every listed commodity's prices on {as_of}: official, "
-            "estimated (an official LME prompt Bloomberg's curve was interpolated for) and missing. The selector "
-            "starts on the largest gross position (USD notional; a commodity whose USD is missing after, by lots). "
-            f"The chart: our official FUTURE_PX of each contract on {as_of} (Bloomberg's price; on a past date its "
-            "daily PX_LAST close) and the latest earlier official close, by contract month, in Bloomberg's quoted "
-            "price; a missing price is a gap marked \"missing\" with its reason, never filled. "
-            "The table: every contract on file, open positions first, lots from the book, source and "
-            "snap time, previous close and change; \"missing\" and why (on hover of the price, in the Why "
-            "missing column and in Data issues). Expiry \"(est.)\" = the contract master's estimate until "
-            "Bloomberg's date is on file. An LME metal is its curve: cash, 3-month and the monthly prompts the "
-            "book needs, and each open prompt's outright, by date.")
-
-
-def commodity_section(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
-                      chosen: Optional[str] = None, today: Optional[str] = None,
-                      issues: Optional[list] = None):
-    """(strip, view) for the Market data by commodity section, or None when no commodity is
-    listed on `as_of` (the tab then shows one quiet line). The strip is the title and every
-    commodity's counts; the view the `chosen` commodity (the selector's default when `chosen`
-    is not listed). Every commodity's missing-price reasons go to `issues` (the tab's Data
-    issues drawer), not only the chosen one's."""
-    blocks = futures_curve_rows(conn, as_of, status, today=today)
-    if not blocks:
-        return None
-    if issues is not None:
-        for block in blocks:
-            issues.extend((f"{r['contract_id']} price", r["why"]) for r in block["rows"] if r["flag"] and r["why"])
-    by_root = {b["root_id"]: b for b in blocks}
-    if chosen not in by_root:
-        _options, chosen = commodity_options(conn, as_of)
-        if chosen not in by_root:
-            chosen = blocks[0]["root_id"]
-    strip = html.Div([about(FUTURES_CURVES_TITLE, futures_curves_about(as_of), level="h4",
-                            style={"marginTop": "0"}), commodity_strip(blocks)])
-    return strip, commodity_view(by_root[chosen], as_of)
-
-
-def futures_curves_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
-                         today: Optional[str] = None, issues: Optional[list] = None,
-                         chosen: Optional[str] = None):
-    """The whole section as one card (strip, then the chosen commodity), for callers outside
-    the tab's callback; None when no commodity is listed."""
-    section = commodity_section(conn, as_of, status, chosen=chosen, today=today, issues=issues)
-    if section is None:
-        return None
-    strip, view = section
-    return html.Div(className="section", children=[strip, view])
-
-
-def _unrequestable_words(value) -> str:
-    """'; 2 more with no Bloomberg ticker, not counted' from a close_completeness
-    `not_requestable` cell (a list of {instrument_id, settle_date, mark_type, reason},
-    2026-09-24; absent on an older inventory), '' when there are none."""
-    if not isinstance(value, (list, tuple)) or not value:
-        return ""
-    names = sorted({str(i.get("instrument_id") or "?") for i in value if isinstance(i, dict)})
-    shown = ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
-    return (f"; {len(value)} more with no Bloomberg ticker, never asked for and not counted"
-            + (f" ({shown})" if shown else ""))
-
-
-def _lme_curve_words(missing) -> str:
-    """'; LME curve LME:CA: cash, 3M not on file' for each LME curve among a close's missing
-    items (close_completeness, Phase 5: one LME_CURVE item per metal, its `detail` naming the
-    anchors missing), '' when none is missing."""
-    if not isinstance(missing, (list, tuple)):
-        return ""
-    parts = [f"LME curve {m.get('instrument_id') or '?'}: {m.get('detail') or 'not on file'}"
-             for m in missing if isinstance(m, dict) and m.get("mark_type") == "LME_CURVE"]
-    return "".join(f"; {p}" for p in parts)
-
-
-def completeness_strip(df: pd.DataFrame) -> html.Div:
-    """Compact row of small squares, one per business day, coloured by completeness,
-    with a tooltip (title attribute) giving the counts for that day: the marks the book
-    needed that a pull can ask for, and apart from them the needs with no Bloomberg ticker
-    (`not_requestable`, which never make a day incomplete)."""
-    if df.empty:
-        return message_box("No completeness data.")
-    squares = []
-    for _, row in df.iterrows():
-        complete = bool(row.get("complete"))
-        title = (f"{row['as_of_date']}: {row['present']}/{row['needed']} needed marks on file as official closes"
-                 + _lme_curve_words(row.get("missing"))
-                 + _unrequestable_words(row.get("not_requestable")))
-        squares.append(html.Div(title=title, className="completeness-square",
-                                style={"display": "inline-block", "width": "14px", "height": "14px",
-                                       "margin": "1px", "backgroundColor": "#1a7f4b" if complete else "#b42318"}))
-    return html.Div(id=COMPLETENESS_STRIP_ID, children=squares)
-
-
 # --------------------------------------------------------------------------- whole-book checks (2026-09-21)
 # "What is missing", "Marks that look wrong" and "Past closes the header needs". All three
 # read stored rows and the Bloomberg status file only: no Bloomberg session, nothing
@@ -1745,7 +726,7 @@ WITH used AS (
   FROM trade_legs l JOIN trades_official t USING (trade_id)
   WHERE t.trade_date <= :as_of AND l.settle_date >= :as_of
 )
-SELECT m.as_of_date, m.instrument_id, m.mark_type, m.settle_date, m.value, m.snapped_at
+SELECT m.as_of_date, m.instrument_id, m.mark_type, m.settle_date, m.value, m.snapped_at, m.source
 FROM marks_official m
 LEFT JOIN used u ON u.instrument_id = m.instrument_id AND u.settle_date = m.settle_date
 WHERE m.as_of_date IN (:as_of, :prev) AND m.mark_type IN ('SPOT', 'FWD_OUTRIGHT', 'FUTURE_PX')
@@ -1966,6 +947,7 @@ def missing_rows(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = 
             "trades_blocked": len(entry["trades"]),
             "notional_blocked": notional_words(entry["notional"]),
             "reason": reason,
+            "trade_ids": sorted(entry["trades"]), "notional": dict(entry["notional"]),
         })
     rows.sort(key=lambda r: (-r["trades_blocked"], r["instrument_id"], r["mark_type"], r["settle_date"]))
     return needed, rows
@@ -2023,48 +1005,6 @@ def _panel_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict]
         ])
 
 
-MISSING_ABOUT = (
-    "Every mark the book needs on the date with no official mark on file. A trade that reads one is priced "
-    "off the nearest official marks until it arrives, and left out of the P&L with its reason when there are "
-    "none. Trades blocked = open trades that read the mark. Notional blocked = the absolute USD leg of those "
-    "trades' open legs (the base amount, under its own currency, where a pair has no USD leg); never converted "
-    "with a mark. Covers the marks requested from Bloomberg (spot, forwards, futures prices); option values are "
-    "computed by the app from these.")
-
-
-def missing_panel(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
-                  issues: Optional[list] = None) -> html.Div:
-    """Panel 1: every mark the book needs on `as_of` that has no official mark. One quiet line
-    when nothing is missing. When the last pull cannot give Bloomberg's reason row by row, the
-    sentence saying why sits on a marker beside the count and goes to `issues` (the tab's Data
-    issues drawer) when given; the reason column is left out only when every row's is blank."""
-    from ui.tabs.header import backfill_status
-    needed, rows = missing_rows(conn, as_of, status)
-    if not needed:
-        return _quiet(MISSING_TITLE, f"The book needs no marks on {as_of}: no FX, futures or option trade is "
-                                     "open that day.", MISSING_ABOUT)
-    if not rows:
-        return _quiet(MISSING_TITLE, f"Every one of the {needed} marks the book needs on {as_of} is official.",
-                      MISSING_ABOUT)
-    is_past = as_of < _book_today_iso()
-    note = pull_note(status, as_of, is_past, backfill_status(conn) if is_past else None)
-    if note and issues is not None:
-        issues.append((MISSING_TITLE, note))
-    columns = [("Pair / instrument", "instrument_id"), ("Mark type", "mark_type"), ("Settle date", "settle_date"),
-               ("On file instead", "on_file"), ("Trades blocked", "trades_blocked"),
-               ("Notional blocked", "notional_blocked")]
-    has_reasons = any(r["reason"] for r in rows)
-    if has_reasons:
-        columns.append(("Bloomberg's reason (last pull)", "reason"))
-    children = [
-        html.P([f"{len(rows)} of the {needed} marks the book needs on {as_of} have no official mark.",
-                marker("past close" if is_past else "no Bloomberg reason", note) if note else None],
-               className="status-line"),
-        _panel_table(MISSING_TABLE_ID, columns, rows, wide=("reason",), numeric=("trades_blocked", "notional_blocked")),
-    ]
-    return _panel(MISSING_TITLE, children, about_text=MISSING_ABOUT)
-
-
 # ---- "Marks that look wrong"
 def _snap_age_seconds(snapped_at, now: datetime) -> Optional[float]:
     """Seconds between `snapped_at` (ISO; a stamp with no offset is read as UTC, like
@@ -2107,15 +1047,15 @@ def suspect_rows(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] =
         now = now or datetime.now(timezone.utc)
 
     todays, previous = [], {}
-    for mark_date, instrument_id, mark_type, settle, value, snapped_at in conn.execute(
+    for mark_date, instrument_id, mark_type, settle, value, snapped_at, source in conn.execute(
             _SUSPECT_MARKS_SQL, {"as_of": as_of, "prev": prev_day}):
         if mark_date == as_of:
-            todays.append((instrument_id, mark_type, settle, value, snapped_at))
+            todays.append((instrument_id, mark_type, settle, value, snapped_at, source))
         else:
             previous[(instrument_id, mark_type, "" if mark_type == "SPOT" else settle)] = value
 
     rows = []
-    for instrument_id, mark_type, settle, value, snapped_at in todays:
+    for instrument_id, mark_type, settle, value, snapped_at, source in todays:
         before = previous.get((instrument_id, mark_type, "" if mark_type == "SPOT" else settle))
         flags, note, change, value_flag = [], "", None, False
         if before is None:
@@ -2147,7 +1087,7 @@ def suspect_rows(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] =
             "value": rk.value(value), "previous": rk.value(before),
             "previous_date": "" if before is None else prev_day,
             "change_pct": None if change is None else float(change),
-            "snapped_at": str(snapped_at or "").replace("T", " "),
+            "snapped_at": str(snapped_at or "").replace("T", " "), "source": str(source or ""),
             "flag": "; ".join(flags), "note": note,
             "_order": (not flags, not value_flag, -abs(change or 0.0)),
         })
@@ -2211,47 +1151,6 @@ def suspect_about(as_of: str, prev_day: str) -> str:
             "marks: nothing is recomputed.")
 
 
-def suspect_panel(conn: sqlite3.Connection, as_of: str, now: Optional[datetime] = None,
-                  today: Optional[str] = None, issues: Optional[list] = None) -> html.Div:
-    """Panel 3: flagged marks in a card, the full list under a collapsed "Show all N marks".
-    With nothing flagged it is one quiet line with that collapsed list under it. When the
-    previous business day has no marks, why sits on a marker and goes to `issues`."""
-    found = suspect_rows(conn, as_of, now=now, today=today)
-    rows, prev_day = found["rows"], found["prev_day"]
-    about_text = suspect_about(as_of, prev_day)
-    if not rows:
-        return _quiet(SUSPECT_TITLE, f"No official spot, forward or futures mark the book uses is on file for "
-                                     f"{as_of}, so there is nothing to check.", about_text)
-    not_compared = None
-    if not found["prev_has_marks"]:
-        from ui.tabs.header import backfill_status, past_close_explanation
-        why = (f"No official marks are on file for {prev_day}, the previous business day, so the marks of {as_of} "
-               f"cannot be compared with a previous close: {past_close_explanation(backfill_status(conn), prev_day)}.")
-        not_compared = marker(f"not compared with {prev_day}", why)
-        if issues is not None:
-            issues.append((SUSPECT_TITLE, why))
-    shown = _suspect_display(conn, rows)
-    flagged = [r for r in shown if r["flag"]]
-    compared = sum(1 for r in rows if r["previous"])
-    show_all = html.Details(className="details", children=[
-        html.Summary(f"Show all {len(rows)} marks"),
-        _panel_table(SUSPECT_ALL_TABLE_ID, _SUSPECT_COLUMNS, shown, wide=("flag", "note"),
-                     numeric=("change_pct",), page_size=25),
-    ])
-    if not flagged:
-        sentence = (f"no mark is flagged: {compared} of {len(rows)} marks compared with {prev_day}"
-                    if found["prev_has_marks"] else f"{len(rows)} marks on file, none compared")
-        return _quiet(SUSPECT_TITLE, sentence, about_text, extra=[not_compared, show_all])
-    children = [
-        html.P([f"{len(flagged)} of {len(rows)} marks flagged ({compared} compared with {prev_day}).", not_compared],
-               className="status-line"),
-        _panel_table(SUSPECT_FLAGGED_TABLE_ID, _SUSPECT_COLUMNS, flagged, wide=("flag", "note"),
-                     numeric=("change_pct",)),
-        show_all,
-    ]
-    return _panel(SUSPECT_TITLE, children, about_text=about_text)
-
-
 # ---- "Past closes the header needs"
 def header_reference_labels(as_of: date) -> Dict[str, List[str]]:
     """ISO date -> the header figures that read that past close, built with the same
@@ -2298,24 +1197,6 @@ def past_close_rows(conn: sqlite3.Connection, header_as_of: str, backfill: Optio
         rows.append({"date": day, "read_by": ", ".join(labels.get(day, [])), "needed": needed,
                      "present": needed - len(missing), "state": state, "why": why, "flag": flag})
     return rows
-
-
-def past_closes_panel(conn: sqlite3.Connection, header_as_of: str, backfill: Optional[dict] = None) -> html.Div:
-    """Panel 2. It replaces nothing: the 20-day completeness strip stays above it."""
-    rows = past_close_rows(conn, header_as_of, backfill)
-    about_text = (f"The header's Daily, Previous day, 5d, MTD and YTD figures difference the LTD of {header_as_of} "
-                  "(the header's as-of date) against these past closes. A close is complete when every mark the "
-                  "book needed that day is official; the Bloomberg backfill fills them by itself after each pull.")
-    table = _panel_table(PAST_CLOSES_TABLE_ID, [
-        ("Date", "date"), ("Read by", "read_by"), ("Needed", "needed"), ("Present", "present"),
-        ("Status", "state"), ("Why it is incomplete", "why"),
-    ], rows, wide=("why",), numeric=("needed", "present"))
-    if not any(r["flag"] for r in rows):
-        # nothing to report: one quiet line, the table collapsed under it
-        return _quiet(PAST_CLOSES_TITLE, f"all {len(rows)} complete or not needed for the header of {header_as_of}",
-                      about_text, extra=[html.Details(className="details", children=[
-                          html.Summary(f"Show the {len(rows)} dates"), table])])
-    return _panel(PAST_CLOSES_TITLE, [table], about_text=about_text)
 
 
 LIBRARY_TITLE = "Bloomberg library"
@@ -2532,34 +1413,6 @@ def period_only_rows(conn: sqlite3.Connection, as_of: str, df_today: pd.DataFram
     return out
 
 
-def unpriced_trades_panel(conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """Every trade that is on file but missing from the headline P&L on the header's date,
-    and why (user, 2026-09-21). The count here is the header's own "excludes N of M"."""
-    total, rows = unpriced_trade_rows(conn, as_of)
-    about_text = ("A trade with no price on the date is left out of EVERY headline figure. Daily, 5d, MTD and YTD "
-                  "are the date's value minus the value on an earlier close, so each also leaves out the trades "
-                  "with no price on ITS close: that is why the counts differ from one figure to the next.")
-    if not rows:
-        return _quiet(UNPRICED_TITLE, f"All {total} trades on file are priced on {as_of}: nothing is left out of the "
-                                      "headline figures.", about_text)
-    by_reason: Dict[str, int] = {}
-    for r in rows:
-        key = re.sub(r"\s+for\s+\S+.*$", "", r["reason"]) or r["reason"]
-        by_reason[key] = by_reason.get(key, 0) + 1
-    top = "; ".join(f"{n} x {why}" for why, n in sorted(by_reason.items(), key=lambda kv: -kv[1])[:4])
-    n_today = sum(1 for r in rows if r["left_out_of"].startswith("every"))
-    return _panel(f"{UNPRICED_TITLE} · {n_today} of {total} unpriced on {as_of}, {len(rows) - n_today} more in some periods", [
-        html.P(["Most common reasons: " + top + ".",
-                marker(f"excl. {n_today}", f"{n_today} trades have no price on {as_of}, so every headline figure "
-                                           "leaves them out.")], className="status-line"),
-        _panel_table(UNPRICED_TABLE_ID,
-                     [("Trade id", "trade_id"), ("Product", "product"), ("Instrument", "instrument_id"),
-                      ("Trade date", "trade_date"), ("Status", "status"), ("Left out of", "left_out_of"),
-                      ("Why", "reason")],
-                     rows, wide=("reason", "left_out_of")),
-    ], about_text=about_text)
-
-
 UPLOAD_ISSUES_TITLE = "Rows of the blotter file that did not become trades"
 UPLOAD_ISSUES_TABLE_ID = "market-data-upload-issues-table"
 
@@ -2601,54 +1454,6 @@ def safe_panel(title: str, build: Callable[[], html.Div]) -> html.Div:
         return _panel(title, [message_box(f"This panel could not be built ({type(exc).__name__}: {exc}).")])
 
 
-def whole_book_panels(conn: sqlite3.Connection, as_of: str, status: Optional[dict] = None,
-                      header_as_of: Optional[str] = None,
-                      issues: Optional[list] = None) -> Tuple[html.Div, html.Div, html.Div]:
-    """(data health: rows not loaded, trades left out of the headline, what is missing;
-    Marks that look wrong; Past closes the header needs) for the tab's `_update_body` render
-    path. "What is missing" and "Marks that look wrong" follow the tab's own as-of date; the
-    trades left out and the past closes follow the HEADER's as-of date (`header_as_of`, what
-    ui/tabs/header.py differences from), and the New York book date when the header has none
-    yet. The reasons each gives on hover also go to `issues` (the Data issues drawer) when
-    given. The Bloomberg library and contract dates moved below the FX pair section on
-    2026-09-25 (`reference_panels`)."""
-    header_day = header_as_of or _book_today_iso()
-    return (html.Div([safe_panel(UPLOAD_ISSUES_TITLE, lambda: upload_issues_panel(conn)),
-                      safe_panel(UNPRICED_TITLE, lambda: unpriced_trades_panel(conn, header_day)),
-                      safe_panel(MISSING_TITLE, lambda: missing_panel(conn, as_of, status, issues=issues))]),
-            safe_panel(SUSPECT_TITLE, lambda: suspect_panel(conn, as_of, issues=issues)),
-            safe_panel(PAST_CLOSES_TITLE, lambda: past_closes_panel(conn, header_day)))
-
-
-def reference_panels(conn: sqlite3.Connection, as_of: str) -> html.Div:
-    """The Bloomberg library and the contract dates, each a collapsed line (2026-09-25: below
-    the FX pair section, above close completeness)."""
-    return html.Div([safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)),
-                     safe_panel(CONTRACT_DATES_TITLE, lambda: contract_dates_panel(conn, as_of))])
-
-
-MANUAL_ENTRY_ABOUT = ("A MANUAL mark is never official: it is kept on file and shown on this tab as \"on file "
-                      "instead\", but no valuation uses it -- only an official mark prices a trade.")
-
-
-def manual_entry_form(default_pair: Optional[str] = None) -> html.Div:
-    """Manual mark entry calling `data.bloomberg.manual.write_manual_mark`, pre-filled
-    with the pair currently selected in the FX pair section. The rule that a MANUAL mark is
-    never official is on hover of the title."""
-    return html.Div(className="market-data-manual-entry", children=[
-        about("Manual mark entry", MANUAL_ENTRY_ABOUT, level="h4"),
-        html.Div(className="toolbar", children=[
-            html.Div([html.Label("Instrument"), dcc.Input(id=MANUAL_INSTRUMENT_ID, type="text", value=default_pair)]),
-            html.Div([html.Label("Settle date"), dcc.Input(id=MANUAL_SETTLE_ID, type="text", placeholder="YYYY-MM-DD")]),
-            html.Div([html.Label("Mark type"), dcc.Dropdown(id=MANUAL_MARK_TYPE_ID, options=MANUAL_MARK_TYPE_OPTIONS,
-                                                             value="SPOT", clearable=False, style={"width": "160px"})]),
-            html.Div([html.Label("Value"), dcc.Input(id=MANUAL_VALUE_ID, type="number")]),
-            html.Div([html.Button("Save", id=MANUAL_SUBMIT_ID, n_clicks=0, className="btn")]),
-        ]),
-        html.Div(id=MANUAL_STATUS_ID, className="status-line"),
-    ])
-
-
 def _connect_readonly(path) -> sqlite3.Connection:
     """Open the database read-only without importing `ui.app` (which pulls in the
     other tabs and can be mid-edit while this module is developed/tested)."""
@@ -2661,307 +1466,708 @@ def message_box(message: str) -> html.P:
     return html.P(message, style={"color": "gray"})
 
 
+
+
+# ============================================================================ the Data tab (2026-09-29)
+# "Can I trust today's numbers?" (user, 2026-09-29: the layout approved piece by piece). Top to
+# bottom: one status line (`status_line`); Missing, and what it blocks (`missing_block`); Marks
+# check (`marks_check_rows`, filtered in its own callback); Reference closes
+# (`reference_close_rows`); Contract dates (`contract_dates_line`); Diagnostics, one closed fold (the
+# Bloomberg library, the feed status in detail, the connection check); the one Data issues drawer.
+# Every figure is a stored official mark or an engine reader's own output: nothing is recomputed.
 TAB_TITLE = "Data"
-TAB_ABOUT = ("Can I trust the numbers? What is on file, what the book needs and why anything is missing, the "
-             "data's health first. This tab never asks Bloomberg for anything by itself: only Pull now (the same "
-             "press as the top bar's Pull Bloomberg now) does; its own timer only re-reads the marks on file.")
-HEALTH_ABOUT = ("The rows of the blotter file that did not become trades, the trades left out of the headline P&L, "
-                "the marks the book needs that are not on file as official, and the marks that look wrong. A check "
-                "with nothing to report is one line; Data issues gathers every reason given on hover below.")
-FX_SECTION_ABOUT = ("The selected pair's spot and every forward outright on file for the date, with its source and "
-                    "snap time, official first. Used by book = open trades with a leg settling on that date. A row "
-                    "that is not official is shown as reconciliation only: no valuation reads it.")
-COMPLETENESS_ABOUT = (f"One square per business day, the last {COMPLETENESS_DAYS}: green when every mark the book "
-                      "needed that day is on file as an official close, red otherwise. Hover a square for its counts.")
+TAB_ABOUT = ("Can I trust today's numbers? The last Bloomberg pull, the marks the book needs that are not on "
+             "file, every official mark the book uses against its previous close, the reference closes the "
+             "header's periods read, and the contract dates. This tab never asks Bloomberg for anything: the top "
+             "bar's Pull Bloomberg now is the one action; the tab only re-reads what is on file.")
+MISSING_ABOUT = (
+    "Every official mark the book needs on the date that is not on file, and the trades it touches. A trade that "
+    "reads a missing mark is priced off the nearest official marks meanwhile (trades reading it); it is left out of "
+    "the P&L only when there are none (trades unpriced). A trade left out of the P&L for another reason is listed "
+    "under them. Notional is the face amount of the tickets, never converted with a mark: sorted by the USD face "
+    "amount, largest first, the rows with a face in another currency after them. The reason is on hover.")
+MARKS_ABOUT = ("Every official mark the book uses on the date, futures, options, LME and FX together, against the "
+               f"previous business day's close. Flagged: a move above {BAD_TICK_PCT:g} %, a value exactly unchanged "
+               "(stale or copied), or on today's date a snap older than the stale limit. Filter by commodity or "
+               "sector, search by name, instrument or source; Download CSV gives the rows shown at full figures.")
+REFERENCE_ABOUT = (
+    "The closes the header's Daily, 5d, MTD and YTD figures difference against. A close is complete when every mark "
+    "the book needed that day is on file as official; the Bloomberg backfill fills them after each pull. Trades "
+    "left out = priced today but with no price on that close, so that period leaves them out (names on hover). "
+    "When a close is not usable, the header steps back to the first earlier close with value and says 'ref <date>'.")
+CONTRACT_DATES_ABOUT = (
+    "Bloomberg's last-trade and first-notice dates of the open futures and options, asked once per contract by "
+    "Pull Bloomberg now. Until they are on file the contract runs on the contract master's conservative estimate.")
+DIAG_TITLE = "Diagnostics"
+DIAG_ABOUT = ("The Bloomberg library (everything a pull asks for), the last pull's feed status step by step, and "
+              "the Bloomberg connection check.")
+
+MARKS_SECTION_ID = "market-data-marks"
+MARKS_TOOLS_ID = "market-data-marks-tools"
+MARKS_FILTER_ID = "market-data-marks-filter"
+MARKS_SEARCH_ID = "market-data-marks-search"
+MARKS_META_ID = "market-data-marks-meta"
+MARKS_EMPTY_ID = "market-data-marks-empty"
+MARKS_TABLE_WRAP_ID = "market-data-marks-wrap"
+MARKS_TABLE_ID = "market-data-marks-table"
+MARKS_STORE_ID = "market-data-marks-rows"
+MARKS_CSV_ID = "market-data-marks-csv"
+MARKS_DOWNLOAD_ID = "market-data-marks-download"
+CONTRACT_DATES_PANEL_ID = "market-data-contract-dates"
+DIAGNOSTICS_ID = "market-data-diagnostics"
+DIAG_BODY_ID = "market-data-diagnostics-body"
+
+_HIDDEN = {"display": "none"}
+_SECTOR_ORDER = ("energy", "metals", "agriculture", "ferrous", "chemicals", "freight")
+FX_SECTOR = "fx"
+_PERIODS = (("daily", "Daily"), ("d5", "5d"), ("mtd", "MTD"), ("ytd", "YTD"))
+MARKS_CSV_COLUMNS = ["instrument_id", "name", "price_kind", "group", "commodity", "mark_type", "settle_date",
+                     "value_raw", "source_code", "snapped_at", "previous_raw", "previous_date_iso", "change_raw",
+                     "change_pct_raw", "flag", "note"]
 
 
-def build_layout(default_date: Optional[str] = None) -> html.Div:
-    """The Data tab (the Market data tab until 2026-09-25), in the order a commodity book
-    reads it (screens redesign, Phase A): the top bar (date, Pull now, feed status); data
-    health (the Data issues drawer, rows not loaded, trades left out, what is missing, marks
-    that look wrong); the futures curves; the FX pair section (its pair dropdown, spot and
-    forward curve); the Bloomberg library and contract dates; close completeness and the past
-    closes the header needs; manual mark entry; the Bloomberg connection check last. Every
-    container is filled by the callback registered in `register_callbacks`."""
-    return html.Div(className="market-data", children=[
-        about(TAB_TITLE, TAB_ABOUT, level="h3"),
-        html.Div(id=TOOLBAR_ID, className="toolbar", children=[
-            # The tab's own date picker left on 2026-09-28: the header's picker is the one place the
-            # as-of changes, and every callback here reads the header's store (`HEADER_AS_OF_STORE_ID`).
-            html.Div(className="toolbar-group", children=[
-                html.Label("Bloomberg"),
-                html.Div([html.Button("Pull now", id=PULL_NOW_ID, n_clicks=0, className="btn"),
-                          dcc.Loading(type="dot", color="#1f5fbf", style={"display": "inline-block"},
-                                      children=[html.Span(id=PULL_NOW_STATUS_ID, className="status-line",
-                                                          style={"marginLeft": "8px"})])]),
-                dcc.Store(id=PULL_REVISION_ID),
-            ]),
-            html.Div(id=STATUS_ID, className="status-line"),
-        ]),
-        dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
-        # Data health first; none of it depends on the pair dropdown. Static containers: each
-        # is an Output of `_update_body`.
-        html.Div(className="data-health", style={"marginBottom": "12px"}, children=[
-            about(HEALTH_TITLE, HEALTH_ABOUT, level="h4"),
-            html.Div(id=ISSUES_ID),
-            html.Div(id=MISSING_PANEL_ID),
-            html.Div(id=SUSPECT_PANEL_ID),
-        ]),
-        # market data by commodity (Phase C, 2026-09-25): the title and every commodity's counts
-        # (COMMODITY_STRIP_ID), the selector (static, so its choice survives each re-read), then
-        # the chosen commodity's chart and table (FUTURES_CURVES_PANEL_ID; one quiet line when no
-        # commodity is open on the date, the selector then hidden)
-        html.Div(id=COMMODITY_SECTION_ID, className="section", children=[
-            html.Div(id=COMMODITY_STRIP_ID),
-            html.Div(id=COMMODITY_PICKER_ID, className="toolbar",
-                     style={"alignItems": "center", "margin": "6px 0"}, children=[
-                         about("Commodity", "Grouped by sector. Starts on the largest gross position (USD "
-                                            "notional; a commodity whose USD is missing after, by lots).",
-                               level="span", style={"fontWeight": "600"}),
-                         dcc.Dropdown(id=COMMODITY_DROPDOWN_ID, options=[], value=None, clearable=False,
-                                      placeholder="Commodity", style={"width": "380px"}),
-                     ]),
-            html.Div(id=FUTURES_CURVES_PANEL_ID),
-        ]),
-        about("FX", "The currency pairs: FX hedges, FX forwards and the USD conversion spots.", level="h4"),
-        html.Div(className="section", children=[
-            html.Div(className="toolbar", style={"alignItems": "center", "marginBottom": "6px"}, children=[
-                about(FX_SECTION_TITLE, FX_SECTION_ABOUT, level="h4", style={"margin": "0"}),
-                dcc.Dropdown(id=PAIR_DROPDOWN_ID, options=[], value=None, clearable=False,
-                             placeholder="Pair", style={"width": "140px"}),
-            ]),
-            html.Div(id=BODY_ID),
-        ]),
-        html.Div(id=REFERENCE_PANEL_ID, style={"marginBottom": "12px"}),
-        about("Close completeness", COMPLETENESS_ABOUT, level="h4"),
-        html.Div(id="market-data-completeness-container"),
-        html.Div(id=PAST_CLOSES_PANEL_ID, style={"marginTop": "8px"}),
-        manual_entry_form(),  # static: its ids are callback inputs and must exist on first render
-        html.Div(className="bbg-check-block", children=[
-            html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
-                        n_clicks=0, className="bbg-check-button"),
-            dcc.Loading(type="dot", color="#1f5fbf",
-                        children=[html.Div(id=BBG_RESULTS_ID, className="bbg-check-results")]),
-        ]),
+def _as_float(value) -> Optional[float]:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v else None
+
+
+# ---- plain names (display only)
+_TRADE_NAME_SQL = """
+SELECT t.trade_id, t.product, t.instrument_id, i.base_ccy, i.quote_ccy, i.expiry_date, MAX(l.settle_date)
+FROM trades_official t JOIN instruments i USING (instrument_id) LEFT JOIN trade_legs l USING (trade_id)
+GROUP BY t.trade_id
+"""
+
+
+def _root_id(instrument_id: str, roots: dict, bases: Dict[str, str]) -> str:
+    base = str(bases.get(instrument_id, "") or "").replace(" ", "").upper()
+    if base in roots:
+        return base
+    return instrument_id if instrument_id in roots else base
+
+
+def _is_lme(root_id: str, root) -> bool:
+    return root_id.startswith("LME:") or str(getattr(root, "exchange", "") or "") == "LME"
+
+
+def name_context(conn: sqlite3.Connection) -> Tuple[dict, Dict[str, str], Dict[str, str]]:
+    """(contract roots, instrument id -> base_ccy, trade id -> 'WTI Dec26 (T-12)'), read once per render."""
+    try:
+        from data.contracts import load_roots
+        roots = dict(load_roots())
+    except Exception:  # noqa: BLE001 -- a name without its root is still shown (the id)
+        roots = {}
+    bases: Dict[str, str] = {}
+    try:
+        for iid, base in conn.execute("SELECT instrument_id, base_ccy FROM instruments"):
+            bases[str(iid)] = str(base or "")
+    except sqlite3.Error:
+        pass
+    names: Dict[str, str] = {}
+    try:
+        for tid, product, iid, base, quote, expiry, settle in conn.execute(_TRADE_NAME_SQL):
+            iid = str(iid)
+            root_id = _root_id(iid, roots, bases)
+            if product in ("FX_SPOT", "FX_FWD", "FX_SWAP"):
+                name = fx_name(iid, product, settle)
+            elif product == "FX_OPTION":
+                name = fx_name(f"{base}{quote}", "FX_OPTION", expiry)
+            elif product == "LME_FWD":
+                name = lme_name(roots.get(root_id), root_id, settle)
+            else:
+                name = contract_name(iid, roots.get(root_id), root_id)
+            names[str(tid)] = f"{name} ({tid})"
+    except sqlite3.Error:
+        pass
+    return roots, bases, names
+
+
+def mark_name(instrument_id: str, mark_type: str, settle_date: str, roots: dict, bases: Dict[str, str]) -> str:
+    """'USDCNH spot', 'USDCNH 18 Nov forward', 'LME copper cash', 'LME copper 10 Dec', 'WTI Dec26'."""
+    iid = str(instrument_id or "")
+    if is_fx_pair(iid):
+        return fx_name(iid, "FX_FWD", settle_date) if mark_type == "FWD_OUTRIGHT" else f"{iid} spot"
+    root_id = _root_id(iid, roots, bases)
+    root = roots.get(root_id)
+    if _is_lme(root_id, root):
+        short = short_root_name(root, root_id)
+        if mark_type == "SPOT":
+            return f"{short} cash"
+        if mark_type == "LME_CURVE":
+            return f"{short} curve"
+        return lme_name(root, root_id, settle_date)
+    return contract_name(iid, root, root_id)
+
+
+def price_kind_words(instrument_id: str, mark_type: str, settle_date: str) -> str:
+    """What kind of price a mark is, in plain words."""
+    iid = str(instrument_id or "")
+    if mark_type == "SPOT":
+        return "spot" if is_fx_pair(iid) else "LME cash price"
+    if mark_type == "FWD_OUTRIGHT":
+        return (f"forward for {short_date(settle_date)}" if is_fx_pair(iid)
+                else f"LME prompt {short_date(settle_date)}")
+    if mark_type == "FUTURE_PX":
+        parsed = parse_contract_id(iid)
+        return "option price" if parsed and parsed.get("option_type") else "futures close"
+    if mark_type == "LME_CURVE":
+        return "LME curve (cash and 3M)"
+    return str(mark_type or "").lower()
+
+
+def mark_group(instrument_id: str, roots: dict, bases: Dict[str, str]) -> Tuple[str, str]:
+    """(sector, commodity) of a mark: ('fx', 'USDCNH') for a pair, else its root's sector and
+    subsector ('metals', 'copper'); ('other', name) when the root is not known."""
+    iid = str(instrument_id or "")
+    if is_fx_pair(iid):
+        return FX_SECTOR, iid
+    root_id = _root_id(iid, roots, bases)
+    root = roots.get(root_id)
+    sector = str(getattr(root, "sector", "") or "other").lower()
+    commodity = str(getattr(root, "subsector", "") or "").replace("_", " ").strip()
+    commodity = commodity[:1].upper() + commodity[1:] if commodity else short_root_name(root, root_id)
+    return sector, commodity
+
+
+def _sector_label(sector: str) -> str:
+    return "FX" if sector == FX_SECTOR else (sector or "other").capitalize()
+
+
+def _sector_rank(sector: str) -> int:
+    if sector in _SECTOR_ORDER:
+        return _SECTOR_ORDER.index(sector)
+    return len(_SECTOR_ORDER) + (1 if sector == FX_SECTOR else 0)
+
+
+def _hover_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict], hover: Dict[str, str],
+                 numeric: Tuple[str, ...] = (), wide: Tuple[str, ...] = (),
+                 page_size: int = PANEL_PAGE_SIZE) -> dash_table.DataTable:
+    """`_panel_table` with a sentence on hover of some cells: `hover` maps a shown column to the
+    row key holding its hover text."""
+    table = _panel_table(table_id, columns, rows, wide=wide, numeric=numeric, page_size=page_size)
+    table.tooltip_data = [{col: {"value": plain_words(r.get(key)), "type": "text"}
+                           for col, key in hover.items() if r.get(key)} for r in rows]
+    table.tooltip_delay = 200
+    table.tooltip_duration = None
+    return table
+
+
+def _link(text: str, target: str, hover: str = "", warn: bool = False) -> html.A:
+    classes = "data-status-link" + (" data-status-link--warn" if warn else "")
+    return html.A(text, href=f"#{target}", className=classes, title=plain_words(hover) or None)
+
+
+# ---- 1. the status line
+def status_line(status: Optional[dict], needs: Tuple[int, int], closes: List[dict],
+                dates: Tuple[int, int]) -> list:
+    """The last pull, marks complete, reference closes complete, contract dates: four links to
+    their blocks, the full sentence of each on hover."""
+    from ui.feed_controls import short_state, short_time
+    line = top_bar_status(status)
+    state = short_state(line)
+    when = short_time((status or {}).get("time")) if status else ""
+    if not status or state == "no pull yet":
+        pull = _link("No Bloomberg pull yet", DIAGNOSTICS_ID, line, warn=True)
+    elif state == "connected":
+        pull = _link(f"Last pull {when}" if when else "Last pull: time not recorded", DIAGNOSTICS_ID, line)
+    else:
+        pull = _link(f"Last pull {when} · {state}" if when else f"Bloomberg {state}", DIAGNOSTICS_ID, line,
+                     warn=state == "not connected")
+    needed, n_missing = needs
+    if not needed:
+        marks = _link("no marks needed", MISSING_PANEL_ID, "The book needs no marks on this date.")
+    else:
+        marks = _link(f"{needed - n_missing:,} of {needed:,} marks",
+                      MISSING_PANEL_ID if n_missing else MARKS_SECTION_ID,
+                      f"{n_missing:,} of the {needed:,} marks the book needs are not on file as official."
+                      if n_missing else "Every mark the book needs is on file as official.", warn=bool(n_missing))
+    done = [c for c in closes if not c["flag"]]
+    open_ = [c for c in closes if c["flag"]]
+    words = f"{len(done)} of {len(closes)} reference closes"
+    if open_:
+        words += " · " + ", ".join(c["period"] for c in open_) + " incomplete"
+    ref = _link(words, PAST_CLOSES_PANEL_ID,
+                "; ".join(f"{c['period']} ({c['date_iso']}): {c['state']}" for c in closes), warn=bool(open_))
+    total, estimated = dates
+    if not total:
+        dates_link = _link("no contract dates needed", CONTRACT_DATES_PANEL_ID,
+                           "No open future or option needs Bloomberg's contract dates.")
+    elif estimated:
+        dates_link = _link(f"{estimated} contract{'s' if estimated != 1 else ''} on estimated dates",
+                           CONTRACT_DATES_PANEL_ID, f"{total - estimated} of {total} contracts on Bloomberg's dates.",
+                           warn=True)
+    else:
+        dates_link = _link("contract dates all from Bloomberg", CONTRACT_DATES_PANEL_ID,
+                           f"All {total} contracts on Bloomberg's own dates.")
+    out: list = []
+    for part in (pull, marks, ref, dates_link):
+        if out:
+            out.append(html.Span(" · ", className="data-status-sep"))
+        out.append(part)
+    return out
+
+
+# ---- 2. Missing, and what it blocks
+def missing_block(conn: sqlite3.Connection, as_of: str, status: Optional[dict], df_today: Optional[pd.DataFrame],
+                  ctx: tuple, issues: Optional[list] = None) -> Tuple[html.Div, Tuple[int, int]]:
+    """One table: each official mark the book needs on `as_of` that is not on file (plain name,
+    the kind of price, the date), the trades it leaves unpriced and the trades reading it (names on
+    hover), their face notional, the reason on hover; then the trades left out of the P&L for any
+    other reason. One quiet line when nothing is missing. Returns (component, (needed, missing))."""
+    roots, bases, tnames = ctx
+    needed, rows = missing_rows(conn, as_of, status)
+    unpriced: Dict[str, str] = {}
+    if df_today is not None and not df_today.empty:
+        left = df_today[df_today["reason"] != ""]
+        unpriced = {str(t): str(r) for t, r in zip(left["trade_id"], left["reason"])}
+    shown, linked = [], set()
+    for r in rows:
+        ids = [str(t) for t in r.get("trade_ids") or []]
+        out = [t for t in ids if t in unpriced]
+        linked.update(out)
+        name = mark_name(r["instrument_id"], r["mark_type"], r["settle_date"], roots, bases)
+        told = str(r.get("reason") or "")
+        reason = "; ".join(x for x in (
+            told or "no reason from Bloomberg",
+            f"on file instead: {r['on_file']}" if r.get("on_file") and r["on_file"] != "nothing" else "",
+            f"{len(ids) - len(out)} trade(s) priced off the nearest official marks meanwhile" if len(ids) > len(out)
+            else "",
+        ) if x)
+        shown.append({
+            "name": name, "what": price_kind_words(r["instrument_id"], r["mark_type"], r["settle_date"]),
+            "date": short_date(as_of), "unpriced": len(out), "reading": len(ids),
+            "notional": r.get("notional_blocked") or MISSING,
+            "reason": f"{r['instrument_id']} {r['mark_type']} {r['settle_date']}: {reason}",
+            "unpriced_names": "; ".join(tnames.get(t, t) for t in out),
+            "reading_names": "; ".join(tnames.get(t, t) for t in ids),
+            "flag": "unpriced" if out else "",       # tinted only when it leaves a trade out of the P&L
+            "_usd": float((r.get("notional") or {}).get("USD") or 0.0),
+        })
+        if issues is not None and (told or out):
+            # a row with neither Bloomberg's own word nor an unpriced trade is covered by the one
+            # sentence on why no reason is shown (`pull_note`, below); its reason stays on hover
+            issues.append((name, reason))
+    shown.sort(key=lambda x: (-x["_usd"], -x["unpriced"], -x["reading"], x["name"]))
+    for tid in sorted(set(unpriced) - linked, key=lambda t: tnames.get(t, t)):
+        shown.append({"name": tnames.get(tid, tid), "what": "trade left out of the P&L", "date": short_date(as_of),
+                      "unpriced": 1, "reading": "", "notional": "", "reason": unpriced[tid],
+                      "unpriced_names": tnames.get(tid, tid), "reading_names": "", "flag": "unpriced",
+                      "_usd": 0.0})
+        if issues is not None:
+            issues.append((tnames.get(tid, tid), unpriced[tid]))
+    n_missing = len(rows)
+    if not shown:
+        sentence = (f"the book needs no marks on {as_of}" if not needed
+                    else f"every mark the book needs is on file ({needed:,} of {needed:,})")
+        return _quiet(MISSING_TITLE, sentence, MISSING_ABOUT), (needed, 0)
+    if rows:
+        from ui.tabs.header import backfill_status
+        is_past = as_of < _book_today_iso()
+        note = pull_note(status, as_of, is_past, backfill_status(conn) if is_past else None)
+        if note and issues is not None:
+            issues.append((MISSING_TITLE, note))
+    for x in shown:
+        x.pop("_usd", None)
+    head = f"{n_missing:,} of {needed:,} marks not on file" if n_missing else "every mark is on file"
+    if unpriced:
+        head += f" · {len(unpriced):,} trade{'s' if len(unpriced) != 1 else ''} left out of the P&L"
+    table = _hover_table(MISSING_TABLE_ID, [
+        ("Instrument", "name"), ("Price", "what"), ("Date", "date"), ("Trades unpriced", "unpriced"),
+        ("Trades reading it", "reading"), ("Notional", "notional"),
+    ], shown, hover={"name": "reason", "what": "reason", "unpriced": "unpriced_names", "reading": "reading_names"},
+        numeric=("unpriced", "reading", "notional"))
+    return _panel(MISSING_TITLE, [html.P(head, className="status-line"), table],
+                  about_text=MISSING_ABOUT), (needed, n_missing)
+
+
+# ---- 3. Marks check
+def _signed_price(change: Optional[float], unit: str) -> str:
+    if change is None:
+        return MISSING
+    text = price_text(abs(change), unit)
+    if float(text.replace(",", "") or 0) == 0:
+        return text
+    return ("+" if change > 0 else MINUS) + text
+
+
+def marks_check_rows(conn: sqlite3.Connection, as_of: str, ctx: tuple, now: Optional[datetime] = None,
+                     today: Optional[str] = None) -> Tuple[List[dict], dict]:
+    """(rows, the `suspect_rows` result): every official mark the book uses on `as_of` (futures,
+    options, LME and FX together) with its source and snap time, the previous business day's
+    close and the change, and the "marks that look wrong" flag; flagged rows first, then by sector
+    (FX last), commodity and name. Two stored marks compared: nothing recomputed. JSON-safe rows
+    (the tab keeps them in a store for its filter and its CSV)."""
+    from ui.tabs.header import mark_time_words
+    roots, bases, _names = ctx
+    found = suspect_rows(conn, as_of, now=now, today=today)
+    units = _price_units(conn, {r["instrument_id"] for r in found["rows"]})
+    rows = []
+    for r in found["rows"]:
+        iid = str(r["instrument_id"])
+        unit = units.get(iid, "")
+        sector, commodity = mark_group(iid, roots, bases)
+        value, previous = _as_float(r.get("value")), _as_float(r.get("previous"))
+        change = value - previous if value is not None and previous is not None else None
+        pct = r.get("change_pct")
+        prev_iso = str(r.get("previous_date") or "")
+        snapped = str(r.get("snapped_at") or "")
+        rows.append({
+            "name": mark_name(iid, r["mark_type"], r["settle_date"], roots, bases),
+            "price_kind": price_kind_words(iid, r["mark_type"], r["settle_date"]),
+            "group": _sector_label(sector), "sector": sector, "commodity": commodity,
+            "mark": price_text(value, unit), "source": source_label(r.get("source")),
+            "snapped": mark_time_words(as_of, snapped) if snapped else MISSING,
+            "previous": price_text(previous, unit) if previous is not None else MISSING,
+            "previous_date": short_date(prev_iso) if prev_iso else "",
+            "change": _signed_price(change, unit),
+            "change_pct": (signed_number(pct, 2) + " %") if pct is not None else MISSING,
+            "flag": str(r.get("flag") or ""), "note": str(r.get("note") or ""),
+            "hover_name": f"{iid} · {r['mark_type']} · {r['settle_date']}",
+            "hover_flag": "; ".join(x for x in (r.get("flag"), r.get("note")) if x),
+            "instrument_id": iid, "mark_type": r["mark_type"], "settle_date": r["settle_date"],
+            "value_raw": value, "source_code": str(r.get("source") or ""), "snapped_at": snapped,
+            "previous_raw": previous, "previous_date_iso": prev_iso, "change_raw": change, "change_pct_raw": pct,
+        })
+    rows.sort(key=lambda x: (not x["flag"], _sector_rank(x["sector"]), x["commodity"], x["name"]))
+    return rows, found
+
+
+def marks_filter_options(rows: List[dict]) -> List[dict]:
+    """The filter's options: each sector with a mark, then its commodities under it."""
+    by_sector: Dict[str, set] = {}
+    for r in rows:
+        by_sector.setdefault(r["sector"], set()).add(r["commodity"])
+    out = []
+    for sector in sorted(by_sector, key=lambda s: (_sector_rank(s), s)):
+        out.append({"label": f"{_sector_label(sector)} (all)", "value": f"sector:{sector}"})
+        out += [{"label": f"· {c}", "value": f"commodity:{sector}:{c}"} for c in sorted(by_sector[sector])]
+    return out
+
+
+def filter_marks(rows: Optional[List[dict]], chosen: Optional[list], search: Optional[str]) -> List[dict]:
+    """The rows the filter (any chosen sector or commodity) and the search (a substring of the
+    name, instrument id, source, group or commodity) keep."""
+    picks = [str(c) for c in (chosen or [])]
+    text = str(search or "").strip().lower()
+
+    def keep(r: dict) -> bool:
+        if picks and not any(p in (f"sector:{r['sector']}", f"commodity:{r['sector']}:{r['commodity']}")
+                             for p in picks):
+            return False
+        if text:
+            hay = " ".join(str(r.get(k) or "") for k in ("name", "instrument_id", "source", "source_code", "group",
+                                                          "commodity", "price_kind")).lower()
+            return text in hay
+        return True
+    return [r for r in rows or [] if keep(r)]
+
+
+_MARKS_COLUMNS = [("Instrument", "name"), ("Price", "price_kind"), ("Group", "group"), ("Mark", "mark"),
+                  ("Source", "source"), ("Marked at", "snapped"), ("Previous close", "previous"),
+                  ("Close of", "previous_date"), ("Change", "change"), ("Change %", "change_pct"), ("Flag", "flag")]
+
+
+def marks_table_view(rows: Optional[List[dict]], chosen: Optional[list], search: Optional[str]) -> tuple:
+    """(the table of the rows the filter and search keep, the count line)."""
+    rows = rows or []
+    if not rows:
+        return html.Div(), ""
+    shown = filter_marks(rows, chosen, search)
+    flagged = sum(1 for r in shown if r["flag"])
+    meta = f"{len(shown):,} of {len(rows):,} marks · " + (f"{flagged} flagged" if flagged else "none flagged")
+    if not shown:
+        return message_box("No mark matches the filter."), meta
+    keys = [k for _n, k in _MARKS_COLUMNS] + ["hover_name", "hover_flag", "note"]
+    data = [{k: r.get(k, "") for k in keys} for r in shown]
+    return _hover_table(MARKS_TABLE_ID, _MARKS_COLUMNS, data,
+                        hover={"name": "hover_name", "flag": "hover_flag", "previous": "note"},
+                        numeric=("mark", "previous", "change", "change_pct"), wide=("flag",), page_size=25), meta
+
+
+# ---- 4. Reference closes
+def reference_close_rows(conn: sqlite3.Connection, as_of: str, df_today: Optional[pd.DataFrame],
+                         tnames: Dict[str, str], backfill: Optional[dict] = None) -> List[dict]:
+    """Daily, 5d, MTD, YTD: the reference close each period differences against, its marks
+    needed and present (`header.needed_marks`, the header's own count), the backfill's reason when
+    incomplete, and the trades that period leaves out for want of a price on that close
+    (`engine.pnl.reference.diff_split`, the header's own test)."""
+    from engine.pnl.ledger import period_reference_dates
+    from engine.pnl.reference import diff_split
+    from ui.tabs.blotter_pricing import priced_value_book
+    from ui.tabs.header import backfill_status, needed_marks, past_close_explanation
+    refs = period_reference_dates(as_of)
+    if backfill is None:
+        backfill = backfill_status(conn)
+    rows = []
+    for key, label in _PERIODS:
+        day = refs.get(key)
+        if not day:
+            continue
+        needed, missing = needed_marks(conn, day)
+        blocked: List[str] = []
+        if df_today is not None and not df_today.empty:
+            blocked = sorted(str(t) for t in diff_split(df_today, priced_value_book(conn, day)[0]).blocked_ids)
+        if not needed:
+            state, why = "nothing needed", "no trade was open that day"
+        elif missing:
+            state, why = f"{len(missing):,} missing", past_close_explanation(backfill, day)
+        else:
+            state, why = "complete", ""
+        rows.append({"period": label, "date": short_date(day), "date_iso": day,
+                     "marks": f"{needed - len(missing):,} of {needed:,}" if needed else MISSING,
+                     "state": state, "why": why, "left_out": len(blocked),
+                     "left_names": "; ".join(tnames.get(t, t) for t in blocked),
+                     "flag": "incomplete" if missing else ""})
+    return rows
+
+
+def reference_closes_panel(rows: List[dict], issues: Optional[list] = None) -> html.Div:
+    """The four reference closes as one small table; the reason column only when one is incomplete."""
+    if not rows:
+        return _quiet(PAST_CLOSES_TITLE, "no reference close for this date", REFERENCE_ABOUT)
+    columns = [("Period", "period"), ("Reference close", "date"), ("Marks", "marks"), ("Status", "state"),
+               ("Trades left out", "left_out")]
+    if any(r["why"] and r["flag"] for r in rows):
+        columns.append(("Why", "why"))
+    for r in rows:
+        if r["flag"] and issues is not None:
+            issues.append((f"{r['period']} close {r['date_iso']}", r["why"]))
+    data = [{k: r.get(k, "") for k in ("period", "date", "marks", "state", "left_out", "why", "left_names", "flag",
+                                        "date_iso")} for r in rows]
+    return _panel(PAST_CLOSES_TITLE, [_hover_table(PAST_CLOSES_TABLE_ID, columns, data,
+                                                   hover={"left_out": "left_names", "state": "why",
+                                                          "date": "date_iso"},
+                                                   numeric=("left_out",), wide=("why",))],
+                  about_text=REFERENCE_ABOUT)
+
+
+# ---- 5. Contract dates
+def contract_dates_line(conn: sqlite3.Connection, as_of: str, ctx: tuple,
+                        issues: Optional[list] = None) -> Tuple[html.Div, Tuple[int, int]]:
+    """'N of M contracts on Bloomberg's dates; K estimated', the list on click."""
+    roots, bases, _names = ctx
+    rows = contract_date_rows(conn, as_of)
+    if not rows:
+        return _quiet(CONTRACT_DATES_TITLE, f"no open future or option needs Bloomberg's contract dates on {as_of}",
+                      CONTRACT_DATES_ABOUT), (0, 0)
+    data = []
+    for r in rows:
+        cid = str(r["contract_id"])
+        root_id = _root_id(cid, roots, bases)
+        data.append({"name": contract_name(cid, roots.get(root_id), root_id), "contract_id": cid,
+                     "bbg_ticker": r["bbg_ticker"], "status": "estimated" if r["flag"] else "Bloomberg",
+                     "last_trade_date": r["last_trade_date"], "first_notice_date": r["first_notice_date"],
+                     "trades": r["trades"], "why": r["why"], "flag": r["flag"]})
+    estimated = [d for d in data if d["flag"]]
+    summary = f"{len(rows) - len(estimated)} of {len(rows)} contracts on Bloomberg's dates; {len(estimated)} estimated"
+    if estimated and issues is not None:
+        issues.append((CONTRACT_DATES_TITLE, f"{len(estimated)} contract(s) run on the contract master's estimated "
+                                             "dates until Bloomberg's own are on file: "
+                                             + ", ".join(d["name"] for d in estimated)))
+    return html.Details(className="details", children=[
+        html.Summary([html.Span(CONTRACT_DATES_TITLE, style={"fontWeight": "600"}), f" · {summary}"],
+                     title=CONTRACT_DATES_ABOUT, className="about-title"),
+        _hover_table(CONTRACT_DATES_TABLE_ID, [
+            ("Contract", "name"), ("Ticker", "bbg_ticker"), ("Dates", "status"), ("Last trade", "last_trade_date"),
+            ("First notice", "first_notice_date"), ("Trades", "trades"), ("Why estimated", "why")],
+            data, hover={"name": "contract_id"}, numeric=("trades",), wide=("why",), page_size=25),
+    ]), (len(rows), len(estimated))
+
+
+# ---- 6. Diagnostics
+def diagnostics_body(conn: sqlite3.Connection, as_of: str, status: Optional[dict]) -> html.Div:
+    """The Bloomberg library and the feed status in detail (the contract dates, curves, LME,
+    options, recalc and ledger blocks); the connection check button sits after it in the static
+    layout."""
+    feed = status_block(status)
+    return html.Div([
+        safe_panel(LIBRARY_TITLE, lambda: library_panel(conn, as_of)),
+        about("Feed status", "What the last Pull Bloomberg now did, step by step.", level="h5"),
+        html.Div(feed if isinstance(feed, list) else [feed], className="status-line"),
     ])
 
 
-def commodity_outputs(conn: sqlite3.Connection, as_of: str, status: Optional[dict], chosen: Optional[str],
-                      issues: Optional[list] = None) -> tuple:
-    """(strip, view) as the tab's body callback renders them: the section's strip and the
-    chosen commodity's chart and table; with no commodity listed, no strip and one quiet line;
-    a failure is said where the view would be, never taking the tab down."""
+def _failed_panel(title: str, exc: Exception) -> html.Div:
+    import logging
+    logging.getLogger(__name__).exception("Data tab block %r failed", title)
+    return _panel(title, [message_box(f"This panel could not be built ({type(exc).__name__}: {exc}).")])
+
+
+def render(as_of_date: Optional[str], db_path) -> tuple:
+    """The body callback's ten outputs for `as_of_date` (the header's as-of): the status line,
+    the missing block, the marks-check rows (store), the filter's options, the marks-check empty
+    line, the filter bar's style, the reference closes, the contract dates, the diagnostics body,
+    the Data issues drawer. A block that fails says so where it would be."""
     blank = html.Div()
-    try:
-        section = commodity_section(conn, as_of, status, chosen=chosen, issues=issues)
-    except Exception as exc:  # noqa: BLE001 -- say what failed where the panel would be
-        import logging
-        logging.getLogger(__name__).exception("Data tab panel %r failed", FUTURES_CURVES_TITLE)
-        return blank, _panel(FUTURES_CURVES_TITLE, [message_box(
-            f"This panel could not be built ({type(exc).__name__}: {exc}).")])
-    if section is None:
-        return blank, _quiet(FUTURES_CURVES_TITLE, f"no commodity future is open on {as_of}",
-                             futures_curves_about(as_of))
-    return section
-
-
-_PICKER_SHOWN = {"alignItems": "center", "margin": "6px 0"}
-_PICKER_HIDDEN = dict(_PICKER_SHOWN, display="none")
-
-
-def commodity_picker_state(db_path, as_of_date: Optional[str], current: Optional[str] = None):
-    """(options, value, picker style, section class) for the commodity selector on
-    `as_of_date`: the user's choice is kept while it is still listed, else the default (the
-    largest gross position). With nothing listed the selector is hidden and the section is not
-    a card (the panel below is one quiet line then)."""
-    empty = ([], None, _PICKER_HIDDEN, "")
     if not as_of_date:
-        return empty
+        return (message_box("No as-of date available."), blank, [], [], blank, _HIDDEN, blank, blank, blank, blank)
     try:
         conn = _connect_readonly(db_path)
-    except sqlite3.OperationalError:
-        return empty
+    except sqlite3.OperationalError as exc:
+        return (message_box(f"Database not available ({exc})."), blank, [], [], blank, _HIDDEN, blank, blank, blank,
+                blank)
+    issues: list = []
     try:
-        options, default = commodity_options(conn, as_of_date)
-    except Exception:  # noqa: BLE001 -- the body's own panel says what failed
-        import logging
-        logging.getLogger(__name__).exception("Data tab commodity selector failed")
-        return empty
+        try:
+            from data.bloomberg.live import read_status
+            feed_status = read_status(db_path)
+        except Exception:  # noqa: BLE001 -- an unreadable status file is "no pull recorded"
+            feed_status = None
+        ctx = name_context(conn)
+        try:
+            from ui.tabs.blotter_pricing import priced_value_book
+            df_today = priced_value_book(conn, as_of_date)[0]
+        except Exception as exc:  # noqa: BLE001 -- the blocks below still show the marks
+            df_today = None
+            issues.append((TAB_TITLE, f"The book could not be priced on {as_of_date} ({type(exc).__name__}: {exc})."))
+
+        try:
+            missing, needs = missing_block(conn, as_of_date, feed_status, df_today, ctx, issues)
+        except Exception as exc:  # noqa: BLE001
+            missing, needs = _failed_panel(MISSING_TITLE, exc), (0, 0)
+
+        try:
+            mark_rows, found = marks_check_rows(conn, as_of_date, ctx)
+        except Exception as exc:  # noqa: BLE001
+            _failed_panel(SUSPECT_TITLE, exc)
+            mark_rows, found = [], {"rows": [], "prev_has_marks": True, "prev_day": ""}
+            issues.append((SUSPECT_TITLE, f"The marks check could not be built ({type(exc).__name__}: {exc})."))
+        if not mark_rows:
+            marks_empty = html.P(f"No official mark the book uses is on file for {as_of_date}.",
+                                 className="status-line")
+            tools_style = _HIDDEN
+        else:
+            marks_empty, tools_style = html.Div(), {}
+            if not found.get("prev_has_marks"):
+                from ui.tabs.header import backfill_status, past_close_explanation
+                prev = found.get("prev_day")
+                why = (f"No official marks are on file for {prev}, the previous business day, so the marks of "
+                       f"{as_of_date} are not compared with a previous close: "
+                       f"{past_close_explanation(backfill_status(conn), prev)}.")
+                marks_empty = html.Div(marker(f"not compared with {prev}", why))
+                issues.append((SUSPECT_TITLE, why))
+
+        closes: List[dict] = []
+        try:
+            closes = reference_close_rows(conn, as_of_date, df_today, ctx[2])
+            closes_panel = reference_closes_panel(closes, issues)
+        except Exception as exc:  # noqa: BLE001
+            closes_panel = _failed_panel(PAST_CLOSES_TITLE, exc)
+
+        try:
+            dates_panel, dates = contract_dates_line(conn, as_of_date, ctx, issues)
+        except Exception as exc:  # noqa: BLE001
+            dates_panel, dates = _failed_panel(CONTRACT_DATES_TITLE, exc), (0, 0)
+
+        diag = safe_panel(DIAG_TITLE, lambda: diagnostics_body(conn, as_of_date, feed_status))
+        line = status_line(feed_status, needs, closes, dates)
     finally:
         conn.close()
-    if not options:
-        return empty
-    listed = {o["value"] for o in options if not o.get("disabled")}
-    return options, current if current in listed else default, _PICKER_SHOWN, "section"
+    drawer = issues_drawer(issues) or blank
+    return (line, missing, mark_rows, marks_filter_options(mark_rows), marks_empty, tools_style, closes_panel,
+            dates_panel, diag, drawer)
 
 
-def pull_now_outcome(app, guard: PullGuard, get_db_path: Callable[[], object]) -> Tuple[str, str]:
-    """One click of this tab's "Pull now": the SAME action as the top bar's "Pull Bloomberg
-    now" (user, 2026-09-22: "the pull bloomberg now on the top right corner should trigger
-    this, not from the market data page" -- until then this button called `pull_once` on
-    its own, so its press pulled today's marks but ran neither the backfill nor the marks
-    snapshot). It asks the feed for one cycle (`ui.feed_controls.click_outcome`:
-    `LiveFeed.trigger_now`, then `pull_once`, the backfill and `snapshot.save_after_pull`
-    in the feed's thread) and returns its status line and a fresh revision; the tab's own
-    status poll shows the outcome as it lands. With no feed on this machine, the
-    not-connected message, and nothing is asked of Bloomberg."""
-    import time
-    from data.bloomberg.live import read_status
-    text, _pending = click_outcome(app, guard, read_status(get_db_path()))
-    return text, str(time.time())
+def build_layout(default_date: Optional[str] = None) -> html.Div:
+    """The Data tab (2026-09-29): the status line, Missing and what it blocks, Marks check (its
+    filter bar static, so its choice and focus survive each re-read), Reference closes, Contract
+    dates, Diagnostics (one closed fold, the connection check button static inside it), the Data
+    issues drawer. Every container is filled by the callbacks of `register_callbacks`."""
+    return html.Div(className="market-data", children=[
+        about(TAB_TITLE, TAB_ABOUT, level="h3"),
+        # BODY_ID holds the one status line (the first output of the body callback)
+        html.Div(id=BODY_ID, className="status-line data-status-line", children=message_box("Loading...")),
+        dcc.Interval(id=REFRESH_ID, interval=REFRESH_MS, n_intervals=0),
+        html.Div(id=MISSING_PANEL_ID, className="data-block"),
+        html.Div(id=MARKS_SECTION_ID, className="section data-block", children=[
+            about(SUSPECT_TITLE, MARKS_ABOUT, level="h4", style={"marginTop": "0"}),
+            html.Div(id=MARKS_EMPTY_ID),
+            html.Div(id=MARKS_TOOLS_ID, className="blotter-filter-bar", style=_HIDDEN, children=[
+                html.Div(className="blotter-filter", children=[
+                    html.Label("Commodity / sector"),
+                    dcc.Dropdown(id=MARKS_FILTER_ID, options=[], value=[], multi=True, placeholder="All",
+                                 className="blotter-filter-dropdown"),
+                ]),
+                html.Div(className="blotter-filter", children=[
+                    html.Label("Search"),
+                    dcc.Input(id=MARKS_SEARCH_ID, type="text", value="", debounce=True,
+                              placeholder="instrument or source", className="blotter-filter-search"),
+                ]),
+                html.Span(id=MARKS_META_ID, className="status-line data-marks-meta"),
+                html.Button("Download CSV", id=MARKS_CSV_ID, n_clicks=0, className="btn btn--ghost",
+                            title="The rows shown, at full figures"),
+                dcc.Download(id=MARKS_DOWNLOAD_ID),
+            ]),
+            html.Div(id=MARKS_TABLE_WRAP_ID),
+            dcc.Store(id=MARKS_STORE_ID, data=[]),
+        ]),
+        html.Div(id=PAST_CLOSES_PANEL_ID, className="data-block"),
+        html.Div(id=CONTRACT_DATES_PANEL_ID, className="data-block"),
+        html.Details(id=DIAGNOSTICS_ID, className="details data-block", children=[
+            html.Summary(DIAG_TITLE, title=DIAG_ABOUT, className="about-title"),
+            html.Div(id=DIAG_BODY_ID),
+            html.Div(className="bbg-check-block", children=[
+                html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
+                            n_clicks=0, className="bbg-check-button"),
+                dcc.Loading(type="dot", color="#1f5fbf",
+                            children=[html.Div(id=BBG_RESULTS_ID, className="bbg-check-results")]),
+            ]),
+        ]),
+        html.Div(id=ISSUES_ID),
+    ])
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """Register the callbacks: pair dropdown population, main body refresh (spot +
-    curve table + chart), completeness strip, the "Pull now" button, and the
-    manual-entry submit button. `get_db_path` is a zero-arg callable returning the
-    resolved DB path, the shell's convention for every tab's `register_callbacks`.
-    """
-
-    # The header's as-of (its date picker, mirrored into this store by ui/app.py): the one as-of of
-    # the app since 2026-09-28; the tab's own picker is gone.
+    """The body (every block, on the header's as-of, a data change and the safety timer), the
+    marks-check filter, its CSV, and the Bloomberg connection check. `get_db_path` is the shell's
+    zero-arg callable returning the database path."""
     from ui.tabs.header import AS_OF_STORE_ID as HEADER_AS_OF_STORE_ID
 
     @app.callback(
-        Output(PAIR_DROPDOWN_ID, "options"),
-        Output(PAIR_DROPDOWN_ID, "value"),
-        Input(HEADER_AS_OF_STORE_ID, "data"),
-        Input(BOOK_REVISION_ID, "data"),
-    )
-    def _update_pairs(as_of_date, _book_rev=None):
-        if not as_of_date:
-            return [], None
-        try:
-            conn = _connect_readonly(get_db_path())
-        except sqlite3.OperationalError:
-            return [], None
-        try:
-            return pair_options(conn, as_of_date)
-        finally:
-            conn.close()
-
-    @app.callback(
-        Output(COMMODITY_DROPDOWN_ID, "options"),
-        Output(COMMODITY_DROPDOWN_ID, "value"),
-        Output(COMMODITY_PICKER_ID, "style"),
-        Output(COMMODITY_SECTION_ID, "className"),
-        Input(HEADER_AS_OF_STORE_ID, "data"),
-        Input(BOOK_REVISION_ID, "data"),
-        State(COMMODITY_DROPDOWN_ID, "value"),
-    )
-    def _update_commodities(as_of_date, _book_rev=None, current=None):
-        return commodity_picker_state(get_db_path(), as_of_date, current)
-
-    @app.callback(
         Output(BODY_ID, "children"),
-        Output("market-data-completeness-container", "children"),
-        Output(STATUS_ID, "children"),
-        Output(MANUAL_INSTRUMENT_ID, "value"),
         Output(MISSING_PANEL_ID, "children"),
-        Output(SUSPECT_PANEL_ID, "children"),
+        Output(MARKS_STORE_ID, "data"),
+        Output(MARKS_FILTER_ID, "options"),
+        Output(MARKS_EMPTY_ID, "children"),
+        Output(MARKS_TOOLS_ID, "style"),
         Output(PAST_CLOSES_PANEL_ID, "children"),
-        Output(FUTURES_CURVES_PANEL_ID, "children"),
-        Output(REFERENCE_PANEL_ID, "children"),
+        Output(CONTRACT_DATES_PANEL_ID, "children"),
+        Output(DIAG_BODY_ID, "children"),
         Output(ISSUES_ID, "children"),
-        Output(COMMODITY_STRIP_ID, "children"),
         Input(HEADER_AS_OF_STORE_ID, "data"),
-        Input(PAIR_DROPDOWN_ID, "value"),
         Input(REFRESH_ID, "n_intervals"),
-        Input(PULL_REVISION_ID, "data"),
-        Input(MANUAL_STATUS_ID, "children"),
         Input(DATA_REVISION_ID, "data"),
-        Input(COMMODITY_DROPDOWN_ID, "value"),
+        Input(BOOK_REVISION_ID, "data"),
     )
-    def _update_body(as_of_date, pair, _n_intervals=0, _pull_rev=None, _manual_status=None, _data_rev=None,
-                     commodity=None):
-        # One as-of for the whole tab: the header's (its picker). The whole-book panels and the
-        # per-pair section read the same date.
-        return _render(as_of_date, pair, as_of_date, commodity)
-
-    def _render(as_of_date, pair, header_as_of=None, commodity=None):
-        blank = html.Div()
-        if not as_of_date:
-            return (message_box("No as-of date available."), blank, "Bloomberg: status unknown", pair,
-                    blank, blank, blank, blank, blank, blank, blank)
-
-        db_path = get_db_path()
-        try:
-            conn = _connect_readonly(db_path)
-        except sqlite3.OperationalError as exc:
-            return (message_box(f"Database not available ({exc})."), blank, "Bloomberg: status unknown", pair,
-                    blank, blank, blank, blank, blank, blank, blank)
-
-        try:
-            try:
-                from data.bloomberg.live import read_status
-                feed_status = read_status(db_path)
-            except ImportError:
-                feed_status = None
-
-            try:
-                body = pair_body(conn, as_of_date, pair) if pair else message_box("No FX pair available.")
-            except Exception as exc:
-                body = message_box(f"Spot and forward curve not available ({exc}).")
-
-            try:
-                from data.bloomberg.inventory import close_completeness
-                end = date.fromisoformat(as_of_date)
-                start = end - timedelta(days=int(COMPLETENESS_DAYS * 1.6) + 5)  # generous calendar padding for bd count
-                completeness = close_completeness(conn, start.isoformat(), end.isoformat()).tail(COMPLETENESS_DAYS)
-                strip = completeness_strip(completeness)
-            except ImportError as exc:
-                strip = message_box(f"Completeness not available yet ({exc}).")
-
-            issues: list = []
-            missing, suspect, past_closes = whole_book_panels(conn, as_of_date, feed_status, header_as_of,
-                                                              issues=issues)
-            commodity_strip_out, futures = commodity_outputs(conn, as_of_date, feed_status, commodity, issues)
-            reference = reference_panels(conn, as_of_date)
-        finally:
-            conn.close()
-
-        drawer = issues_drawer(issues) or blank
-        return (body, strip, status_block(feed_status), pair, missing, suspect, past_closes, futures, reference,
-                drawer, commodity_strip_out)
-
-    guard = PullGuard()
+    def _update_body(as_of_date, *_triggers):
+        return render(as_of_date, get_db_path())
 
     @app.callback(
-        Output(PULL_NOW_STATUS_ID, "children"),
-        Output(PULL_REVISION_ID, "data"),
-        Input(PULL_NOW_ID, "n_clicks"),
-        prevent_initial_call=True,
+        Output(MARKS_TABLE_WRAP_ID, "children"),
+        Output(MARKS_META_ID, "children"),
+        Input(MARKS_STORE_ID, "data"),
+        Input(MARKS_FILTER_ID, "value"),
+        Input(MARKS_SEARCH_ID, "value"),
     )
-    def _pull_now(n_clicks):
-        return pull_now_outcome(app, guard, get_db_path)
+    def _filter_marks(rows, chosen, search):
+        return marks_table_view(rows, chosen, search)
 
     @app.callback(
-        Output(MANUAL_STATUS_ID, "children"),
-        Input(MANUAL_SUBMIT_ID, "n_clicks"),
+        Output(MARKS_DOWNLOAD_ID, "data"),
+        Input(MARKS_CSV_ID, "n_clicks"),
+        State(MARKS_STORE_ID, "data"),
+        State(MARKS_FILTER_ID, "value"),
+        State(MARKS_SEARCH_ID, "value"),
         State(HEADER_AS_OF_STORE_ID, "data"),
-        State(MANUAL_INSTRUMENT_ID, "value"),
-        State(MANUAL_SETTLE_ID, "value"),
-        State(MANUAL_MARK_TYPE_ID, "value"),
-        State(MANUAL_VALUE_ID, "value"),
         prevent_initial_call=True,
     )
-    def _submit_manual(n_clicks, as_of_date, instrument_id, settle_date, mark_type, value):
-        if not as_of_date or not instrument_id or not settle_date or not mark_type or value is None:
-            return "Fill in every field before saving."
-        try:
-            from data.bloomberg.manual import write_manual_mark
-            from data.ingest.schema import connect
-        except ImportError as exc:
-            return f"Manual entry not available yet ({exc})."
-        db_path = get_db_path()
-        conn = connect(db_path)
-        try:
-            write_manual_mark(conn, as_of_date, instrument_id, settle_date, mark_type, float(value))
-        except Exception as exc:
-            return f"Save failed: {exc!r}"
-        finally:
-            conn.close()
-        return f"Saved MANUAL {mark_type} {instrument_id} {settle_date} = {float(value)!r}."
+    def _marks_csv(_n, rows, chosen, search, as_of_date):
+        shown = filter_marks(rows, chosen, search)
+        frame = pd.DataFrame([{k: r.get(k) for k in MARKS_CSV_COLUMNS} for r in shown], columns=MARKS_CSV_COLUMNS)
+        return dcc.send_data_frame(frame.to_csv, f"marks-{as_of_date or 'today'}.csv", index=False)
 
     @app.callback(
         Output(BBG_RESULTS_ID, "children"),
@@ -2969,8 +2175,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         prevent_initial_call=True,
     )
     def _on_bbg_check_click(n_clicks):
-        # Runs on click only (prevent_initial_call): a Bloomberg-unreachable machine
-        # never pays this cost just to load the page, and no other tab or callback
-        # depends on this Output.
+        # Runs on click only (prevent_initial_call): a Bloomberg-unreachable machine never pays
+        # this cost just to load the page.
         checks = run_bloomberg_diagnostics_safe()
         return _render_bbg_results(checks)

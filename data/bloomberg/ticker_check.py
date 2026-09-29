@@ -5,6 +5,7 @@
     python -m data.bloomberg.ticker_check --sector energy --search
     python -m data.bloomberg.ticker_check --book --db data/raw/risk.db
     python -m data.bloomberg.ticker_check --lme --options         # only the LME curve and the options
+    python -m data.bloomberg.ticker_check --desk --db data/raw/risk.db   # only the desk checks
 
 The contract universe's Bloomberg roots and price scales are best guesses until a terminal
 confirms them (user, 2026-09-24: "add a bloomberg diagnostic tool I will be able to use so that
@@ -42,8 +43,21 @@ What it asks (``plan`` works it out and asks nothing):
    fill against PX_LAST, OPT_EXPIRE_DT against the stored expiry) and places each open LME
    ticket's prompt on the metal's curve (no extra ask: the metal's LME tickers are asked).
 
-A plain run does parts 1, 4 and 5; ``--lme`` and / or ``--options`` run only those parts. The
-book check runs whenever a book is given.
+7. Desk checks (``--desk``, 2026-09-29; ``plan_desk`` / ``run_desk``): the open questions only a
+   terminal settles, each PASS / WARN / FAIL / SKIPPED with a plain line. (1) the book's futures'
+   PX_LAST against PX_SETTLE over the last DESK_DAYS days, per exchange in ticks (FUT_TICK_SIZE);
+   (2) their OPEN_INT and PX_VOLUME beside the research app's (``contract_liquidity``) with the
+   ratio; (3) OPEN_INT / PX_VOLUME on each held LME metal's 3M and the research app's monthly
+   prompt tickers; (4) a year of PX_LAST on the SGX USD/CNH future in several ticker forms;
+   (5) physical / cash settlement (DELIVERY_FIELDS, candidates) against the ``delivery`` column;
+   (6) CALENDAR_NON_SETTLEMENT_DATES per exchange calendar against ``config/calendars/``;
+   (7) the research database's history depth against the replay dates, and (8) whether
+   Bloomberg's contract dates are stored, both from local data. The report ends with a short
+   "Manual checks" list. The desk checks never change the exit code, and when Bloomberg cannot
+   be reached they still write the report (their Bloomberg checks SKIPPED, 7 and 8 filled).
+
+A plain run does parts 1, 4, 5 and 7; ``--lme``, ``--options`` and / or ``--desk`` run only
+those parts. The book check runs whenever a book is given, except with ``--desk`` alone.
 
 Verdicts per root, most severe first: NO_ANSWER (the request timed out), NOT_FOUND (Bloomberg's
 own error words), NO_PRICE (resolves, but no PX_LAST or PX_SETTLE: an entitlement or a dead
@@ -76,7 +90,7 @@ import sqlite3
 import sys
 import textwrap
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -114,6 +128,10 @@ PURPOSE = "ticker_check"                  # the diagnostics tag of this module's
 # Parts of a check. A plain run does all three; --lme / --options pick only those.
 PART_ROOTS, PART_LME, PART_OPTIONS = "roots", "lme", "options"
 ALL_PARTS = (PART_ROOTS, PART_LME, PART_OPTIONS)
+# The desk checks (2026-09-29): a plain run adds them after the parts above; --desk runs them alone.
+PART_DESK = "desk"
+PASS, WARN, FAIL, SKIPPED = "PASS", "WARN", "FAIL", "SKIPPED"
+DESK_STATUSES = (FAIL, WARN, PASS, SKIPPED)
 
 # LME curve tickers (Phase 5). The prompt-date field is bbg-curves' (fwd_curve.LME_PROMPT_DATE_FIELD),
 # read lazily; this fallback is the same unverified guess.
@@ -1621,15 +1639,21 @@ class BlpapiClient:
                 out.setdefault(s, Answer(s, {}, security_error=f"no answer: {timed_out}", answered=False))
         return out
 
-    def bulk(self, securities: Sequence[str], field_name: str) -> Dict[str, Answer]:
-        """A ReferenceDataRequest for one bulk field (OPT_CHAIN): each security's answer carries
-        the field as a list of rows, each row a {sub-field: value} dict. The app's request helper
-        reads one value per field, so a bulk field has its own loop here."""
+    def bulk(self, securities: Sequence[str], field_name: str,
+             overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Answer]:
+        """A ReferenceDataRequest for one bulk field (OPT_CHAIN, CALENDAR_NON_SETTLEMENT_DATES),
+        with optional field overrides: each security's answer carries the field as a list of
+        rows, each row a {sub-field: value} dict. The app's request helper reads one value per
+        field, so a bulk field has its own loop here."""
         blpapi = self._blpapi
         request = self.service.createRequest("ReferenceDataRequest")
         for s in securities:
             request.getElement("securities").appendValue(s)
         request.getElement("fields").appendValue(field_name)
+        for name, value in (overrides or {}).items():
+            o = request.getElement("overrides").appendElement()
+            o.setElement("fieldId", name)
+            o.setElement("value", str(value))
         cid = blpapi.CorrelationId(next(_SEARCH_CIDS))
         try:
             self.session.sendRequest(request, correlationId=cid)
@@ -1672,6 +1696,34 @@ class BlpapiClient:
                                       for fx in self._pm._parse_field_exceptions(sd)})
             if etype == blpapi.Event.RESPONSE and ours:
                 return out
+
+    def history(self, securities: Sequence[str], fields: Sequence[str], start: date, end: date) -> Dict[str, History]:
+        """A HistoricalDataRequest over [start, end] through the app's own helper
+        (``pull_marks.fetch_historical_series``): each security's days, with Bloomberg's own words
+        for a refused security or field. A timeout is an unanswered History, never a crash."""
+        timed_out = ""
+        data: Dict[str, Dict[str, Dict[str, object]]] = {}
+        try:
+            data = self._pm.fetch_historical_series(self.session, self.service, list(securities), list(fields),
+                                                    start, end, diag=self.diag, tag={"purpose": PURPOSE})
+        except self._pm.BloombergRequestError as exc:
+            timed_out = exc.detail or exc.classification
+        except Exception as exc:  # noqa: BLE001 -- the session failed under the request: unreachable
+            raise BloombergUnavailable(f"the history request failed ({type(exc).__name__}: {exc})") from None
+        raw = (self.diag.requests[-1].get("raw_response") if self.diag.requests else None) or []
+        out: Dict[str, History] = {}
+        for sec in raw:
+            err = sec.get("securityError") or None
+            name = str(sec.get("security"))
+            out[name] = History(
+                name, dict(data.get(name) or {}),
+                security_error=str(err.get("message") or "security error") if err else "",
+                field_errors={str(fx.get("fieldId") or "?"): str(fx.get("message") or "")
+                              for fx in sec.get("fieldExceptions") or []})
+        if timed_out:
+            for s in securities:
+                out.setdefault(s, History(s, {}, security_error=f"no answer: {timed_out}", answered=False))
+        return out
 
     def search(self, query: str, max_results: int = SEARCH_MAX_RESULTS) -> List[Tuple[str, str]]:
         blpapi = self._blpapi
@@ -2139,6 +2191,1080 @@ def _run_options(client, the_plan: Plan, result: CheckResult, size: int) -> None
         _option_findings(res, root_px.get(res.root.root_id), None)
 
 
+# --------------------------------------------------------------------------- desk checks (2026-09-29)
+#
+# User, 2026-09-29: one place to settle every open question that needs a Bloomberg terminal
+# ("there are many - hopefully the diagnostics program can help"). Eight checks, each PASS /
+# WARN / FAIL / SKIPPED with a plain line. They run on a plain `bbg-check` and alone with
+# `--desk`, after the other parts, in their own requests; they never change the exit code
+# (they report; the app's rules do not follow from them), write no marks and no trades, and a
+# config change they suggest is a worksheet row (delivery, the SGX root) or a line for the
+# housekeeper (a calendar file, the LME and SGX history notes). Every field name here that the
+# pull does not already use is a best guess until a terminal answers (agent memory
+# bloomberg_field_assumptions).
+
+DESK_TITLES = {
+    1: "Futures close against exchange settlement",
+    2: "Open interest and volume, one- or two-sided",
+    3: "LME per-prompt liquidity",
+    4: "SGX USD/CNH future history",
+    5: "Delivery type",
+    6: "Exchange holidays",
+    7: "Research history depth",
+    8: "Contract dates stored",
+}
+DESK_DAYS = 5                               # business days of history compared in checks 1 and 2
+DESK_WINDOW_CALENDAR_DAYS = 14              # asked back from the as-of, so 5 business days fit round a holiday
+DESK_HISTORY_FIELDS = ("PX_LAST", "PX_SETTLE", "OPEN_INT", "PX_VOLUME")
+DESK_TICK_FIELDS = ("FUT_TICK_SIZE",)
+LME_LIQUIDITY_FIELDS = ("OPEN_INT", "PX_VOLUME")
+LME_RESEARCH_MONTHS = 3                     # the research app's nearest listed monthly prompts asked per metal
+SGX_XUC_ROOT = "SGX:XUC"
+SGX_HISTORY_DAYS = 365
+SGX_MIN_CLOSES = 200                        # a year's history counts as there with this many closes
+SGX_FIELDS = ("PX_LAST",)
+# Candidate fields for a future's physical / cash settlement: the first that answers is used.
+# None has been seen on a terminal (2026-09-29); if none answers, the check is SKIPPED with
+# Bloomberg's words, and FLDS <GO> on a front future finds the right one.
+DELIVERY_FIELDS = ("FUT_DELIVERY_TYPE", "FUT_SETTLE_TYP", "CASH_SETTLED", "FUT_DLV_TYP")
+CALENDAR_FIELD = "CALENDAR_NON_SETTLEMENT_DATES"
+CALENDAR_START, CALENDAR_END = date(2026, 1, 1), date(2027, 12, 31)
+# Our calendar id -> Bloomberg's calendar code (override SETTLEMENT_CALENDAR_CODE). Empty: each
+# calendar is asked on a front future of that exchange with no code, assumed to answer with that
+# exchange's own calendar. Fill a code in only when a terminal shows it is needed.
+CALENDAR_CODES: Dict[str, str] = {}
+REPLAYS = (("the negative-WTI replay", date(2020, 4, 17)), ("the LME nickel replay", date(2022, 3, 7)))
+CHINA_EXCHANGE_CODES = ("SHFE", "DCE", "ZCE", "INE", "GFEX")
+CALENDAR_OWNER = "exchange-calendars"
+HISTORY_OWNER = "risk-history"
+SHFE_MANUAL = ("compare one SHFE copper contract's OPEN_INT and PX_VOLUME with SHFE's own daily report "
+               "(shfe.com.cn, 成交持仓排名 / daily trading statistics) to confirm one- or two-sided counting")
+_DATE_LINE_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*(#.*)?$")
+
+
+@dataclass(frozen=True)
+class History:
+    """Bloomberg's daily history of one security, in plain Python types."""
+
+    security: str
+    days: Mapping[str, Mapping[str, object]]            # ISO date -> {field: value}
+    security_error: str = ""
+    field_errors: Mapping[str, str] = field(default_factory=dict)
+    answered: bool = True
+
+
+@dataclass
+class DeskCheck:
+    number: int
+    status: str = SKIPPED
+    summary: str = ""
+    lines: List[str] = field(default_factory=list)
+    worksheet: List[Dict[str, str]] = field(default_factory=list)
+    housekeeper: List[Tuple[str, str]] = field(default_factory=list)   # (lane, line)
+
+    @property
+    def title(self) -> str:
+        return DESK_TITLES[self.number]
+
+
+@dataclass
+class DeskPlan:
+    """What the desk checks would ask, worked out without asking anything."""
+
+    as_of: date
+    book: Optional[Book]
+    roots: Mapping[str, ContractRoot]
+    futures: List[BookFuture] = field(default_factory=list)          # checks 1, 2 and 8
+    options: List[BookFuture] = field(default_factory=list)          # check 8 (read, not asked)
+    lme: List[Tuple[ContractRoot, List[Tuple[str, str]]]] = field(default_factory=list)  # 3: (metal, [(label, ticker)])
+    lme_note: str = ""
+    sgx: Optional[ContractRoot] = None
+    sgx_tickers: List[Tuple[str, str]] = field(default_factory=list)  # check 4: (what it is, ticker)
+    delivery_roots: List[ContractRoot] = field(default_factory=list)  # check 5, asked
+    delivery_placeholders: List[ContractRoot] = field(default_factory=list)
+    delivery_why: str = ""                                            # why check 5 has no roots
+    calendars: List[Tuple[str, str, str]] = field(default_factory=list)     # check 6: (calendar, security, root id)
+    calendars_unasked: List[Tuple[str, str]] = field(default_factory=list)  # (calendar, why)
+    history_roots: List[str] = field(default_factory=list)            # check 7
+    research_path: Optional[Path] = None
+    research_why: str = ""
+    batch_size: int = BATCH_SIZE
+
+    @property
+    def window(self) -> Tuple[date, date]:
+        return self.as_of - timedelta(days=DESK_WINDOW_CALENDAR_DAYS), self.as_of
+
+    @property
+    def sgx_window(self) -> Tuple[date, date]:
+        return self.as_of - timedelta(days=SGX_HISTORY_DAYS), self.as_of
+
+    @property
+    def contract_tickers(self) -> List[str]:
+        return list(dict.fromkeys(f.ticker for f in self.futures if f.ticker))
+
+    @property
+    def lme_tickers(self) -> List[str]:
+        return list(dict.fromkeys(t for _m, pairs in self.lme for _label, t in pairs))
+
+    @property
+    def sgx_ticker_list(self) -> List[str]:
+        return list(dict.fromkeys(t for _label, t in self.sgx_tickers))
+
+    @property
+    def delivery_tickers(self) -> List[str]:
+        return list(dict.fromkeys(generic_ticker(r) for r in self.delivery_roots))
+
+    @property
+    def calendar_tickers(self) -> List[str]:
+        return list(dict.fromkeys(s for _c, s, _r in self.calendars))
+
+    def _n(self, tickers: Sequence[str]) -> int:
+        return math.ceil(len(tickers) / max(1, self.batch_size))
+
+    @property
+    def calendar_requests(self) -> int:
+        groups: Dict[str, List[str]] = {}
+        for cal, sec, _r in self.calendars:
+            groups.setdefault(CALENDAR_CODES.get(cal, ""), []).append(sec)
+        return sum(self._n(list(dict.fromkeys(v))) for v in groups.values())
+
+    @property
+    def securities(self) -> int:
+        """Securities asked (a contract of checks 1-2 counts twice: its history and its tick size)."""
+        return (2 * len(self.contract_tickers) + len(self.lme_tickers) + len(self.sgx_ticker_list)
+                + len(self.delivery_tickers) + len(self.calendar_tickers))
+
+    @property
+    def requests(self) -> int:
+        return (2 * self._n(self.contract_tickers) + self._n(self.lme_tickers) + self._n(self.sgx_ticker_list)
+                + self._n(self.delivery_tickers) + self.calendar_requests)
+
+    @property
+    def needs_bloomberg(self) -> bool:
+        return self.securities > 0
+
+    def describe(self) -> List[str]:
+        def s(n: int, word: str = "") -> str:
+            return "" if n == 1 else (word or "s")
+
+        start, end = self.window
+        n = len(self.contract_tickers)
+        lines = [f"Desk checks on {self.as_of.isoformat()}:"]
+        if self.book is None:
+            lines.append("  1-2. Futures close and liquidity: skipped (no book: give --db).")
+        else:
+            lines.append(f"  1-2. Futures close and liquidity: {len(self.futures)} open contract{s(len(self.futures))}, "
+                         f"{n} ticker{s(n)}: {self._n(self.contract_tickers)} HistoricalDataRequest (fields "
+                         f"{', '.join(DESK_HISTORY_FIELDS)}, {start.isoformat()} to {end.isoformat()}, the last "
+                         f"{DESK_DAYS} days kept) and {self._n(self.contract_tickers)} ReferenceDataRequest "
+                         f"({', '.join(DESK_TICK_FIELDS)}).")
+        if self.book is None:
+            lines.append("  3. LME per-prompt liquidity: skipped (no book: give --db).")
+        else:
+            lines.append(f"  3. LME per-prompt liquidity: {len(self.lme)} metal{s(len(self.lme))}, "
+                         f"{len(self.lme_tickers)} ticker{s(len(self.lme_tickers))} (3M and monthly prompts), fields "
+                         f"{', '.join(LME_LIQUIDITY_FIELDS)}, {self._n(self.lme_tickers)} ReferenceDataRequest"
+                         + (f"; {self.lme_note}" if self.lme_note else "") + ".")
+        if self.sgx is None:
+            lines.append(f"  4. SGX USD/CNH history: skipped ({SGX_XUC_ROOT} not in config/contracts.csv or the filter).")
+        else:
+            s0, s1 = self.sgx_window
+            k = len(self.sgx_ticker_list)
+            lines.append(f"  4. SGX USD/CNH history: {k} ticker form{s(k)} ({', '.join(self.sgx_ticker_list)}), field "
+                         f"PX_LAST {s0.isoformat()} to {s1.isoformat()}, {self._n(self.sgx_ticker_list)} "
+                         "HistoricalDataRequest.")
+        if self.delivery_roots or self.delivery_placeholders:
+            k = len(self.delivery_roots)
+            lines.append(f"  5. Delivery type: {k} root{s(k)} on their front generic "
+                         f"({len(self.delivery_placeholders)} placeholder{s(len(self.delivery_placeholders))} not "
+                         f"asked), {len(DELIVERY_FIELDS)} candidate fields ({', '.join(DELIVERY_FIELDS)}), "
+                         f"{self._n(self.delivery_tickers)} ReferenceDataRequest.")
+        else:
+            lines.append(f"  5. Delivery type: skipped ({self.delivery_why}).")
+        k = len(self.calendars)
+        lines.append(f"  6. Exchange holidays: {k} calendar{s(k)}, one front generic each, bulk field {CALENDAR_FIELD} "
+                     f"{CALENDAR_START.isoformat()} to {CALENDAR_END.isoformat()}, {self.calendar_requests} "
+                     "ReferenceDataRequest"
+                     + (f"; not asked: {', '.join(f'{c} ({w})' for c, w in self.calendars_unasked)}"
+                        if self.calendars_unasked else "") + ".")
+        if self.book is None:
+            lines.append("  7-8. Research history depth and contract dates stored: skipped (no book: give --db).")
+        else:
+            k = len(self.history_roots)
+            lines.append(f"  7. Research history depth: local, no Bloomberg: {k} root{s(k)}"
+                         + (f" in {self.research_path}" if self.research_path else f" ({self.research_why})") + ".")
+            lines.append(f"  8. Contract dates stored: local, no Bloomberg: {len(self.futures)} future"
+                         f"{s(len(self.futures))} and {len(self.options)} option{s(len(self.options))} on futures.")
+        lines.append(f"  Desk total: {self.securities} securit{'y' if self.securities == 1 else 'ies'} in "
+                     f"{self.requests} request{s(self.requests)} (up to {self.batch_size} securities each).")
+        return lines
+
+
+@dataclass
+class DeskResult:
+    plan: DeskPlan
+    checks: List[DeskCheck]
+    requests_sent: int = 0
+    research: Dict[str, str] = field(default_factory=dict)     # the research database's newest date and last pull
+
+    def counts(self) -> Dict[str, int]:
+        out = {s: 0 for s in DESK_STATUSES}
+        for c in self.checks:
+            out[c.status] += 1
+        return out
+
+    def worksheet_rows(self) -> List[Dict[str, str]]:
+        return [row for c in self.checks for row in c.worksheet]
+
+    def housekeeper_lines(self) -> List[Tuple[str, str]]:
+        return [item for c in self.checks for item in c.housekeeper]
+
+
+# ---- the plan
+
+def research_db() -> Tuple[Optional[Path], str]:
+    """The research app's database (``engine.risk.commodity_history.candidates``), or (None, why)."""
+    try:
+        from engine.risk import commodity_history as ch
+        cands = ch.candidates()
+    except Exception as exc:  # noqa: BLE001 -- a problem there is a reason, never a crash
+        return None, f"the research history module could not be loaded ({type(exc).__name__}: {exc})"
+    found = [c for c in cands if c.get("exists")]
+    if not found:
+        return None, "no research database: tried " + ", ".join(str(c.get("path")) for c in cands)
+    return Path(found[0]["path"]), ""
+
+
+def _research_connect(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True, timeout=5.0)
+
+
+def _research_lme_tickers(path: Optional[Path], root_id: str, as_of: date,
+                          prompt_months: Sequence[Tuple[int, int]]) -> Tuple[List[Tuple[str, str]], str]:
+    """The research app's monthly prompt tickers of one metal (the months of the book's open
+    prompts and the next LME_RESEARCH_MONTHS listed), or our own form for the book's prompt months
+    when the research database has none. ([(label, ticker)], note)."""
+    why = "no research database"
+    if path is not None:
+        try:
+            conn = _research_connect(path)
+            try:
+                rows = conn.execute("SELECT year, month, bbg_ticker FROM contract WHERE instrument_id = ? "
+                                    "AND last_trade_date >= ? ORDER BY last_trade_date",
+                                    (root_id, as_of.isoformat())).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            rows, why = [], f"the research database could not be read ({exc})"
+        else:
+            why = f"the research database lists no live {root_id} contract"
+        if rows:
+            wanted = set(prompt_months)
+            picked = [r for i, r in enumerate(rows) if i < LME_RESEARCH_MONTHS or (r[0], r[1]) in wanted]
+            return [(f"monthly {y}-{m:02d} (research)", str(t)) for y, m, t in picked if str(t or "").strip()], ""
+    try:
+        from engine.lme import monthly_ticker
+        ours = [(f"monthly {y}-{m:02d} (ours)", monthly_ticker(root_id, y, m)) for y, m in dict.fromkeys(prompt_months)]
+    except Exception as exc:  # noqa: BLE001 -- reported, never a crash
+        return [], f"{why}; our monthly tickers could not be built ({exc})"
+    return ours, f"{why}: our own monthly tickers for the book's prompt months instead"
+
+
+def _calendar_securities(roots: Mapping[str, ContractRoot], held: Set[str],
+                         wanted: Optional[Set[str]]) -> Tuple[List[Tuple[str, str, str]], List[Tuple[str, str]]]:
+    """One front generic per exchange calendar on file: a root the book holds first, else a
+    verified one, else the first with a real Bloomberg root."""
+    try:
+        from engine.calendars import calendar_ids
+        cals = list(calendar_ids())
+    except Exception as exc:  # noqa: BLE001 -- reported, never a crash
+        return [], [("all", f"the calendars could not be read ({type(exc).__name__}: {exc})")]
+    asked: List[Tuple[str, str, str]] = []
+    unasked: List[Tuple[str, str]] = []
+    for cal in cals:
+        if wanted is not None and cal not in wanted:
+            continue
+        cands = [r for r in roots.values() if str(r.calendar or "").upper() == cal and not r.bbg_placeholder]
+        if not cands:
+            unasked.append((cal, "no root of this calendar has a Bloomberg root yet"))
+            continue
+        cands.sort(key=lambda r: (r.root_id not in held, not r.bbg_verified, r.root_id))
+        asked.append((cal, generic_ticker(cands[0]), cands[0].root_id))
+    return asked, unasked
+
+
+def plan_desk(roots: Optional[Iterable[ContractRoot]] = None, *, book: Optional[Book] = None, as_of: date,
+              root_ids: Sequence[str] = (), sector: Optional[str] = None,
+              batch_size: int = BATCH_SIZE) -> DeskPlan:
+    """What the desk checks would ask. A root or sector filter narrows the book's contracts, the
+    delivery roots and the calendars; without a book, checks 1-3, 7 and 8 are skipped and the
+    delivery check takes the filtered roots (skipped without a filter). Asks nothing. Raises
+    ValueError for an unknown root id."""
+    by_id = dict(roots.items()) if isinstance(roots, Mapping) else (
+        {r.root_id: r for r in roots} if roots is not None else load_roots())
+    narrowed = bool(root_ids or sector)
+    selected = _select(list(by_id.values()), root_ids, sector) if narrowed else []
+    in_scope = {r.root_id for r in selected} if narrowed else None
+    out = DeskPlan(as_of=as_of, book=book, roots=by_id, batch_size=batch_size)
+    out.research_path, out.research_why = research_db()
+    held: Set[str] = set()
+    if book is not None:
+        out.futures = [f for f in book.futures if in_scope is None or f.root_id in in_scope]
+        out.options = [o for o in book.options if in_scope is None or o.root_id in in_scope]
+        lme = [t for t in book.lme if in_scope is None or t.root_id in in_scope]
+        held = {f.root_id for f in out.futures} | {o.root_id for o in out.options} | {t.root_id for t in lme}
+        out.history_roots = sorted(held)
+        for rid in dict.fromkeys(t.root_id for t in lme):
+            metal = by_id.get(rid)
+            if metal is None:
+                continue
+            months: List[Tuple[int, int]] = []
+            for t in lme:
+                if t.root_id == rid:
+                    try:
+                        d = to_date(t.prompt)
+                    except ValueError:
+                        continue
+                    months.append((d.year, d.month))
+            pairs: List[Tuple[str, str]] = []
+            try:
+                from engine.lme import three_month_ticker
+                pairs.append(("3M", three_month_ticker(rid)))
+            except Exception as exc:  # noqa: BLE001 -- reported, never a crash
+                out.lme_note = f"{rid}: the 3M ticker could not be built ({exc})"
+            monthly, note = _research_lme_tickers(out.research_path, rid, as_of, months)
+            pairs += monthly
+            if note:
+                out.lme_note = note
+            out.lme.append((metal, pairs))
+        if not lme:
+            out.lme_note = "no open LME ticket in the book"
+    sgx = by_id.get(SGX_XUC_ROOT)
+    if sgx is not None and (in_scope is None or SGX_XUC_ROOT in in_scope):
+        out.sgx = sgx
+        forms = [("config/contracts.csv's form", generic_ticker(sgx))]
+        for code in dict.fromkeys((sgx.bbg_root, sgx.exchange_code)):
+            for key in ("Curncy", "Comdty"):
+                forms.append((f"root {code}, yellow key {key}", f"{padded_root(code)}1 {key}"))
+        if book is not None:
+            held_xuc = [f for f in book.futures if f.root_id == SGX_XUC_ROOT and f.ticker]
+            if held_xuc:
+                forms.append((f"held contract {held_xuc[0].instrument_id}", held_xuc[0].ticker))
+        seen: Set[str] = set()
+        for label, t in forms:
+            if t not in seen:
+                seen.add(t)
+                out.sgx_tickers.append((label, t))
+    if narrowed:
+        delivery = selected
+    elif book is not None:
+        delivery = [by_id[r] for r in sorted(held) if r in by_id]
+        if not delivery:
+            out.delivery_why = "the book holds no commodity contract"
+    else:
+        delivery = []
+        out.delivery_why = "no book and no --root / --sector: give --db, or name the roots"
+    out.delivery_roots = [r for r in delivery if not r.bbg_placeholder]
+    out.delivery_placeholders = [r for r in delivery if r.bbg_placeholder]
+    wanted = {str(r.calendar or "").upper() for r in selected} if narrowed else None
+    out.calendars, out.calendars_unasked = _calendar_securities(by_id, held, wanted)
+    return out
+
+
+# ---- asking
+
+def _desk_reference(client, tickers: Sequence[str], fields: Sequence[str], dr: DeskResult) -> Dict[str, Answer]:
+    out: Dict[str, Answer] = {}
+    for batch in _chunks(list(tickers), max(1, dr.plan.batch_size)):
+        dr.requests_sent += 1
+        got = client.reference(batch, fields) or {}
+        by_upper = {str(k).upper(): v for k, v in got.items()}
+        for t in batch:
+            out[t] = got.get(t) or by_upper.get(t.upper()) or Answer(
+                t, {}, security_error="Bloomberg sent nothing back for this security", answered=False)
+    return out
+
+
+def _desk_history(client, tickers: Sequence[str], fields: Sequence[str], start: date, end: date,
+                  dr: DeskResult) -> Dict[str, History]:
+    out: Dict[str, History] = {}
+    for batch in _chunks(list(tickers), max(1, dr.plan.batch_size)):
+        dr.requests_sent += 1
+        got = client.history(batch, fields, start, end) or {}
+        by_upper = {str(k).upper(): v for k, v in got.items()}
+        for t in batch:
+            out[t] = got.get(t) or by_upper.get(t.upper()) or History(
+                t, {}, security_error="Bloomberg sent nothing back for this security", answered=False)
+    return out
+
+
+def _can(client, method: str, keyword: str = "") -> bool:
+    fn = getattr(client, method, None)
+    if fn is None:
+        return False
+    if not keyword:
+        return True
+    try:
+        import inspect
+        return keyword in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _refused(sec: str, err: str) -> str:
+    return f'Bloomberg refused {sec}: "{err}"'
+
+
+def _field_words(errors: Mapping[str, str], names: Sequence[str]) -> str:
+    said = [f'{n}: "{errors[n]}"' for n in names if errors.get(n)]
+    return ("; Bloomberg said " + "; ".join(said)) if said else ""
+
+
+def _ratio_words(r: Optional[float]) -> str:
+    if r is None:
+        return "no ratio"
+    if 0.9 <= r <= 1.1:
+        return "the same counting"
+    if 1.8 <= r <= 2.2:
+        return "Bloomberg twice the research figure: one of them counts both sides"
+    if 0.45 <= r <= 0.55:
+        return "Bloomberg half the research figure: one of them counts both sides"
+    return "they differ"
+
+
+def _exchange(root: Optional[ContractRoot]) -> str:
+    return root.exchange if root is not None else "?"
+
+
+def _is_china(root: Optional[ContractRoot]) -> bool:
+    return root is not None and root.exchange.upper() in CHINA_EXCHANGE_CODES
+
+
+# ---- the checks
+
+def _check_settlement(dp: DeskPlan, hist: Mapping[str, History], ticks: Mapping[str, Answer]) -> DeskCheck:
+    """1: PX_LAST against PX_SETTLE over the last DESK_DAYS days, per contract and per exchange."""
+    c = DeskCheck(1)
+    per_ex: Dict[str, Dict[str, float]] = {}
+    errors = 0
+    agreeing: List[str] = []
+    for fut in dp.futures:
+        root = dp.roots.get(fut.root_id)
+        ex = _exchange(root)
+        if not fut.ticker:
+            c.lines.append(f"{ex:<6} {fut.instrument_id}: not asked ({fut.why_no_ticker})")
+            continue
+        h = hist.get(fut.ticker)
+        if h is None or h.security_error:
+            errors += 1
+            c.lines.append(f"{ex:<6} {fut.instrument_id}: " + (_refused(fut.ticker, h.security_error) if h
+                                                               else "not asked"))
+            continue
+        tick_answer = ticks.get(fut.ticker)
+        tick = _num(tick_answer.fields.get("FUT_TICK_SIZE")) if tick_answer is not None else None
+        days = sorted(h.days)[-DESK_DAYS:]
+        same = differ = no_both = 0
+        worst = 0.0
+        for d in days:
+            last, settle = _num(h.days[d].get("PX_LAST")), _num(h.days[d].get("PX_SETTLE"))
+            if last is None or settle is None:
+                no_both += 1
+                continue
+            gap = abs(last - settle)
+            if gap <= 1e-9 * max(1.0, abs(settle)):
+                same += 1
+            else:
+                differ += 1
+                worst = max(worst, gap)
+        stats = per_ex.setdefault(ex, {"days": 0, "differ": 0, "worst_ticks": 0.0})
+        stats["days"] += same + differ
+        stats["differ"] += differ
+        in_ticks = worst / tick if tick else None
+        if in_ticks is not None:
+            stats["worst_ticks"] = max(stats["worst_ticks"], in_ticks)
+        if not days:
+            c.lines.append(f"{ex:<6} {fut.instrument_id} [{fut.ticker}]: no history in the window"
+                           + _field_words(h.field_errors, DESK_HISTORY_FIELDS))
+            continue
+        if same and not differ and not no_both and not h.field_errors:
+            agreeing.append(fut.instrument_id)
+            continue
+        size = f"{in_ticks:.1f} ticks" if in_ticks is not None else f"{_g(worst)} in price, tick size unknown"
+        n = same + differ
+        c.lines.append(f"{ex:<6} {fut.instrument_id} [{fut.ticker}]: {n} day{'s' if n != 1 else ''} compared, "
+                       f"PX_LAST = PX_SETTLE on {same}, differs on {differ}" + (f" (up to {size})" if differ else "")
+                       + (f"; {no_both} day{'s' if no_both != 1 else ''} without both" if no_both else "")
+                       + _field_words(h.field_errors, ("PX_SETTLE", "PX_LAST"))
+                       + (" [China: settlement is the day's volume-weighted average]" if _is_china(root) else ""))
+    if agreeing:
+        c.lines.insert(0, f"PX_LAST = PX_SETTLE on every day compared: {', '.join(agreeing)}")
+    summary = [f"{ex} {int(s['differ'])} of {int(s['days'])} days differ"
+               + (f", up to {s['worst_ticks']:.1f} ticks" if s["worst_ticks"] else "")
+               for ex, s in sorted(per_ex.items()) if s["differ"]]
+    same_ex = sorted(ex for ex, s in per_ex.items() if s["days"] and not s["differ"])
+    compared = sum(int(s["days"]) for s in per_ex.values())
+    differing = sum(int(s["differ"]) for s in per_ex.values())
+    if differing:
+        c.status = WARN
+        c.summary = ("the close the app marks at (PX_LAST, a user decision) is not the exchange settlement on "
+                     + "; ".join(summary) + (f"; they agree on {', '.join(same_ex)}" if same_ex else "")
+                     + ". This only reports; nothing changes unless you decide it should")
+    elif compared:
+        c.status = PASS
+        c.summary = f"PX_LAST equals PX_SETTLE on all {compared} contract-days ({', '.join(same_ex)})"
+    elif errors:
+        c.status = FAIL
+        c.summary = f"Bloomberg refused {errors} of the book's contracts; nothing to compare"
+    else:
+        c.summary = "no day had both PX_LAST and PX_SETTLE"
+    return c
+
+
+def _check_liquidity(dp: DeskPlan, hist: Mapping[str, History], research: Mapping[str, dict],
+                     research_note: str) -> DeskCheck:
+    """2: Bloomberg's OPEN_INT and PX_VOLUME beside the research app's figures, with the ratio."""
+    c = DeskCheck(2)
+    ratios: List[float] = []
+    bbg_any = china = False
+    for fut in dp.futures:
+        root = dp.roots.get(fut.root_id)
+        ex = _exchange(root)
+        china = china or _is_china(root)
+        tag = " [China: confirm by hand]" if _is_china(root) else ""
+        if not fut.ticker:
+            continue
+        h = hist.get(fut.ticker)
+        if h is None or h.security_error:
+            c.lines.append(f"{ex:<6} {fut.instrument_id}: "
+                           + (_refused(fut.ticker, h.security_error) if h else "not asked") + tag)
+            continue
+        rec = research.get(fut.instrument_id) or {}
+        days = sorted(h.days)
+
+        def on(fname: str, day: Optional[str], h: History = h, days: List[str] = days) -> Tuple[Optional[float], str]:
+            if day and day in h.days and _num(h.days[day].get(fname)) is not None:
+                return _num(h.days[day].get(fname)), day
+            for d in reversed(days):
+                v = _num(h.days[d].get(fname))
+                if v is not None:
+                    return v, d
+            return None, ""
+
+        oi, oi_day = on("OPEN_INT", rec.get("oi_date"))
+        vol, vol_day = on("PX_VOLUME", rec.get("volume_date"))
+        bbg_any = bbg_any or oi is not None or vol is not None
+        r_oi, r_vol = _num(rec.get("open_interest")), _num(rec.get("volume_last"))
+        ratio_oi = oi / r_oi if oi is not None and r_oi else None
+        ratio_vol = vol / r_vol if vol is not None and r_vol else None
+        if ratio_oi is not None:
+            ratios.append(ratio_oi)
+        bbg = (f"Bloomberg OI {_g(oi)} ({oi_day or '-'}), volume {_g(vol)} ({vol_day or '-'})"
+               + _field_words(h.field_errors, ("OPEN_INT", "PX_VOLUME")))
+        if r_oi is not None or r_vol is not None:
+            res = (f"research OI {_g(r_oi)} ({rec.get('oi_date') or '-'}), volume {_g(r_vol)} "
+                   f"({rec.get('volume_date') or '-'})")
+            rat = ((f"ratio OI {ratio_oi:.2f}" if ratio_oi is not None else "ratio OI -")
+                   + (f", volume {ratio_vol:.2f}" if ratio_vol is not None else ", volume -")
+                   + f": {_ratio_words(ratio_oi)}")
+            c.lines.append(f"{ex:<6} {fut.instrument_id}: {bbg}; {res}; {rat}{tag}")
+        else:
+            why = rec.get("reason") or research_note or "no research figure"
+            c.lines.append(f"{ex:<6} {fut.instrument_id}: {bbg}; research: {why}{tag}")
+    off = [r for r in ratios if not 0.9 <= r <= 1.1]
+    if not bbg_any:
+        c.status = FAIL
+        c.summary = "Bloomberg returned no OPEN_INT or PX_VOLUME for any of the book's contracts"
+    elif off:
+        c.status = WARN
+        c.summary = (f"{len(off)} of {len(ratios)} contracts count differently from the research app "
+                     "(a ratio near 2 or 0.5 means one of them counts both sides)")
+    elif ratios:
+        c.status = PASS
+        c.summary = f"Bloomberg's open interest agrees with the research app's on all {len(ratios)} contracts compared"
+    else:
+        c.status = WARN
+        c.summary = "Bloomberg answered, but the research app has no figure to compare with"
+    if china:
+        c.summary += ". Chinese contracts: one- or two-sided counting is settled by hand (Manual checks)"
+    if research_note:
+        c.lines.append(f"note: {research_note}")
+    return c
+
+
+def _check_lme_liquidity(dp: DeskPlan, answers: Mapping[str, Answer]) -> DeskCheck:
+    """3: which LME tickers (3M, the monthly prompts) Bloomberg gives OPEN_INT / PX_VOLUME for."""
+    c = DeskCheck(3)
+    full = partial = refused = 0
+    three_m: List[str] = []
+    monthly: List[str] = []
+    for metal, pairs in dp.lme:
+        for label, ticker in pairs:
+            a = answers.get(ticker)
+            if a is None:
+                continue
+            bucket = three_m if label == "3M" else monthly
+            if a.security_error:
+                refused += 1
+                bucket.append(f"{ticker} refused")
+                c.lines.append(f"{metal.root_id:<8} {label:<26} {_refused(ticker, a.security_error)}")
+                continue
+            oi, vol = _num(a.fields.get("OPEN_INT")), _num(a.fields.get("PX_VOLUME"))
+            got = [n for n, v in (("OPEN_INT", oi), ("PX_VOLUME", vol)) if v is not None]
+            if len(got) == 2:
+                full += 1
+            else:
+                partial += 1
+            bucket.append(f"{ticker} {' and '.join(got) or 'neither'}")
+            c.lines.append(f"{metal.root_id:<8} {label:<26} {ticker:<16} OPEN_INT {_g(oi)}, PX_VOLUME {_g(vol)}"
+                           + _field_words(a.field_errors, LME_LIQUIDITY_FIELDS))
+    total = full + partial + refused
+    if dp.lme_note:
+        c.lines.append(f"note: {dp.lme_note}")
+    if not total:
+        c.summary = dp.lme_note or "no LME ticker to ask"
+        return c
+    c.status = PASS if full == total else (FAIL if refused == total else WARN)
+    c.summary = (f"{full} of {total} LME tickers give both OPEN_INT and PX_VOLUME, {partial} one or neither, "
+                 f"{refused} refused")
+    c.housekeeper.append((HISTORY_OWNER, "LME per-prompt liquidity from Bloomberg: 3M: " + ("; ".join(three_m) or "-")
+                          + "; monthly prompts: " + ("; ".join(monthly) or "-")))
+    return c
+
+
+def _check_sgx(dp: DeskPlan, hist: Mapping[str, History]) -> DeskCheck:
+    """4: a year of PX_LAST history for the SGX USD/CNH future, and which ticker form gives it."""
+    c = DeskCheck(4)
+    root = dp.sgx
+    if root is None:
+        c.summary = f"{SGX_XUC_ROOT} is not in config/contracts.csv"
+        return c
+    works: List[Tuple[str, str, int]] = []
+    for label, ticker in dp.sgx_tickers:
+        h = hist.get(ticker)
+        if h is None:
+            continue
+        if h.security_error:
+            c.lines.append(f"{ticker:<16} ({label}): {_refused(ticker, h.security_error)}")
+            continue
+        closes = sorted(d for d, v in h.days.items() if _num(v.get("PX_LAST")) is not None)
+        if closes:
+            works.append((label, ticker, len(closes)))
+            c.lines.append(f"{ticker:<16} ({label}): {len(closes)} daily closes, {closes[0]} to {closes[-1]}")
+        else:
+            c.lines.append(f"{ticker:<16} ({label}): resolves, no PX_LAST history"
+                           + _field_words(h.field_errors, SGX_FIELDS))
+    ours = generic_ticker(root)
+    ours_ok = [w for w in works if w[1] == ours and w[2] >= SGX_MIN_CLOSES]
+    generics = [w for w in works if not w[0].startswith("held") and w[2] >= SGX_MIN_CLOSES]
+    if ours_ok:
+        c.status = PASS
+        c.summary = (f"{ours} has a year of history ({ours_ok[0][2]} closes): the Risk tab can use it for the CNY "
+                     "hedges")
+    elif works:
+        best = max(generics or works, key=lambda w: w[2])
+        c.status = WARN
+        c.summary = (f"{ours} (config/contracts.csv's form) gives no full year; {best[1]} ({best[0]}) gives "
+                     f"{best[2]} closes")
+        if best in generics:
+            head, key = best[1].rsplit(" ", 1)
+            code = head[:-1].strip()
+            reason = f"desk check 4: {best[1]} has {best[2]} daily closes in a year, {ours} does not"
+            if code and code != root.bbg_root:
+                c.worksheet.append({"root_id": root.root_id, "field": "bbg_root", "current": root.bbg_root,
+                                    "suggested": code, "verdict": "TICKER_FORM", "reason": reason, "apply": ""})
+            if key != root.bbg_yellow_key:
+                c.worksheet.append({"root_id": root.root_id, "field": "bbg_yellow_key", "current": root.bbg_yellow_key,
+                                    "suggested": key, "verdict": "TICKER_FORM", "reason": reason, "apply": ""})
+        c.housekeeper.append((HISTORY_OWNER, f"SGX USD/CNH history: {best[1]} works ({best[2]} closes in a year); "
+                                             f"{ours} does not"))
+    else:
+        c.status = FAIL
+        c.summary = "no ticker form tried gives a PX_LAST history: find the SGX USD/CNH future with SECF <GO>"
+    return c
+
+
+def _delivery_from(field_name: str, value) -> Optional[str]:
+    """'physical' | 'cash' | None from one delivery field's value."""
+    text = str(value if value is not None else "").strip().lower()
+    if not text:
+        return None
+    if "CASH" in field_name.upper() and text in ("y", "yes", "true", "1", "n", "no", "false", "0"):
+        return "cash" if text in ("y", "yes", "true", "1") else "physical"
+    if "cash" in text or "financ" in text:
+        return "cash"
+    if "phys" in text or "deliver" in text:
+        return "physical"
+    return None
+
+
+def _check_delivery(dp: DeskPlan, answers: Mapping[str, Answer]) -> DeskCheck:
+    """5: Bloomberg's physical / cash settlement against config/contracts.csv's delivery column."""
+    c = DeskCheck(5)
+    agree = disagree = unread = 0
+    used: Set[str] = set()
+    rejected: Dict[str, str] = {}
+    for root in dp.delivery_roots:
+        ticker = generic_ticker(root)
+        a = answers.get(ticker)
+        if a is None:
+            continue
+        if a.security_error:
+            unread += 1
+            c.lines.append(f"{root.root_id:<12} {_refused(ticker, a.security_error)}")
+            continue
+        for fname, words in a.field_errors.items():
+            rejected.setdefault(fname, words)
+        hit = next(((f, a.fields.get(f)) for f in DELIVERY_FIELDS if a.fields.get(f) not in (None, "")), None)
+        if hit is None:
+            unread += 1
+            continue
+        used.add(hit[0])
+        bbg = _delivery_from(*hit)
+        ours = root.delivery or "(blank)"
+        said = f"{root.root_id:<12} [{ticker}]: {hit[0]} = {hit[1]!r}"
+        if bbg is None:
+            unread += 1
+            c.lines.append(f"{said}, not read as physical or cash; ours {ours}")
+        elif bbg == root.delivery:
+            agree += 1
+            c.lines.append(f"{said} ({bbg}), ours {ours}: agree")
+        else:
+            disagree += 1
+            c.lines.append(f"{said} ({bbg}), ours {ours}: DISAGREE")
+            c.worksheet.append({"root_id": root.root_id, "field": "delivery", "current": root.delivery,
+                                "suggested": bbg, "verdict": "DELIVERY_MISMATCH",
+                                "reason": f"desk check 5: Bloomberg {ticker} {hit[0]} = {hit[1]!r}. It decides "
+                                          "whether the app warns at first notice (physical) or last trade (cash)",
+                                "apply": ""})
+    for root in dp.delivery_placeholders:
+        c.lines.append(f"{root.root_id:<12} not asked (bbg_root {root.bbg_root!r} is a placeholder)")
+    if not used:
+        said = "; ".join(f'{f}: "{w}"' for f, w in rejected.items() if f in DELIVERY_FIELDS)
+        c.status = SKIPPED
+        c.summary = ("Bloomberg answered none of the candidate fields " + ", ".join(DELIVERY_FIELDS)
+                     + (f"; Bloomberg said {said}" if said else "")
+                     + ". Find the field with FLDS <GO> on a front future (search 'delivery' or 'settle')")
+        return c
+    c.status = WARN if disagree else PASS
+    c.summary = (f"field {', '.join(sorted(used))}: {agree} agree, {disagree} disagree (worksheet rows), "
+                 f"{unread} not read")
+    return c
+
+
+def _calendar_file_notes(cal: str) -> Dict[date, str]:
+    """{date: 'unverified' | 'estimated' | ''} of one calendar file's dates."""
+    try:
+        from engine.calendars import CALENDAR_DIR
+    except Exception:  # noqa: BLE001 -- no notes; the dates themselves come from engine.calendars
+        return {}
+    path = next((p for p in Path(CALENDAR_DIR).glob("*.txt") if p.stem.upper() == cal), None)
+    out: Dict[date, str] = {}
+    if path is None:
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        m = _DATE_LINE_RE.match(raw)
+        if not m:
+            continue
+        note = (m.group(2) or "").lower()
+        try:
+            out[date.fromisoformat(m.group(1))] = ("estimated" if "estimated" in note
+                                                   else "unverified" if "unverified" in note else "")
+        except ValueError:
+            continue
+    return out
+
+
+def _dates_in(rows) -> Set[date]:
+    """The weekday dates inside CALENDAR_START..CALENDAR_END of a bulk calendar field's rows."""
+    out: Set[date] = set()
+    for row in rows if isinstance(rows, (list, tuple)) else []:
+        for v in (row.values() if isinstance(row, Mapping) else [row]):
+            try:
+                d = to_date(v)
+            except (ValueError, TypeError):
+                continue
+            if CALENDAR_START <= d <= CALENDAR_END and d.weekday() < 5:
+                out.add(d)
+    return out
+
+
+def _check_calendars(dp: DeskPlan, answers: Mapping[str, Answer]) -> DeskCheck:
+    """6: Bloomberg's non-settlement dates against config/calendars/, per calendar."""
+    c = DeskCheck(6)
+    from engine.calendars import holidays
+    same = differ = failed = 0
+    for cal, sec, rid in dp.calendars:
+        a = answers.get(sec)
+        if a is None:
+            continue
+        if a.security_error or not a.fields.get(CALENDAR_FIELD):
+            failed += 1
+            words = a.security_error or a.field_errors.get(CALENDAR_FIELD) or "no dates returned"
+            c.lines.append(f"{cal:<9} [{sec}, {rid}]: Bloomberg said \"{words}\"")
+            continue
+        bbg = _dates_in(a.fields.get(CALENDAR_FIELD))
+        try:
+            ours = {d for d in holidays(cal) if CALENDAR_START <= d <= CALENDAR_END}
+        except ValueError as exc:
+            failed += 1
+            c.lines.append(f"{cal:<9} our file could not be read ({exc})")
+            continue
+        notes = _calendar_file_notes(cal)
+        missing, extra = sorted(bbg - ours), sorted(ours - bbg)
+        confirmed = sorted(d for d in ours & bbg if notes.get(d))
+        if not missing and not extra:
+            same += 1
+            c.lines.append(f"{cal:<9} [{sec}]: {len(bbg)} dates, the same as the file"
+                           + (f"; {len(confirmed)} marked unverified / estimated there are now confirmed"
+                              if confirmed else ""))
+            continue
+        differ += 1
+        bits = []
+        if missing:
+            bits.append("missing from the file: " + ", ".join(d.isoformat() for d in missing))
+        if extra:
+            bits.append("in the file, not on Bloomberg: " + ", ".join(
+                d.isoformat() + (f" ({notes[d]})" if notes.get(d) else "") for d in extra))
+        if confirmed:
+            bits.append(f"{len(confirmed)} unverified / estimated dates confirmed")
+        c.lines.append(f"{cal:<9} [{sec}]: Bloomberg {len(bbg)} dates, file {len(ours)}; " + "; ".join(bits))
+        c.housekeeper.append((CALENDAR_OWNER, f"config/calendars/{cal}.txt against Bloomberg's {CALENDAR_FIELD} on "
+                                              f"{sec} ({CALENDAR_START.year}-{CALENDAR_END.year}): " + "; ".join(bits)))
+    for cal, why in dp.calendars_unasked:
+        c.lines.append(f"{cal:<9} not asked ({why})")
+    total = same + differ + failed
+    if not total:
+        c.summary = "no calendar asked"
+        return c
+    c.status = PASS if same == total else (FAIL if failed == total else WARN)
+    c.summary = (f"{same} calendar{'s' if same != 1 else ''} agree with Bloomberg, {differ} differ (lines for the "
+                 f"housekeeper), {failed} not answered")
+    return c
+
+
+def research_status(path: Optional[Path]) -> Dict[str, str]:
+    """The research database's newest settlement date and its last pull's provider, read-only."""
+    if path is None:
+        return {}
+    out: Dict[str, str] = {"path": str(path)}
+    try:
+        conn = _research_connect(path)
+        try:
+            out["newest"] = str(conn.execute("SELECT MAX(date) FROM price_daily").fetchone()[0] or "")
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'job'").fetchone():
+                row = conn.execute("SELECT provider, finished_at FROM job WHERE kind = 'pull' "
+                                   "ORDER BY job_id DESC LIMIT 1").fetchone()
+                if row:
+                    out["provider"], out["finished"] = str(row[0] or ""), str(row[1] or "")
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        out["error"] = str(exc)
+    return out
+
+
+def _check_history_depth(dp: DeskPlan) -> DeskCheck:
+    """7: the research database's earliest settlement per root the book holds, against the replays."""
+    c = DeskCheck(7)
+    if dp.book is None:
+        c.summary = "no book: give --db"
+        return c
+    if not dp.history_roots:
+        c.summary = "the book holds no commodity contract"
+        return c
+    if dp.research_path is None:
+        c.summary = dp.research_why
+        return c
+    short = both = absent = 0
+    conn = _research_connect(dp.research_path)
+    try:
+        for rid in dp.history_roots:
+            first, last = conn.execute(
+                "SELECT MIN(date), MAX(date) FROM price_daily WHERE contract_id IN "
+                "(SELECT contract_id FROM contract WHERE instrument_id = ?)", (rid,)).fetchone()
+            if not first:
+                absent += 1
+                c.lines.append(f"{rid:<12} not in the research database: no history, so no risk figure or replay")
+                continue
+            start = to_date(first)
+            if any(start > d for _name, d in REPLAYS):
+                short += 1
+            else:
+                both += 1
+            c.lines.append(f"{rid:<12} {first} to {last}: " + "; ".join(
+                f"{'reaches' if start <= d else 'does NOT reach'} {d.isoformat()} ({name})" for name, d in REPLAYS))
+    finally:
+        conn.close()
+    c.status = PASS if not short and not absent else WARN
+    c.summary = (f"{both} of {len(dp.history_roots)} roots reach both replay dates, {short} do not, {absent} have no "
+                 f"history ({dp.research_path})")
+    return c
+
+
+def _check_dates_stored(dp: DeskPlan) -> DeskCheck:
+    """8: whether Bloomberg's contract dates are in contract_static for the book's contracts."""
+    c = DeskCheck(8)
+    if dp.book is None:
+        c.summary = "no book: give --db"
+        return c
+    items = list(dp.futures) + list(dp.options)
+    if not items:
+        c.summary = "the book holds no open future or option on a future"
+        return c
+    stored = 0
+    for f in items:
+        s = f.stored
+        kind = "option" if f.kind == "CMDTY_OPTION" else "future"
+        if s:
+            stored += 1
+            c.lines.append(f"{f.instrument_id:<22} {kind}: stored, last trade {s.get('last_trade_date') or '-'}, "
+                           f"first notice {s.get('first_notice_date') or '-'} ({s.get('source')}, "
+                           f"{s.get('fetched_at')})")
+        else:
+            c.lines.append(f"{f.instrument_id:<22} {kind}: not stored; the app runs on the estimate "
+                           f"{f.expiry or '-'} until a pull stores Bloomberg's dates")
+    missing = len(items) - stored
+    c.status = PASS if not missing else WARN
+    c.summary = (f"{stored} of {len(items)} have Bloomberg's dates in contract_static"
+                 + (f"; {missing} not yet: pull once (Pull Bloomberg now) to store them" if missing else ""))
+    return c
+
+
+def run_desk(client, dp: DeskPlan, *, offline: str = "") -> DeskResult:
+    """Run the eight desk checks through ``client`` (``reference``, ``history(securities, fields,
+    start, end)``, ``bulk(securities, field, overrides=...)``). ``offline``: why Bloomberg is not
+    asked; every Bloomberg check is then SKIPPED with it, and 7 and 8 still run from local data.
+    A check that fails in itself is FAIL with its error; the others go on. Writes nothing."""
+    dr = DeskResult(dp, [])
+    dr.research = research_status(dp.research_path)
+
+    def skipped(n: int, why: str) -> DeskCheck:
+        return DeskCheck(n, SKIPPED, why)
+
+    def guarded(n: int, fn: Callable[[], DeskCheck]) -> DeskCheck:
+        try:
+            return fn()
+        except BloombergUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- one check failing must not stop the others
+            return DeskCheck(n, FAIL, f"the check itself failed ({type(exc).__name__}: {exc})")
+
+    no_bbg = offline or ("" if client is not None else "Bloomberg was not asked")
+    no_history = no_bbg or ("" if _can(client, "history") else "this Bloomberg client cannot ask history")
+    # 1 and 2: the book's futures, one history request and one tick-size request.
+    if dp.book is None:
+        dr.checks += [skipped(1, "no book: give --db"), skipped(2, "no book: give --db")]
+    elif not dp.contract_tickers:
+        why = "the book holds no open future with a Bloomberg ticker"
+        dr.checks += [skipped(1, why), skipped(2, why)]
+    elif no_history:
+        dr.checks += [skipped(1, no_history), skipped(2, no_history)]
+    else:
+        start, end = dp.window
+        hist = _desk_history(client, dp.contract_tickers, DESK_HISTORY_FIELDS, start, end, dr)
+        ticks = _desk_reference(client, dp.contract_tickers, DESK_TICK_FIELDS, dr)
+        dr.checks.append(guarded(1, lambda: _check_settlement(dp, hist, ticks)))
+        research: Dict[str, dict] = {}
+        note = ""
+        try:
+            from engine.risk.commodity_history import contract_liquidity
+            research = contract_liquidity({f.instrument_id: f.root_id for f in dp.futures}, dp.as_of,
+                                          window=DESK_DAYS)
+        except Exception as exc:  # noqa: BLE001 -- the research side is context; its failure is a note
+            note = f"the research app's figures could not be read ({type(exc).__name__}: {exc})"
+        if dr.research.get("provider") == "mock":
+            note = ((note + "; ") if note else "") + ("the research app's last pull was mock data, so the "
+                                                      "ratios say nothing yet")
+        dr.checks.append(guarded(2, lambda: _check_liquidity(dp, hist, research, note)))
+    # 3: LME per-prompt liquidity.
+    if not dp.lme_tickers:
+        dr.checks.append(skipped(3, "no book: give --db" if dp.book is None else (dp.lme_note or "nothing to ask")))
+    elif no_bbg:
+        dr.checks.append(skipped(3, no_bbg))
+    else:
+        lme_answers = _desk_reference(client, dp.lme_tickers, LME_LIQUIDITY_FIELDS, dr)
+        dr.checks.append(guarded(3, lambda: _check_lme_liquidity(dp, lme_answers)))
+    # 4: SGX USD/CNH history.
+    if dp.sgx is None:
+        dr.checks.append(skipped(4, f"{SGX_XUC_ROOT} is not in config/contracts.csv (or not in the --root / "
+                                    "--sector filter)"))
+    elif no_history:
+        dr.checks.append(skipped(4, no_history))
+    else:
+        s0, s1 = dp.sgx_window
+        sgx_hist = _desk_history(client, dp.sgx_ticker_list, SGX_FIELDS, s0, s1, dr)
+        dr.checks.append(guarded(4, lambda: _check_sgx(dp, sgx_hist)))
+    # 5: delivery type.
+    if not dp.delivery_roots:
+        dr.checks.append(skipped(5, dp.delivery_why or "no root with a real Bloomberg root to ask"))
+    elif no_bbg:
+        dr.checks.append(skipped(5, no_bbg))
+    else:
+        dlv = _desk_reference(client, dp.delivery_tickers, DELIVERY_FIELDS, dr)
+        dr.checks.append(guarded(5, lambda: _check_delivery(dp, dlv)))
+    # 6: exchange holidays.
+    no_bulk = no_bbg or ("" if _can(client, "bulk", "overrides")
+                         else "this Bloomberg client cannot ask a bulk field with overrides")
+    if not dp.calendars:
+        dr.checks.append(skipped(6, "; ".join(f"{c}: {w}" for c, w in dp.calendars_unasked) or "no calendar"))
+    elif no_bulk:
+        dr.checks.append(skipped(6, no_bulk))
+    else:
+        cal_answers: Dict[str, Answer] = {}
+        groups: Dict[str, List[str]] = {}
+        for cal, sec, _r in dp.calendars:
+            groups.setdefault(CALENDAR_CODES.get(cal, ""), []).append(sec)
+        for code, secs in groups.items():
+            overrides = {"CALENDAR_START_DATE": CALENDAR_START.strftime("%Y%m%d"),
+                         "CALENDAR_END_DATE": CALENDAR_END.strftime("%Y%m%d")}
+            if code:
+                overrides["SETTLEMENT_CALENDAR_CODE"] = code
+            for batch in _chunks(list(dict.fromkeys(secs)), max(1, dp.batch_size)):
+                dr.requests_sent += 1
+                got = client.bulk(batch, CALENDAR_FIELD, overrides=overrides) or {}
+                for s in batch:
+                    cal_answers[s] = got.get(s) or Answer(
+                        s, {}, security_error="Bloomberg sent nothing back for this security", answered=False)
+        dr.checks.append(guarded(6, lambda: _check_calendars(dp, cal_answers)))
+    # 7 and 8: local data only.
+    dr.checks.append(guarded(7, lambda: _check_history_depth(dp)))
+    dr.checks.append(guarded(8, lambda: _check_dates_stored(dp)))
+    dr.checks.sort(key=lambda c: c.number)
+    return dr
+
+
+def manual_checks(dr: Optional[DeskResult]) -> List[str]:
+    """The things no Bloomberg field can settle, one line each."""
+    res = dr.research if dr is not None else {}
+    if res.get("newest"):
+        now = f"now: newest settlement {res['newest']}"
+        if res.get("provider"):
+            now += f", last pull by '{res['provider']}'" + (f" at {res['finished']}" if res.get("finished") else "")
+        if res.get("provider") == "mock":
+            now += ": mock data, not real"
+    else:
+        now = "no research database found on this PC"
+    lines = [f"SHFE counting: {SHFE_MANUAL}.",
+             "Research data: check that the research app on this PC is pulling real data: its price_daily newest "
+             f"date should be yesterday's and its last pull not 'mock' ({now})."]
+    if dr is not None and any(c.number == 5 and c.status == SKIPPED and "FLDS" in c.summary for c in dr.checks):
+        lines.append("Delivery field: FLDS <GO> on a front future, search 'delivery', and tell the session which "
+                     "field says physical or cash.")
+    lines.append("Send the report's 'For the housekeeper' section back to the session.")
+    return lines
+
+
+def render_desk(dr: DeskResult) -> List[str]:
+    counts = dr.counts()
+    lines = [f"Desk checks on {dr.plan.as_of.isoformat()}: " + ", ".join(f"{counts[s]} {s}" for s in DESK_STATUSES)
+             + f" ({dr.requests_sent} Bloomberg request{'s' if dr.requests_sent != 1 else ''})"]
+    for c in dr.checks:
+        lines += ["", f"  {c.number}. {c.title}: {c.status}. {c.summary}."]
+        for ln in c.lines:
+            lines.append(f"       {ln}")
+    return lines
+
+
 # --------------------------------------------------------------------------- reports
 
 def worksheet_rows(result: CheckResult) -> List[Dict[str, str]]:
@@ -2215,14 +3341,21 @@ def _identity(answer: Optional[Answer]) -> str:
     return "Bloomberg: " + ", ".join(bits) if bits else ""
 
 
-def render_text(result: CheckResult, *, now: datetime, paths: Mapping[str, Path]) -> str:
-    """The plain-English report."""
+def render_text(result: CheckResult, *, now: datetime, paths: Mapping[str, Path],
+                desk: Optional[DeskResult] = None, not_run: str = "") -> str:
+    """The plain-English report; ``desk`` adds the desk checks and the manual checks, ``not_run``
+    says why the root, LME, options and book checks did not run (Bloomberg unreachable)."""
     p = result.plan
     lines = [f"Bloomberg ticker check, {now:%Y-%m-%d %H:%M}" + (f" ({result.host})" if result.host else ""), ""]
-    lines += p.describe()
-    lines.append(f"Sent {result.requests_sent} reference request{'s' if result.requests_sent != 1 else ''}"
-                 + (f" and {result.searches_sent} searches" if p.search else "") + ".")
-    if PART_ROOTS in p.parts:
+    if not_run:
+        reason = not_run.rstrip() if not_run.rstrip()[-1:] in ".?!" else not_run.rstrip() + "."
+        lines.append(f"Bloomberg could not be reached: {reason} The root, LME, options and book checks did not "
+                     "run; the desk checks below say what could be read without it.")
+    elif p.parts or p.book is not None:
+        lines += p.describe()
+        lines.append(f"Sent {result.requests_sent} reference request{'s' if result.requests_sent != 1 else ''}"
+                     + (f" and {result.searches_sent} searches" if p.search else "") + ".")
+    if PART_ROOTS in p.parts and not not_run:
         lines += ["", "Summary of the contract roots"]
         counts = result.counts()
         for v in ROOT_VERDICTS:
@@ -2256,20 +3389,28 @@ def render_text(result: CheckResult, *, now: datetime, paths: Mapping[str, Path]
         lines += ["", *_render_lme(result)]
     if result.options:
         lines += ["", *_render_options(result)]
-    if p.book is not None:
+    if p.book is not None and not not_run:
         lines += ["", *_render_book(result)]
+    if desk is not None:
+        lines += ["", *render_desk(desk)]
     code = result.code_findings()
-    if code:
-        lines += ["", "For the housekeeper: these are code, not config/contracts.csv, so the worksheet cannot fix them. "
-                      "Paste this section to the housekeeper, who passes each line to the lane named."]
+    desk_code = desk.housekeeper_lines() if desk is not None else []
+    if code or desk_code:
+        lines += ["", "For the housekeeper: these are code or files outside config/contracts.csv, so the worksheet "
+                      "cannot fix them. Paste this section to the housekeeper, who passes each line to the lane named."]
         for owner, subject, f in code:
             lines.append(f"  - {owner}: {subject}: {f.verdict}: {f.evidence}.")
+        for owner, line in desk_code:
+            lines.append(f"  - {owner}: {line}.")
     lines += ["", "Files"]
     for label, path in paths.items():
         lines.append(f"  {label}: {path}")
     lines += ["", "Nothing was written to the marks, the trades or config/contracts.csv. Mark 'yes' in the "
               "worksheet's apply column for each change you accept, then apply it "
               "(py 2_launcher.py contracts-apply <worksheet>)."]
+    if desk is not None:
+        lines += ["", "Manual checks (no Bloomberg field can settle these)"]
+        lines += [f"  - {m}" for m in manual_checks(desk)]
     return "\n".join(lines) + "\n"
 
 
@@ -2452,7 +3593,21 @@ def _field_rows(result: CheckResult) -> Tuple[List[str], List[List[str]]]:
     return columns, rows
 
 
-def write_reports(result: CheckResult, out_dir, *, now: datetime) -> Dict[str, Path]:
+def all_worksheet_rows(result: CheckResult, desk: Optional[DeskResult] = None) -> List[Dict[str, str]]:
+    """The worksheet: ``worksheet_rows(result)`` and the desk checks' rows, one per (root, field, suggested)."""
+    rows = worksheet_rows(result) + (desk.worksheet_rows() if desk is not None else [])
+    seen: Set[Tuple[str, str, str]] = set()
+    out: List[Dict[str, str]] = []
+    for row in rows:
+        key = (row["root_id"], row["field"], row["suggested"])
+        if key not in seen:
+            seen.add(key)
+            out.append(row)
+    return out
+
+
+def write_reports(result: CheckResult, out_dir, *, now: datetime, desk: Optional[DeskResult] = None,
+                  not_run: str = "") -> Dict[str, Path]:
     """Write the three files under ``out_dir``; returns {'report', 'fields', 'worksheet'} -> path."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -2467,8 +3622,9 @@ def write_reports(result: CheckResult, out_dir, *, now: datetime) -> Dict[str, P
     with open(paths["worksheet"], "w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(WORKSHEET_COLUMNS))
         writer.writeheader()
-        writer.writerows(worksheet_rows(result))
-    paths["report"].write_text(render_text(result, now=now, paths=paths), encoding="utf-8")
+        writer.writerows(all_worksheet_rows(result, desk))
+    paths["report"].write_text(render_text(result, now=now, paths=paths, desk=desk, not_run=not_run),
+                               encoding="utf-8")
     return paths
 
 
@@ -2493,6 +3649,10 @@ def _parser() -> argparse.ArgumentParser:
                          "without either flag every part runs")
     ap.add_argument("--options", action="store_true",
                     help="the options on futures: each option_style root's option chain and one option of it")
+    ap.add_argument("--desk", action="store_true",
+                    help="the desk checks: futures close against settlement, open interest and volume, LME "
+                         "per-prompt liquidity, SGX USD/CNH history, delivery type, exchange holidays, research "
+                         "history depth, contract dates stored; a plain run includes them")
     ap.add_argument("--host", default="localhost")
     ap.add_argument("--port", type=int, default=8194)
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="folder for the reports (default: reports/)")
@@ -2500,69 +3660,106 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _book_day() -> date:
+    """The book's today (``live.book_today``: the day turns at 17:00 New York); the local date
+    when that cannot be loaded."""
+    try:
+        from data.bloomberg.live import book_today
+        return book_today()
+    except Exception:  # noqa: BLE001 -- the check must still run
+        return date.today()
+
+
 def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Callable[[str, int], object]] = None,
          now: Optional[datetime] = None, as_of: Optional[date] = None,
          roots: Optional[Iterable[ContractRoot]] = None) -> int:
     """The command line. Exit 0 when every checked root (and the book) is OK, 1 when anything
-    needs attention, 2 when Bloomberg could not be reached (the reason is printed).
+    needs attention, 2 when Bloomberg could not be reached (the reason is printed). The desk
+    checks never change the exit code; a run that includes them still writes the report when
+    Bloomberg cannot be reached (their Bloomberg checks SKIPPED with the reason, checks 7 and 8
+    from local data) and exits 2.
     ``client_factory(host, port)``, ``now``, ``as_of`` and ``roots`` are for tests."""
     args = _parser().parse_args(list(argv) if argv is not None else None)
     if args.limit is not None and args.limit < 1:
         print("--limit must be 1 or more")
         return 1
     root_map = load_roots() if roots is None else {r.root_id: r for r in roots}
-    parts = tuple(p for p, on in ((PART_LME, args.lme), (PART_OPTIONS, args.options)) if on) or ALL_PARTS
+    picked = tuple(p for p, on in ((PART_LME, args.lme), (PART_OPTIONS, args.options)) if on)
+    desk_on = bool(args.desk or not picked)
+    parts = picked or (() if args.desk else ALL_PARTS)
     today = as_of or lme_today()
     book: Optional[Book] = None
     if args.db or args.book:
         if as_of is None:
-            from data.bloomberg.live import book_today
-            as_of = book_today()
+            as_of = _book_day()
         try:
             book = load_book(Path(args.db) if args.db else default_db_path(), as_of, root_map)
         except BookError as exc:
             print(f"Book check not possible: {exc}.")
             return 1
     try:
-        the_plan = plan(root_map, root_ids=args.root, sector=args.sector, book=book, book_only=args.book,
-                        limit=args.limit, search=args.search, parts=parts, today=today)
+        if parts:
+            the_plan = plan(root_map, root_ids=args.root, sector=args.sector, book=book, book_only=args.book,
+                            limit=args.limit, search=args.search, parts=parts, today=today)
+        else:
+            the_plan = Plan(roots=[], asked=[], placeholders=[], parts=(), today=today)
+        desk_plan = plan_desk(root_map, book=book, as_of=as_of or _book_day(), root_ids=args.root,
+                              sector=args.sector) if desk_on else None
     except ValueError as exc:
         print(str(exc))
         return 1
-    if the_plan.empty:
+    if the_plan.empty and desk_plan is None:
         print("Nothing to check: no contract root matches the filters" + (" and the book holds none." if book else "."))
         return 1
-    for line in the_plan.describe():
-        print(line)
+    if parts:
+        for line in the_plan.describe():
+            print(line)
+    if desk_plan is not None:
+        for line in desk_plan.describe():
+            print(line)
     if args.dry_run:
         print("Dry run: nothing was asked and nothing was written.")
         return 0
 
     client = None
     host = f"{args.host}:{args.port}"
-    if the_plan.needs_bloomberg:
-        print(f"Asking Bloomberg on {host} for {the_plan.securities} securities in {the_plan.requests} requests"
-              + (f", then up to {the_plan.max_option_followups} option tickers in up to "
-                 f"{the_plan.max_followup_requests} more" if the_plan.max_option_followups else "")
-              + (f", and up to {the_plan.max_searches} searches" if the_plan.search else "") + ".")
+    desk_needs = desk_plan is not None and desk_plan.needs_bloomberg
+    if (parts and the_plan.needs_bloomberg) or desk_needs:
+        if parts and the_plan.needs_bloomberg:
+            print(f"Asking Bloomberg on {host} for {the_plan.securities} securities in {the_plan.requests} requests"
+                  + (f", then up to {the_plan.max_option_followups} option tickers in up to "
+                     f"{the_plan.max_followup_requests} more" if the_plan.max_option_followups else "")
+                  + (f", and up to {the_plan.max_searches} searches" if the_plan.search else "") + ".")
+        if desk_needs:
+            print(f"Desk checks: asking Bloomberg on {host} for {desk_plan.securities} securities in "
+                  f"{desk_plan.requests} requests.")
         try:
             client = (client_factory or BlpapiClient)(args.host, args.port)
         except BloombergUnavailable as exc:
             print(f"Bloomberg could not be reached: {exc}")
+            if desk_plan is not None:
+                desk = run_desk(None, desk_plan, offline="Bloomberg could not be reached (the reason is at the top)")
+                empty = CheckResult(the_plan, [], [], [], host=host)
+                paths = write_reports(empty, args.out, now=now or datetime.now(), desk=desk, not_run=str(exc))
+                _print_desk(desk)
+                print(f"Report:    {paths['report']} (desk checks only)")
             return 2
+    desk: Optional[DeskResult] = None
     try:
-        result = run_check(client, the_plan, host=host)
+        result = run_check(client, the_plan, host=host) if parts else CheckResult(the_plan, [], [], [], host=host)
+        if desk_plan is not None:
+            desk = run_desk(client, desk_plan)
     except BloombergUnavailable as exc:
         print(f"Bloomberg could not be reached: {exc}")
         return 2
     finally:
         if client is not None and hasattr(client, "close"):
             client.close()
-    if the_plan.securities and not result.any_answered:
+    if parts and the_plan.securities and not result.any_answered:
         print(f"Bloomberg did not answer any request on {host}; nothing to judge. Run the check again.")
         return 2
     stamp_time = now or datetime.now()
-    paths = write_reports(result, args.out, now=stamp_time)
+    paths = write_reports(result, args.out, now=stamp_time, desk=desk)
     counts = result.counts()
     if result.roots:
         print("Roots: " + ", ".join(f"{counts[v]} {v}" for v in ROOT_VERDICTS if counts[v]) + ".")
@@ -2571,7 +3768,7 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
         if items:
             tally = {v: sum(1 for i in items if i.verdict == v) for v in verdicts}
             print(f"{label}: " + ", ".join(f"{n} {v}" for v, n in tally.items() if n) + ".")
-    if book is not None:
+    if the_plan.book is not None:
         bad_contracts = sum(1 for c in result.contracts if c.verdict != OK)
         bad_spots = sum(1 for s in result.spots if s.verdict != OK)
         print(f"Book: {len(result.contracts)} contracts, {bad_contracts} flagged; "
@@ -2580,16 +3777,24 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
                  f"flagged" if result.book_options else "")
               + (f"; {len(result.book_lme)} LME tickets, {sum(1 for t in result.book_lme if t.verdict != OK)} "
                  f"flagged" if result.book_lme else "") + ".")
-    code = result.code_findings()
+    if desk is not None:
+        _print_desk(desk)
+    code = len(result.code_findings()) + (len(desk.housekeeper_lines()) if desk is not None else 0)
     if code:
-        print(f"For the housekeeper: {len(code)} finding{'s' if len(code) != 1 else ''} in code, listed at the end "
+        print(f"For the housekeeper: {code} finding{'s' if code != 1 else ''} in code, listed at the end "
               "of the report.")
-    ws = worksheet_rows(result)
+    ws = all_worksheet_rows(result, desk)
     print(f"Report:    {paths['report']}")
     print(f"Fields:    {paths['fields']}")
     print(f"Worksheet: {paths['worksheet']} ({len(ws)} rows, {sum(1 for w in ws if w['apply'] == 'yes')} "
           "pre-filled 'yes')")
     return 1 if result.needs_attention else 0
+
+
+def _print_desk(desk: DeskResult) -> None:
+    counts = desk.counts()
+    print("Desk checks: " + ", ".join(f"{counts[s]} {s}" for s in DESK_STATUSES if counts[s]) + " ("
+          + "; ".join(f"{c.number} {c.status}" for c in desk.checks) + ").")
 
 
 if __name__ == "__main__":

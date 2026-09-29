@@ -3,82 +3,84 @@
 Use this on the PC that has the Bloomberg Terminal. The app asks Bloomberg nothing until you
 press **Pull Bloomberg now** (hard rule 8); between pulls it works on the marks on file.
 
-## The first visit: check the contract tickers (once, then after any change to the universe)
+## Things to check when the Bloomberg connection is here
 
-The contract universe (`config/contracts.csv`, 202 commodity contract roots) was written
-without a terminal. Only 11 Bloomberg roots are verified; 102 were filled on 2026-09-24 as
-stand-ins, most of them the exchange code. The price scales (cents or dollars per bushel,
-pence or pounds per therm) are unconfirmed too, and a wrong scale is a 100x P&L error. The
-Bloomberg check tells you, root by root, what is right and what to change.
+Everything the app was built without a terminal for, in one list. Most of it is automated:
+one command, `py 2_launcher.py bbg-check --search --book --db data\raw\risk.db`, runs the
+checks marked **auto** and writes a report and a fixes worksheet under `reports/`
+(procedure below). The **manual** ones are a few minutes each. Paste the report's
+"For the housekeeper" section back to a Claude session when done.
+
+| # | What | Why it matters | How |
+|---|---|---|---|
+| 1 | The 202 contract roots: name, exchange, currency, contract size, value per point | Only 11 are verified; a wrong root means no price | auto: root check |
+| 2 | Price scales (cents or dollars, pence or pounds) | A wrong scale is a 100x P&L error | auto: root check (SCALE_MISMATCH) |
+| 3 | Jason's fills against Bloomberg's price, incl. the broker's $/lb roots (cattle, COMEX copper) | Confirms the broker price conversion | auto: `--book` |
+| 4 | Futures close = exchange settlement (PX_LAST against PX_SETTLE, last 5 days) | The app marks at PX_LAST; Chinese exchanges settle at the day's average price | auto: desk check 1 |
+| 5 | Open interest and volume: one- or two-sided on SHFE, DCE, INE | Sets the liquidity check's figures for China | auto: desk check 2, then **manual**: compare one SHFE copper contract with SHFE's own daily report |
+| 6 | LME open interest and volume per prompt month | Whether the liquidity check means anything for LME tickets | auto: desk check 3 |
+| 7 | SGX USD/CNH future: ticker and one year of history | The Risk tab needs it to count the CNY hedges | auto: desk check 4 |
+| 8 | Physical or cash delivery per root | Decides whether the app warns at first notice or last trade | auto: desk check 5 |
+| 9 | Exchange holidays 2026-2027 (`config/calendars/`, every `# unverified` line, China 2027, GME) | Business-day counts to expiry and the P&L reference dates | auto: desk check 6 |
+| 10 | Research history depth: reaches April 2020 (negative WTI) and March 2022 (LME nickel)? | Those stress replays are n/a without it | auto: desk check 7 (no terminal needed) |
+| 11 | Bloomberg's contract dates (last trade, first notice) stored for the book's futures | Until then expiries are estimated and flagged early | auto: desk check 8; one Pull Bloomberg now stores them |
+| 12 | LME curve tickers and prompt dates (cash, 3M, monthlies) | The LME forwards' marks | auto: `--lme` |
+| 13 | The research app on this PC pulls real data (its newest settlement is yesterday's, not mock) | Risk, carry, liquidity and the z-scores all read it | **manual**: open the research app, or read desk check 7's dates |
+| 14 | FX forward points divisor and broken-date forwards (`docs/open-questions.md` 27, 28, 71) | Only if Jason books FX forwards (none in his export yet) | auto: `py 2_launcher.py doctor --bloomberg` |
+
+After the fixes are applied: one **Pull Bloomberg now**, then the Data tab's status line
+should read marks complete, reference closes complete and contract dates from Bloomberg.
+
+## Running the check
 
 1. `git pull`, then in the project folder: `py 2_launcher.py bbg-check --dry-run`. It asks
-   Bloomberg nothing and prints how many securities the check would ask for (202 in 5
-   requests). If your terminal has a tight data allowance, start smaller in step 2.
+   Bloomberg nothing and prints how many securities and fields each check would ask for. If
+   your terminal has a tight data allowance, start smaller in step 2.
 2. `py 2_launcher.py bbg-check --limit 5`: a first real run on five roots, to see the
    report's shape.
-3. `py 2_launcher.py bbg-check --search`: the full run. `--search` also looks up candidate
-   roots, on Bloomberg's security search (the terminal's SECF), for any root Bloomberg does
-   not know. To narrow it: `--sector energy`, `--root NYMEX:CL --root SHFE:CU`.
+3. The full run: `py 2_launcher.py bbg-check --search --book --db data\raw\risk.db`.
+   `--search` looks up candidate roots on Bloomberg's security search for any root Bloomberg
+   does not know; `--book` checks Jason's own contracts; the desk checks run too. To narrow
+   it: `--sector energy`, `--root NYMEX:CL --root SHFE:CU`; `--desk`, `--lme` or
+   `--options` run only that part.
 4. Read `reports/bbg_check_<stamp>.txt`. Each root gets a verdict:
    - OK: name, exchange, currency and value per point all agree.
    - NOT_FOUND: Bloomberg does not know the root (its own words are quoted). The search
      candidates are listed; pick the right one in the worksheet.
    - NO_PRICE: the ticker exists but returned no price (entitlement, or a dead contract).
    - SCALE_MISMATCH: Bloomberg's currency is 'USd' / 'GBp' (cents / pence), or its value per
-     point (FUT_VAL_PT) is 100x off our multiplier. The suggested price scale is given.
+     point is 100x off our multiplier. The suggested price scale is given.
    - CURRENCY_MISMATCH, EXCHANGE_MISMATCH, NAME_CHECK: read the reason; the last two are
      warnings only.
+   The desk checks each say PASS, WARN, FAIL or SKIPPED in one line; the report ends with
+   the manual checks and a "For the housekeeper" section.
 5. Open `reports/contract_fixes_<stamp>.csv` in Excel. Every suggested change is one row;
    an OK root's "mark as verified" row is pre-filled `apply = yes`, everything else is
    blank. Type `yes` in `apply` for each change you agree with, save as CSV.
 6. `py 2_launcher.py contracts-apply reports/contract_fixes_<stamp>.csv --dry-run`, then
    without `--dry-run`. It refuses a row whose "current" value no longer matches the file,
    and never writes a file that would not load.
-7. Run `bbg-check` again until it exits 0 (or only warnings remain), then commit
-   `config/contracts.csv` and push, so the dev PC gets the fixes.
-   The report also has three sections for the newer products (2026-09-24): "LME curve tickers" (per metal: cash, 3M and the first monthly, with Bloomberg's prompt date against ours), "Options on futures" (per root: the chain Bloomberg lists against our ticker form, exercise style and lead months), and at the end "For the housekeeper": findings that are code, not `config/contracts.csv`; paste that section back to the session. `--lme` / `--options` run only those parts.
-8. Once Jason's blotter is uploaded: `py 2_launcher.py bbg-check --book --db data\raw\risk.db`
-   also checks the book's own contracts: each fill against Bloomberg's price (a fill 100x
-   off Bloomberg's is flagged), the stored contract dates against Bloomberg's, and the USD
-   conversion spots the non-USD futures need.
+7. Run `bbg-check` again until only warnings remain, then commit `config/contracts.csv` and
+   push, so the other PC gets the fixes.
 
 ## Every day
 
-1. Launch with `chelsea`. A browser tab opens on the risk monitor (the Blotter tab).
-2. Upload the trade blotter ("Upload trade file") and press Confirm. An upload replaces every
-   non-manual trade in the database, so there are never duplicates.
-3. Press **Pull Bloomberg now** (top bar, or "Pull now" on the Market data tab). One press
-   does everything, in order:
-   - Bloomberg's contract dates for any commodity future that has none on file (the
-     expiry moves from the estimate to Bloomberg's date);
-   - today's prices: FX spot and forward curves, futures, the USD conversion spots;
-   - the OIS curves and vol smiles the FX options need, and the options' prices;
-   - the backfill of past closes the P&L periods need;
-   - the marks snapshot (`data/bbg_snapshot/`), for the PC without a terminal.
-4. On the Market data tab, read the feed status:
-   - "N contract date(s) stored, M future(s) moved to Bloomberg's expiry": expected on the
-     first pulls after an upload.
-   - Futures "not requested: no verified Bloomberg ticker": that contract root needs the
-     ticker check above.
-   - The Bloomberg library lists every ticker the book needs; a gap is flagged with its
-     reason.
-5. Press **Check Bloomberg connection** (bottom of the Market data tab) and read every line:
-   - PASS on "blpapi installed" and "Terminal answers": nothing to do.
-   - FAIL on SPOT / FWD_OUTRIGHT / FUTURE_PX coverage: press Pull now again. If it stays
-     FAIL, the Terminal may not be logged in, or the ticker is wrong for that instrument:
-     run the ticker check.
-   - FAIL on OIS curve coverage (FX options): an open FX option needs its currency's OIS
-     curve. Press Pull now; if it recurs, the Terminal may lack curve permissions.
-   - WARNING "no strike on file" for an FX option: open the Blotter's Manual entry sub-tab
-     ("Option terms"), pick the option and type its terms once; they survive every upload.
-   - FAIL "Last marks pull ... looks stale": the last pull asked for zero marks but the
-     book now needs some. Press Pull now.
-6. Check the **Expiries** tab. RED or EXPIRED rows are contracts near first notice or last
-   trade. An "(est.)" date means Bloomberg's own date is not on file yet: the level is held
-   early on purpose, and the next pull fetches the real date.
-7. A trade the export does not carry (an OTC forward, option or FX swap): book it under
-   Blotter > Manual entry. It is saved as source MANUAL, priced on the next pull, and never
-   removed by an upload.
+1. Launch with `chelsea`. The browser opens on the Book tab.
+2. Upload the blotter ("Upload blotter" in the top bar). An upload is a merge by Trade Id:
+   trades already on file are replaced by the file's rows, new ones are added, a cancelled
+   row removes its trade. The Blotter tab shows what the upload did.
+3. Press **Pull Bloomberg now** (top bar). One press does everything, in order: Bloomberg's
+   contract dates for any future that has none on file; today's prices (futures, LME, FX,
+   the USD conversion spots); the backfill of the past closes the P&L periods need; the
+   marks snapshot for the PC without a terminal.
+4. Read the Data tab's status line: marks complete, reference closes complete, contract
+   dates from Bloomberg. Anything missing is listed under it with the trades it blocks; the
+   Marks check table shows every mark with its source, time and change, flagged rows first.
+5. If something stays missing after a second pull, open the Data tab's Diagnostics fold and
+   press **Check Bloomberg connection**; a ticker that Bloomberg does not know needs the
+   check above.
+6. Read the Book's "Needs you": first notice or expiry coming up, missing marks, legs that
+   could not be paired, positions large against the market's open interest or volume.
 
 ## Moving the marks to the other PC
 

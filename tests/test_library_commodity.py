@@ -17,7 +17,7 @@ from data.ingest import schema
 AS_OF = "2026-09-24"
 _INSTRUMENT = ("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)")
-_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+_TRADE = "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 _LEG = "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)"
 
 

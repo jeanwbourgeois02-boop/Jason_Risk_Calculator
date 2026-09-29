@@ -1,3 +1,4 @@
 - [NDF removal 2026-09-24](ndf_removal_2026_09_24.md) — adapter has no NDF rules; ndf.py deleted the same day; sample-file test date; all my files LF.
 - [LME forwards on the ladder 2026-09-24](lme_forwards_on_ladder_2026_09_24.md) — USD leg only, metal never a currency; delta_per_ccy: FUTURE out, LME USD leg in (user yes 2026-09-28, C15).
 - Older notes on these files live in `.claude/agent-memory/cash-ladder/` (grid vs exposure `>=`/`>`, dollar convention and gold, lane discipline); the NDF note there is obsolete.
+- [Closed-out options carry no delta 2026-09-29](closed_out_options_no_delta_2026_09_29.md) — valuation's grouping imported; ids via json_each; not in `unresolved` (would read as missing).

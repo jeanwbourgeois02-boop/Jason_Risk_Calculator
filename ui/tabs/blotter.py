@@ -1,4 +1,21 @@
-"""Trades tab (the Blotter until 2026-09-28): docs/BUILD_PLAN.md section 5 "Blotter", rebuilt
+"""Blotter tab (key "blotter"; the Trades tab of 2026-09-28, the Blotter again since 2026-09-29).
+
+2026-09-29 (user): "What did I load, and did it load right?" The tab is the audit trail of the
+uploaded file and shows NO P&L, mark, Greek or period figure (the Book is the one place for
+them). One view, `blotter_view`: the last upload (one line, then the rows that did not become
+trades and the file-level warnings, `data.ingest.upload.last_upload_report` /
+`last_upload_issues`; this block left the Data tab that day), every fill as uploaded (one table,
+one row per trade on file: Trade Id, trade date, side, quantity with its unit, the broker's
+description as written, our contract, the broker's price and ours with a grey x100 where the
+broker's price units were converted, the trade name, the type and the Book position the trade
+landed in, the status and its uploads, `trade_upload_trail`; filters, a search, a date range and
+a CSV), the upload history (`upload_history`, a closed fold) and the Data issues drawer. The
+Options sub-tab sits beside it only while the book holds an open option (`has_open_option`),
+kept as it was; the Bundles sub-tab left. The notes below are the tab's history: the priced
+trade table they describe (`scope_df`, `detail_table`, the strips) is no longer rendered on this
+tab; `add_instrument_fields` and `add_trade_labels` stay, the P&L tab reads them.
+
+Before 2026-09-29 -- Trades tab (the Blotter until 2026-09-28): docs/BUILD_PLAN.md section 5 "Blotter", rebuilt
 2026-09-15 into sub-tabs (user decision): All trades (the Total book), Options, Bundles. The FX
 and Futures & LME sub-tabs left on 2026-09-28 (UI redesign wave 3: their rows are all in All
 trades, their summaries on the P&L and Exposure tabs) and their code with them (`ui.tabs.blotter_fx`
@@ -107,12 +124,11 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
-from ui.tabs import blotter_bundles as bundles_ui
 from ui.tabs import options as options_ui
 from ui.tabs.blotter_pricing import (
     HEADLINE_ORDER,
@@ -134,8 +150,9 @@ from ui.tabs.controls import today_ny
 from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import (
-    MISSING, about, format_cell, is_fx_pair, issues_drawer, marker, plain_words, price_text, quoted_unit,
-    short_money, short_root_name, trade_type_words,
+    HAND_KINDS, MISSING, about, contract_name, format_cell, fx_name, is_fx_pair, issues_drawer, lme_name, marker,
+    missing_cell, plain_words, price_text, quoted_unit, short_money, short_root_name, spread_name, trade_type_words,
+    type_cell, type_disagrees,
 )
 
 # The tab's own date picker and title row left on 2026-09-28 (the screens tidy): the header's
@@ -163,8 +180,12 @@ _ALL = "All"
 # of All trades; the blotter upload is the only way a trade enters the app). Rates left on
 # 2026-09-24 (the macro trader's products are out of the app, CLAUDE.md "Commodity
 # conversion plan").
-SCOPE_ORDER = ("total", "options", "bundles")
-SCOPE_LABELS = {"total": "All trades", "options": "Options", "bundles": "Bundles"}
+# The Blotter (2026-09-29): one view, "total" (every fill as uploaded, `blotter_view`), and the
+# Options sub-tab beside it only while the book holds an open option (`has_open_option`); the
+# sub-tab bar is hidden otherwise. The Bundles sub-tab left that day (`ui.tabs.blotter_bundles`
+# stays on disk, rendered nowhere; the bundle data is untouched).
+SCOPE_ORDER = ("total", "options")
+SCOPE_LABELS = {"total": "All fills", "options": "Options"}
 SCOPE_PRODUCTS = {
     "total": None,
     # An option on a commodity future (CMDTY_OPTION) sits with the FX options: ui.tabs.options
@@ -173,9 +194,10 @@ SCOPE_PRODUCTS = {
 }
 # Sub-tabs that are forms/lists of their own, not `priced_value_book`-shaped tables:
 # no strip / row-detail / filter callbacks are registered for them.
-_NON_TABLE_SCOPES = ("bundles", "options")
-# Views rebuilt whole when only marks changed (ui/revision.py); see `_update`.
-_MARKS_REBUILD_SCOPES = ("bundles",)
+_NON_TABLE_SCOPES = ("total", "options")
+# Views rebuilt whole when only marks changed (ui/revision.py); see `_update`. None since the
+# Blotter shows no mark (2026-09-29).
+_MARKS_REBUILD_SCOPES: tuple = ()
 # Sub-tabs whose own module refreshes its table IN PLACE from the revision stores
 # (`ui.tabs.options._render` / `_headline`), so it left the list above on 2026-09-18: a
 # wholesale rebuild on every Bloomberg pull reset the Options terms editor's dropdown and
@@ -1732,22 +1754,698 @@ def _scope_layout_body(scope: str, conn: sqlite3.Connection, as_of: str) -> html
     return html.Div(body)
 
 
-def bundles_layout(conn: sqlite3.Connection, as_of: str) -> html.Div:
-    from data.ingest.themes import list_bundles
+# =========================================================================== the Blotter (2026-09-29)
+# User, 2026-09-29: the Trades tab is the Blotter again, "What did I load, and did it load right?":
+# the audit trail of Jason's uploaded file, with NO P&L (the Book is the one place for P&L, marks
+# and period figures). Top to bottom: the last upload (its one line, then the rows that did not
+# become trades and the file-level warnings), every fill as uploaded (one table, one row per trade
+# on file, open, settled or closed out), the upload history (a closed fold), the one Data issues
+# drawer. Read as the upload lane recorded it (`data.ingest.upload`: `last_upload_report`,
+# `last_upload_issues`, `upload_history`, `trade_upload_trail`) and as `trades` / `instruments`
+# hold it; each trade's status is the shared reader's, its type and spread the Book's
+# (`ui.tabs.book.trade_types`, spreads-engine's positions). Nothing is priced or recomputed here.
+BLOTTER_QUESTION = "What did I load, and did it load right?"
+FILLS_ID = "blotter-fills"
+FILLS_BODY_ID = f"{FILLS_ID}-body"
+FILLS_SEARCH_ID = f"{FILLS_ID}-search"
+FILLS_DATES_ID = f"{FILLS_ID}-dates"
+FILLS_CLEAR_ID = f"{FILLS_ID}-filter-clear"
+FILLS_CSV_ID = f"{FILLS_ID}-csv"
+FILLS_DOWNLOAD_ID = f"{FILLS_ID}-download"
+LAST_UPLOAD_ID = "blotter-last-upload"
+HISTORY_ID = "blotter-upload-history"
+BLOTTER_ISSUES_ID = "blotter-issues"
+FILL_FILTER_COLS = ("strategy", "trade_type", "commodity", "status")
+FILL_FILTER_LABELS = {"strategy": "Trade name", "trade_type": "Type", "commodity": "Commodity", "status": "Status"}
+NO_HISTORY = "No upload recorded on this database"
+FILLS_MAX_ROWS = 500          # rows drawn at once; the CSV always holds every row the filters keep
+OPTION_PRODUCTS = ("FX_OPTION", "CMDTY_OPTION")
+FX_HEDGE_GROUP = "FX hedges"
+_STATUS_WORDS = {"OPEN": "open", "SETTLED": "settled", "CLOSED": "closed out"}
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_FILE_COUNT_KEYS = ("futures", "options_on_futures", "lme_forwards", "fx_forwards", "fx_spot", "fx_options")
+# (key, screen label, header hover): the fills table's columns, in order.
+FILL_COLUMNS = (
+    ("trade_id", "Trade Id", "The broker's Trade Id, the key an upload merges on."),
+    ("trade_date", "Trade date", "The trade date as the file gave it."),
+    ("side", "Side", "Buy or sell, as the file gave it."),
+    ("quantity", "Quantity", "Lots for a future or an option on one, tonnes for an LME ticket, the base currency "
+                             "amount for an FX trade."),
+    ("broker_symbol", "As written", "The file's Symbol cell exactly as written ('CLZ6-USAA'). A trade loaded before "
+                                    "29 Sep shows the broker's description in grey instead: re-upload the file to "
+                                    "fill it."),
+    ("contract", "Our contract", "The contract the app read the row as, in plain words; the instrument id on hover."),
+    ("broker_price", "Broker price", "The file's Price cell exactly as written, in the broker's units. A dash when "
+                                     "it was not recorded (loaded before 29 Sep) or the cell was blank, so the fill "
+                                     "was rebuilt from NetInvoice."),
+    ("price", "Our price", "The fill the app stores, in Bloomberg's units, the price every P&L figure uses. A grey "
+                           "×100 says it is the broker's price as written times 100."),
+    ("strategy", "Trade name", "Jason's name for the trade, the text after the underscore of the PBRoot."),
+    ("trade_type", "Type", "Cross exchange, cross product or term structure: the type of the position the trade "
+                           "sits in, the same on every tab."),
+    ("spread", "Spread", "The Book position the trade landed in: a pair, a spread, an FX hedge, or outright when it "
+                         "is in none."),
+    ("status", "Status", "Open, settled (its P&L frozen) or closed out (an option bought and sold back)."),
+    ("uploads", "Uploads", "The last upload that added or replaced the trade; the full trail on hover."),
+)
+_FILL_LEFT = ("trade_id", "side", "broker_symbol", "contract", "strategy", "trade_type", "spread", "status", "uploads")
+
+
+def _num_or_none(value) -> Optional[float]:
     try:
-        from engine.pnl.ledger import period_pnl_by
-        grouped = period_pnl_by(conn, as_of, "theme")
-    except Exception:
-        grouped = {}
-    bundles = list_bundles(conn)
-    return html.Div([
-        bundles_ui.bundle_list_table(bundles, grouped),
-        bundles_ui.create_form(),
-        bundles_ui.add_remove_form(),
-        dcc.Store(id=bundles_ui.BUNDLE_SELECTED_ID),
-        dcc.Store(id=bundles_ui.BUNDLE_REVISION_ID),
-        html.Div(id="blotter-bundle-detail-container"),
-    ])
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
+
+
+def _day_text(iso, with_year: bool = True) -> str:
+    """'28 Sep 2026' from '2026-09-28' ('28 Sep' without the year); the text as it is when it is
+    not a date."""
+    import datetime as _dt
+    try:
+        d = _dt.date.fromisoformat(str(iso)[:10])
+    except (TypeError, ValueError):
+        return str(iso or "")
+    return f"{d.day} {_MONTHS[d.month - 1]}" + (f" {d.year}" if with_year else "")
+
+
+def _ny_stamp(iso):
+    """The timestamp in New York, or None when it does not parse (a naive one is read as UTC)."""
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    try:
+        stamp = _dt.datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=_dt.timezone.utc)
+    return stamp.astimezone(ZoneInfo("America/New_York"))
+
+
+def ny_day(iso) -> str:
+    """'28 Sep' (the New York date) from a UTC timestamp; the text as it is when it does not parse."""
+    local = _ny_stamp(iso)
+    return str(iso or "") if local is None else f"{local.day} {_MONTHS[local.month - 1]}"
+
+
+def ny_time(iso) -> str:
+    """'Mon 28 Sep 21:34 NY' from a UTC timestamp ('2026-09-29T01:34:13+00:00'), on the app's one
+    clock (New York); the text as it is when it does not parse."""
+    local = _ny_stamp(iso)
+    if local is None:
+        return str(iso or "")
+    return f"{_WEEKDAYS[local.weekday()]} {local.day} {_MONTHS[local.month - 1]} {local:%H:%M} NY"
+
+
+def quantity_text(quantity, unit: str) -> str:
+    """'120 lots', '350 t', '2,000,000 USD': the size at full figures with its unit, unsigned (Side
+    carries the direction)."""
+    q = _num_or_none(quantity)
+    if q is None:
+        return MISSING
+    q = abs(q)
+    body = f"{q:,.0f}" if q == int(q) else f"{q:,.4f}".rstrip("0").rstrip(".")
+    if unit == "lots" and q == 1:
+        unit = "lot"
+    return f"{body} {unit}".strip()
+
+
+def _parse_cell(text) -> Optional[float]:
+    """The number a Price cell as written reads as ('78,450' -> 78450.0), or None."""
+    cleaned = str(text or "").replace(",", "").replace(" ", "").strip()
+    return _num_or_none(cleaned) if cleaned else None
+
+
+SYMBOL_NOT_RECORDED = "symbol not recorded: loaded before 29 Sep, re-upload to fill"
+PRICE_NOT_RECORDED = "price not recorded: loaded before 29 Sep, re-upload the file to fill it"
+PRICE_FROM_NETINVOICE = "the file's Price cell was blank or not a number: the fill was rebuilt from NetInvoice"
+
+
+def _read_trades(conn: sqlite3.Connection) -> list:
+    """Every trade on file with its instrument's currencies and expiry, its last leg date and its
+    option terms, as dicts; a database from before the PBRoot or the raw-cell columns
+    (broker_symbol, broker_price) reads '' for them."""
+    base = ("SELECT t.trade_id, t.trade_date, t.quantity, t.price, t.product, t.instrument_id, t.description, "
+            "t.account, {labels}, COALESCE(i.base_ccy, ''), COALESCE(i.quote_ccy, ''), COALESCE(i.expiry_date, '') "
+            "FROM trades t LEFT JOIN instruments i ON i.instrument_id = t.instrument_id")
+    keys = ("trade_id", "trade_date", "quantity", "price", "product", "instrument_id", "description", "account",
+            "strategy", "label_type", "pb_root", "broker_symbol", "broker_price", "base_ccy", "quote_ccy",
+            "expiry_date")
+    rows = None
+    for labels in ("t.strategy, t.trade_type, t.pb_root, t.broker_symbol, t.broker_price",
+                   "t.strategy, t.trade_type, t.pb_root, '', ''", "t.strategy, '', '', '', ''"):
+        try:
+            rows = conn.execute(base.format(labels=labels)).fetchall()
+            break
+        except sqlite3.OperationalError:
+            continue
+    if rows is None:
+        rows = []
+    out = [dict(zip(keys, r)) for r in rows]
+    try:
+        last_leg = {str(t): str(d or "") for t, d in
+                    conn.execute("SELECT trade_id, MAX(settle_date) FROM trade_legs GROUP BY trade_id")}
+    except sqlite3.Error:
+        last_leg = {}
+    try:
+        terms = {str(i): (_num_or_none(k), str(o or "")) for i, k, o in
+                 conn.execute("SELECT instrument_id, strike, option_type FROM instrument_options")}
+    except sqlite3.Error:
+        terms = {}
+    for r in out:
+        r["trade_id"] = str(r["trade_id"])
+        r["settle_date"] = last_leg.get(r["trade_id"], "")
+        r["strike"], r["option_type"] = terms.get(str(r["instrument_id"]), (None, ""))
+    return out
+
+
+def _leg_label(leg: dict, roots: dict) -> str:
+    inst, rid = str(leg.get("instrument_id") or ""), str(leg.get("root_id") or "")
+    if str(leg.get("product") or "") == "LME_FWD":
+        return lme_name(roots.get(rid), rid, str(leg.get("prompt") or ""))
+    return contract_name(inst, roots.get(rid), rid)
+
+
+def _ids_of(entry: dict) -> list:
+    ids = entry.get("trade_ids") or ([entry.get("trade_id")] if entry.get("trade_id") else [])
+    return [str(t) for t in ids]
+
+
+def spread_of_trades(spreads: Optional[dict], roots: dict) -> dict:
+    """{trade_id: (spread name, hover)}: the Book position each trade landed in, as spreads-engine
+    gave it: a strategy's pair (named by its legs, "WTI Dec26 / WTI Jan27", as the Book names it),
+    an FX hedge of a strategy, an unmatched leg of one ("outright"), a spread found by the rule
+    (`spread_name`). A trade in none is not in the dict (the caller reads "outright")."""
+    out: Dict[str, tuple] = {}
+    result = spreads or {}
+    for entry in result.get("strategies") or []:
+        who = str(entry.get("name") or "") or "the unlabelled trades"
+        for p in entry.get("pairs") or []:
+            name = " / ".join(_leg_label(leg, roots) for leg in p.get("legs") or []) or "pair"
+            words = trade_type_words(p.get("type")) or "pair"
+            for tid in _ids_of(p):
+                out.setdefault(tid, (name, f"A {words} pair of {who}."))
+        for h in entry.get("hedges") or []:
+            for tid in _ids_of(h):
+                out.setdefault(tid, ("FX hedge", f"An FX hedge of {who}."))
+        for r in entry.get("residuals") or []:
+            for tid in _ids_of(r):
+                out.setdefault(tid, ("outright", f"An unmatched leg of {who}: no opposite leg to pair it with."))
+    for p in result.get("positions") or []:
+        if str(p.get("kind") or "") in HAND_KINDS:
+            continue
+        name = spread_name(p, roots)
+        for tid in _ids_of(p):
+            out.setdefault(tid, (name, f"Found by the spread rule: {p.get('name') or name}."))
+    return out
+
+
+def _commodity_label(product: str, root) -> str:
+    """The commodity across exchanges, as the Book groups it ('Copper', 'Live cattle'); FX hedges
+    for an FX product or a root of the fx sector; '' when the root is unknown."""
+    if product in FX_ROW_PRODUCTS:
+        return FX_HEDGE_GROUP
+    if root is None:
+        return ""
+    if str(getattr(root, "sector", "") or "") == "fx":
+        return FX_HEDGE_GROUP
+    try:
+        from engine.curve import subsector_name
+        return subsector_name(str(getattr(root, "subsector", "") or "")) or short_root_name(root)
+    except Exception:  # noqa: BLE001 -- the root's own short name
+        return short_root_name(root)
+
+
+_FILL_FRAME_COLUMNS = [
+    "trade_id", "trade_date", "side", "quantity", "qty_unit", "broker_symbol", "description", "contract",
+    "instrument_id", "product", "product_label", "commodity", "broker_price", "broker_price_tip", "price",
+    "price_scale", "price_scaled", "price_unit", "strategy", "pb_root",
+    "trade_type", "type_source", "type_note", "spread", "spread_tip", "status", "status_tip", "uploads",
+    "uploads_tip", "account"]
+
+
+def fills_frame(conn: sqlite3.Connection, as_of: str) -> tuple:
+    """(frame, issues, with_uploads): one row per trade on file, newest trade date first, every
+    column the fills table and its CSV show with their hovers; the Data issues lines
+    [(label, sentence)]; and whether any upload is recorded (the Uploads column shows then)."""
+    from data.contracts import load_roots
+    try:
+        roots = dict(load_roots())
+    except Exception:  # noqa: BLE001 -- names fall back to the ids on file
+        roots = {}
+    trades = _read_trades(conn)
+    issues: list = []
+    status_of: Dict[str, str] = {}
+    status_error = ""
+    try:
+        df, _, _ = priced_value_book(conn, as_of)
+        if not df.empty:
+            status_of = {str(t): str(s or "") for t, s in zip(df["trade_id"], df["status"])}
+    except Exception as exc:  # noqa: BLE001 -- the Status column says why
+        logging.getLogger(__name__).exception("Blotter: statuses unavailable on %s", as_of)
+        status_error = f"the book could not be read on {as_of} ({type(exc).__name__}: {exc})"
+    types: Dict[str, dict] = {}
+    spreads: dict = {}
+    if trades:
+        try:
+            from ui.tabs.book import _labels, _spreads, trade_types
+            spreads = _spreads(conn, as_of) or {}
+            types = trade_types({"labels": _labels(conn), "spreads": spreads})
+        except Exception as exc:  # noqa: BLE001 -- the broker's own labels stand
+            logging.getLogger(__name__).exception("Blotter: positions unavailable on %s", as_of)
+            issues.append(("Positions", f"the Book's positions could not be read, so Type is the broker's own label "
+                                        f"and Spread reads outright ({type(exc).__name__}: {exc})"))
+    spread_map = spread_of_trades(spreads, roots)
+    for rev in spreads.get("review") or []:
+        ids = ", ".join(str(t) for t in rev.get("trade_ids") or [])
+        issues.append(("Could not group", f"{ids}: {rev.get('reason') or 'the spread rule left these trades for review'}"))
+    history: list = []
+    try:
+        from data.ingest.upload import trade_upload_trail, upload_history
+        history = upload_history(conn)
+    except Exception as exc:  # noqa: BLE001
+        issues.append(("Uploads", f"the upload history could not be read ({type(exc).__name__}: {exc})"))
+    records = []
+    type_checks: Dict[str, list] = {}   # one Data issues line per note, naming its trades
+    for r in trades:
+        tid, product = r["trade_id"], str(r["product"] or "")
+        base, quote, inst = str(r["base_ccy"]), str(r["quote_ccy"]), str(r["instrument_id"])
+        root = roots.get(base)
+        pair = f"{base}{quote}" if base and quote else inst
+        if product in ("FUTURE", "CMDTY_OPTION"):
+            contract = contract_name(inst, root, base)
+        elif product == "LME_FWD":
+            contract = lme_name(root, base, r["settle_date"])
+        elif product in FX_ROW_PRODUCTS:
+            contract = fx_name(pair, product, r["settle_date"] or r["expiry_date"], r["option_type"], r["strike"])
+        else:
+            contract = inst
+        if product in ("FUTURE", "CMDTY_OPTION", "LME_FWD") and root is None:
+            issues.append((tid, f"{inst}: its contract root {base or '(none)'} is not in the contract universe"))
+        unit = QUANTITY_UNIT_OF.get(product) or (base if product in FX_ROW_PRODUCTS else "")
+        q = _num_or_none(r["quantity"])
+        price = _num_or_none(r["price"])
+        scale = float(getattr(root, "broker_price_scale", 1.0) or 1.0) if product in ("FUTURE", "CMDTY_OPTION") else 1.0
+        broker_symbol = str(r["broker_symbol"] or "")
+        broker_price = str(r["broker_price"] or "")
+        if broker_price:
+            broker_tip = ""
+        elif broker_symbol:
+            broker_tip = PRICE_FROM_NETINVOICE
+        else:
+            broker_tip = PRICE_NOT_RECORDED
+        parsed = _parse_cell(broker_price)
+        scaled = (scale != 1.0 and price is not None and parsed is not None
+                  and abs(price - parsed * scale) <= 1e-9 * max(1.0, abs(price)))
+        if product in ("FX_SPOT", "FX_FWD") and is_fx_pair(pair):
+            price_unit = pair
+        elif product in FX_ROW_PRODUCTS:
+            price_unit = ""
+        else:
+            price_unit = quoted_unit(root)
+        raw_status = status_of.get(tid, "")
+        if raw_status:
+            status, status_tip = _STATUS_WORDS.get(raw_status, raw_status.lower()), ""
+        elif str(r["trade_date"] or "") > str(as_of):
+            status, status_tip = "", f"dealt after the as-of date {as_of}"
+        else:
+            status, status_tip = "", status_error or f"not in the book valued on {as_of}"
+            issues.append((tid, f"status unknown: {status_tip}"))
+        t = types.get(tid) or {}
+        label_type = str(r["label_type"] or "")
+        trade_type = str(t.get("trade_type") or label_type)
+        type_source = str(t.get("type_source") or ("label" if label_type else ""))
+        type_note = str(t.get("type_note") or ("the broker's label on the trade" if label_type else ""))
+        if type_disagrees(type_source, type_note):
+            type_checks.setdefault(type_note or "the labels disagree", []).append(tid)
+        spread, spread_tip = spread_map.get(tid, ("outright", "In no pair or spread of the Book."))
+        uploads, uploads_tip = "", ""
+        if history:
+            trail = trade_upload_trail(conn, tid)
+            if trail:
+                last = trail[0]
+                uploads = f"{last['action']} {ny_day(last['uploaded_at'])}"
+                if len(trail) > 1:
+                    uploads += f" · {len(trail)} uploads"
+                uploads_tip = "\n".join(f"{ny_time(x['uploaded_at'])} · {x['filename']} · {x['action']}"
+                                        for x in trail)
+            else:
+                uploads_tip = "on file before the upload history began: no recorded upload names it"
+        records.append({
+            "trade_id": tid, "trade_date": str(r["trade_date"] or ""),
+            "side": "" if q is None or q == 0 else ("Buy" if q > 0 else "Sell"),
+            "quantity": None if q is None else abs(q), "qty_unit": unit,
+            "broker_symbol": broker_symbol, "description": str(r["description"] or ""), "contract": contract,
+            "instrument_id": inst,
+            "product": product, "product_label": _fmt_product(product), "commodity": _commodity_label(product, root),
+            "broker_price": broker_price, "broker_price_tip": broker_tip, "price": price, "price_scale": scale,
+            "price_scaled": bool(scaled), "price_unit": price_unit,
+            "strategy": str(r["strategy"] or ""), "pb_root": str(r["pb_root"] or ""),
+            "trade_type": trade_type, "type_source": type_source, "type_note": type_note,
+            "spread": spread, "spread_tip": spread_tip, "status": status, "status_tip": status_tip,
+            "uploads": uploads, "uploads_tip": uploads_tip, "account": str(r["account"] or ""),
+        })
+    for note, ids in type_checks.items():
+        issues.append(("Type to check", f"{len(ids)} trade{'s' if len(ids) != 1 else ''} ({', '.join(ids)}): {note}"))
+    frame = pd.DataFrame(records, columns=_FILL_FRAME_COLUMNS)
+    if not frame.empty:
+        frame = frame.sort_values(["trade_date", "trade_id"], ascending=[False, False], kind="mergesort")
+        frame = frame.reset_index(drop=True)
+    return frame, issues, bool(history)
+
+
+def filter_fills(df: pd.DataFrame, picks: Optional[dict] = None, search: Optional[str] = None,
+                 start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
+    """The fills the filters keep: each picked column's values (none picked keeps all), the
+    trade date within [start, end], and the search text in the Trade Id, the Symbol cell as
+    written, the description, our contract or the instrument id (case-insensitive)."""
+    out = df
+    if out.empty:
+        return out
+    for col, picked in (picks or {}).items():
+        if picked and col in out.columns:
+            out = out[out[col].isin(list(picked))]
+    if start:
+        out = out[out["trade_date"] >= str(start)[:10]]
+    if end:
+        out = out[out["trade_date"] <= str(end)[:10]]
+    needle = str(search or "").strip().lower()
+    if needle and not out.empty:
+        hit = pd.Series(False, index=out.index)
+        for col in ("trade_id", "broker_symbol", "description", "contract", "instrument_id"):
+            if col not in out.columns:
+                continue
+            hit |= out[col].astype(str).str.lower().str.contains(needle, regex=False)
+        out = out[hit]
+    return out
+
+
+_FILL_WRAP = ("broker_symbol", "spread")   # long text: wraps so the table fits one 1680 px screen
+
+
+def _cell(content, key: str, title: Optional[str] = None):
+    extra = {"title": plain_words(title)} if title else {}
+    classes = " ".join(c for c in ("l" if key in _FILL_LEFT else "", "blotter-wrap" if key in _FILL_WRAP else "") if c)
+    return html.Td(content, className=classes or None, **extra)
+
+
+def _fill_row(r: dict, with_uploads: bool) -> html.Tr:
+    unit = str(r.get("price_unit") or "")
+    price = _num_or_none(r.get("price"))
+    scale = float(r.get("price_scale") or 1.0)
+    our = [price_text(price, unit, fill=price)]
+    if r.get("price_scaled"):
+        our.append(html.Span(f"×{scale:g}", className="cell-unit",
+                             title=f"The broker books this contract in whole currency units, Bloomberg in cents or "
+                                   f"pence: the broker's price × {scale:g} is the fill the app stores and prices."))
+    strategy = r.get("strategy") or missing_cell("no trade name: the file's PBRoot cell is empty on this trade")
+    status = r.get("status") or missing_cell(r.get("status_tip") or "status unknown")
+    symbol = r.get("broker_symbol")
+    if not symbol:
+        desc = r.get("description")
+        symbol = (html.Span(desc, style={"color": "#8a919c"}, title=SYMBOL_NOT_RECORDED)
+                  if desc else missing_cell(SYMBOL_NOT_RECORDED))
+    broker = r.get("broker_price") or missing_cell(r.get("broker_price_tip") or PRICE_NOT_RECORDED)
+    cells = [
+        _cell(r.get("trade_id"), "trade_id"),
+        _cell(_day_text(r.get("trade_date")), "trade_date"),
+        _cell(r.get("side") or MISSING, "side"),
+        _cell(quantity_text(r.get("quantity"), str(r.get("qty_unit") or "")), "quantity"),
+        _cell(symbol, "broker_symbol"),
+        _cell(r.get("contract"), "contract", f"{r.get('instrument_id')} · {r.get('product_label')}"),
+        _cell(broker, "broker_price"),
+        _cell(our, "price"),
+        _cell(strategy, "strategy", f"PBRoot {r.get('pb_root')}" if r.get("pb_root") else None),
+        html.Td(type_cell(r.get("trade_type"), r.get("type_source"), r.get("type_note")), className="l"),
+        _cell(r.get("spread"), "spread", r.get("spread_tip")),
+        _cell(status, "status", r.get("status_tip") or None),
+    ]
+    if with_uploads:
+        cells.append(_cell(r.get("uploads") or MISSING, "uploads", r.get("uploads_tip")))
+    return html.Tr(cells)
+
+
+def fills_table(df: pd.DataFrame, total: int, with_uploads: bool) -> html.Div:
+    """The fills shown: a count line, then the table (at most `FILLS_MAX_ROWS` rows drawn, the
+    rest counted; the CSV holds them all)."""
+    shown = len(df)
+    count = f"{total} fills on file" if shown == total else f"{shown} of {total} fills"
+    if df.empty:
+        return html.Div([html.Div(count, className="book-section-meta"),
+                         html.P("No fill matches the filters.", className="book-section-meta")])
+    cols = [c for c in FILL_COLUMNS if with_uploads or c[0] != "uploads"]
+    head = html.Tr([html.Th(label, title=tip, className="l" if key in _FILL_LEFT else None)
+                    for key, label, tip in cols])
+    body = [_fill_row(r, with_uploads) for r in df.head(FILLS_MAX_ROWS).to_dict("records")]
+    children = [html.Div(count, className="book-section-meta blotter-fills-count"),
+                html.Div(html.Table([html.Thead(head), html.Tbody(body)], className="book-table blotter-fills-table"),
+                         className="blotter-fills-scroll")]
+    if shown > FILLS_MAX_ROWS:
+        children.append(html.P(f"The newest {FILLS_MAX_ROWS} of {shown} are drawn; narrow them with the filters, or "
+                               f"Download CSV for every one.", className="book-section-meta"))
+    return html.Div(children)
+
+
+_CSV_COLUMNS = (("trade_id", "Trade Id"), ("trade_date", "Trade date"), ("side", "Side"), ("quantity", "Quantity"),
+                ("qty_unit", "Unit"), ("broker_symbol", "As written"), ("description", "Description"),
+                ("contract", "Our contract"),
+                ("instrument_id", "Instrument"), ("product_label", "Product"), ("commodity", "Commodity"),
+                ("broker_price", "Broker price"), ("price", "Our price"), ("price_scale", "Broker price scale"),
+                ("strategy", "Trade name"), ("pb_root", "PBRoot"), ("trade_type", "Type"), ("spread", "Spread"),
+                ("status", "Status"), ("account", "Account"), ("uploads_tip", "Uploads"))
+
+
+def fills_csv(df: pd.DataFrame):
+    """`dcc.send_data_frame` of the fills the filters keep, at full figures under the screen's
+    labels; None with no rows."""
+    if df.empty:
+        return None
+    frame = df[[c for c, _ in _CSV_COLUMNS]].copy()
+    frame["trade_type"] = [trade_type_words(t) for t in frame["trade_type"]]
+    frame["uploads_tip"] = [str(t or "").replace("\n", "; ") for t in frame["uploads_tip"]]
+    frame = frame.rename(columns=dict(_CSV_COLUMNS))
+    return dcc.send_data_frame(frame.to_csv, "blotter-fills.csv", index=False)
+
+
+def _fill_options(df: pd.DataFrame, col: str) -> list:
+    if df.empty:
+        return []
+    values = sorted({str(v) for v in df[col].tolist() if v not in (None, "")})
+    if col == "trade_type":
+        return [{"label": trade_type_words(v) or v, "value": v} for v in values]
+    return [{"label": v, "value": v} for v in values]
+
+
+def fills_filter_bar(df: pd.DataFrame) -> html.Div:
+    """The filter bar (the Trades tab's pattern): trade name, type, commodity and status as
+    multi-select dropdowns listing the values on file, a trade-date range, a search over the
+    Trade Id, the symbol as written and our contract, Clear filters and Download CSV."""
+    children = [html.Div(className="blotter-filter", children=[
+        html.Label(FILL_FILTER_LABELS[c]),
+        dcc.Dropdown(id=f"{FILLS_ID}-filter-{c}", options=_fill_options(df, c), value=[], multi=True,
+                     placeholder="All", className="blotter-filter-dropdown"),
+    ]) for c in FILL_FILTER_COLS]
+    dates = sorted(d for d in df["trade_date"].tolist() if d) if not df.empty else []
+    children.append(html.Div(className="blotter-filter", children=[
+        html.Label("Trade date"),
+        dcc.DatePickerRange(id=FILLS_DATES_ID, min_date_allowed=dates[0] if dates else None,
+                            max_date_allowed=dates[-1] if dates else None, display_format="D MMM YYYY",
+                            first_day_of_week=1, clearable=True, start_date_placeholder_text="from",
+                            end_date_placeholder_text="to", className="blotter-date-range"),
+    ]))
+    children.append(html.Div(className="blotter-filter", children=[
+        html.Label("Search"),
+        dcc.Input(id=FILLS_SEARCH_ID, type="text", value="", debounce=True,
+                  placeholder="trade id, symbol or contract", className="blotter-filter-search"),
+    ]))
+    children.append(html.Button("Clear filters", id=FILLS_CLEAR_ID, n_clicks=0, className="btn btn--ghost"))
+    children.append(html.Button("Download CSV", id=FILLS_CSV_ID, n_clicks=0, className="btn btn--ghost",
+                                title="The fills shown, every column, at full figures"))
+    children.append(dcc.Download(id=FILLS_DOWNLOAD_ID))
+    return html.Div(className="blotter-filter-bar", children=children)
+
+
+def _section_head(title: str, text: str, meta=None, level: str = "h4") -> html.Div:
+    children = [about(title, text, level=level, className="book-section-title")]
+    if meta:
+        children.append(html.Span(meta, className="book-section-meta"))
+    return html.Div(children, className="book-section-head")
+
+
+_CONVERTED_RE = re.compile(r"(\d+) fill\(s\) converted from the broker's price units[^:]*:\s*([^.]+)\.")
+
+
+def _in_file(report: dict) -> int:
+    return sum(int(report.get(k) or 0) for k in _FILE_COUNT_KEYS)
+
+
+def last_upload_line(report: dict) -> tuple:
+    """(line, hover) of the last upload: the file, its time, the merge counts ('89 trades in the
+    file: 12 added, 77 replaced, 0 removed; 89 on file') and the fills converted from the broker's
+    price units, read from the upload's own summary; the whole summary on hover."""
+    merge = (f"{_in_file(report)} trades in the file: {int(report.get('added') or 0)} added, "
+             f"{int(report.get('replaced') or 0)} replaced, {int(report.get('removed') or 0)} removed; "
+             f"{int(report.get('on_file_after') or 0)} on file")
+    bits = [str(report.get("filename") or "(no file name)"), ny_time(report.get("uploaded_at")), merge]
+    found = _CONVERTED_RE.search(str(report.get("summary") or ""))
+    if found:
+        what = found.group(2).strip()
+        factor = re.search(r"\s*\(x([\d.]+)\)\s*$", what)
+        if factor:
+            what = f"×{factor.group(1)}: {what[:factor.start()].strip()}"
+        bits.append(f"{found.group(1)} fills converted from the broker's price units ({what})")
+    hover = f"Uploaded {report.get('uploaded_at')} (UTC).\n{report.get('summary') or ''}".strip()
+    return " · ".join(bits), hover
+
+
+_LAST_UPLOAD_ABOUT = ("What the last blotter upload did, as it was recorded: the file, the time, the merge by Trade "
+                      "Id, and every row of the file that did not become a trade.")
+
+
+def last_upload_section(conn: sqlite3.Connection) -> html.Div:
+    """The last upload: one line, then the rows of the file that did not become trades (row, the
+    symbol as written, the reason) and the file-level warnings, as the upload recorded them."""
+    head = _section_head("The last upload", _LAST_UPLOAD_ABOUT)
+    try:
+        from data.ingest.upload import last_upload_issues, last_upload_report
+        report, issues = last_upload_report(conn), last_upload_issues(conn)
+    except Exception as exc:  # noqa: BLE001
+        return html.Div(id=LAST_UPLOAD_ID, children=[
+            head, missing_cell(f"the upload record could not be read ({type(exc).__name__}: {exc})")])
+    if report is None and not issues:
+        return html.Div(id=LAST_UPLOAD_ID, children=[head, html.Div(NO_HISTORY + ".", className="book-section-meta")])
+    children = [head]
+    if report is not None:
+        line, hover = last_upload_line(report)
+        children.append(html.Div(line, title=hover, className="blotter-upload-line"))
+        excluded = int(report.get("excluded_rows") or 0)
+        if excluded:
+            children.append(html.Div(f"{excluded} row{'s' if excluded != 1 else ''} left out by the book filter",
+                                     title=plain_words(report.get("excluded_text")) or None,
+                                     className="book-section-meta"))
+    rows = [i for i in issues if str(i.get("kind") or "") != "WARNING"]
+    warnings = [i for i in issues if str(i.get("kind") or "") == "WARNING"]
+    if rows:
+        th = html.Tr([html.Th("Row"), html.Th("Symbol as written", className="l"), html.Th("What", className="l"),
+                      html.Th("Why", className="l")])
+        body = [html.Tr([
+            html.Td(str(i.get("row_no") or MISSING)),
+            html.Td(str(i.get("symbol") or "") or missing_cell("the row has no symbol"), className="l"),
+            html.Td("could not be read" if str(i.get("kind")) == "REJECTED" else "not loaded", className="l",
+                    title=("the app could not read the row" if str(i.get("kind")) == "REJECTED"
+                           else "a kind of row the app does not load")),
+            html.Td(plain_words(i.get("reason")), className="l blotter-why"),
+        ]) for i in rows]
+        children.append(html.Div(f"{len(rows)} row{'s' if len(rows) != 1 else ''} of the file did not become trades",
+                                 className="book-section-meta"))
+        children.append(html.Table([html.Thead(th), html.Tbody(body)], className="book-table blotter-rejects"))
+    elif report is not None:
+        children.append(html.Div("Every row of the file became a trade.", className="book-section-meta"))
+    for w in warnings:
+        children.append(html.Div([html.Span("About the file", className="marker marker--amber"), " ",
+                                  plain_words(w.get("reason"))], className="blotter-file-warning"))
+    return html.Div(id=LAST_UPLOAD_ID, children=children)
+
+
+_HISTORY_ABOUT = "Every upload recorded on this database, newest first: what each one added, replaced and removed."
+
+
+def upload_history_fold(conn: sqlite3.Connection) -> Optional[html.Details]:
+    """Every recorded upload, newest first, in a closed fold: when, the file, the trades in it,
+    added / replaced / removed (their Trade Ids on hover) and the trades on file after. None when
+    no upload is on record at all (the last-upload section says so once)."""
+    def summary(meta: str) -> html.Summary:
+        return html.Summary([about("Upload history", _HISTORY_ABOUT, level="span", className="book-section-title"),
+                             html.Span(meta, className="book-section-meta")], className="book-section-head")
+    try:
+        from data.ingest.upload import last_upload_report, upload_history
+        history, report = upload_history(conn), last_upload_report(conn)
+    except Exception as exc:  # noqa: BLE001
+        return html.Details([summary("could not be read"),
+                             missing_cell(f"the history could not be read ({type(exc).__name__}: {exc})")],
+                            className="book-fold", id=HISTORY_ID)
+    if not history and report is None:
+        return None
+    if not history:
+        return html.Details([summary("none recorded yet: the history starts at the next upload")],
+                            className="book-fold", id=HISTORY_ID)
+
+    def ids_tip(ids) -> Optional[str]:
+        ids = [str(t) for t in ids or []]
+        if not ids:
+            return None
+        return ", ".join(ids[:40]) + (f" and {len(ids) - 40} more" if len(ids) > 40 else "")
+
+    th = html.Tr([html.Th("When", className="l"), html.Th("File", className="l"), html.Th("In the file"),
+                  html.Th("Added"), html.Th("Replaced"), html.Th("Removed"), html.Th("On file after")])
+    body = []
+    for h in history:
+        removed = int(h.get("removed") or 0) + int(h.get("removed_manual") or 0)
+        body.append(html.Tr([
+            html.Td(ny_time(h.get("uploaded_at")), className="l", title=f"{h.get('uploaded_at')} (UTC)"),
+            html.Td(str(h.get("filename") or ""), className="l", title=plain_words(h.get("summary")) or None),
+            html.Td(str(_in_file(h))),
+            html.Td(str(int(h.get("added") or 0)), title=ids_tip(h.get("added_ids"))),
+            html.Td(str(int(h.get("replaced") or 0)), title=ids_tip(h.get("replaced_ids"))),
+            html.Td(str(removed), title=ids_tip(h.get("removed_ids"))),
+            html.Td(str(int(h.get("on_file_after") or 0))),
+        ]))
+    meta = f"{len(history)} upload{'s' if len(history) != 1 else ''}"
+    return html.Details([summary(meta), html.Table([html.Thead(th), html.Tbody(body)], className="book-table")],
+                        className="book-fold", id=HISTORY_ID)
+
+
+_FILLS_ABOUT = ("One row per trade on file, open, settled or closed out, as the file gave it and as the app read it: "
+                "the symbol and price as written, the contract and price the app stores, the trade's name, type and "
+                "the Book position it landed in. No P&L here: the Book is the one place for it.")
+
+
+def blotter_view(conn: sqlite3.Connection, as_of: str) -> html.Div:
+    """The Blotter's one view (no sub-tab while the book holds no option): the last upload,
+    every fill as uploaded, the upload history, the Data issues drawer."""
+    try:
+        df, issues, with_uploads = fills_frame(conn, as_of)
+    except Exception as exc:  # noqa: BLE001 -- one card; the last upload still shows
+        logging.getLogger(__name__).exception("Blotter: the fills could not be read on %s", as_of)
+        return html.Div([last_upload_section(conn), _error_card("Fills", exc, conn)])
+    if df.empty:
+        fills = html.Div([_section_head("Every fill as uploaded", _FILLS_ABOUT),
+                          html.P("No trades on file: upload a blotter.", className="book-section-meta")])
+    else:
+        fills = html.Div([
+            _section_head("Every fill as uploaded", _FILLS_ABOUT),
+            fills_filter_bar(df),
+            html.Div(id=FILLS_BODY_ID, children=fills_table(df, len(df), with_uploads)),
+        ])
+    children = [last_upload_section(conn), fills]
+    fold = upload_history_fold(conn)
+    if fold is not None:
+        children.append(fold)
+    drawer = issues_drawer(issues, id=BLOTTER_ISSUES_ID)
+    if drawer is not None:
+        children.append(drawer)
+    return html.Div(children, className="blotter-view")
+
+
+def has_open_option(conn: sqlite3.Connection, as_of: str) -> bool:
+    """Whether the book holds an open option (an FX option or an option on a future) on `as_of`,
+    by the shared reader's status; with the reader unavailable, an option whose expiry is not
+    past. The Options sub-tab shows only then."""
+    try:
+        df, _, _ = priced_value_book(conn, as_of)
+        if df.empty:
+            return False
+        return bool((df["product"].isin(OPTION_PRODUCTS) & (df["status"] == "OPEN")).any())
+    except Exception:  # noqa: BLE001 -- the instruments' own expiries
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM trades t JOIN instruments i USING (instrument_id) "
+                               "WHERE t.product IN ('FX_OPTION','CMDTY_OPTION') AND i.expiry_date >= ?",
+                               (as_of,)).fetchone()
+            return bool(row and row[0])
+        except sqlite3.Error:
+            return False
 
 
 def _today_default(default_date: Optional[str]) -> Optional[str]:
@@ -1759,20 +2457,21 @@ def _today_default(default_date: Optional[str]) -> Optional[str]:
         return default_date
 
 
+SUBTABS_HIDDEN = {"display": "none"}
+
+
 def build_layout(default_date: Optional[str] = None) -> html.Div:
-    """Title row (coordinator instruction 2026-09-15): a single row, the tab's name on the
-    left, the full-text date heading + date picker + "Today" button on the right, no card,
-    no kicker -- the `ladder-title-row(-heading|-right)` class names the stylesheet's one
-    title-row rule styles (named for the Ladder tab, which left on 2026-09-28)."""
+    """The Blotter (2026-09-29): the sub-tab bar (All fills | Options), always in the page but
+    hidden unless the book holds an open option (`_update` shows it), the banners, the trade-set
+    store and the content. No title row and no date picker: the header's picker is the as-of."""
     return html.Div(className="blotter", children=[
-        dcc.Tabs(id=SUBTABS_ID, value=SCOPE_ORDER[0], className="subtabs", children=[
+        dcc.Tabs(id=SUBTABS_ID, value=SCOPE_ORDER[0], className="subtabs", style=SUBTABS_HIDDEN, children=[
             dcc.Tab(label=SCOPE_LABELS[s], value=s, className="subtab",
                     selected_className="subtab--selected")
             for s in SCOPE_ORDER
         ]),
-        # Banners (missing option terms, stored values that are not numbers): always in
-        # the page and refreshed in place on every revision (`_refresh_notices`), not
-        # frozen into a sub-tab's content until its next rebuild.
+        # Banners (stored values that are not numbers): always in the page and refreshed in place
+        # on every revision (`_refresh_notices`), not frozen into the content until its next rebuild.
         html.Div(id=NOTICES_ID),
         # The trade-set signature the content below was built from (`_update`).
         dcc.Store(id=BUILT_TRADE_SET_ID),
@@ -1786,6 +2485,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     @app.callback(
         Output(CONTENT_ID, "children"),
         Output(BUILT_TRADE_SET_ID, "data"),
+        Output(SUBTABS_ID, "style"),
         Input(AS_OF_STORE_ID, "data"),
         Input(SUBTABS_ID, "value"),
         Input(BOOK_REVISION_ID, "data"),
@@ -1793,8 +2493,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         State(BUILT_TRADE_SET_ID, "data"),
     )
     def _update(as_of_date, scope, _book_rev=None, _data_rev=None, built_trade_set=None):
-        """`(content, trade-set signature it was built from)`; `(no_update, no_update)`
-        when what is on screen stays.
+        """`(content, trade-set signature it was built from, the sub-tab bar's style)`;
+        `no_update` three times when what is on screen stays. The sub-tab bar shows only while the
+        book holds an open option (2026-09-29); the Options scope falls back to the fills when the
+        last one goes.
 
         No browser reload (ui/revision.py, 2026-09-18). A changed TRADE SET (an upload)
         rebuilds whatever sub-tab is showing. A marks-only change rebuilds the views that
@@ -1814,7 +2516,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         from dash import ctx, no_update
         from dash.exceptions import MissingCallbackContextException
         if not as_of_date:
-            return message_box("No as-of date available."), no_update
+            return message_box("No as-of date available."), no_update, no_update
         scope = scope or SCOPE_ORDER[0]
         try:
             triggered = {t["prop_id"].split(".")[0] for t in (ctx.triggered or [])}
@@ -1828,11 +2530,30 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 trade_set = trade_set_signature(db_path)
                 book_moved = not trade_set or trade_set != built_trade_set
             if not book_moved and scope not in _MARKS_REBUILD_SCOPES:
-                return no_update, no_update
+                return no_update, no_update, no_update
+        with_options = _options_shown(db_path, as_of_date)
+        if scope == "options" and not with_options:
+            scope = SCOPE_ORDER[0]   # the last option gone: the sub-tab bar hides, the fills show
         content = _render_content(db_path, as_of_date, scope)
         if trade_set is None:
             trade_set = trade_set_signature(db_path)
-        return content, (trade_set or no_update)
+        return content, (trade_set or no_update), ({} if with_options else SUBTABS_HIDDEN)
+
+    def _options_shown(db_path, as_of_date) -> bool:
+        """Whether the Options sub-tab shows: the book holds an open option (`has_open_option`)."""
+        from ui.app import connect_readonly
+        try:
+            conn = connect_readonly(db_path)
+        except sqlite3.OperationalError:
+            return False
+        try:
+            with pricing_snapshot(conn, "Blotter options check"):
+                return has_open_option(conn, as_of_date)
+        except Exception:  # noqa: BLE001 -- no sub-tab rather than a broken tab
+            logging.getLogger(__name__).exception("Blotter: the open-option check failed for %s", as_of_date)
+            return False
+        finally:
+            conn.close()
 
     def _render_content(db_path, as_of_date, scope):
         from ui.app import connect_readonly
@@ -1842,8 +2563,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             return message_box(f"Database not available ({exc}).")
         try:
             with pricing_snapshot(conn, f"Blotter {scope}"):  # one view of the marks per render
-                if scope == "bundles":
-                    return _safe_section("Bundles", lambda: bundles_layout(conn, as_of_date), conn)
+                if scope == "total":
+                    return blotter_view(conn, as_of_date)
                 # The banners are in `NOTICES_ID`, outside this content (`_refresh_notices`).
                 return scope_layout(scope, conn, as_of_date, with_notices=False)
         except ImportError as exc:
@@ -2001,6 +2722,70 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     options_ui.register_callbacks(app, get_db_path)
 
+    # ---- the fills table (2026-09-29): the filters narrow the rows in place; the CSV is the rows kept
+    fill_filter_ids = [f"{FILLS_ID}-filter-{c}" for c in FILL_FILTER_COLS]
+
+    def _kept_fills(values, search, start, end, as_of_date):
+        """(rows kept, rows on file, with_uploads), read fresh from the database."""
+        from ui.app import connect_readonly
+        conn = connect_readonly(get_db_path())
+        try:
+            with pricing_snapshot(conn, "Blotter fills"):
+                df, _issues, with_uploads = fills_frame(conn, as_of_date)
+        finally:
+            conn.close()
+        kept = filter_fills(df, dict(zip(FILL_FILTER_COLS, values)), search, start, end)
+        return kept, len(df), with_uploads
+
+    @app.callback(
+        Output(FILLS_BODY_ID, "children"),
+        *[Input(fid, "value") for fid in fill_filter_ids],
+        Input(FILLS_SEARCH_ID, "value"),
+        Input(FILLS_DATES_ID, "start_date"),
+        Input(FILLS_DATES_ID, "end_date"),
+        State(AS_OF_STORE_ID, "data"),
+        prevent_initial_call=True,
+    )
+    def _filter_fills(*args):
+        from dash import no_update
+        *values, search, start, end, as_of_date = args
+        if not as_of_date:
+            return no_update
+        try:
+            kept, total, with_uploads = _kept_fills(values, search, start, end, as_of_date)
+        except Exception as exc:  # noqa: BLE001 -- the table says why instead of an HTTP 500
+            logging.getLogger(__name__).exception("Blotter: the fills filter failed for %s", as_of_date)
+            return _error_card("Fills", exc)
+        return fills_table(kept, total, with_uploads)
+
+    @app.callback(
+        *[Output(fid, "value") for fid in fill_filter_ids],
+        Output(FILLS_SEARCH_ID, "value"),
+        Output(FILLS_DATES_ID, "start_date"),
+        Output(FILLS_DATES_ID, "end_date"),
+        Input(FILLS_CLEAR_ID, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _clear_fill_filters(_n_clicks):
+        return [[] for _ in fill_filter_ids] + ["", None, None]
+
+    @app.callback(
+        Output(FILLS_DOWNLOAD_ID, "data"),
+        Input(FILLS_CSV_ID, "n_clicks"),
+        *[State(fid, "value") for fid in fill_filter_ids],
+        State(FILLS_SEARCH_ID, "value"),
+        State(FILLS_DATES_ID, "start_date"),
+        State(FILLS_DATES_ID, "end_date"),
+        State(AS_OF_STORE_ID, "data"),
+        prevent_initial_call=True,
+    )
+    def _download_fills(_n_clicks, *args):
+        *values, search, start, end, as_of_date = args
+        if not as_of_date:
+            return None
+        kept, _total, _with = _kept_fills(values, search, start, end, as_of_date)
+        return fills_csv(kept)
+
     def _register_strip_refresh(scope: str) -> None:
         @app.callback(
             Output(f"blotter-strip-{scope}", "children"),
@@ -2089,97 +2874,3 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                 _register_strip_callback(_scope)
             _register_detail_callback(_scope)
             _register_filter_callback(_scope)
-
-    @app.callback(
-        Output(bundles_ui.BUNDLE_STATUS_ID, "children"),
-        Output(bundles_ui.BUNDLE_REVISION_ID, "data"),
-        Input(bundles_ui.BUNDLE_CREATE_BUTTON_ID, "n_clicks"),
-        State(bundles_ui.BUNDLE_NAME_INPUT_ID, "value"),
-        State(bundles_ui.BUNDLE_DESC_INPUT_ID, "value"),
-        State(bundles_ui.BUNDLE_PAIRS_INPUT_ID, "value"),
-        prevent_initial_call=True,
-    )
-    def _create_bundle(n_clicks, name, description, pairs_csv):
-        import time
-        from data.ingest.themes import add_pair_to_bundle, create_bundle
-        if not name or not name.strip():
-            return "Enter a bundle name", None
-        db_path = get_db_path()
-        try:
-            conn = sqlite3.connect(db_path)
-        except sqlite3.OperationalError as exc:
-            return f"Database not available ({exc}).", None
-        try:
-            create_bundle(conn, name.strip(), description or "")
-            pairs = [p.strip() for p in (pairs_csv or "").split(",") if p.strip()]
-            failed = []
-            for pair in pairs:
-                try:
-                    add_pair_to_bundle(conn, name.strip(), pair)
-                except ValueError:
-                    failed.append(pair)
-            msg = f"Created bundle {name!r}"
-            if failed:
-                msg += f"; unknown pairs skipped: {', '.join(failed)}"
-            return msg, str(time.time())
-        finally:
-            conn.close()
-
-    @app.callback(
-        Output(bundles_ui.BUNDLE_SELECTED_ID, "data"),
-        Input(bundles_ui.BUNDLE_LIST_ID, "derived_virtual_selected_rows"),
-        State(bundles_ui.BUNDLE_LIST_ID, "derived_virtual_data"),
-        prevent_initial_call=True,
-    )
-    def _select_bundle(selected_rows, rows):
-        if not selected_rows or not rows:
-            return None
-        return rows[selected_rows[0]].get("name")
-
-    @app.callback(
-        Output("blotter-bundle-detail-container", "children"),
-        Output(bundles_ui.BUNDLE_STATUS_ID, "children", allow_duplicate=True),
-        Input(bundles_ui.BUNDLE_SELECTED_ID, "data"),
-        Input(bundles_ui.BUNDLE_REVISION_ID, "data"),
-        Input(bundles_ui.BUNDLE_ADD_PAIR_BUTTON_ID, "n_clicks"),
-        Input(bundles_ui.BUNDLE_REMOVE_PAIR_BUTTON_ID, "n_clicks"),
-        State(bundles_ui.BUNDLE_ADD_PAIR_INPUT_ID, "value"),
-        State(bundles_ui.BUNDLE_REMOVE_PAIR_INPUT_ID, "value"),
-        State(AS_OF_STORE_ID, "data"),
-        prevent_initial_call=True,
-    )
-    def _bundle_detail(selected, _rev, _add_clicks, _remove_clicks, add_pair, remove_pair, as_of_date):
-        from dash import ctx
-
-        from data.ingest.themes import add_pair_to_bundle, bundle_pairs, remove_pair_from_bundle
-        if not selected:
-            return message_box("Select a bundle above to see its pairs."), ""
-        db_path = get_db_path()
-        try:
-            conn = sqlite3.connect(db_path)
-        except sqlite3.OperationalError as exc:
-            return message_box(f"Database not available ({exc})."), f"Database not available ({exc})."
-        status = ""
-        try:
-            trigger = ctx.triggered_id if hasattr(ctx, "triggered_id") else None
-            if trigger == bundles_ui.BUNDLE_ADD_PAIR_BUTTON_ID and add_pair:
-                try:
-                    add_pair_to_bundle(conn, selected, add_pair.strip())
-                    status = f"Added {add_pair.strip()} to {selected}"
-                except ValueError as exc:
-                    status = str(exc)
-            elif trigger == bundles_ui.BUNDLE_REMOVE_PAIR_BUTTON_ID and remove_pair:
-                remove_pair_from_bundle(conn, selected, remove_pair.strip())
-                status = f"Removed {remove_pair.strip()} from {selected}"
-            pairs = bundle_pairs(conn, selected)
-            children = [bundles_ui.bundle_detail_table(pairs)]
-            if as_of_date:
-                df, _, _ = priced_value_book(conn, as_of_date)
-                if not df.empty:
-                    df = df[df["theme"] == selected]
-                    df = add_instrument_fields(conn, add_row_display_fields(conn, df, as_of_date))
-                children.append(html.H5(f"Trades in {selected}"))
-                children.append(detail_table(df, table_id="blotter-bundle-trades"))
-            return html.Div(children), status
-        finally:
-            conn.close()

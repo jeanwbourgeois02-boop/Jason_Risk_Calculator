@@ -18,3 +18,4 @@
 - [LME forwards review 2026-09-24](review-findings-lme-forwards-2026-09-24.md) — LME_FWD on FX path, cash-date pillar, settlement_price freeze: no criticals; doc drift, bad-value test gap, no LME mark writer
 - [C14/C15/C17 review 2026-09-28](review-findings-c14-c15-c17-2026-09-28.md) — LME freeze at P-2, FUTURE out of delta SQL, INTERP rows dropped: no criticals; test_valuation LME pin red; open-row jump P-1..P
 - [Daily split review 2026-09-28](review-findings-daily-split-2026-09-28.md) — spreads daily_split/strategies: no criticals; settled hedge misbucketed, hedge set too wide, prev-frame fallback, no tests
+- [Series + period explain 2026-09-29, 2 passes](review-findings-series-explain-2026-09-29.md) — pass-1 items closed; open: scorecard closed+open != LTD on flat non-USD ideas, doc drift

@@ -23,9 +23,15 @@ Choices I took (low stakes unless the user objects):
   own Oct/Feb 2521 + Nov/Mar 1000): economically the same, said in the note.
 - Trade ids: a contract's trades are listed once, on the first pair using it (else its residual);
   `contract_trade_ids` lists them all. Lots split, fills never do.
-- Hedges: fx-sector roots (SGX:XUC) AND FX spot/forward/swap under the strategy's PBRoot (user,
-  2026-09-28), whatever their status (a settled one's Daily is still hedge). An FX product's
-  usd_notional is its USD leg from the fill (base amount, or -base x outright); no USD leg -> None.
+- Hedges: fx-sector roots (SGX:XUC) AND FX spot/forward/swap/OPTION on a currency pair under the
+  strategy's PBRoot (user, 2026-09-28; options added 2026-09-29), whatever their status. Never a
+  precious-metal pair (XAUUSD is a residual of its own). An FX forward's usd_notional is its USD leg
+  from the fill; an FX option's is the USD leg of its DELTA (qty x DELTA, x the pair's official SPOT
+  on a USD-quoted pair; exact marks, None without): long USD positive like the forwards, same
+  magnitude as book_positions' by_pair. The golden sample's DELTA marks are 0.45+-0.2 for puts too
+  (tests/golden_book.py), so its puts read long USD: a fixture quirk, not the rule.
+- Coverage (2026-09-29) reads `hedge_cny_usd` (hedges on a CNH/CNY pair only); `hedge_usd` stays
+  every hedge. Before, a EURGBP forward with no USD leg blanked the CNY coverage of the sample.
 - **Ratio is RAW** (China CNY/unit over foreign USD/unit, no FX) where the template has
   `params.ratio_screen` (now `Template.ratio_screen`): the desk convention text says "8.0-8.3 at FX
   7.1-7.3", i.e. FX left in. ZNA1 entry 6.64 / 6.75. Converted-vs-raw still open with Jason

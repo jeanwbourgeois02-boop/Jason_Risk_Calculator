@@ -113,6 +113,10 @@ lists; the UI renders it and recomputes nothing):
     "commodity_scenarios": engine.stress.commodity_stress(conn, as_of) passed through
                   untouched ({as_of, available, config, scenarios [...], reasons}), on the same
                   positions, spreads and research history,
+    "position_risk": engine.risk.positions.position_risk (2026-09-29): the Book's open rows as
+                  positions, each one's standalone VaR and historical component contribution to
+                  the positions' book VaR, the diversification line, the correlation matrix and
+                  the positions left out (that module's docstring has the shape),
     "missing": [plain-language reasons: rows left out of the book series or the
                 scenarios, positions the Blotter could not price, ...]
   }
@@ -128,11 +132,12 @@ import pandas as pd
 
 from engine.ladder.positions import book_positions
 from engine.pnl import stress as stress_scenarios
-from engine.risk.commodity import (KIND_COMMODITY, KIND_SECTOR, KIND_SPREAD, ROLE_PART, ROLE_VIEW,
+from engine.risk.commodity import (KIND_COMMODITY, KIND_SECTOR, KIND_SPREAD, ROLE_PART, ROLE_VIEW, _PerLot,
                                    commodity_underlyers)
 from engine.risk.commodity_history import CommodityHistory, load_commodity_history
 from engine.risk.config import load_config
 from engine.risk.history import YIELDS_FILE, History, load_history
+from engine.risk.positions import position_risk
 
 ANNUAL_SCALER = math.sqrt(252.0)
 NAN = float("nan")
@@ -400,7 +405,9 @@ def book_risk(conn: sqlite3.Connection, as_of: str, *, history: Optional[History
     # the commodity rows: parts per root, views per sector and per open spread
     curve, spreads, cm_missing = _commodity_positions(conn, as_of)
     missing.extend(cm_missing)
-    cm_rows, cm_series, contract_missing = commodity_underlyers(conn, as_of, commodity_history, curve or {}, spreads)
+    per_lot = _PerLot(commodity_history, as_of)
+    cm_rows, cm_series, contract_missing = commodity_underlyers(conn, as_of, commodity_history, curve or {}, spreads,
+                                                                per_lot=per_lot)
     missing.extend(contract_missing)
     cm_status, cm_lag2, cm_coverage = _commodity_status(commodity_history, cm_series, as_of, curve)
     for r in cm_rows:
@@ -469,9 +476,17 @@ def book_risk(conn: sqlite3.Connection, as_of: str, *, history: Optional[History
     missing.extend(scenario_missing)
     commodity_scenarios = _commodity_scenarios(conn, as_of, commodity_scenarios_path, curve, spreads,
                                                commodity_history)
+    try:
+        by_position = position_risk(conn, as_of, spreads=spreads, curve=curve, per_lot=per_lot, config=config,
+                                    headline_var=book["var95_1d_usd"],
+                                    fx_history_reason="" if history.available else (history.reason or "not on file"))
+    except Exception as exc:  # noqa: BLE001 -- the blocks by position never take the tab down
+        by_position = {"available": False, "reason": f"risk by position could not be computed "
+                                                     f"({type(exc).__name__}: {exc})",
+                       "positions": [], "excluded": [], "correlation": None, "correlation_reason": ""}
     return {"as_of": as_of, "history": hist_status, "commodity_history": cm_status, "config": config,
             "book": book, "underlyers": rows, "scenarios": scenarios,
-            "commodity_scenarios": commodity_scenarios, "missing": missing}
+            "commodity_scenarios": commodity_scenarios, "position_risk": by_position, "missing": missing}
 
 
 # --------------------------------------------------------------------------- commodities

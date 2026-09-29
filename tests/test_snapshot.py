@@ -157,7 +157,7 @@ def test_import_freezes_the_settled_trades_because_no_pull_runs_without_bloomber
     mac = schema.connect(tmp_path / "mac.db")
     _instruments(mac, [("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31")])
     # sold 1m AUD @0.65 settling 09-10: frozen at the snapshot's 09-09 spot, 0.62
-    mac.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    mac.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "", "t", "d", "", "", ""))
     mac.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-10", 0.65, 1),
@@ -315,7 +315,7 @@ def test_import_freezes_as_of_the_book_date_not_the_machines_date(tmp_path, monk
     snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "snap")
     mac = schema.connect(tmp_path / "mac.db")
     _instruments(mac, [("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31")])
-    mac.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    mac.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "", "t", "d", "", "", ""))
     mac.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-10", 0.65, 1),

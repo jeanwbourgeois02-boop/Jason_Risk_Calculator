@@ -23,7 +23,7 @@ def test_records_from_db_fx_forward_two_legs_and_grid_vs_exposure_boundary():
 
     conn = schema.connect()
     conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('t1','XLSX','USDJPY','FX_FWD','t1','2026-08-20',"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('t1','XLSX','USDJPY','FX_FWD','t1','2026-08-20',"
                  "1000000,147.0,'acc','cp','HAHY7','t','desc','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("t1", 1, "FX_NEAR", "USD", 1000000.0, "2026-08-20", "2026-09-16", 147.0, 1),
@@ -65,7 +65,7 @@ def _fresh():
 
 
 def _trade(conn, trade_id, pair, product, qty, price, trade_date="2026-08-20", package=None):
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (trade_id, "XLSX", pair, product, package or trade_id, trade_date, qty, price,
                   "acc", "cp", "HAHY7", "t", "desc", "", "", ""))
 
@@ -184,7 +184,7 @@ def _option_db(as_of="2026-09-17", delta=0.4, spot=147.0, expiry="2026-11-19"):
     conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
     conn.execute("INSERT INTO instruments VALUES ('USDJPY111926P-197571137','FX_OPTION','USD','JPY',1,0,"
                  "'USDJPY111926P-197571137','2026-11-19')")
-    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','USDJPY111926P-197571137','FX_OPTION','o1','2026-08-20',"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('o1','XLSX','USDJPY111926P-197571137','FX_OPTION','o1','2026-08-20',"
                  "-1e6,0.0125,'acc','cp','HAHY7','t','USDJPY put','','','')")
     conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','USD',-1e6,'2026-08-20',?,0.0125,0)", (expiry,))
     if delta is not None:

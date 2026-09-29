@@ -1085,19 +1085,29 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
       option: {trade_id, instrument_id, root_id, product, lots, why}), ``hedges`` ([{trade_ids,
       instrument_id, root_id, product, contract_month, value_date, lots, currency, usd_notional,
       notional_reason}], one per contract), ``notes``, ``gross_usd`` / ``net_usd`` /
-      ``notional_reason`` (the position's), ``hedge_usd``, ``cny_gross_usd``, ``cny_net_usd``,
-      ``hedge_coverage`` (|hedge| / CNY gross), ``hedge_coverage_net`` (-hedge / CNY net, signed:
+      ``notional_reason`` (the position's), ``hedge_usd`` (every hedge's USD figure summed),
+      ``hedge_cny_usd`` (2026-09-29: the hedges on a CNH / CNY pair only, what the coverage
+      reads), ``cny_gross_usd``, ``cny_net_usd``, ``hedge_coverage`` (|CNY hedge| / CNY gross),
+      ``hedge_coverage_net`` (-CNY hedge / CNY net, signed:
       1.0 = fully hedged, negative runs with the exposure: a long China leg needs a short USD/CNH
       hedge), ``unhedged_cny`` (CNY net + hedge, USD), ``hedge_reason``,
       ``pnl_usd`` / ``pnl_reasons`` / ``pnl_notes`` / ``ref_dates`` (the position's) and
-      ``daily`` (``daily_split.py``: {spread, fx, hedge, total, excluded, reasons, included,
-      by_trade, date, reason}: computed only when the strategy's ``pnl_usd['daily']`` is a
+      ``daily`` ({spread, fx, hedge, new_trades, realised, other, total, excluded, reasons,
+      included, by_trade ({trade_id: the six parts}), bucket ({trade_id: the step that took
+      it}), date, reason}; since 2026-09-29 the P&L explain's one bucket order,
+      ``period_explain.classify_trades``, over ``period_pnl``'s per-trade figures: a trade dealt
+      since the reference close is ``new_trades``, one settled since it ``realised``, then
+      ``hedge``, then ``spread`` / ``fx``, and one that cannot be split ``other``, named in
+      ``reasons``; computed only when the strategy's ``pnl_usd['daily']`` is a
       figure, over the very rows it was measured from, so ``total`` equals it to the cent; else
       the zeros with ``reason`` and every trade in ``excluded``. ``total`` is never the Daily's
       stand-in: a screen shows ``pnl_usd['daily']`` and uses the split for its parts only).
       An FX spot / forward / swap under a strategy's PBRoot is that strategy's currency hedge,
       like a USD/CNH future (user, 2026-09-28): whole Daily in ``hedge``, ``usd_notional`` the
-      USD leg's signed amount from the fill (None with a reason on a pair with no USD leg).
+      USD leg's signed amount from the fill (None with a reason on a pair with no USD leg); so
+      is an FX option on a currency pair (user, 2026-09-29), ``usd_notional`` the USD leg of its
+      official DELTA; a precious-metal pair (XAUUSD) never is: it is a residual of its own
+      (``hedges.py``).
     - ``review``: groups the rule refused to take, never guessed ('ambiguous': two ways to group;
       'ratio_off': a calendar or template's legs whose lots are outside 5 %; 'accounts': a
       single-currency calendar or template on two accounts): review_id, kind, trade_ids,

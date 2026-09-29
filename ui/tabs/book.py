@@ -1,89 +1,42 @@
-"""Book tab: the app's home. "What is my book, and what needs me?" Rebuilt on 2026-09-28 (the
-screens tidy, wave 1). Vocabulary (user, 2026-09-28, the research app's Book): a **strategy** is
-the spread type, cross exchange / cross product / term structure ("Unassigned" for a plain JSHY10
-label), never Jason's PBRoot name; the PBRoot name (COPAR3, CATTLE, `trades.strategy`) is his
-**trade**. The code keeps `strategy` as the field name of the PBRoot label (spreads-engine's
-kind `strategy`, `trades.strategy`); every label, hover and CSV header says "trade". Earlier:
-the approved mock is the brief's Main.dc.html, with Empty.dc.html for a
-database with no trades and AfterUpload.dc.html for trades with no marks yet). One screen:
+"""Book tab: the app's home. "What is my book, and what needs me?" Rebuilt on 2026-09-29 (the
+layout approved by the user against the research app's Book, `../Commodity Dashboard/rvapp/app/book.py`:
+tiles, one summary table with a break-down switch, a flat Open trades list). Vocabulary (user,
+2026-09-28): a **spread type** is cross exchange / cross product / term structure; Jason's PBRoot
+name (COPAR3, CATTLE, `trades.strategy`) is his **trade**, never called a strategy on screen (the
+code keeps `strategy` as the field name of the PBRoot label). Top to bottom:
 
-  1. The title line: "Book", the counts ("6 strategies · 5 spreads · 12 outrights · 3 options ·
-     2 LME prompts · 8 FX hedges"), the group-by switch (Strategy, the default; Commodity;
-     Instrument) and Download CSV. Since 2026-09-28 (Jason's real export: every trade carries his
-     strategy name and the broker's trade type, and "a lot of trades are long short on the same
-     commodity - the net exposure must be seen"; then, the same day, "he does need to be able to
-     sort by strategy"; the definitive design approved later that day: strategy -> pairs ->
-     legs): the Strategy view is one group per strategy read from spreads-engine's
-     `strategies` entry: a pair row per pair the engine made inside it (its two legs' names,
-     its type in words with "inferred" / "fallback" small, the paired size, the engine's gross
-     and net on the paired lots, its level at entry and now in the pair's unit, the move, its
-     legs' P&L, the earlier leg's next event, a "legs N bd apart" marker, a "residual" marker),
-     its two leg rows under it (the pair's lots on each contract; a contract split over two
-     pairs lists its trades once, on the first, and the other row says so instead of a figure),
-     then the lots left outright under "Outright" and the strategy's USD/CNH futures and FX
-     trades under "Hedge"; the group line carrying the strategy's type in words, its legs in
-     words ("long COMEX copper 34 lots · short LME copper 350 t · net long 35.6 t", the net in
-     one unit only where curve-positions' `by_subsector` conversion is this strategy's alone),
-     "hedged 96 %" where it has CNY legs (the engine's `hedge_coverage_net`; an amber marker when
-     the hedge runs with the exposure) and its subtotals, with the engine's Daily split ("spread
-     +12.3k · FX −1.1k · hedge +0.9k") on the Daily's hover when it is whole and equals the
-     Daily shown; the Commodity view nets the book per open contract across strategies, grouped by
-     commodity across exchanges (copper = COMEX + LME), each commodity's group line carrying its
-     net exposure in words from `by_subsector`; the Instrument view keeps one row per position (a
-     strategy named by its own name, its legs on hover and in the detail). The trade type is on
-     hover of the position name and on the strategy group line, never a column; a label that
-     disagrees with the legs is one line of the Data issues drawer.
-  2. The tiles: Strategies (spread types), Trades (PBRoot names), Positions, P&L today and P&L since entry (the header's own Daily
-     and LTD, the same value and markers), Gross exposure, Net exposure (the engine's USD
-     notional summed over the known positions, "excl. N" for the rest).
-  3. The movers strip: the three best and three worst Daily figures among the rows.
-  3a. The summary first (2026-09-28, the user on Jason's real blotter: "where is the pnl by
-     strat"; the research app's Book shape): the "By strategy" table (`summary_table`), one
-     line per strategy with its type, legs, open trades, P&L today / MTD / since entry, gross,
-     net, its signed share of the Book's LTD and of the Book's gross (`_share`: part / whole of
-     two summed figures, display), hedge coverage and earliest next event, sorted by gross,
-     the Book line = the header; then "Break it down" (`breakdown_table`), the same columns by
-     Commodity | Type | Instrument (`BREAKDOWN_ID`); then the positions table under a
-     "Positions" fold, open by default, with its Strategy | Commodity | Instrument switch.
-  4. The positions table, one row per open position: the spread positions of
-     `engine.spreads.book_spreads(conn, as_of)["positions"]` (their levels from
-     `engine/spreads/levels.py`), the outright futures one row per contract (`["outrights"]`),
-     and one row per open trade for the options on futures, LME forwards and FX hedges from the
-     shared filled reader (`ui/tabs/blotter_pricing.priced_value_book`). Columns: Position (plain
-     names, the instrument ids and the type on hover), Size (words: "long 15 lots"), Gross and
-     Net (the engine's USD notional: `book_spreads`' `gross_usd` / `net_usd` on a position or an
-     outright, curve-positions' `notional_usd` on a netted contract whose trades are exactly that
-     row's; a dash with the reason otherwise, never lots × multiplier × mark × spot here), Entry,
-     Now (the unit as a small suffix), Move, Daily, MTD, LTD, Next. The settled and closed-out
-     trades are one line of their own so that the Book line equals the header's Daily, MTD and
-     LTD to the cent: every trade of the as-of book is in exactly one row, and every row's period
-     figure is the P&L tab's own per-trade figure (`ui.tabs.pnl.period_rows`, the header's
-     split), the known ones summed (display). A group line sums its rows' known figures and says
-     "excl. N" when any is missing (no marker at all while the book has no marks: the Loaded
-     line under the tiles says values come with the first pull); a missing cell is an em dash with its reason
-     on hover. Nothing is recomputed: a spread's entry, level, move and $ per unit are
-     spreads-engine's; an outright's Entry is the lots-weighted fill and its Move the mark less
-     the Daily reference close's mark, both read off the value rows; a trade row's Entry is its
-     fill and its Now its mark.
-  5. A click on a row opens its detail under the table: a spread's entries and legs
-     (`detail_payloads`, `members_table`, `detail_legs_table`), an outright's, a leg's or a
-     trade row's trades, the settled line's list.
-  6. "Needs you" (at most five lines, a chip, one sentence and a tab link): RED / AMBER events
-     with real dates, DATES (the contracts on estimated dates), MARKS (the marks missing), GROUP
-     (the trade sets the spread rule could not match), LIMITS.
-  7. "Last load": one sentence from the persisted `upload_report`.
-  8. One Data issues drawer.
+  1. Tiles: Open trades (the rows of the list), LTD and P&L today (the header's own figures and
+     markers), Gross and Net (the engine's USD notional over the rows, summed, "excl. N"), and
+     "CNH hedged" when exactly one trade has a coverage figure (spreads-engine's
+     `hedge_coverage_net` is per trade; the book has none).
+  2. Needs you: a slim strip, at most three lines (an expiry or first notice at RED / AMBER with a
+     real date, the marks missing, the legs that could not be paired), hidden when empty.
+  3. "P&L by" (`summary_table`, id `TABLE_ID`): one table, a switch Spread type | Sector | Commodity |
+     Instrument | Trade; columns Trades (open positions), P&L today, MTD, LTD, Gross, Net, % of gross,
+     Next; the settled line; the Book line = the header's Daily, MTD and LTD to the cent. A click on
+     a line filters Open trades to it (a chip above the list clears it; the switch, filter and sort
+     persist for the session).
+  4. Open trades (`open_rows`): the Strategy rows of `book_rows` flattened, one row per pair (its two
+     legs' trades on it), per leg left over, per spread of the unlabelled trades, per outright, option,
+     LME prompt and FX trade. Columns Spread (the trade name small), Type, Sector, Size, Entry, Level,
+     Move (coloured by its effect on the position), z and %ile (the research app's context,
+     read-only), P&L today (the engine's per-trade Daily split on hover), LTD, Gross, Net (an amber
+     marker on an unbalanced pair or a leg left over), Next. Every column sorts on a click. Before the
+     first pull one line says levels and P&L come with it.
+  5. The row detail on a click: the level (or mark) since the first trade date with the entry dashed
+     (`engine.spreads.history.position_history` through the shared filled reader, at most 60 closes,
+     memoised), the fills, the legs.
+  6. Closed and settled: a closed fold, "(N) · realised ±x", the settled lines.
+  7. Last load: one quiet line from the persisted `upload_report`; then the one Data issues drawer.
 
-Two states of the same screen: with no trades on file, the "No blotter loaded" card (the Upload
-button and the sample link) beside "What happens next"; with trades but no official mark for the
-book, one quiet "Loaded" line under the tiles, fills in Entry and dashes elsewhere. Since later
-the same day the pair rows carry the research app's context (z, %ile, a sparkline; `pair_research`,
-read-only, never in a figure) and the sections read the research app's shape (`section_head`).
-
-Display rules: `ui.tabs.formatting` (2026-09-28). The tab has no date picker: it follows the
-header's as-of store and re-renders in place on the data revision and its safety interval.
-`layout(default_date)` (alias `build_layout`) and `register_callbacks(app, get_db_path)` are the
-shell's interface. `contract_label`, `position_size_text` and `_spreads` are read by the P&L tab.
+Every row's period figure is the P&L tab's own per-trade figure (`ui.tabs.pnl.period_rows`, the
+header's split), the known ones summed (display); nothing is priced or recomputed here. The empty
+state (no trades) is the "No blotter loaded" card. Display rules: `ui.tabs.formatting`. The tab has
+no date picker: it follows the header's as-of store and re-renders in place on the data revision
+and its safety interval. `layout(default_date)` (alias `build_layout`) and
+`register_callbacks(app, get_db_path)` are the shell's interface; `gather`, `book_rows`,
+`grouped_rows`, `group_total`, `trade_types`, `_period_of`, `_spreads`, `_labels`, `empty_state` and
+`trades_on_file` are read by the P&L, Trades, Exposure and Risk tabs and the smoke test.
 """
 from __future__ import annotations
 
@@ -91,9 +44,9 @@ import datetime as dt
 import logging
 import math
 import os
+import re
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import quote
 
 import dash
 import pandas as pd
@@ -104,10 +57,10 @@ from ui.feed_controls import safety_refresh_ms
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import ranking as rk
 from ui.tabs.formatting import (
-    HAND_KINDS, MINUS, MISSING, SOURCE_INFERRED, SOURCE_MIXED, TRADE_TYPE_TITLES, about, contract_name, date_cell,
+    HAND_KINDS, MINUS, MISSING, SOURCE_MIXED, TRADE_TYPE_TITLES, about, contract_name, date_cell,
     fx_name, issues_drawer, lme_name, missing_cell, money_cell, parse_contract_id, plain_words, price_text, quoted_unit,
     short_date, short_money, short_root_name, sign_class, signed_money, signed_number, size_words, spread_name,
-    sum_known, tab_link, trade_type_words, type_disagrees, unit_suffix,
+    sum_known, tab_link, trade_type_words, type_cell, type_disagrees, unit_suffix,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -116,59 +69,34 @@ log = logging.getLogger(__name__)
 BODY_ID = "book-body"
 REFRESH_ID = "book-refresh"
 TOOLBAR_ID = "book-toolbar"
-GROUP_ID = "book-group-by"                 # the Positions fold's Strategy | Commodity | Instrument switch
 TILES_ID = "book-tiles"
 CSV_BUTTON_ID = "book-csv"
 DOWNLOAD_ID = "book-download"
 TABLE_ID = "book-table"
-DETAIL_ID = "book-detail"
-DETAIL_MEMBERS_ID = "book-detail-members"
 DETAIL_LEGS_ID = "book-detail-legs"
 ALERTS_ID = "book-alerts"
 LOAD_ID = "book-load"
 ISSUES_ID = "book-issues"
-EMPTY_UPLOAD_TYPE = "book-empty-upload"    # the empty state's Upload button (clicks the top bar's input): a
-EMPTY_UPLOAD_ID = {"type": EMPTY_UPLOAD_TYPE, "idx": "book"}   # pattern id, since the button exists only while the book is empty
+EMPTY_UPLOAD_TYPE = "book-empty-upload"    # the empty state's Upload button (clicks the top bar's input), a pattern id
 EMPTY_UPLOAD_SINK_ID = "book-empty-upload-sink"
 ROW_TYPE = "book-row"                      # the pattern id of a clickable row: {"type": ROW_TYPE, "idx": row id}
 
 NA = MISSING
-PERIODS = ("daily", "mtd", "ltd")
-PERIOD_TITLES = {"daily": "Daily", "mtd": "MTD", "ltd": "LTD"}
+PERIODS = ("daily", "mtd", "ytd", "ltd")
+PERIOD_TITLES = {"daily": "Daily", "mtd": "MTD", "ytd": "YTD", "ltd": "LTD"}
 GROUP_COMMODITY, GROUP_STRATEGY, GROUP_INSTRUMENT = "commodity", "strategy", "instrument"
-GROUP_OPTIONS = ((GROUP_STRATEGY, "Strategy"), (GROUP_COMMODITY, "Commodity"), (GROUP_INSTRUMENT, "Instrument"))
-DEFAULT_GROUP = GROUP_STRATEGY
-# the summary first (2026-09-28, the user on Jason's real blotter: "where is the pnl by strat"; the
-# research app's Book shape): the By strategy table (one line per spread type), then "Break it down"
-# by Trade (PBRoot name) | Commodity | Instrument, then the positions table folded open under it
-SUMMARY_ID = "book-summary"
-BREAKDOWN_ID = "book-breakdown-by"
-BREAKDOWN_TABLE_ID = "book-breakdown"
-BREAKDOWN_SECTION_ID = "book-breakdown-section"
-POSITIONS_SECTION_ID = "book-positions"
-POSITIONS_TABLE_ID = "book-positions-table"
 UNDER_ID = "book-under"
-SUMMARY_SECTION_ID = "book-summary-section"   # the By strategy title row (static: it holds the Download CSV button)
-SUMMARY_TABLE_ID = "book-summary-table"       # the placeholder the By strategy table is rendered into
-POSITIONS_SUMMARY_ID = "book-positions-meta"  # the Positions fold's summary meta: "· 23 · strategy → trade → pairs → legs"
 RESEARCH_LABEL = "research"                   # the research app's context on a pair row (read-only, never in a figure)
-RESEARCH_COLUMNS = ("z", "%ile", "")          # z-score, 5-year percentile, the sparkline
-SPARK_W, SPARK_H = 90, 18                     # the sparkline, px
-SPARK_DAYS = 365                              # the history the sparkline shows, calendar days to the as-of
-SPARK_POINTS = 260                            # at most this many points on the polyline
-FOLD_WORDS = {GROUP_STRATEGY: "strategy → trade → pairs → legs", GROUP_COMMODITY: "commodity → contract",
-              GROUP_INSTRUMENT: "instrument → position"}
-GROUP_TYPE = "type"                        # by strategy: the spread type of each position (the By strategy table)
-GROUP_TRADE = "trade"                      # by trade: one line per PBRoot name (Break it down's default)
-BREAKDOWN_OPTIONS = ((GROUP_TRADE, "Trade"), (GROUP_COMMODITY, "Commodity"), (GROUP_INSTRUMENT, "Instrument"))
-DEFAULT_BREAKDOWN = GROUP_TRADE
-NO_TYPE_GROUP = "Unassigned"               # a plain JSHY10 label: no strategy (spread type) on the trade
-MIXED_GROUP = "Mixed labels"
-STRATEGY_ORDER = ("CROSS_EXCHANGE", "CROSS_PRODUCT", "TERM_STRUCTURE")   # the research app's order
+GROUP_TYPE = "type"                        # by spread type (the summary's default)
+GROUP_TRADE = "trade"                      # by trade: one line per PBRoot name
 BOOK_LABEL = "Book"
 SETTLED_GROUP = "Settled and closed out"
 OTHER_GROUP = "Other"
 OPTIONS_GROUP, FX_GROUP, LME_GROUP, FUTURES_GROUP = "Options on futures", "FX hedges", "LME forwards", "Futures"
+# A precious-metal pair (an XAUUSD forward, an XAGUSD option) is a position of its own, not a
+# currency hedge (user, 2026-09-29; the engine's test, `engine.spreads.is_hedge`): an outright
+# in the Spread type view, under Metals by sector, its own line by commodity and instrument.
+PRECIOUS_GROUP = "Metals (FX-quoted)"
 NO_STRATEGY_GROUP = "No trade name"        # the rows whose fills carry no PBRoot name
 LEG_PREFIX = "LEG"                          # a Strategy view row: LEG-<strategy>-<instrument>[-<prompt>]
 PAIR_PREFIX = "PAIR"                        # a Strategy view pair row: PAIR-<pair_id> (strategy|contract a|contract b)
@@ -176,89 +104,58 @@ HEDGE_PREFIX = "HEDGE"                      # a Strategy view hedge row: HEDGE-<
 PART_PAIR, PART_OUTRIGHT, PART_HEDGE = "pair", "outright", "hedge"   # the parts of a strategy, in this order
 _PART_RANK = {PART_PAIR: 0, "": 1, PART_OUTRIGHT: 1, PART_HEDGE: 2}
 FALLBACK_WORDS = "paired by a fallback rule, not by the trade's own strategy"
-PART_LABELS = {
-    PART_OUTRIGHT: ("Outright", "The trade's lots left after its pairs: whole lots with no leg to pair with, or "
-                                "left over beyond a pair's exact match; an option or an FX product inside the "
-                                "trade is listed here too."),
-    PART_HEDGE: ("Hedge", "The trade's own USD/CNH futures and FX fills: the desk's hedge of the CNY legs. Gross "
-                          "is the hedge's USD notional (lots × the contract's USD size, or the USD leg's amount)."),
-}
 NO_MARKS_REASON = "no marks on file yet: values appear after the first Bloomberg pull"
 FX_SECTOR = "fx"                            # the SGX USD/CNH future's sector in config/contracts.csv
 _SECTOR_ORDER = ("energy", "metals", "agriculture", "ferrous", FX_SECTOR)
 CONTRACT_PRODUCTS = ("FUTURE", "CMDTY_OPTION", "LME_FWD")   # netted per contract in the Commodity view
 LINES_ON_HOVER = 12
-NEEDS_MAX = 5
 FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION")
 _METAL_UNITS = {"XAU": "oz", "XAG": "oz", "XPT": "oz", "XPD": "oz"}
 _NEXT_EVENT_WORDS = {"first notice": "first notice", "last trade": "last trade", "option expiry": "expiry",
                      "LME prompt": "prompt"}
 
-TAB_KEYS = {"Book": "book", "Exposure": "curve", "P&L": "pnl", "Risk": "risk", "Trades": "blotter",
+TAB_KEYS = {"Book": "book", "Exposure": "curve", "P&L": "pnl", "Risk": "risk", "Blotter": "blotter",
             "Data": "market-data"}
 
-TITLE_ABOUT = ("The book at the header's as-of date. A strategy is the spread type (cross exchange, cross product, "
-               "term structure), a trade is Jason's PBRoot name (COPAR3, CATTLE). By strategy: one line per strategy with "
-               "the trades in it. Break it down: by trade, by commodity (the contracts netted across trades) or by "
-               "instrument. Positions: every open position, by strategy then trade (each trade's pairs with their legs, "
-               "the lots left outright, its hedges), by commodity or by instrument. Each row: its size, the engine's "
-               "gross and net USD notional, its entry, its level now, today's move and its Daily, MTD and LTD P&L in "
-               "USD. Every view adds up to the header. Click a row for its fills and legs.")
-NEEDS_ABOUT = ("What needs you today, most urgent first, one line per kind: expiries within the alert window, the "
-               "contracts still on estimated dates, the marks missing, the trade sets the spread rule could not "
-               "match, the limits. A line whose detail is on another tab names it; a position's dates are in "
-               "its own Next column below.")
+TITLE_ABOUT = ("The book at the header's as-of date. A spread type is cross exchange, cross product or term "
+               "structure; a trade is Jason's PBRoot name (COPAR3, CATTLE). P&L by: the whole book by spread type, "
+               "sector, commodity, instrument or trade, the Book line = the header. Open trades: one row per pair, "
+               "leg left over, option, LME prompt and FX trade; click a line above to filter it, a column head to "
+               "sort, a row for its chart, fills and legs.")
+NEEDS_ABOUT = ("What needs you today, most urgent first, one line per kind: an expiry or first notice within the "
+               "alert window, the marks missing, the legs that could not be paired.")
 LOAD_ABOUT = "What the last blotter load did, as the upload recorded it."
 COLUMN_TIPS = {
-    "Position": "The trade, spread, contract, option, LME prompt or FX hedge in plain words, the trade name (PBRoot) "
-                "small beside it; the instrument ids and the strategy (cross exchange, cross product, term "
-                "structure) on hover. Click a row for its fills and legs.",
-    "Size": "The open size in words: a spread in lots of the near month or in its template's quantity unit, a future "
-            "in lots, an LME prompt in tonnes, an FX hedge in its base currency.",
-    "Gross": "The gross USD notional on the open lots (k / m, the full figure on hover): the engine's figure for a "
-             "trade, a spread, an outright or a contract at the day's marks and spots. A dash with its reason "
-             "where the engine gives none (an option's lots × price is a value, not a notional).",
-    "Net": "The net USD notional, long positive, likewise.",
-    "Entry": "A spread's level at entry (the lots-weighted fills of its legs), an outright's lots-weighted fill, a "
+    "Spread": "The pair, leg, option, LME prompt or FX trade in plain words, Jason's trade name (PBRoot) small and "
+              "grey after it; the legs and instrument ids on hover.",
+    "Type": "Cross exchange, cross product or term structure for a pair (the engine's rule); outright, option, LME "
+            "forward or FX hedge otherwise.",
+    "Sector": "The contract's sector; FX hedges on their own.",
+    "Size": "The open size in words: a pair in its paired quantity (the smaller side), a future in lots, an LME "
+            "prompt in tonnes, an FX hedge in its base currency.",
+    "Entry": "A pair's level at entry (the lots-weighted fills of its legs), an outright's lots-weighted fill, a "
              "fill's price. Prices at tick precision.",
-    "Now": "The level or mark at the day's official marks, with its unit.",
-    "Move": "Now less the level or mark at the Daily's reference close; a spread's $ per unit on hover.",
-    "Daily": "Daily P&L in USD (k / m, the full figure on hover), by the header's rule; a group line sums its rows' "
-             "known figures and says what it leaves out.",
-    "MTD": "MTD P&L in USD, likewise.",
-    "LTD": "LTD P&L in USD, likewise.",
-    "Next": "The position's next event (first notice, last trade, option expiry, LME prompt, FX value date) and the "
-            "business days to it; grey with a leading ≈ while the date is estimated.",
-    # the By strategy and Break it down tables (2026-09-28)
-    "Strategy": "The strategy is the spread type, in the research app's words: cross exchange, cross product or term "
-                "structure; 'Unassigned' for a plain JSHY10 label with no type. On a position it is the engine's: the "
-                "broker's label where the legs agree with it, else read from the legs; 'labels disagree' when its "
-                "fills carry different labels. Every trade of the book is in exactly one line, so the Book line is "
-                "the header's figure.",
-    "Trade": "Jason's trade name (the PBRoot label on his fills: COPAR3, CATTLE); 'No trade name' gathers the fills "
-             "without one, 'Settled and closed out' the fills no longer open. Every fill of the book is in exactly "
-             "one line, so the Book line is the header's figure.",
-    "Trades": "The trades (PBRoot names) in this strategy; how many on hover.",
-    "Legs": "The trade's open lots per contract, netted, and its net in one unit where the contracts convert.",
-    "Open": "How many of the line's fills are open (every fill on file on hover).",
-    "P&L today": "Daily P&L in USD by the header's rule (k / m, the full figure on hover); the engine's split "
-                 "(spread, FX, hedge) on hover of a trade's figure.",
-    "Since entry": "LTD P&L in USD: every fill of the line since the first, the settled ones at their frozen figure.",
-    "% of P&L": "The line's LTD as a share of the Book's LTD, signed (a loss against a profitable book is negative); "
-                "the shares add to 100. A dash while either figure is missing.",
-    "% of exposure": "The line's gross USD notional as a share of the Book's gross.",
-    "Hedged": "For a trade with CNY legs: how much of the CNY legs' signed net notional its FX hedge covers "
-              "(the engine's figure, 100 % = fully hedged); an amber marker when the hedge runs with the exposure.",
-    # the research context on a pair row (2026-09-28, the user's reversal of "no market context on the monitor")
+    "Level": "A pair's level at the day's official marks in its unit; the mark otherwise.",
+    "Move": "Level less the Daily's reference close: green when it moved the position's way, red when against; the "
+            "$ per unit and the move in σ (research) on hover.",
     "z": "The research app's z-score of the pair's spread level against its own history (the app's primary window; "
          "its 1-year z on hover). Context, read-only: never in P&L, delta or a total.",
     "%ile": "The research app's 5-year percentile of the pair's spread level. Context, read-only.",
-    "History": "The pair's spread level over the last year in the research app; the entry level a dashed line, the "
-               "last point a dot. Context, read-only.",
+    "P&L today": "Daily P&L in USD by the header's rule (k / m, the full figure on hover); on a row of a trade, the "
+                 "engine's split of that whole trade's Daily (spread, FX, hedge) on hover.",
+    "MTD": "MTD P&L in USD, likewise.",
+    "LTD": "LTD P&L in USD, likewise: every fill since the first, the settled ones at their frozen figure.",
+    "Gross": "The gross USD notional on the open lots (k / m, the full figure on hover): the engine's figure for a "
+             "pair, a leg, an outright or a trade at the day's marks and spots. A dash with its reason where the "
+             "engine gives none (an option's lots × price is a value, not a notional).",
+    "Net": "The net USD notional, long positive, likewise; an amber marker when a pair's legs do not balance or a "
+           "leg is left over from its trade's pairs.",
+    "Next": "The position's next event (first notice, last trade, option expiry, LME prompt, FX value date) and the "
+            "business days to it; red within 3 business days and amber within 10 by the engine's level, grey with "
+            "a leading ≈ while the date is estimated.",
+    "Trades": "How many open positions the line holds (the rows of Open trades); the fills on hover.",
+    "% of gross": "The line's gross USD notional as a share of the Book's gross.",
 }
-RESEARCH_ABOUT = ("Context from the research app (RV Spreads), read-only: the z-score, the 5-year percentile and a "
-                  "year of the spread's level, on a pair the research app tracks (its template id, or a calendar "
-                  "of one root). Never a mark, never in P&L, delta or a total.")
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -426,33 +323,6 @@ def _table_styles(numeric_cols: Sequence[str], text_cols: Sequence[str], na_cols
 
 def _tip(text: str) -> dict:
     return {"value": plain_words(text), "type": "text"}
-
-
-def members_table(payload: Dict[str, Any]) -> dash_table.DataTable:
-    """The position's entries: one row per member spread, its trade dates, accounts, size and
-    entry level (a dash with its reason)."""
-    unit = payload.get("unit") or ""
-    rows, tips = [], []
-    for m in payload.get("members") or []:
-        size = _num(m.get("size"))
-        entry = _num(m.get("level_entry"))
-        rows.append({"spread_id": m.get("spread_id") or "", "trade_dates": ", ".join(m.get("trade_dates") or []),
-                     "accounts": ", ".join(m.get("accounts") or []),
-                     "size": NA if size is None else size_text(size, m.get("size_unit") or ""),
-                     "entry": level_text(entry, unit), "trades": ", ".join(m.get("trade_ids") or []),
-                     "status": m.get("status") or ""})
-        tip: Dict[str, dict] = {}
-        if entry is None:
-            tip["entry"] = _tip(m.get("level_entry_reason") or "no entry level and no reason")
-        tips.append(tip)
-    columns = [rk.text("Entry", "spread_id"), rk.text("Trade date(s)", "trade_dates"),
-               rk.text("Account(s)", "accounts"), rk.text("Size", "size"),
-               rk.text(f"Entry level ({unit or 'no unit'})", "entry"), rk.text("Trades", "trades"),
-               rk.text("Status", "status")]
-    return dash_table.DataTable(
-        id=DETAIL_MEMBERS_ID, columns=columns, data=rows, tooltip_data=tips, **rk.sortable(),
-        **_table_styles([], [c["id"] for c in columns if c["id"] != "entry"], na_cols=("entry", "size")),
-        page_action="none")
 
 
 def detail_legs_table(payload: Dict[str, Any]) -> dash_table.DataTable:
@@ -665,6 +535,18 @@ def gather(conn: sqlite3.Connection, as_of: str) -> dict:
     except Exception as exc:  # noqa: BLE001 -- the commodity group lines then say why
         data["curve"], data["curve_error"] = None, _failure("the net exposure by commodity could not be built", exc)
     try:
+        from engine.spreads import carry
+        data["carry"], data["carry_error"] = carry(conn, as_of, spreads=data.get("spreads")), ""
+    except Exception as exc:  # noqa: BLE001 -- research context: the column is then blank, the reason in the drawer
+        log.exception("book tab: carry failed for %s", as_of)
+        data["carry"], data["carry_error"] = None, _failure("the carry (roll-down) could not be read", exc)
+    try:
+        from engine.limits import liquidity
+        data["liquidity"] = liquidity(conn, as_of, spreads=data.get("spreads"), curve=data.get("curve"))
+    except Exception:  # noqa: BLE001 -- research context for one Needs you line: a failure hides the line
+        log.exception("book tab: the liquidity check failed for %s", as_of)
+        data["liquidity"] = None
+    try:
         from engine.expiry import expiry_schedule
         data["schedule"], data["schedule_error"] = expiry_schedule(conn, as_of), ""
     except Exception as exc:  # noqa: BLE001
@@ -720,13 +602,22 @@ def _sector_of(root_ids: Sequence[str], roots: Dict[str, Any]) -> str:
     return ""
 
 
+def fx_is_hedge(product: str, base: str = "", quote: str = "", instrument_id: str = "", root=None) -> bool:
+    """The engine's currency-hedge test (`engine.spreads.is_hedge`), never copied here: an FX
+    product on a currency pair or the USD/CNH future is a hedge, a precious-metal pair is not."""
+    from engine.spreads import is_hedge
+    return bool(is_hedge(root, product, base, quote, instrument_id))
+
+
 def _commodity_of(root_ids: Sequence[str], product: str, data: dict) -> Tuple[str, str]:
-    """(group label, subsector key) of a row for the Commodity view: an FX product or a root of
-    sector 'fx' (the SGX USD/CNH future) under FX hedges; else the root's commodity across
-    exchanges in plain words (`engine.curve.subsector_name`: 'Copper', 'Iron ore'); Other when
-    the root is not in the universe."""
+    """(group label, subsector key) of a row for the Commodity view: an FX hedge (an FX product
+    on a currency pair) or a root of sector 'fx' (the SGX USD/CNH future) under FX hedges, a
+    precious-metal pair under its own line; else the root's commodity across exchanges in plain
+    words (`engine.curve.subsector_name`: 'Copper', 'Iron ore'); Other when the root is not in
+    the universe."""
     if product in FX_PRODUCTS:
-        return FX_GROUP, ""
+        base = str(root_ids[0]) if root_ids else ""
+        return (FX_GROUP if fx_is_hedge(product, base) else PRECIOUS_GROUP), ""
     for rid in root_ids:
         root = data["roots"].get(rid)
         if root is None:
@@ -1142,7 +1033,10 @@ def trade_row(r: pd.Series, data: dict) -> dict:
         size = size_words(qty, _METAL_UNITS[base]) if base in _METAL_UNITS else size_words(qty, ccy=base or "")
         nxt = _next_plain(data, info.get("expiry_date") if product == "FX_OPTION" else settle,
                           "expiry" if product == "FX_OPTION" else "value date")
-        sector_group, instrument_group = FX_GROUP, FX_GROUP
+        if fx_is_hedge(product, base, info.get("quote_ccy", ""), inst, root):
+            sector_group, instrument_group = FX_GROUP, FX_GROUP
+        else:                       # a precious-metal pair: a metals position, not a hedge
+            sector_group, instrument_group, sector = _sector_label("metals"), PRECIOUS_GROUP, "metals"
         if product == "FX_OPTION":
             unit = f"of {base} notional" if base else ""
     else:
@@ -1161,7 +1055,9 @@ def trade_row(r: pd.Series, data: dict) -> dict:
             data, f"{base} {settle}" if product == "LME_FWD" else inst, [tid], qty, product)
     elif product in FX_PRODUCTS:
         gross, net, notional_source = None, None, ""
-        notional_reason = "an FX hedge's notional is its currency exposure, on the Exposure tab's currency card"
+        notional_reason = ("an FX hedge's notional is its currency exposure, on the Exposure tab's currency card"
+                           if instrument_group == FX_GROUP else
+                           "a precious-metal forward's USD exposure is on the Exposure tab's currency card (metals)")
     else:
         gross, net, notional_source = None, None, ""
         notional_reason = f"no USD notional from the engine for a {product.replace('_', ' ').lower()}"
@@ -1198,11 +1094,6 @@ def settled_row(data: dict, trade_ids: Sequence[str], strategy: str = "") -> dic
                 periods=_periods_of(data, trade_ids), trade_ids=[str(t) for t in trade_ids],
                 sector_group=SETTLED_GROUP, instrument_group=SETTLED_GROUP, commodity_group=SETTLED_GROUP,
                 strategy=strategy or SETTLED_GROUP, trade_type=SETTLED_GROUP)
-
-
-def strategy_positions(data: dict) -> List[dict]:
-    """The open strategy positions (spreads-engine's kind `strategy`: Jason's PBRoot names)."""
-    return [p for p in open_positions(data.get("spreads") or {}) if str(p.get("kind") or "") == "strategy"]
 
 
 def _strategy_entry(data: Optional[dict], name: str) -> Optional[dict]:
@@ -1369,47 +1260,35 @@ def _pair_research_key(p: dict) -> Tuple[str, str, str]:
 
 
 def _research(data: dict, as_of: str) -> dict:
-    """The research app's statistics and a year of level history for every pair of the strategies
-    (`engine/risk/research_spreads.py`, read-only; mock data on this PC): {"keys": {pair_id: (sid,
-    inst, reason)}, "stats": {(sid, inst): entry}, "history": {(sid, inst): {"values", "first",
-    "last", "reason"}}, "reason": '' or why nothing could be read, "source"}."""
-    from engine.risk.research_spreads import research_spread_history, research_spread_stats
+    """The research app's statistics for every pair of the trades (`engine/risk/research_spreads.py`,
+    read-only; mock data on this PC): {"keys": {pair_id: (sid, inst, reason)}, "stats": {(sid,
+    inst): entry}, "reason": '' or why nothing could be read, "source"}. (Its year of history fed
+    the sparkline, which left the Book on 2026-09-29.)"""
+    from engine.risk.research_spreads import research_spread_stats
     keys: Dict[str, Tuple[str, str, str]] = {}
     for entry in (data.get("spreads") or {}).get("strategies") or []:
         for p in entry.get("pairs") or []:
             keys[str(p.get("pair_id") or "")] = _pair_research_key(p)
     wanted = sorted({(sid, inst) for sid, inst, _why in keys.values() if sid})
-    out: Dict[str, Any] = {"keys": keys, "stats": {}, "history": {}, "reason": "", "source": ""}
+    out: Dict[str, Any] = {"keys": keys, "stats": {}, "reason": "", "source": ""}
     if not wanted:
         return out
     stats = research_spread_stats(wanted, as_of)
     out["stats"], out["reason"], out["source"] = dict(stats.get("stats") or {}), str(stats.get("reason") or ""), str(stats.get("source") or "")
     out["path"] = str(stats.get("path") or "")
-    if not stats.get("available"):
-        return out
-    start = (dt.date.fromisoformat(as_of) - dt.timedelta(days=SPARK_DAYS)).isoformat()
-    for key in wanted:
-        series = research_spread_history(key, start, as_of)
-        values = [float(v) for v in series.tolist() if v is not None and math.isfinite(float(v))]
-        if len(values) > SPARK_POINTS:
-            step = len(values) / SPARK_POINTS
-            values = [values[int(i * step)] for i in range(SPARK_POINTS)] + [values[-1]]
-        out["history"][key] = {"values": values, "reason": str(series.attrs.get("reason") or ""),
-                               "first": series.index[0].date().isoformat() if len(series) else "",
-                               "last": series.index[-1].date().isoformat() if len(series) else ""}
     return out
 
 
 def pair_research(data: dict, p: dict) -> dict:
     """The research context of one pair for its row: key, z, pctile, level, unit, name, asof, the
-    sparkline values, the entry level, and a reason when there is nothing to show."""
+    entry level, and a reason when there is nothing to show."""
     res = data.get("research") or {}
     pair_id = str(p.get("pair_id") or "")
     sid, inst, why = (res.get("keys") or {}).get(pair_id) or _pair_research_key(p)
     key_text = f"{sid} {inst}".strip()
     out: Dict[str, Any] = {"key": key_text, "sid": sid, "inst": inst, "z": None, "z_kind": "", "z_1y": None, "pctile": None,
                            "level": None, "unit": "", "name": "", "asof": None, "note": "", "reason": "",
-                           "values": [], "first": "", "last": "", "history_reason": "", "entry": _num(p.get("level_entry"))}
+                           "entry": _num(p.get("level_entry"))}
     if data.get("research_error"):
         out["reason"] = str(data["research_error"])
         return out
@@ -1428,14 +1307,11 @@ def pair_research(data: dict, p: dict) -> dict:
     out.update(z=_num(entry.get("z_primary")), z_kind=str(entry.get("z_primary_kind") or ""), z_1y=_num(entry.get("z_1y")),
                pctile=_num(entry.get("pctile_5y")), level=_num(entry.get("level")), unit=str(entry.get("unit") or ""),
                name=str(entry.get("name") or ""), asof=entry.get("asof"), note=str(entry.get("note") or ""))
-    hist = (res.get("history") or {}).get((sid, inst)) or {}
-    out.update(values=list(hist.get("values") or []), first=str(hist.get("first") or ""), last=str(hist.get("last") or ""),
-               history_reason=str(hist.get("reason") or (f"no research history for {key_text}" if not hist else "")))
     return out
 
 
 def research_hover(r: dict) -> str:
-    """One hover for the three research cells of a pair row."""
+    """One hover for the research cells (z, %ile) of a pair row."""
     bits = [f"{RESEARCH_LABEL}: {r['name'] or r['key']} ({r['key']})" if r.get("name") else f"{RESEARCH_LABEL}: {r['key']}"]
     if r.get("z") is not None:
         bits.append(f"z {signed_number(r['z'], 2)}" + (f" ({r['z_kind']})" if r.get("z_kind") else "")
@@ -1447,67 +1323,10 @@ def research_hover(r: dict) -> str:
         bits.append(f"level {level_text(r['level'], r.get('unit'))} {r.get('unit') or ''}".rstrip())
     if r.get("asof"):
         bits.append(f"run of {r['asof']}")
-    if r.get("values"):
-        bits.append(f"history {r['first']} to {r['last']} ({len(r['values'])} points), the dashed line the entry level")
-    elif r.get("history_reason"):
-        bits.append(r["history_reason"])
     if r.get("note"):
         bits.append(r["note"])
     bits.append("context from the research app, read-only: never in P&L, delta or a total")
     return " · ".join(bits)
-
-
-def sparkline_src(values: Sequence[float], entry: Optional[float] = None, w: int = SPARK_W, h: int = SPARK_H) -> str:
-    """An inline SVG sparkline as a data URI for an `html.Img`: the values as a polyline, the
-    entry level a dashed line when it lies near the history's range, the last point a dot. The
-    browser draws it; no JavaScript, no plotly figure."""
-    vals = [float(v) for v in values if v is not None and math.isfinite(float(v))]
-    if not vals:
-        return ""
-    lo, hi = min(vals), max(vals)
-    span = (hi - lo) or abs(hi) * 0.01 or 1.0
-    show_entry = entry is not None and math.isfinite(entry) and lo - span * 0.5 <= entry <= hi + span * 0.5
-    if show_entry:
-        lo, hi = min(lo, entry), max(hi, entry)
-        span = (hi - lo) or 1.0
-    pad = 2.0
-
-    def x(i: int) -> float:
-        return pad + (w - 2 * pad) * i / max(len(vals) - 1, 1)
-
-    def y(v: float) -> float:
-        return h - pad - (h - 2 * pad) * (v - lo) / span
-
-    points = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">']
-    if show_entry:
-        ye = y(entry)
-        parts.append(f'<line x1="0" y1="{ye:.1f}" x2="{w}" y2="{ye:.1f}" stroke="#9ca3af" stroke-width="1" stroke-dasharray="2,2"/>')
-    parts.append(f'<polyline points="{points}" fill="none" stroke="#0f1f3d" stroke-width="1" stroke-linejoin="round"/>')
-    parts.append(f'<circle cx="{x(len(vals) - 1):.1f}" cy="{y(vals[-1]):.1f}" r="1.8" fill="#0f1f3d"/>')
-    parts.append("</svg>")
-    return "data:image/svg+xml;utf8," + quote("".join(parts), safe="")
-
-
-def _research_tds(row: dict) -> List[html.Td]:
-    """The three research cells of a row: z, %ile and the sparkline on a pair row, each a dash with
-    its reason when the research app has nothing; empty on every other row."""
-    r = row.get("research")
-    if row.get("kind") != "pair" or not r:
-        return [html.Td("", className="book-research") for _ in RESEARCH_COLUMNS]
-    if r.get("reason"):
-        why = r["reason"]
-        return [html.Td(missing_cell(why), className="book-research") for _ in RESEARCH_COLUMNS]
-    hover = research_hover(r)
-    z = html.Td(signed_number(r["z"], 2) if r.get("z") is not None else missing_cell(f"no z-score for {r['key']}: not enough history in the research app"),
-                className="book-research", title=plain_words(hover))
-    pct = html.Td(f"{r['pctile']:.0f}" if r.get("pctile") is not None else missing_cell(f"no 5-year percentile for {r['key']} in the research app"),
-                  className="book-research", title=plain_words(hover))
-    src = sparkline_src(r.get("values") or [], r.get("entry"))
-    spark = html.Td(html.Img(src=src, className="book-spark", alt="", width=SPARK_W, height=SPARK_H) if src
-                    else missing_cell(r.get("history_reason") or f"no research history for {r['key']}"),
-                    className="book-research book-spark-cell", title=plain_words(hover))
-    return [z, pct, spark]
 
 
 def engine_leg_row(data: dict, strategy: str, leg: dict, part: str, position: Optional[dict] = None,
@@ -1812,7 +1631,7 @@ def _commodity_group_order(data: Optional[dict]) -> List[str]:
 def _group_order(by: str, names: Sequence[str], data: Optional[dict] = None) -> List[str]:
     tail = [FX_GROUP, OTHER_GROUP, SETTLED_GROUP]
     if by == GROUP_INSTRUMENT:
-        order = [FUTURES_GROUP, OPTIONS_GROUP, LME_GROUP, FX_GROUP, OTHER_GROUP, SETTLED_GROUP]
+        order = [FUTURES_GROUP, OPTIONS_GROUP, LME_GROUP, PRECIOUS_GROUP, FX_GROUP, OTHER_GROUP, SETTLED_GROUP]
         return [g for g in order if g in names] + sorted(g for g in names if g not in order)
     if by == GROUP_STRATEGY:
         fixed = [NO_STRATEGY_GROUP, SETTLED_GROUP]
@@ -1888,56 +1707,7 @@ def notional_total(rows: Sequence[dict]) -> Tuple[Optional[float], Optional[floa
     return gross, net, excluded, reasons
 
 
-def _strategy_position(data: Optional[dict], label: str) -> Optional[dict]:
-    for p in strategy_positions(data or {}):
-        if str(p.get("strategy") or p.get("name") or "") == label:
-            return p
-    return None
-
-
-def group_notional(label: str, rows: Sequence[dict], by: str, data: Optional[dict]
-                   ) -> Tuple[Optional[float], Optional[float], int, List[str], str]:
-    """(gross, net, excluded, reasons, source) of a group line: in the Strategy view the
-    strategy's own engine figure (`book_spreads`' `gross_usd` / `net_usd` on the position, never
-    a sum of its legs); otherwise the rows' known figures summed."""
-    p = _strategy_position(data, label) if by == GROUP_STRATEGY else None
-    if p is not None:
-        gross, net = _num(p.get("gross_usd")), _num(p.get("net_usd"))
-        why = str(p.get("notional_reason") or "no notional given")
-        if gross is None:
-            return None, None, 1, [f"{label}: {why}"], ""
-        return gross, net, 0, [], "the spread finder's notional on the trade's open lots at the day's marks and spots"
-    gross, net, excluded, reasons = notional_total(rows)
-    return gross, net, excluded, reasons, "the rows' known figures summed"
-
-
-def groups_notional(groups: Sequence[Tuple[str, Sequence[dict]]], by: str, data: Optional[dict]
-                    ) -> Tuple[Optional[float], Optional[float], int, List[str]]:
-    """The gross and net of a set of group lines summed (a trade's is the engine's own), the
-    groups with none counted with their reasons."""
-    pairs_g, pairs_n = [], []
-    excluded, reasons = 0, []
-    for label, members in groups:
-        g, n, ex, why, _src = group_notional(label, members, by, data)
-        if g is None:
-            excluded += max(ex, 1)
-            reasons += why or [f"{label}: no notional"]
-            continue
-        excluded += ex
-        reasons += why
-        pairs_g.append((g, ""))
-        pairs_n.append((n, ""))
-    return sum_known(pairs_g)[0], sum_known(pairs_n)[0], excluded, reasons
-
-
-def total_notional(rows: Sequence[dict], by: str, data: Optional[dict]
-                   ) -> Tuple[Optional[float], Optional[float], int, List[str]]:
-    """The Book line's gross and net: the group lines' figures summed (a trade's is the
-    engine's own), the groups with none counted."""
-    return groups_notional(grouped_rows(rows, by, data), by, data)
-
-
-# --------------------------------------------------------------------------- the table
+# --------------------------------------------------------------------------- cells, tiles, detail and load helpers kept from the earlier tables
 def _excl_hover(excluded: int, reasons: Sequence[str]) -> str:
     return (f"excludes {excluded}: " + "; ".join(reasons[:LINES_ON_HOVER])
             + (f"; and {len(reasons) - LINES_ON_HOVER} more" if len(reasons) > LINES_ON_HOVER else ""))
@@ -2000,226 +1770,7 @@ def _next_td(row: dict) -> html.Td:
                              f"{nxt['event']}: {nxt['hover']}", alert_date=alert), className="l")
 
 
-def _name_children(row: dict) -> List[Any]:
-    """The Position cell: the name, then the strategy name small (the names when a netted contract
-    row holds several); nothing after a row that is the strategy itself or sits under its
-    strategy's group in the Strategy view."""
-    children: List[Any] = [row["name"]]
-    if row["kind"] == "pair":
-        words = row.get("type_words") or ""
-        tag = row.get("type_tag") or ""
-        if words:
-            children.append(html.Span([words, html.Span(f" · {tag}", className="book-pair-tag") if tag else None],
-                                      className="book-pair-type",
-                                      title=plain_words(row.get("type_note") or f"the pair's rule: {words}")))
-        return children
-    if row.get("hand") == "strategy" or row.get("group"):
-        return children
-    names = row.get("strategies") or ([row["strategy"]] if row.get("strategy") else [])
-    if names:
-        children.append(html.Span(", ".join(names), className="name-sub",
-                                  title="Jason's trade name (the broker's PBRoot label)"))
-    return children
-
-
-def type_sentence(trade_type: str, type_source: str = "", type_note: str = "") -> str:
-    """The strategy (spread type) in one sentence for a hover: 'Strategy: cross exchange (the
-    broker's label)', 'Strategy: term structure (read from the legs)', 'Strategy: the broker's
-    labels disagree: ...'; '' for an outright with no type and no note."""
-    words = trade_type_words(trade_type)
-    source, note = str(type_source or ""), str(type_note or "")
-    if not words:
-        if source == SOURCE_MIXED:
-            return f"Strategy: the broker's labels on the legs disagree{': ' + note if note else ''}"
-        return f"Strategy: {note}" if note else ""
-    how = "read from the legs, no broker label on these fills" if source == SOURCE_INFERRED else "the broker's label"
-    text = f"Strategy: {words} ({how})"
-    if type_disagrees(source, note):
-        text += f". Check: {note}"
-    return text
-
-
-def position_tr(row: dict, markers: bool = True, marks_on_file: bool = True) -> html.Tr:
-    move_cls = sign_class(row["move_sign"]) if row["move"] is not None else "cell-missing"
-    now_children: List[Any] = [row["now_text"]]
-    if row["now"] is not None and row.get("unit"):
-        now_children.append(unit_suffix(row["unit"]))
-    if row.get("ratio"):
-        now_children.append(unit_suffix("ratio"))
-    hover = "\n".join(t for t in (row["name_hover"], type_sentence(row["trade_type"], row["type_source"], row["type_note"])
-                                  if row["kind"] != "settled" else "") if t)
-    size_children: List[Any] = [row["size"]]
-    if row.get("size_marker"):
-        text, why = row["size_marker"]
-        size_children.append(html.Span(text, className="marker marker--small", title=plain_words(why)))
-    cells = [
-        html.Td(_name_children(row), className="l book-name", title=plain_words(hover)),
-        html.Td(size_children, className="l", title=plain_words(row["size_hover"]) or None),
-    ]
-    if row["kind"] == "settled":
-        cells += [html.Td(""), html.Td("")]
-    else:
-        cells += _notional_tds(row["gross"], row["net"], 0, [row["notional_reason"]], row["notional_source"],
-                               markers, marks_on_file)
-    cells += [
-        html.Td(row["entry_text"], title=plain_words(row["entry_hover"]) or None,
-                className="cell-missing" if row["entry"] is None and row["entry_text"] == NA else None),
-        html.Td(now_children, title=plain_words(row["now_hover"]) or None,
-                className="cell-missing" if row["now"] is None and row["now_text"] == NA else None),
-        html.Td(row["move_text"], title=plain_words(row["move_hover"]) or None,
-                className=move_cls if row["move_text"] != "" else None),
-    ]
-    cells += _research_tds(row)
-    for key in PERIODS:
-        value, excluded, reasons, note = row["periods"][key]
-        cells.append(_money_td(value, excluded, reasons, note, markers=markers and not row.get("subtotal")))
-    next_td = _next_td(row)
-    if row.get("next_marker"):
-        text, why = row["next_marker"]
-        next_td.children = [next_td.children, html.Span(text, className="marker marker--amber marker--small",
-                                                        title=plain_words(why))]
-    cells.append(next_td)
-    cls = "book-row book-pair" if row["kind"] == "pair" else (
-        "book-row book-row--leg" if row.get("part") and row["kind"] != "settled" else "book-row")
-    return html.Tr(cells, id={"type": ROW_TYPE, "idx": row["id"]}, n_clicks=0, className=cls)
-
-
-def _units_words(value: Optional[float], unit: str) -> str:
-    """'long 35.6 t', 'short 7.9m USD', 'flat': a net in physical units, rounded to a tenth."""
-    if value is None:
-        return NA
-    if unit and len(unit) == 3 and unit.isupper() and unit.isalpha():
-        return size_words(value, ccy=unit)
-    return size_words(round(float(value), 1), unit or "units")
-
-
-def _split_words(c: dict) -> str:
-    """'long COMEX 34 lots', 'short LME 350 t': one root's net on its exchange (an LME root in
-    tonnes, a futures root in lots)."""
-    exchange = str(c.get("exchange") or c.get("root_id") or "")
-    if exchange == "LME":
-        v, unit = _num(c.get("net_units")), str(c.get("unit") or "t")
-    else:
-        v, unit = _num(c.get("net_lots")), "lots"
-    words = size_words(round(v, 1), unit) if v is not None else NA
-    side, _sp, rest = words.partition(" ")
-    return f"{side} {exchange} {rest}".strip() if rest else f"{exchange} {words}".strip()
-
-
-def _root_words(root_id: str, lots: float, roots: Dict[str, Any], longs: float = 0.0, shorts: float = 0.0) -> str:
-    """'long COMEX copper 34 lots', 'short LME zinc 1,900 t', 'HRC flat (long 200, short 200
-    lots)': one root's net of a strategy's open legs, an LME root in tonnes (its lots are
-    tonnes), a futures root in lots; a root that nets to zero says each way (a term structure)."""
-    root = roots.get(root_id)
-    if root is None and len(root_id) == 3 and root_id.isalpha() and root_id.isupper():
-        return f"FX hedge {size_words(lots, ccy=root_id)}"      # an FX spot / forward leg: its base currency amount
-    name = short_root_name(root, root_id)
-    unit = "t" if root_id.startswith("LME:") else "lots"
-    if abs(lots) < 1e-9:
-        return f"{name} flat (long {plain(longs)}, short {plain(abs(shorts))} {unit})"
-    words = size_words(round(float(lots), 1), unit)
-    side, _sp, rest = words.partition(" ")
-    return f"{side} {name} {rest}".strip() if rest else f"{name} {words}".strip()
-
-
-def strategy_legs_words(position: dict, data: dict) -> Tuple[List[Any], str]:
-    """The legs sentence of a strategy's group line: each root's net open lots or tonnes in
-    words ('long COMEX copper 34 lots · short LME copper 350 t'), then 'net long 35.6 t' for a
-    commodity whose curve-positions `by_subsector` line is this strategy's alone (every root of
-    the commodity in this strategy at the same net, so the engine's conversion to one unit is
-    the strategy's own; the note on hover); no net where it is not. (children, hover)."""
-    roots = data.get("roots") or {}
-    by_root: Dict[str, float] = {}
-    longs: Dict[str, float] = {}
-    shorts: Dict[str, float] = {}
-    for leg in position.get("legs") or []:
-        rid = str(leg.get("root_id") or "")
-        lots = _num(leg.get("open_lots"))
-        if lots is None:
-            lots = _num(leg.get("lots")) or 0.0
-        by_root[rid] = by_root.get(rid, 0.0) + lots
-        (longs if lots > 0 else shorts)[rid] = (longs if lots > 0 else shorts).get(rid, 0.0) + lots
-    parts: List[Any] = []
-    for rid, lots in by_root.items():
-        if abs(lots) < 1e-9 and not longs.get(rid) and not shorts.get(rid):
-            continue                       # no open lots at all on this root
-        if parts:
-            parts.append(" · ")
-        parts.append(html.Span(_root_words(rid, lots, roots, longs.get(rid, 0.0), shorts.get(rid, 0.0)),
-                               className=sign_class(lots) or None,
-                               title=plain_words(f"{rid}: the trade's open lots on its contracts, netted (display)")))
-    subs = ((data.get("curve") or {}).get("by_subsector") or {})
-    subsectors = data.get("subsectors") or {}
-    hover_lines: List[str] = []
-    by_sub: Dict[str, List[str]] = {}
-    for rid in by_root:
-        by_sub.setdefault(subsectors.get(rid, ""), []).append(rid)
-    for key, rids in by_sub.items():
-        sub = subs.get(key)
-        if not sub or len(rids) < 2:
-            continue                       # one root: its own words above say it; nothing to convert
-        split = {str(c.get("root_id")): c for c in sub.get("split") or []}
-        if set(split) != set(rids):
-            continue                       # another strategy holds this commodity too
-        same = all(abs((_num(split[r].get("net_units" if r.startswith("LME:") else "net_lots")) or 0.0) - by_root[r]) < 1e-6
-                   for r in rids)
-        net_units, unit = _num(sub.get("net_units")), str(sub.get("unit") or "")
-        if not same or net_units is None:
-            continue
-        name = str(sub.get("name") or key)
-        prefix = f"{name.lower()} " if len(by_sub) > 1 else ""
-        parts += [" · ", html.Span(f"{prefix}net {_units_words(net_units, unit)}", className=sign_class(net_units) or None,
-                                   title=plain_words(str(sub.get("units_note") or f"the roots' units add: {unit}")))]
-        if sub.get("units_note"):
-            hover_lines.append(f"{name}: {sub['units_note']}")
-    return parts, "\n".join(hover_lines)
-
-
-def net_exposure_children(sub: Optional[dict], label: str = "", markers: bool = True) -> Tuple[List[Any], str]:
-    """The net exposure line of a commodity group, from curve-positions' `by_subsector` entry:
-    'net long 35.6 t · long COMEX 34 lots · short LME 350 t' (the net in one physical unit, then
-    each root's net on its exchange), the units note, the USD net and gross (or why not) on
-    hover; a dash with the units note when the units do not add. (children, hover)."""
-    if not sub:
-        return [], ""
-    net_units, unit = _num(sub.get("net_units")), str(sub.get("unit") or "")
-    parts: List[Any] = []
-    units_note = str(sub.get("units_note") or "")
-    if net_units is None:
-        parts.append(html.Span(["net ", missing_cell(units_note or "no net in one unit")]))
-    else:
-        parts.append(html.Span(f"net {_units_words(net_units, unit)}", className=sign_class(net_units) or None,
-                               title=units_note or f"the roots' units add: {unit}"))
-    split = list(sub.get("split") or [])
-    exchanges = [str(c.get("exchange") or "") for c in split]
-    for c in split:
-        words = _split_words(c)
-        if exchanges.count(str(c.get("exchange") or "")) > 1:
-            words += f" ({short_root_name(None, str(c.get('root_id') or ''))})"
-        parts += [" · ", html.Span(words, title=plain_words(f"{c.get('root_id')}: {c.get('reason') or 'net lots, the trades netted'}"))]
-    net_usd, gross_usd = _num(sub.get("net_usd")), _num(sub.get("gross_usd"))
-    hover_lines = [units_note] if units_note else []
-    if net_usd is not None and gross_usd is not None:
-        hover_lines.append(f"USD notional: net {signed_money(net_usd, '$')}, gross {short_money(gross_usd, '$')} "
-                           f"({full_usd(net_usd)} / {full_usd(gross_usd)})")
-    else:
-        hover_lines.append(f"no USD notional: {sub.get('reason') or 'a price is missing'}")
-    if sub.get("missing") and markers:
-        parts.append(html.Span(f"excl. {len(sub['missing'])}", className="marker",
-                               title=plain_words(f"no USD figure for {', '.join(sub['missing'][:LINES_ON_HOVER])}: {sub.get('reason') or ''}")))
-    return parts, "\n".join(hover_lines)
-
-
-def _subsector_for_group(label: str, rows: Sequence[dict], data: Optional[dict]) -> Optional[dict]:
-    subs = ((data or {}).get("curve") or {}).get("by_subsector") or {}
-    keys = [r.get("subsector") for r in rows if r.get("subsector")]
-    for key in dict.fromkeys(keys):
-        if key in subs:
-            return subs[key]
-    return next((sub for sub in subs.values() if str(sub.get("name")) == label), None)
-
-
-def hedge_coverage_children(entry: Optional[dict]) -> List[Any]:
+def hedge_coverage_children(entry: Optional[dict], words: str = "hedged") -> List[Any]:
     """'hedged 96 %' on a strategy line with CNY legs: the engine's `hedge_coverage_net` (the
     hedge against the signed CNY net, 1.0 = fully hedged), the unhedged CNY notional and the
     gross-based coverage on hover; an amber marker with the engine's sentence when the hedge
@@ -2232,7 +1783,7 @@ def hedge_coverage_children(entry: Optional[dict]) -> List[Any]:
     if net_cov is None:
         if not reason or "no CNY legs" in reason:
             return []
-        return ["hedged ", missing_cell(reason)]
+        return [f"{words} " if words else "", missing_cell(reason)]
     gross_cov, unhedged = _num(entry.get("hedge_coverage")), _num(entry.get("unhedged_cny"))
     hedge_usd, cny_net = _num(entry.get("hedge_usd")), _num(entry.get("cny_net_usd"))
     hover = "; ".join(t for t in (
@@ -2242,215 +1793,12 @@ def hedge_coverage_children(entry: Optional[dict]) -> List[Any]:
         f"against the CNY legs' gross notional: {gross_cov * 100:.0f} %" if gross_cov is not None else "",
         reason) if t)
     pct = round(net_cov * 100) + 0.0            # never a "−0 %" for a coverage that rounds to nothing
-    out: List[Any] = [html.Span(f"hedged {pct:.0f} %".replace("-", MINUS), title=plain_words(hover))]
+    out: List[Any] = [html.Span(f"{words} {pct:.0f} %".strip().replace("-", MINUS), title=plain_words(hover))]
     if reason:
         out.append(html.Span("hedge runs with the exposure", className="marker marker--amber", title=plain_words(reason)))
     return out
 
 
-def daily_split_note(entry: Optional[dict], total: Optional[float]) -> str:
-    """The strategy line's Daily hover: 'spread +12.3k · FX −1.1k · hedge +0.9k' when the engine's
-    split is whole and equals the Daily shown to the cent; else its reason. Display only."""
-    if not entry:
-        return ""
-    split = entry.get("daily") or {}
-    if split.get("reason"):
-        return f"not split: {split['reason']}"
-    if total is None:
-        return ""
-    if abs(float(split.get("total") or 0.0) - total) > 0.005:
-        return f"not split: the engine's split adds to {full_usd(float(split.get('total') or 0.0))}, not the Daily shown"
-    return (f"spread {signed_money(_num(split.get('spread')) or 0.0)} · FX {signed_money(_num(split.get('fx')) or 0.0)} · "
-            f"hedge {signed_money(_num(split.get('hedge')) or 0.0)}")
-
-
-def strategy_line_children(label: str, position: dict, data: dict) -> Tuple[List[Any], str]:
-    """A trade's group line: the PBRoot name, its strategy in words (small; the source and the
-    engine's note on hover, 'inferred' never on screen), and its legs in words. (children, title)."""
-    children: List[Any] = [label]
-    words = trade_type_words(position.get("trade_type"))
-    sentence = type_sentence(str(position.get("trade_type") or ""), str(position.get("type_source") or ""),
-                             str(position.get("type_note") or ""))
-    if words:
-        children.append(html.Span(words, className="book-strategy-type", title=plain_words(sentence)))
-    elif str(position.get("type_source") or "") == SOURCE_MIXED:
-        children.append(html.Span("labels disagree", className="book-strategy-type marker--amber",
-                                  title=plain_words(sentence)))
-    parts, hover = strategy_legs_words(position, data)
-    if parts:
-        children += [" · ", html.Span(parts, className="book-net-line", title=plain_words(hover) or None)]
-    coverage = hedge_coverage_children(_strategy_entry(data, label))
-    if coverage:
-        children += [" · ", html.Span(coverage, className="book-net-line")]
-    n = len(position.get("trade_ids") or [])
-    title = f"Trade {label} (Jason's PBRoot name): {_plural(n, 'fill')}; its open lots per contract are the rows under it"
-    return children, title
-
-
-def group_tr(label: str, rows: Sequence[dict], by: str = GROUP_INSTRUMENT, data: Optional[dict] = None,
-             markers: bool = True, marks_on_file: bool = True) -> html.Tr:
-    children: List[Any] = [label]
-    title = f"{_plural(len(rows), 'position')}"
-    position = _strategy_position(data, label) if by == GROUP_STRATEGY else None
-    if position is not None:
-        children, title = strategy_line_children(label, position, data or {})
-    elif by == GROUP_COMMODITY and label != SETTLED_GROUP:
-        sub = _subsector_for_group(label, rows, data)
-        parts, hover = net_exposure_children(sub, label, markers=markers)
-        if parts:
-            children += [" · ", html.Span(parts, className="book-net-line", title=plain_words(hover) or None)]
-            title = f"{_plural(len(rows), 'contract')}; net exposure at delta (the Exposure tab's figure)"
-        elif (data or {}).get("curve_error"):
-            children += [" · ", html.Span(["net ", missing_cell(data["curve_error"])], className="book-net-line")]
-    cells: List[Any] = [html.Td(children, className="l", colSpan=2, title=plain_words(title))]
-    if label == SETTLED_GROUP:
-        cells += [html.Td(""), html.Td("")]
-    else:
-        gross, net, excluded, reasons, source = group_notional(label, rows, by, data)
-        cells += _notional_tds(gross, net, excluded, reasons, source, markers, marks_on_file)
-    cells.append(html.Td("", colSpan=3 + len(RESEARCH_COLUMNS)))
-    entry = _strategy_entry(data, label) if position is not None else None
-    for key in PERIODS:
-        total, excluded, reasons = group_total(rows, key)
-        note = daily_split_note(entry, total) if key == "daily" else ""
-        cells.append(_money_td(total, excluded, reasons, note, markers=markers))
-    cells.append(html.Td(""))
-    return html.Tr(cells, className="book-group")
-
-
-def part_tr(part: str) -> html.Tr:
-    """The small 'Outright' / 'Hedge' label over a strategy's rows of that part."""
-    label, hover = PART_LABELS[part]
-    return html.Tr([html.Td(label, className="l", colSpan=11 + len(RESEARCH_COLUMNS), title=plain_words(hover))],
-                   className="book-part")
-
-
-def total_tr(rows: Sequence[dict], marks_on_file: bool, by: str = GROUP_INSTRUMENT, data: Optional[dict] = None) -> html.Tr:
-    note = "= header" if marks_on_file else "no marks on file"
-    cells: List[Any] = [html.Td([BOOK_LABEL, html.Span(note, className="book-note")], className="l", colSpan=2,
-                                title="Every trade of the as-of book is in one row above, so this line is the "
-                                      "header's Daily, MTD and LTD: the known figures summed, what is left out named.")]
-    gross, net, excluded, reasons = total_notional(rows, by, data)
-    cells += _notional_tds(gross, net, excluded, reasons, "the group lines' figures summed", marks_on_file, marks_on_file,
-                           bold=True)
-    cells.append(html.Td("", colSpan=3 + len(RESEARCH_COLUMNS)))
-    for key in PERIODS:
-        total, excluded, reasons = group_total(rows, key)
-        cells.append(_money_td(total, excluded, reasons, bold=True, markers=marks_on_file))
-    cells.append(html.Td(""))
-    return html.Tr(cells, className="book-total")
-
-
-def _position_type_key(position: dict) -> str:
-    """A trade's strategy label from its engine position: the type in words, 'Mixed labels' when
-    its fills' labels disagree with no type read, else 'Unassigned'."""
-    words = strategy_words(position.get("trade_type"))
-    if words:
-        return words
-    return MIXED_GROUP if str(position.get("type_source") or "") == SOURCE_MIXED else NO_TYPE_GROUP
-
-
-def _strategy_labels_order(names: Sequence[str]) -> List[str]:
-    head = [strategy_words(code) for code in STRATEGY_ORDER]
-    tail = [MIXED_GROUP, NO_TYPE_GROUP, SETTLED_GROUP]
-    return [g for g in head if g in names] + sorted(g for g in names if g not in head + tail) + [g for g in tail if g in names]
-
-
-def typed_groups(rows: Sequence[dict], data: Optional[dict]) -> List[Tuple[str, List[Tuple[str, List[dict]]]]]:
-    """The Positions fold's Strategy view: [(strategy label, [(trade label, its rows)])]. A trade
-    (PBRoot name) sits under the strategy the engine gave its position; the rows with no trade
-    name each under their own; the settled line last, under its own label."""
-    buckets: Dict[str, List[Tuple[str, List[dict]]]] = {}
-    for label, members in grouped_rows(rows, GROUP_STRATEGY, data):
-        if label == SETTLED_GROUP:
-            buckets.setdefault(SETTLED_GROUP, []).append((label, list(members)))
-            continue
-        position = _strategy_position(data, label)
-        if position is not None:
-            buckets.setdefault(_position_type_key(position), []).append((label, list(members)))
-            continue
-        for key in dict.fromkeys(_type_key(r) for r in members):
-            buckets.setdefault(key, []).append((label, [r for r in members if _type_key(r) == key]))
-    return [(g, buckets[g]) for g in _strategy_labels_order(list(buckets))]
-
-
-def _trade_names(rows: Sequence[dict]) -> List[str]:
-    """The trade names (PBRoot) on a set of rows, sorted, the group labels never among them."""
-    names: List[str] = []
-    for r in rows:
-        for s in (r.get("strategies") or ([r["strategy"]] if r.get("strategy") else [])):
-            if s and s not in (SETTLED_GROUP, NO_STRATEGY_GROUP) and s not in names:
-                names.append(s)
-    return sorted(names)
-
-
-def strategy_tr(label: str, groups: Sequence[Tuple[str, Sequence[dict]]], data: Optional[dict], markers: bool = True,
-                marks_on_file: bool = True) -> html.Tr:
-    """The Positions fold's strategy line over its trades: the label, the trade names small, the
-    trade lines' gross and net summed, and its rows' Daily, MTD and LTD summed (display)."""
-    members = [r for _label, ms in groups for r in ms]
-    names = _trade_names(members)
-    children: List[Any] = [label]
-    if names:
-        children.append(html.Span(", ".join(names), className="book-strategy-type",
-                                  title=f"{_plural(len(names), 'trade')} (PBRoot names) in this strategy"))
-    n_open, n_total = _open_count(data or {}, [t for r in summed_rows(members) for t in r["trade_ids"]])
-    title = (f"Strategy {label}: {_plural(len(groups), 'trade')}, {n_open} open of {_plural(n_total, 'fill')} on file; "
-             f"its trades' lines are under it")
-    cells: List[Any] = [html.Td(children, className="l", colSpan=2, title=plain_words(title))]
-    gross, net, excluded, reasons = groups_notional(groups, GROUP_STRATEGY, data)
-    cells += _notional_tds(gross, net, excluded, reasons, "the trade lines' figures summed", markers, marks_on_file)
-    cells.append(html.Td("", colSpan=3 + len(RESEARCH_COLUMNS)))
-    for key in PERIODS:
-        total, excluded, reasons = group_total(members, key)
-        cells.append(_money_td(total, excluded, reasons, markers=markers))
-    cells.append(html.Td(""))
-    return html.Tr(cells, className="book-strategy")
-
-
-def book_table(rows: Sequence[dict], by: str, marks_on_file: bool, data: Optional[dict] = None) -> html.Div:
-    """The table. The Strategy view nests strategy (spread type) -> trade (PBRoot name) -> pairs
-    -> legs -> Outright -> Hedge. While the book has no marks at all (`marks_on_file` False) no
-    cell carries an "excl. N" marker: the Loaded banner above says values come with the first pull."""
-    head = html.Thead([
-        html.Tr([html.Th("", colSpan=7),
-                 html.Th(RESEARCH_LABEL, colSpan=len(RESEARCH_COLUMNS), className="book-research-head", title=RESEARCH_ABOUT),
-                 html.Th("", colSpan=4)], className="book-head-groups"),
-        html.Tr([
-            html.Th("Position", className="l", style={"width": "320px"}, title=COLUMN_TIPS["Position"]),
-            html.Th("Size", className="l", title=COLUMN_TIPS["Size"]),
-            html.Th("Gross", title=COLUMN_TIPS["Gross"]), html.Th("Net", title=COLUMN_TIPS["Net"]),
-            html.Th("Entry", title=COLUMN_TIPS["Entry"]), html.Th("Now", title=COLUMN_TIPS["Now"]),
-            html.Th("Move", title=COLUMN_TIPS["Move"]),
-            html.Th("z", className="book-research", title=COLUMN_TIPS["z"]),
-            html.Th("%ile", className="book-research", title=COLUMN_TIPS["%ile"]),
-            html.Th("", className="book-research", title=COLUMN_TIPS["History"]),
-            html.Th("Daily", title=COLUMN_TIPS["Daily"]),
-            html.Th("MTD", title=COLUMN_TIPS["MTD"]), html.Th("LTD", title=COLUMN_TIPS["LTD"]),
-            html.Th("Next", className="l", style={"width": "130px"}, title=COLUMN_TIPS["Next"])])])
-    body: List[Any] = []
-    if by == GROUP_STRATEGY:
-        sections = typed_groups(rows, data)
-    else:
-        sections = [("", grouped_rows(rows, by, data))]
-    for strategy, groups in sections:
-        if strategy and strategy != SETTLED_GROUP:
-            body.append(strategy_tr(strategy, groups, data, markers=marks_on_file, marks_on_file=marks_on_file))
-        for label, members in groups:
-            body.append(group_tr(label, members, by, data, markers=marks_on_file, marks_on_file=marks_on_file))
-            shown = ""
-            for r in members:
-                part = str(r.get("part") or "")
-                if part in PART_LABELS and part != shown and r["kind"] != "settled":
-                    body.append(part_tr(part))
-                shown = part or shown
-                body.append(position_tr(r, markers=marks_on_file, marks_on_file=marks_on_file))
-    body.append(total_tr(rows, marks_on_file, by, data))
-    return html.Div(className="book-card", children=[html.Table([head, html.Tbody(body)], id=TABLE_ID,
-                                                                className="book-table")])
-
-
-# --------------------------------------------------------------------------- the tiles
 def _header_figure(data: dict, key: str, marks_on_file: bool) -> Tuple[List[Any], str]:
     """The header's own figure of a period (`pnl.period_rows`' entry: the same value the header
     card shows, with its 'excl. N' / 'filled N' / 'ref <date>' markers) as tile children, and
@@ -2469,382 +1817,12 @@ def _header_figure(data: dict, key: str, marks_on_file: bool) -> Tuple[List[Any]
     return children, hover
 
 
-def open_view_rows(view_rows: Sequence[dict]) -> List[dict]:
-    """The open rows of a view as the Positions tile and the fold's summary count them: a pair
-    counts once (its two leg rows are inside it), the settled line not at all."""
-    return [r for r in view_rows if r["kind"] != "settled" and not (r["kind"] == "leg" and r.get("part") == PART_PAIR)]
-
-
-def tiles_row(positions: Sequence[dict], view_rows: Sequence[dict], data: dict, marks_on_file: bool) -> html.Div:
-    """Seven tiles over the summary: Strategies (the spread types present), Trades (the PBRoot
-    names), Positions, P&L today and P&L since entry (the header's own Daily and LTD, the same
-    value and markers), Gross exposure, Net exposure (the engine's USD notional summed over the
-    known position rows, "excl. N" for the rest; a dash with the reason when nothing is priced)."""
-    strategies = strategy_positions(data)
-    names = [str(p.get("strategy") or p.get("name") or "") for p in strategies]
-    present = {_type_key(r) for r in positions if r["kind"] != "settled"}
-    types = [strategy_words(code) for code in STRATEGY_ORDER if strategy_words(code) in present]
-    open_rows = open_view_rows(view_rows)
-    df = data.get("df")
-    n_trades = int(len(df)) if df is not None else 0
-    n_open = int((df["status"] == "OPEN").sum()) if df is not None and not df.empty else 0
-    gross, net, excluded, reasons = notional_total([r for r in positions if r["kind"] != "settled"])
-    why = ("; ".join(reasons[:LINES_ON_HOVER]) or "no notional") if marks_on_file else NO_MARKS_REASON
-
-    def tile(label: str, value: Any, hover: str, kind: str = "") -> html.Div:
-        return html.Div(className="book-tile", children=[
-            html.Div(label, className="k"), html.Div(value, className=f"v {kind}".strip(), title=plain_words(hover) or None)])
-
-    daily, daily_hover = _header_figure(data, "daily", marks_on_file)
-    ltd, ltd_hover = _header_figure(data, "ltd", marks_on_file)
-    tiles = [
-        tile("Strategies", f"{len(types):,}",
-             (", ".join(types) + ("; some positions unassigned" if NO_TYPE_GROUP in present else "")) if types
-             else "no strategy (spread type) on the open positions"),
-        tile("Trades", f"{len(names):,}", ", ".join(names) if names else "no trade name (PBRoot) on the fills"),
-        tile("Positions", f"{len(open_rows):,}",
-             f"{counts_text(positions, data)} · {_plural(n_trades, 'fill')} on file, {n_open} open; the rows of the Positions table"),
-        tile("P&L today", daily, f"{COLUMN_TIPS['P&L today']}\n{daily_hover}"),
-        tile("P&L since entry", ltd, f"{COLUMN_TIPS['Since entry']}\n{ltd_hover}"),
-        tile("Gross exposure", _notional_cell(gross, why, "the engine's gross USD notional over the positions, summed",
-                                              excluded=excluded, reasons=reasons, markers=marks_on_file,
-                                              marks_on_file=marks_on_file),
-             COLUMN_TIPS["Gross"] if gross is not None else why),
-        tile("Net exposure", _notional_cell(net, why, "the engine's net USD notional over the positions, summed, long positive",
-                                            signed=True, excluded=excluded, reasons=reasons, markers=marks_on_file,
-                                            marks_on_file=marks_on_file),
-             COLUMN_TIPS["Net"] if net is not None else why),
-    ]
-    return html.Div(tiles, id=TILES_ID, className="book-tiles")
-
-
-# --------------------------------------------------------------------------- the summary: By strategy, Break it down
-def _share(part: Optional[float], whole: Optional[float]) -> Optional[float]:
-    """part / whole in percent, of two summed figures (display); None when either is missing or
-    the whole is zero."""
-    if part is None or whole is None or abs(whole) < 1e-9:
-        return None
-    return part / whole * 100.0
-
-
-def _pct_td(part: Optional[float], whole: Optional[float], what: str, signed: bool = False, bold: bool = False,
-            marks_on_file: bool = True) -> html.Td:
-    """A share cell: '+42.3 %' (signed, coloured) or '42.3 %', the two full figures on hover; a
-    dash with the reason when either side is missing."""
-    share = _share(part, whole)
-    style = {"fontWeight": 700} if bold else None
-    if share is None:
-        why = (NO_MARKS_REASON if not marks_on_file else
-               f"no share: {'the line has no ' + what if part is None else 'the Book has no ' + what if whole is None else 'the Book figure is zero'}")
-        return html.Td(missing_cell(why), style=style)
-    text = (f"{share:+.1f} %" if signed else f"{share:.1f} %").replace("-", MINUS)
-    hover = f"{full_usd(part)} of the Book's {full_usd(whole)} ({what})"
-    return html.Td(html.Span(text, className=(sign_class(share) if signed else None) or None, title=plain_words(hover)),
-                   style=style)
-
-
-def _earliest_next(rows: Sequence[dict]) -> Optional[dict]:
-    """The earliest next event among a set of rows (real or estimated), by date."""
-    events = [r["next"] for r in rows if r.get("next") and r["next"].get("iso")]
-    return min(events, key=lambda n: (str(n["iso"]), 0 if not n.get("estimated") else 1)) if events else None
-
-
-def _open_count(data: dict, trade_ids: Sequence[str]) -> Tuple[int, int]:
-    """(open, total) over a set of trade ids."""
-    df = data.get("df")
-    if df is None or df.empty:
-        return 0, len(trade_ids)
-    status = dict(zip(df["trade_id"].astype(str), df["status"].astype(str)))
-    ids = list(dict.fromkeys(str(t) for t in trade_ids))
-    return sum(1 for t in ids if status.get(t) == "OPEN"), len(ids)
-
-
 def strategy_words(code: Optional[str]) -> str:
     """A strategy (spread type) as a group label, with its capital: 'Cross exchange'; '' for none."""
     words = trade_type_words(code)
     return words[:1].upper() + words[1:] if words else ""
 
 
-def _type_key(row: dict) -> str:
-    if row["kind"] == "settled":
-        return SETTLED_GROUP
-    if row.get("type_source") == SOURCE_MIXED and not row.get("trade_type"):
-        return MIXED_GROUP
-    return strategy_words(row.get("trade_type")) or NO_TYPE_GROUP
-
-
-def breakdown_groups(rows: Sequence[dict], by: str, data: dict) -> List[Tuple[str, List[dict]]]:
-    """[(label, rows)] of a summary view: Commodity, Instrument and Trade through `grouped_rows`;
-    by strategy (`GROUP_TYPE`) by each row's own type (one type per fill, the type of the position
-    it sits in, `trade_types`): cross exchange, cross product, term structure, then the rest."""
-    if by != GROUP_TYPE:
-        return grouped_rows(rows, by, data)
-    names = list(dict.fromkeys(_type_key(r) for r in rows))
-    return [(g, sorted((r for r in rows if _type_key(r) == g), key=_daily_abs)) for g in _strategy_labels_order(names)]
-
-
-def summary_entries(data: dict, rows: Sequence[dict], by: str = GROUP_STRATEGY) -> List[dict]:
-    """One entry per group of the view: the label, its rows, the trade's position and engine
-    entry (the Trade view, `GROUP_STRATEGY`), the period figures (`group_total`, the same sums
-    the group lines use), the gross and net (`group_notional`: a trade's the engine's own), the
-    open and total fill counts, the trade names, the earliest next event, the type words. Sorted
-    by gross largest first, the unlabelled and settled lines last; the By strategy view keeps the
-    research app's order (cross exchange, cross product, term structure, unassigned)."""
-    groups = breakdown_groups(rows, by, data) if by == GROUP_TYPE else grouped_rows(rows, by, data)
-    out: List[dict] = []
-    for label, members in groups:
-        position = _strategy_position(data, label) if by == GROUP_STRATEGY else None
-        entry = _strategy_entry(data, label) if position is not None else None
-        summed = summed_rows(members)
-        tids = [t for r in summed for t in r["trade_ids"]]
-        n_open, n_total = _open_count(data, tids)
-        settled = label == SETTLED_GROUP
-        if settled:
-            gross, net, excluded, reasons, source = None, None, 0, ["settled and closed-out trades carry no open notional"], ""
-        else:
-            gross, net, excluded, reasons, source = group_notional(label, members, by, data)
-        if position is not None:
-            type_code, type_source, type_note = (str(position.get(k) or "") for k in ("trade_type", "type_source", "type_note"))
-        elif settled:
-            type_code, type_source, type_note = "", "", ""
-        else:
-            _s, type_code, type_source, type_note = _labels_of(data, tids)
-        out.append({"label": label, "rows": members, "position": position, "entry": entry, "settled": settled,
-                    "periods": {k: group_total(members, k) for k in PERIODS}, "gross": gross, "net": net,
-                    "excluded": excluded, "reasons": reasons, "source": source, "n_open": n_open, "n_total": n_total,
-                    "next": _earliest_next(members), "trade_type": type_code, "type_source": type_source,
-                    "type_note": type_note, "trades": _trade_names(summed)})
-    if by == GROUP_TYPE:
-        return out
-    tail = {NO_STRATEGY_GROUP: 1, NO_TYPE_GROUP: 1, MIXED_GROUP: 1, OTHER_GROUP: 1, SETTLED_GROUP: 2}
-    out.sort(key=lambda e: (tail.get(e["label"], 0), 0 if e["gross"] is not None else 1, -(e["gross"] or 0.0), e["label"]))
-    return out
-
-
-def _type_td(e: dict) -> html.Td:
-    """The strategy in words; on a trade line whose fills carry different labels an amber
-    'labels disagree'; on a commodity or instrument group of several types a plain 'mixed'."""
-    words = trade_type_words(e["trade_type"])
-    sentence = type_sentence(e["trade_type"], e["type_source"], e["type_note"])
-    if words:
-        return html.Td(words, className="l book-type", title=plain_words(sentence))
-    if e["type_source"] == SOURCE_MIXED:
-        if e["position"] is not None:
-            return html.Td(html.Span("labels disagree", className="marker--amber book-type"), className="l",
-                           title=plain_words(sentence))
-        return html.Td("mixed", className="l book-type", title=plain_words(e["type_note"] or "positions of several types"))
-    return html.Td("", className="l")
-
-
-def _open_td(e: dict, bold: bool = False) -> html.Td:
-    """The Open column: how many of the line's fills are open (every fill on file on hover)."""
-    hover = (f"{_plural(e['n_total'], 'fill')} settled or closed out" if e["settled"] else
-             f"{e['n_open']} open of {_plural(e['n_total'], 'fill')} on file")
-    return html.Td(f"{e['n_open']:,}" if not e["settled"] else f"{e['n_total']:,}", title=hover,
-                   style={"fontWeight": 700} if bold else None)
-
-
-def _names_td(e: dict) -> html.Td:
-    """The By strategy table's Trades column: the PBRoot names in the strategy, grey, the counts
-    on hover; blank on the settled line."""
-    if e["settled"]:
-        return html.Td("", className="l book-trades", title=f"{_plural(e['n_total'], 'fill')} settled or closed out")
-    names = e.get("trades") or []
-    if not names:
-        return html.Td("no trade name", className="l book-trades",
-                       title=f"no PBRoot name on these fills; {e['n_open']} open of {_plural(e['n_total'], 'fill')} on file")
-    return html.Td(", ".join(names), className="l book-trades",
-                   title=f"{_plural(len(names), 'trade')} (PBRoot names); {e['n_open']} open of {_plural(e['n_total'], 'fill')} on file")
-
-
-def _label_td(e: dict, by: str) -> html.Td:
-    if e["position"] is not None:
-        n = len(e["position"].get("trade_ids") or [])
-        title = f"Trade {e['label']} (Jason's PBRoot name): {_plural(n, 'fill')}; its pairs and legs are in the Positions table"
-    elif by == GROUP_TYPE and not e["settled"]:
-        title = f"Strategy {e['label']}: {_plural(len(summed_rows(e['rows'])), 'position')}, {_plural(len(e.get('trades') or []), 'trade')}"
-    else:
-        title = f"{_plural(len(summed_rows(e['rows'])), 'position')}"
-    return html.Td(e["label"], className="l book-name", title=plain_words(title))
-
-
-def _summary_pnl_tds(e: dict, marks_on_file: bool, bold: bool = False) -> List[html.Td]:
-    cells = []
-    for key in PERIODS:
-        total, excluded, reasons = e["periods"][key]
-        note = daily_split_note(e["entry"], total) if key == "daily" else ""
-        cells.append(_money_td(total, excluded, reasons, note, bold=bold, markers=marks_on_file))
-    return cells
-
-
-def _book_entry(rows: Sequence[dict], by: str, data: dict) -> dict:
-    """The Book line of a summary table: the header's figures, the group lines' notional summed."""
-    gross, net, excluded, reasons = total_notional(rows, GROUP_INSTRUMENT if by == GROUP_TYPE else by, data)
-    tids = [t for r in summed_rows(rows) for t in r["trade_ids"]]
-    n_open, n_total = _open_count(data, tids)
-    return {"label": BOOK_LABEL, "rows": list(rows), "position": None, "entry": None, "settled": False,
-            "periods": {k: group_total(rows, k) for k in PERIODS}, "gross": gross, "net": net, "excluded": excluded,
-            "reasons": reasons, "source": "the group lines' figures summed", "n_open": n_open, "n_total": n_total,
-            "next": _earliest_next(rows), "trade_type": "", "type_source": "", "type_note": ""}
-
-
-def _summary_tr(e: dict, book: dict, by: str, marks_on_file: bool, legs: bool, data: dict, total: bool = False) -> html.Tr:
-    """One line of a summary table. By strategy (`GROUP_TYPE`): the label, the trade names, then
-    the figures. By trade (`GROUP_STRATEGY`, `legs`): the name, its strategy, its legs, the open
-    count, the figures, hedged. By commodity or instrument: the name, its strategy, the open
-    count, the figures."""
-    bold = total
-    if total:
-        note = "= header" if marks_on_file else "no marks on file"
-        cells: List[Any] = [html.Td([BOOK_LABEL, html.Span(note, className="book-note")], className="l book-name",
-                                    title="Every fill of the as-of book is in one line above, so this line is the "
-                                          "header's Daily, MTD and LTD: the known figures summed, what is left out named."),
-                            html.Td("", className="l")]
-        if legs:
-            cells.append(html.Td("", className="l"))
-    else:
-        cells = [_label_td(e, by), _names_td(e) if by == GROUP_TYPE else _type_td(e)]
-        if legs:
-            parts, hover = strategy_legs_words(e["position"], data) if e["position"] is not None else ([], "")
-            cells.append(html.Td(html.Span(parts, className="book-net-line", title=plain_words(hover) or None) if parts else "",
-                                 className="l book-legs"))
-    if by != GROUP_TYPE:
-        cells.append(_open_td(e, bold=bold))
-    cells += _summary_pnl_tds(e, marks_on_file, bold=bold)
-    if e["settled"]:
-        cells += [html.Td(""), html.Td("")]
-    else:
-        cells += _notional_tds(e["gross"], e["net"], e["excluded"], e["reasons"], e["source"], marks_on_file, marks_on_file,
-                               bold=bold)
-    cells.append(_pct_td(e["periods"]["ltd"][0], book["periods"]["ltd"][0], "LTD P&L", signed=True, bold=bold,
-                         marks_on_file=marks_on_file))
-    if e["settled"]:
-        cells.append(html.Td(""))
-    else:
-        cells.append(_pct_td(e["gross"], book["gross"], "gross notional", bold=bold, marks_on_file=marks_on_file))
-    if legs:
-        coverage = hedge_coverage_children(e["entry"]) if not total else []
-        cells.append(html.Td(html.Span(coverage, className="book-net-line") if coverage else "", className="l"))
-    cells.append(_next_td({"next": e["next"], "kind": "settled" if e["settled"] or total else ""}))
-    return html.Tr(cells, className="book-total" if total else "book-summary-row")
-
-
-def _summary_head(first: str, legs: bool, by: str = GROUP_STRATEGY) -> html.Thead:
-    tip = COLUMN_TIPS["Strategy" if by == GROUP_TYPE else "Trade" if by == GROUP_STRATEGY else "Position"]
-    cols: List[Any] = [html.Th(first, className="l", title=tip)]
-    if by == GROUP_TYPE:
-        cols.append(html.Th("Trades", className="l", title=COLUMN_TIPS["Trades"]))
-    else:
-        cols.append(html.Th("Strategy", className="l", title=COLUMN_TIPS["Strategy"]))
-    if legs:
-        cols.append(html.Th("Legs", className="l", title=COLUMN_TIPS["Legs"]))
-    if by != GROUP_TYPE:
-        cols.append(html.Th("Open", title=COLUMN_TIPS["Open"]))
-    cols += [html.Th("P&L today", title=COLUMN_TIPS["P&L today"]),
-             html.Th("MTD", title=COLUMN_TIPS["MTD"]), html.Th("Since entry", title=COLUMN_TIPS["Since entry"]),
-             html.Th("Gross", title=COLUMN_TIPS["Gross"]), html.Th("Net", title=COLUMN_TIPS["Net"]),
-             html.Th("% of P&L", title=COLUMN_TIPS["% of P&L"]), html.Th("% of exposure", title=COLUMN_TIPS["% of exposure"])]
-    if legs:
-        cols.append(html.Th("Hedged", className="l", title=COLUMN_TIPS["Hedged"]))
-    cols.append(html.Th("Next", className="l", style={"width": "130px"}, title=COLUMN_TIPS["Next"]))
-    return html.Thead(html.Tr(cols))
-
-
-def summary_table(data: dict, rows: Sequence[dict], marks_on_file: bool) -> html.Div:
-    """The By strategy table (`SUMMARY_ID`), the hero: one line per strategy (spread type) present
-    among the position rows, in the research app's order (cross exchange, cross product, term
-    structure, then mixed labels, unassigned, the settled line), the trades (PBRoot names) in it,
-    P&L today, MTD, since entry, gross, net, its signed share of the Book's LTD, its share of the
-    Book's gross and the earliest next event; the Book line = the header. Nothing computed but the
-    sums and the two shares."""
-    entries = summary_entries(data, rows, GROUP_TYPE)
-    book = _book_entry(rows, GROUP_TYPE, data)
-    body = [_summary_tr(e, book, GROUP_TYPE, marks_on_file, False, data) for e in entries]
-    body.append(_summary_tr(book, book, GROUP_TYPE, marks_on_file, False, data, total=True))
-    return html.Div(className="book-card", children=[html.Table([_summary_head("Strategy", False, GROUP_TYPE), html.Tbody(body)],
-                                                                id=SUMMARY_ID, className="book-table book-summary")])
-
-
-def trade_table(data: dict, rows: Sequence[dict], marks_on_file: bool) -> html.Div:
-    """Break it down by trade: one line per trade (Jason's PBRoot name; 'No trade name' and the
-    settled line when they exist), its strategy, legs, open fills, P&L today, MTD, since entry,
-    gross, net, the two shares, the hedge coverage and the earliest next event; the Book line =
-    the header."""
-    entries = summary_entries(data, rows, GROUP_STRATEGY)
-    book = _book_entry(rows, GROUP_STRATEGY, data)
-    body = [_summary_tr(e, book, GROUP_STRATEGY, marks_on_file, True, data) for e in entries]
-    body.append(_summary_tr(book, book, GROUP_STRATEGY, marks_on_file, True, data, total=True))
-    return html.Div(className="book-card", children=[html.Table([_summary_head("Trade", True, GROUP_STRATEGY), html.Tbody(body)],
-                                                                id=BREAKDOWN_TABLE_ID + "-table",
-                                                                className="book-table book-summary")])
-
-
-def breakdown_table(data: dict, rows: Sequence[dict], by: str, marks_on_file: bool) -> html.Div:
-    """The Break it down table (`BREAKDOWN_TABLE_ID`): by trade (`trade_table`), else the same
-    columns without Legs and Hedged, grouped by Commodity or Instrument over the existing rows;
-    the Book line = the header."""
-    if by == GROUP_TRADE:
-        return trade_table(data, rows, marks_on_file)
-    first = dict(BREAKDOWN_OPTIONS).get(by, "Group")
-    entries = summary_entries(data, rows, by)
-    book = _book_entry(rows, by, data)
-    body = [_summary_tr(e, book, by, marks_on_file, False, data) for e in entries]
-    body.append(_summary_tr(book, book, by, marks_on_file, False, data, total=True))
-    return html.Div(className="book-card", children=[html.Table([_summary_head(first, False, by), html.Tbody(body)],
-                                                                id=BREAKDOWN_TABLE_ID + "-table",
-                                                                className="book-table book-summary")])
-
-
-def breakdown_rows(data: dict, by: str) -> List[dict]:
-    """The rows the Break it down view groups: by trade the Strategy view's rows (each trade's
-    pairs, legs and hedges), by commodity the netted contract rows, else the position rows (one
-    per trade, spread, outright, fill)."""
-    if by == GROUP_TRADE:
-        return book_rows(data, GROUP_STRATEGY)
-    return book_rows(data, GROUP_COMMODITY) if by == GROUP_COMMODITY else book_rows(data)
-
-
-# --------------------------------------------------------------------------- title line, movers
-def counts_text(rows: Sequence[dict], data: dict) -> str:
-    """'6 trades · 5 spreads · 12 outrights · 3 options · 2 LME prompts · 8 FX hedges' (a zero
-    left out), over the position rows; a trade is a PBRoot name."""
-    n_strat = sum(1 for r in rows if r["kind"] == "spread" and r.get("hand") == "strategy")
-    n_spreads = sum(1 for r in rows if r["kind"] == "spread" and r.get("hand") != "strategy")
-    n_out = sum(1 for r in rows if r["kind"] == "outright")
-    # the rows of the other products (a trade inside a strategy is counted in its strategy)
-    n_opt = sum(1 for r in rows if r["kind"] == "trade" and r["instrument_group"] == OPTIONS_GROUP)
-    n_lme = sum(1 for r in rows if r["kind"] == "trade" and r["instrument_group"] == LME_GROUP)
-    n_fx = sum(1 for r in rows if r["kind"] == "trade" and r["instrument_group"] == FX_GROUP)
-    parts = [(n_strat, "trade", "trades"), (n_spreads, "spread", "spreads"), (n_out, "outright", "outrights"),
-             (n_opt, "option", "options"),
-             (n_lme, "LME prompt", "LME prompts"), (n_fx, "FX hedge", "FX hedges")]
-    words = [f"{n} {one if n == 1 else many}" for n, one, many in parts if n]
-    return " · ".join(words) if words else "no open position"
-
-
-def movers_strip(rows: Sequence[dict]) -> Optional[html.Div]:
-    """The three best and three worst Daily figures among the position rows."""
-    scored = [(r["periods"]["daily"][0], r) for r in rows if r["kind"] != "settled" and r["periods"]["daily"][0] is not None]
-    if not scored:
-        return None
-    best = [x for x in sorted(scored, key=lambda x: -x[0]) if x[0] > 0][:3]
-    worst = [x for x in sorted(scored, key=lambda x: x[0]) if x[0] < 0][:3]
-    if not best and not worst:
-        return None                        # every Daily is zero: no strip, not a bare label
-
-    def card(v, r):
-        return html.Div(className="book-mover", children=[
-            html.Span(r["name"], className="book-mover-name", title=plain_words(r["name_hover"])),
-            html.B(signed_money(v), className=f"book-mover-value {sign_class(v)}", title=full_usd(v))])
-    children: List[Any] = [card(v, r) for v, r in best]
-    if best and worst:
-        children.append(html.Div(className="book-movers-divider"))
-    children += [card(v, r) for v, r in worst]
-    children.append(html.Span("today's movers", className="book-movers-label"))
-    return html.Div(className="book-movers", children=children)
-
-
-# --------------------------------------------------------------------------- the row detail
 def _trade_lines(data: dict, trade_ids: Sequence[str]) -> html.Table:
     """A small table of trades: id, date, product, size, fill, mark, LTD (full figures)."""
     df = data["df"]
@@ -2870,47 +1848,6 @@ def _trade_lines(data: dict, trade_ids: Sequence[str]) -> html.Table:
     return html.Table([html.Thead(head), html.Tbody(body)], className="book-table")
 
 
-def detail_for(data: dict, rows: Sequence[dict], row_id: str) -> Any:
-    """The detail of the clicked row: a spread's entries and legs, otherwise its trades."""
-    row = next((r for r in rows if r["id"] == row_id), None)
-    if row is None:
-        return None
-    if row["kind"] == "spread":
-        payload = detail_payloads(data.get("spreads") or {}).get(row_id)
-        if payload is None:
-            return None
-        unit = payload.get("unit") or ""
-        summary = (f"{row['name']}: {payload.get('size_text') or ''}, entry {level_text(_num(payload.get('level_entry')), unit)}, "
-                   f"now {level_text(_num(payload.get('level_now')), unit)} {unit}").strip()
-        return html.Div(className="section section--secondary book-detail", children=[
-            about(summary, "The position's entries and legs.", level="h5", style={"margin": "0 0 6px"}),
-            about("Entries", "The spreads found on each trade date that make this position, with their own entry "
-                             "level.", level="div", className="section-kicker"),
-            members_table(payload),
-            about("Legs", "Each leg's prices as quoted (entry = its lots-weighted average fill), and the factor that "
-                          "turns its price into the spread's unit.", level="div", className="section-kicker"),
-            detail_legs_table(payload),
-            about("Trades", "Every trade of the position, open or closed, at full figures.", level="div",
-                  className="section-kicker"),
-            _trade_lines(data, row["trade_ids"])])
-    title = row["name"] if row["kind"] != "settled" else SETTLED_GROUP
-    if row["kind"] == "pair":
-        unit = row.get("unit") or ("ratio" if row.get("ratio") else "")
-        summary = f"{row['name']}: {row['size']}, entry {row['entry_text']}, now {row['now_text']} {unit}".strip()
-        return html.Div(className="section section--secondary book-detail", children=[
-            about(summary, row["name_hover"], level="h5", style={"margin": "0 0 6px"}),
-            about("Fills of both legs", "Every fill of the two contracts in this trade, open or closed, at "
-                                         "full figures (a contract split between pairs lists its trades on each).",
-                  level="div", className="section-kicker"),
-            _trade_lines(data, row.get("detail_trade_ids") or row["trade_ids"])])
-    return html.Div(className="section section--secondary book-detail", children=[
-        html.Div(style={"display": "flex", "alignItems": "baseline", "gap": "10px"}, children=[
-            about(title, row["name_hover"], level="h5", style={"margin": "0 0 6px"}),
-            pointer("Trades", "book-detail-trades", "→ Trades")]),
-        _trade_lines(data, row.get("detail_trade_ids") or row["trade_ids"])])
-
-
-# --------------------------------------------------------------------------- needs you
 def _need(chip: str, kind: str, text: str, hover: str, tab: str, rank: int) -> dict:
     return {"chip": chip, "kind": kind, "text": text, "hover": hover, "tab": tab, "rank": rank}
 
@@ -2930,79 +1867,6 @@ def _event_words(data: dict, r: dict) -> str:
     return f"{name} {event} {when}"
 
 
-def needs(data: dict) -> List[dict]:
-    """At most five lines, one per kind, most urgent first."""
-    out: List[dict] = []
-    rows = (data.get("schedule") or {}).get("rows") or []
-    urgent = [r for r in rows if r.get("level") in ("EXPIRED", "RED", "AMBER") and not r.get("estimated")]
-    if urgent:
-        first = urgent[0]
-        more = f" (+{len(urgent) - 1} more)" if len(urgent) > 1 else ""
-        out.append(_need(str(first.get("level")), "red" if first.get("level") != "AMBER" else "warn",
-                         _event_words(data, first) + more,
-                         "\n".join(_event_words(data, r) for r in urgent[:LINES_ON_HOVER]), "", 0))
-    estimated = sorted({str(r.get("contract_id")) for r in rows if r.get("estimated") and r.get("level") != "EXPIRED"})
-    if estimated:
-        out.append(_need("DATES", "warn", f"{_plural(len(estimated), 'contract')} run on estimated dates until the "
-                                          "first Bloomberg pull",
-                         "\n".join(contract_label(c) for c in estimated[:LINES_ON_HOVER]), "", 1))
-    elif data.get("schedule_error"):
-        out.append(_need("DATES", "warn", "roll calendar not available", data["schedule_error"], "", 1))
-    needed, missing = data.get("needs") or (0, [])
-    if data.get("needs_error"):
-        out.append(_need("MARKS", "warn", "the marks the book needs could not be listed", data["needs_error"], "Data", 2))
-    elif missing:
-        names = []
-        for m in missing:
-            inst = str(m.get("instrument_id") or "")
-            info = data["instruments"].get(inst) or {}
-            root_id = info.get("base_ccy", "")
-            label = (contract_name(inst, data["roots"].get(root_id), root_id) if parse_contract_id(inst)
-                     else f"{short_root_name(data['roots'].get(root_id), root_id)} {short_date(m.get('settle_date'))}".strip()
-                     if root_id in data["roots"] else inst)
-            if label not in names:
-                names.append(label)
-        out.append(_need("MARKS", "warn", f"{len(missing)} of {needed} marks missing: {', '.join(names[:2])}"
-                                          + (f" +{len(names) - 2}" if len(names) > 2 else ""),
-                         "\n".join(f"{m['instrument_id']} {plain_words(m['mark_type']).lower()} {m['settle_date']}" for m in missing[:LINES_ON_HOVER]),
-                         "Data", 2))
-    review = (data.get("spreads") or {}).get("review") or []
-    if review:
-        out.append(_need("GROUP", "info", f"{_plural(len(review), 'set')} of trades could not be matched to a spread",
-                         "\n".join(str(r.get("reason") or r.get("review_id") or "") for r in review[:LINES_ON_HOVER]),
-                         "Trades", 3))
-    checks = data.get("limits") or []
-    if data.get("limits_error"):
-        out.append(_need("LIMITS", "quiet", "limits could not be checked", data["limits_error"], "Risk", 4))
-    else:
-        breached = [c for c in checks if str(c.get("level")) in ("BREACH", "WARN")]
-        set_rows = [c for c in checks if c.get("level") not in ("NOT_SET", "config")]
-        if breached:
-            c = breached[0]
-            out.append(_need(str(c.get("level")), "red", f"{c.get('source')} {str(c.get('limit') or '').replace('_', ' ')} "
-                                                          f"{c.get('scope')}: {c.get('reason') or 'over its limit'}",
-                             "\n".join(str(x.get("reason") or "") for x in breached[:LINES_ON_HOVER]), "Risk", 0))
-        elif not set_rows:
-            out.append(_need("LIMITS", "quiet", "position limits not set",
-                             "No desk or exchange limit is set yet.", "Risk", 4))
-    out.sort(key=lambda n: n["rank"])
-    return out[:NEEDS_MAX]
-
-
-def needs_section(data: dict) -> html.Div:
-    lines = []
-    for n, need in enumerate(needs(data), start=1):
-        lines.append(html.Div(className="book-need", children=[
-            html.Span(need["chip"], className=f"book-need-chip book-need-chip--{need['kind']}"),
-            html.Span(need["text"], title=plain_words(need["hover"]) or None),
-            pointer(need["tab"], f"book-need-{n}")]))
-    if not lines:
-        lines.append(html.Div("Nothing needs you today.", className="book-need", style={"color": "var(--muted)"}))
-    return html.Div(className="book-card book-needs", children=[
-        about("Needs you", NEEDS_ABOUT, level="div", className="book-h"), html.Div(id=ALERTS_ID, children=lines)])
-
-
-# --------------------------------------------------------------------------- last load
 _REPORT_KINDS = (("futures", "future", "futures"), ("options_on_futures", "option", "options"),
                  ("lme_forwards", "LME forward", "LME forwards"), ("fx_forwards", "FX forward", "FX forwards"),
                  ("fx_spot", "FX spot", "FX spot"), ("fx_options", "FX option", "FX options"))
@@ -3055,37 +1919,10 @@ def merge_words(report: dict) -> str:
             f"{removed} removed; {on_file} on file")
 
 
-def load_section(data: dict) -> html.Div:
-    if data.get("load_error"):
-        return html.Div(id=LOAD_ID, className="book-card book-load", children=[
-            about("Last load", LOAD_ABOUT, level="div", className="book-h"), message_box(data["load_error"])])
-    text, hover, clean = load_sentence(data.get("load"))
-    children: List[Any] = [html.Span(text, title=plain_words(hover) or None)]
-    if not clean:
-        children += [" ", pointer("Data", "book-load-data", "→ Data")]
-    return html.Div(id=LOAD_ID, className="book-card book-load", children=[
-        about("Last load", LOAD_ABOUT, level="div", className="book-h"), html.Div(children)])
-
-
-def loaded_line(data: dict) -> html.Div:
-    """One quiet line under the tiles of a book with trades and no marks yet: the load sentence and
-    that values come with the first pull (the gold-edged banner of the first Phase E build)."""
-    text, hover, clean = load_sentence(data.get("load"))
-    children: List[Any] = [html.Span("Loaded", className="book-loaded-k"), html.Span(text, title=plain_words(hover) or None),
-                           html.Span(" · values appear after the first pull; fills and sizes are already right",
-                                     title=NO_MARKS_REASON)]
-    if not clean:
-        children += [" · ", pointer("Data", "book-banner-data", "what was skipped and why")]
-    return html.Div(className="book-loaded-line", children=children)
-
-
-loaded_banner = loaded_line
-
-
-# --------------------------------------------------------------------------- issues, body
 def issue_items(data: dict, rows: Sequence[dict]) -> List[Tuple[str, str]]:
     items: List[Tuple[str, str]] = []
-    for key, label in (("periods_error", "P&L"), ("spreads_error", "Spreads"), ("schedule_error", "Roll calendar"),
+    for key, label in (("periods_error", "P&L"), ("spreads_error", "Spreads"), ("carry_error", "Carry"),
+                       ("schedule_error", "Roll calendar"),
                        ("needs_error", "Marks"), ("limits_error", "Limits"), ("load_error", "Load")):
         if data.get(key):
             items.append((label, data[key]))
@@ -3136,7 +1973,7 @@ def issue_items(data: dict, rows: Sequence[dict]) -> List[Tuple[str, str]]:
                 items.append((str(tid), f"no P&L on {data.get('as_of')}: {why or 'no reason given'}"))
     if data.get("n_filled"):
         items.append(("Fill", f"{_plural(int(data['n_filled']), 'trade')} valued from an earlier close (no price on "
-                              f"{data.get('as_of')}); each trade's note is on the Trades tab."))
+                              f"{data.get('as_of')}); each trade's note is on the Blotter tab."))
     return items
 
 
@@ -3181,120 +2018,8 @@ def empty_state(data: Optional[dict] = None, idx: str = "book") -> html.Div:
 
 
 HIDDEN = {"display": "none"}
-SUMMARY_ABOUT = ("One line per strategy, the spread type (cross exchange, cross product, term structure; unassigned "
-                 "for a plain JSHY10 label), with the trades (PBRoot names) in it, P&L today, MTD and since entry "
-                 "(the header's rule, the known figures summed), the engine's gross and net USD notional, its signed "
-                 "share of the Book's LTD and of the Book's gross, and the earliest next event. Each position's "
-                 "strategy is the engine's: the broker's label first, read from the legs only where there is none. "
-                 "The Book line is the header.")
-BREAKDOWN_ABOUT = ("The same figures by trade (one line per PBRoot name: its strategy, legs, open fills, hedge "
-                   "coverage), by commodity (the contracts netted across trades) or by instrument; shares are of "
-                   "the whole book. The Book line is the header.")
-POSITIONS_ABOUT = ("Every open position: by Strategy, each spread type, then each trade (PBRoot name) with its pairs "
-                   "and their legs, the lots left outright and its hedges; by Commodity, one row per open contract "
-                   "netted across trades; by Instrument, one row per position. Click a row for its fills. The Book "
-                   "line is the header.")
 
 
-SUMMARY_META = "P&L by spread type; the Book line is the header"
-BREAKDOWN_META = "the same figures by trade, commodity or instrument"
-
-
-def section_head(title: str, text: str, meta: str = "", *extra: Any) -> html.Div:
-    """A section's title row, the research app's shape: the small-caps title (its definitions on
-    hover), the one-line meta beside it, then anything else (a switch, the CSV button)."""
-    children: List[Any] = [about(title, text, level="h4", className="book-section-title")]
-    if meta:
-        children.append(html.Span(meta, className="book-section-meta"))
-    children += [x for x in extra if x is not None]
-    return html.Div(className="book-section-head", children=children)
-
-
-def fold_meta(view_rows: Sequence[dict], by: str) -> str:
-    """The Positions fold's summary meta: '· 23 · strategy → trade → pairs → legs'."""
-    return f"· {len(open_view_rows(view_rows)):,} · {FOLD_WORDS.get(by, FOLD_WORDS[DEFAULT_GROUP])}"
-
-
-def parts(data: dict, by: str = DEFAULT_GROUP, breakdown_by: str = DEFAULT_BREAKDOWN) -> dict:
-    """The tab's pieces from `gather`'s output, each for its own placeholder of the static
-    layout: `top` (the tiles, the loaded line, the movers), `summary` (the By strategy table),
-    `breakdown` (the Break it down table), `positions` (the positions table), `under` (Needs you,
-    Last load, the drawer), `counts` (the Positions fold's meta) and `shown` (False for the empty
-    state: the sections other than `top` are hidden)."""
-    by = by if by in dict(GROUP_OPTIONS) else DEFAULT_GROUP
-    breakdown_by = breakdown_by if breakdown_by in dict(BREAKDOWN_OPTIONS) else DEFAULT_BREAKDOWN
-    if not data.get("n_total"):
-        return {"top": empty_state(data), "summary": None, "breakdown": None, "positions": None, "under": None,
-                "counts": "", "shown": False}
-    positions = book_rows(data)
-    strat_rows = book_rows(data, GROUP_STRATEGY)
-    rows = strat_rows if by == GROUP_STRATEGY else book_rows(data, by) if by == GROUP_COMMODITY else positions
-    brk_rows = strat_rows if breakdown_by == GROUP_TRADE else breakdown_rows(data, breakdown_by)
-    marks = bool(data.get("marks_on_file"))
-    top: List[Any] = []
-    if data.get("spreads_error"):
-        top.append(message_box(data["spreads_error"]))
-    top.append(tiles_row(positions, strat_rows, data, marks))
-    if not marks:
-        top.append(loaded_line(data))
-    if marks:
-        strip = movers_strip(positions)
-        if strip is not None:
-            top.append(strip)
-    summary = summary_table(data, positions, marks) if positions else message_box(f"No open position on {data.get('as_of')}.")
-    breakdown = breakdown_table(data, brk_rows, breakdown_by, marks) if brk_rows else None
-    table = book_table(rows, by, marks, data) if rows else None
-    extra = [r for r in strat_rows if r not in positions] + [r for r in rows if r not in positions and r not in strat_rows]
-    under = [needs_section(data),
-             html.Div(className="book-side", children=[load_section(data),
-                                                       issues_drawer(issue_items(data, positions + extra), id=ISSUES_ID)
-                                                       or html.Div()])]
-    return {"top": html.Div(top), "summary": summary, "breakdown": breakdown, "positions": table, "under": under,
-            "counts": fold_meta(rows, by), "shown": True}
-
-
-def body(data: dict, by: str = DEFAULT_GROUP, breakdown_by: str = DEFAULT_BREAKDOWN) -> Tuple[html.Div, str, dict]:
-    """(the whole tab as one Div, the fold's meta text, the toolbar's style): `parts` assembled in
-    the layout's order, for a direct render (the smoke test, a script). The callback fills the
-    placeholders one by one."""
-    p = parts(data, by, breakdown_by)
-    if not p["shown"]:
-        return html.Div([p["top"], html.Div(id=DETAIL_ID)]), "", HIDDEN
-    return html.Div([p["top"],
-                     html.Div([section_head("By strategy", SUMMARY_ABOUT, SUMMARY_META), p["summary"] or html.Div()]),
-                     html.Div([section_head("Break it down", BREAKDOWN_ABOUT, BREAKDOWN_META), p["breakdown"] or html.Div()]),
-                     html.Div([section_head("Positions", POSITIONS_ABOUT, p["counts"]),
-                               p["positions"] or message_box(f"No open position on {data.get('as_of')}."),
-                               html.Div(id=DETAIL_ID)]),
-                     html.Div(className="book-under", children=p["under"])]), p["counts"], {}
-
-
-# --------------------------------------------------------------------------- CSV
-def csv_frame(rows: Sequence[dict], by: str, data: Optional[dict] = None) -> pd.DataFrame:
-    """The table at full figures for the download: one line per row with its group."""
-    records = []
-    for label, members in grouped_rows(rows, by, data):
-        for r in members:
-            rec = {"group": label, "part": r.get("part") or "", "row": r["kind"], "pair": r.get("pair_id") or "",
-                   "position": r["name"], "trade": ", ".join(r.get("strategies") or []) or r.get("strategy", ""),
-                   "strategy": trade_type_words(r.get("trade_type", "")) or "", "strategy_source": r.get("type_source", ""),
-                   "size": r["size"], "gross_usd": r["gross"], "net_usd": r["net"],
-                   "notional_reason": r["notional_reason"] if r["gross"] is None else "", "entry": r["entry"],
-                   "now": r["now"], "unit": r.get("unit") or ("ratio" if r.get("ratio") else ""), "move": r["move"]}
-            for key in PERIODS:
-                value, excluded, _reasons, _note = r["periods"][key]
-                rec[f"{key}_usd"] = value
-                rec[f"{key}_excluded"] = excluded
-            nxt = r.get("next") or {}
-            rec["next_event"], rec["next_date"], rec["next_estimated"] = nxt.get("event", ""), nxt.get("iso", ""), nxt.get("estimated", "")
-            research = r.get("research") or {}
-            rec["research_key"], rec["research_z"], rec["research_pctile"] = research.get("key", ""), research.get("z"), research.get("pctile")
-            rec["trade_ids"] = " ".join(r["trade_ids"])
-            records.append(rec)
-    return pd.DataFrame(records)
-
-
-# --------------------------------------------------------------------------- shell
 def _open(db_path):
     from ui.app import connect_readonly       # local: ui.app imports the tabs
     return connect_readonly(db_path)
@@ -3312,131 +2037,12 @@ def _problem(as_of: str, exc: Exception) -> html.Div:
                className="status-line status-line--bad")])
 
 
-def render_parts(as_of: Optional[str], db_path, by: str = DEFAULT_GROUP, breakdown_by: str = DEFAULT_BREAKDOWN) -> dict:
-    """`parts` for `as_of`, from one read-only connection closed straight after. A problem is a
-    message where the top would be, the other sections hidden."""
-    empty = {"top": None, "summary": None, "breakdown": None, "positions": None, "under": None, "counts": "", "shown": False}
-    if not as_of:
-        return {**empty, "top": message_box("No as-of date available.")}
-    try:
-        conn = _open(db_path)
-    except sqlite3.OperationalError as exc:
-        return {**empty, "top": message_box(f"Database not available ({exc}).")}
-    try:
-        return parts(_gather(conn, as_of), by or DEFAULT_GROUP, breakdown_by or DEFAULT_BREAKDOWN)
-    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
-        log.exception("book tab failed for %s", as_of)
-        return {**empty, "top": _problem(as_of, exc)}
-    finally:
-        conn.close()
-
-
-def render(as_of: Optional[str], db_path, by: str = DEFAULT_GROUP) -> Tuple[Any, str, dict]:
-    """(the whole tab as one Div, counts text, toolbar style) for `as_of`: `body` on one
-    read-only connection closed straight after. A problem is a message where the body would be."""
-    if not as_of:
-        return message_box("No as-of date available."), "", {}
-    try:
-        conn = _open(db_path)
-    except sqlite3.OperationalError as exc:
-        return message_box(f"Database not available ({exc})."), "", {}
-    try:
-        return body(_gather(conn, as_of), by or DEFAULT_GROUP)
-    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
-        log.exception("book tab failed for %s", as_of)
-        return _problem(as_of, exc), "", {}
-    finally:
-        conn.close()
-
-
-def render_detail(row_id: Optional[str], as_of: Optional[str], db_path) -> Any:
-    if not row_id or not as_of:
-        return None
-    try:
-        conn = _open(db_path)
-    except sqlite3.OperationalError as exc:
-        return message_box(f"Database not available ({exc}).")
-    try:
-        data = _gather(conn, as_of)
-        rid = str(row_id)
-        rows = book_rows(data)
-        if rid.startswith("CONTRACT-"):
-            rows += book_rows(data, GROUP_COMMODITY)
-        elif rid.startswith((f"{LEG_PREFIX}-", f"{PAIR_PREFIX}-", f"{HEDGE_PREFIX}-", "SETTLED-")):
-            rows += book_rows(data, GROUP_STRATEGY)
-        return detail_for(data, rows, rid)
-    except Exception as exc:  # noqa: BLE001 -- the reason under the table, never a 500
-        log.exception("book tab detail failed for %s", row_id)
-        return message_box(f"The position's detail could not be built ({type(exc).__name__}: {exc}).")
-    finally:
-        conn.close()
-
-
-def render_csv(as_of: Optional[str], db_path, by: str):
-    if not as_of:
-        return None
-    try:
-        conn = _open(db_path)
-    except sqlite3.OperationalError:
-        return None
-    try:
-        data = _gather(conn, as_of)
-        by = by if by in dict(GROUP_OPTIONS) else DEFAULT_GROUP
-        frame = csv_frame(book_rows(data, by), by, data)
-        return dcc.send_data_frame(frame.to_csv, f"book-{as_of}.csv", index=False)
-    except Exception:  # noqa: BLE001
-        log.exception("book tab csv failed for %s", as_of)
-        return None
-    finally:
-        conn.close()
-
-
 def _switch(id_: str, options: Sequence[Tuple[str, str]], default: str) -> dcc.RadioItems:
     return dcc.RadioItems(id=id_, className="book-switch",
                           options=[{"label": label, "value": value} for value, label in options],
                           value=default, inline=True, persistence=True, persistence_type="session")
 
 
-def layout(default_date: Optional[str] = None) -> html.Div:
-    """The static shell (2026-09-28): the title, the top placeholder (the tiles, the loaded line,
-    the movers), the By strategy section (its title row static, so the Download CSV button it
-    holds is never re-inserted), the Break it down section with its Trade | Commodity | Instrument
-    switch, the Positions fold (open; its summary meta a placeholder) with its Strategy | Commodity
-    | Instrument switch, the row detail, the under-section and the safety interval. The switches
-    are static so the callback can read them (a switch inside a re-rendered body would fire the
-    callback that renders it). No date picker."""
-    return html.Div(className="book-tab", children=[
-        html.Div(id=TOOLBAR_ID, className="book-title-row", children=[about("Book", TITLE_ABOUT, level="h3")]),
-        html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
-        html.Div(id=SUMMARY_SECTION_ID, className="book-section", style=HIDDEN, children=[
-            section_head("By strategy", SUMMARY_ABOUT, SUMMARY_META,
-                         html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
-                                     title="The Positions table as shown, at full figures, one line per row"),
-                         dcc.Download(id=DOWNLOAD_ID)),
-            html.Div(id=SUMMARY_TABLE_ID),
-        ]),
-        html.Div(id=BREAKDOWN_SECTION_ID, className="book-section", style=HIDDEN, children=[
-            section_head("Break it down", BREAKDOWN_ABOUT, BREAKDOWN_META, _switch(BREAKDOWN_ID, BREAKDOWN_OPTIONS, DEFAULT_BREAKDOWN)),
-            html.Div(id=BREAKDOWN_TABLE_ID),
-        ]),
-        html.Details(id=POSITIONS_SECTION_ID, className="details book-fold", open=True, style=HIDDEN, children=[
-            html.Summary(className="book-section-head", title=POSITIONS_ABOUT, children=[
-                html.Span("Positions", className="book-section-title"),
-                html.Span(id=POSITIONS_SUMMARY_ID, className="book-section-meta"),
-                _switch(GROUP_ID, GROUP_OPTIONS, DEFAULT_GROUP)]),
-            html.Div(id=POSITIONS_TABLE_ID),
-            html.Div(id=DETAIL_ID),
-        ]),
-        html.Div(id=UNDER_ID, className="book-under", style=HIDDEN),
-        dcc.Store(id=EMPTY_UPLOAD_SINK_ID),
-        dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
-    ])
-
-
-build_layout = layout
-
-# The empty state's Upload button opens the top bar's own file chooser (the one upload of the
-# app, `ui.uploads.FILE_UPLOAD_ID`): a click on that hidden input inside the user's click.
 _OPEN_UPLOAD_JS = (
     "function(ns) {\n"
     "    var n = (ns || []).filter(function(x) { return x; }).length;\n"
@@ -3449,48 +2055,1857 @@ _OPEN_UPLOAD_JS = (
 )
 
 
+# --------------------------------------------------------------------------- the open trades (2026-09-29)
+# The Book's layout approved on 2026-09-29 against the research app's Book: tiles, Needs you,
+# one summary table with a break-down switch, a flat Open trades list, the row detail, the
+# closed fold, the last load and the drawer. The rows are the Strategy rows of `book_rows`
+# flattened: a pair row carries its two legs' trades (its leg rows go), everything else is a row
+# of its own, and the settled lines go to the closed fold. Every trade is in exactly one row that
+# carries P&L, so the summary's Book line is the header.
+GROUP_SECTOR = "sector"
+VIEW_CONTRACT = "contract"                  # the Instrument view: one group per contract
+VIEW_ID = "book-view"
+VIEW_OPTIONS = ((GROUP_TYPE, "Spread type"), (GROUP_COMMODITY, "Commodity"), (VIEW_CONTRACT, "Instrument"),
+                (GROUP_SECTOR, "Sector"), (GROUP_TRADE, "Trade"))
+DEFAULT_VIEW = GROUP_TYPE
+OUTRIGHTS_GROUP = "Outrights"
+OTHER_SPREADS_GROUP = "Other spreads"
+TYPE_GROUP_ORDER = ("Cross exchange", "Cross product", "Term structure", OTHER_SPREADS_GROUP, OUTRIGHTS_GROUP,
+                    OPTIONS_GROUP, LME_GROUP, FX_GROUP, OTHER_GROUP, SETTLED_GROUP)
+_TYPE_WORDS = {OUTRIGHTS_GROUP: "outright", OPTIONS_GROUP: "option", LME_GROUP: "LME forward", FX_GROUP: "FX hedge",
+               OTHER_GROUP: "other"}
+GRID_SECTION_ID = "book-grid-section"
+TBODY_ID = "book-grid-body"
+GRID_META_ID = "book-grid-meta"
+PREPULL_ID = "book-prepull"
+EXPAND_ALL_ID = "book-expand-all"
+COLLAPSE_ALL_ID = "book-collapse-all"
+CLEAR_FILTERS_ID = "book-clear-filters"
+EXPAND_STORE_ID = "book-open-rows"          # {"base": default | open | closed, "flip": [node ids]}, session
+SORT_STORE_ID = "book-sort-store"           # {"key", "desc"} or None (the order as built), session
+DETAIL_STORE_ID = "book-detail-open"        # the node whose detail is open under its row, or None, session
+TOGGLE_TYPE = "book-toggle"                 # a row's chevron: {"type": ..., "idx": node id}
+SORT_TYPE = "book-sort"                     # a column head: {"type": ..., "idx": column key}
+SORT_ARROW_TYPE = "book-sort-arrow"         # the arrow inside a column head
+PREPULL_TEXT = "Levels and P&L fill in after the first Bloomberg pull; fills and sizes are already right"
+HISTORY_POINTS = 60                         # at most this many closes on a detail chart, plus the as-of
+_CHINA_CCY = ("CNY", "CNH")
+SPLIT_WORDS = (("spread", "spread"), ("fx", "FX"), ("hedge", "hedge"), ("new_trades", "new trades"),
+               ("realised", "realised"), ("other", "other"))   # the engine's Daily split, in this order
+AS_HELD = "as held: an option counts as its option lots, not at delta; delta is on the Exposure tab"
+GRID_TIPS = {
+    "name": "The group, the position (a pair, a leg left over, an option, an LME prompt, an FX trade), its legs, its "
+            "fills. Click the chevron to open a row, the name for its chart, fills and legs. Jason's trade name "
+            "(PBRoot) small and grey; the legs and ids on hover.",
+    "type": "Cross exchange, cross product or term structure for a pair (the engine's rule); outright, option, LME "
+            "forward or FX hedge otherwise.",
+    "sector": "The contract's sector; FX hedges on their own.",
+    "net": f"Net lots, {AS_HELD}. A fill its quantity; a contract its fills netted; a group the contracts' nets added "
+           "where the units agree (lots, tonnes, one currency), 'mixed' otherwise; a commodity in one physical unit "
+           "(curve-positions' figure).",
+    "gross": f"Gross lots, {AS_HELD}: each contract's net, without its sign, added up where the units agree.",
+    "fill": "A fill's price; a leg's or contract's lots-weighted average fill; a pair's level at entry.",
+    "mark": "The official mark on the day (its source and date on hover); a pair's level at the day's marks.",
+    "prev": "The mark, or a pair's level, on the Daily's reference close.",
+    "move": "Mark less the reference close: green when it moved the position's way, red when against; a pair's $ per "
+            "unit and its move in σ (research) on hover.",
+    "carry": "Research: the calendar's roll-down per month in USD on the position (+ = the curve's shape pays the "
+             "position), from the research app's curve; the roll-down in the spread's unit and the note on hover. "
+             "Calendar spreads only. Context, never in P&L or a total.",
+    "z": "The research app's z-score of the pair's level (context, read-only: never in P&L, delta or a total).",
+    "pctile": "The research app's 5-year percentile of the pair's level (context, read-only).",
+    "daily": "Daily P&L in USD by the header's rule (k / m, a fill at the full figure); every level sums its fills; on "
+             "a position of a trade, the engine's split of that whole trade's Daily on hover.",
+    "mtd": "MTD P&L in USD, likewise.", "ytd": "YTD P&L in USD, likewise.",
+    "ltd": "LTD P&L in USD, likewise: every fill since the first, the settled ones at their frozen figure.",
+    "local": "P&L in the contract's own currency, on a fill, a leg or a one-contract position; never summed across "
+             "currencies.",
+    "gross_usd": "The engine's gross USD notional on the open lots (a pair's on its paired lots); a group sums its rows' "
+                 "known figures, 'excl. N' for the rest.",
+    "net_usd": "The engine's net USD notional, long positive, likewise; an amber marker when a pair's legs do not "
+               "balance or a leg is left over from its trade's pairs.",
+    "next": "The next event (first notice, last trade, expiry, prompt, value date) and the business days to it; red "
+            "within 3 and amber within 10 by the engine's level, grey with ≈ while the date is estimated.",
+}
+
+
+def _units_words(value: Optional[float], unit: str) -> str:
+    """'long 35.6 t', 'short 7.9m USD', 'flat': a net in physical units, rounded to a tenth."""
+    if value is None:
+        return ""
+    if unit and len(unit) == 3 and unit.isupper() and unit.isalpha():
+        return size_words(value, ccy=unit)
+    return size_words(round(float(value), 1), unit or "units")
+
+
+def _cap(text: str) -> str:
+    return text[:1].upper() + text[1:] if text else text
+
+
+def _engine_pair(data: dict, pair_id: str) -> Optional[dict]:
+    """spreads-engine's pair entry by its id, from any strategy."""
+    for s in ((data.get("spreads") or {}).get("strategies") or []):
+        for p in s.get("pairs") or []:
+            if str(p.get("pair_id") or "") == pair_id:
+                return p
+    return None
+
+
+def _engine_position(data: dict, position_id: str) -> Optional[dict]:
+    for p in open_positions(data.get("spreads") or {}):
+        if str(p.get("position_id") or p.get("name")) == position_id:
+            return p
+    return None
+
+
+def _type_group(row: dict) -> str:
+    """The row's line in the Spread type view."""
+    if row["kind"] == "settled":
+        return SETTLED_GROUP
+    if row["kind"] in ("pair", "spread"):
+        return strategy_words(row.get("trade_type")) or OTHER_SPREADS_GROUP
+    group = row.get("instrument_group")
+    if group in (FUTURES_GROUP, PRECIOUS_GROUP):     # a precious-metal pair is an outright, not a hedge
+        return OUTRIGHTS_GROUP
+    return group if group in (OPTIONS_GROUP, LME_GROUP, FX_GROUP) else OTHER_GROUP
+
+
+def _sector_group(row: dict) -> str:
+    if row["kind"] == "settled":
+        return SETTLED_GROUP
+    if row.get("instrument_group") == FX_GROUP or row.get("sector") == FX_SECTOR:
+        return FX_GROUP
+    return _sector_label(row.get("sector")) if row.get("sector") else OTHER_GROUP
+
+
+def _direction(row: dict, data: dict, pair: Optional[dict]) -> Tuple[Optional[float], Optional[float]]:
+    """(+1 long / −1 short / None, the signed size) of a row: a pair's direction is its first
+    leg's (the level is written first leg first), a spread's its size's sign, else its lots'."""
+    if row["kind"] == "pair":
+        if pair is None:
+            return None, None
+        sign = -1.0 if str(pair.get("direction") or "long") == "short" else 1.0
+        size = _num(pair.get("size"))
+        return sign, (sign * size if size is not None else None)
+    if row["kind"] == "spread":
+        position = _engine_position(data, row["id"])
+        size = _num((position or {}).get("size"))
+    else:
+        size = _num(row.get("lots"))
+    if not size:
+        return None, size
+    return (1.0 if size > 0 else -1.0), size
+
+
+def _broken(row: dict, pair: Optional[dict]) -> Optional[Tuple[str, str]]:
+    """The amber marker of a pair whose legs do not balance, or of a leg left over from a trade's
+    pairs, with its sentence in plain words; None otherwise."""
+    if row["kind"] == "pair" and pair is not None:
+        residual = _num(pair.get("residual_units")) or 0.0
+        if abs(residual) > 1e-9:
+            unit = str(pair.get("residual_unit") or pair.get("size_unit") or "")
+            return (f"unbalanced {signed_number(residual, 1)} {unit}".strip(),
+                    f"The two legs do not balance: the pair holds {signed_number(residual, 2)} {unit} more on one "
+                    f"side than an exact match (the larger leg pairs the whole lots nearest to the smaller one). "
+                    f"Net is the two legs' USD notional netted, so it carries that difference and the price gap "
+                    f"between the legs.")
+    if row["kind"] == "leg" and row.get("part") == PART_OUTRIGHT:
+        who = row.get("group") or ""
+        return ("left over", f"A leg of trade {who} left over after its pairs: lots with no opposite leg to pair "
+                             f"with, or beyond a pair's exact match. It is an outright until it is paired.")
+    return None
+
+
+def _china(row: dict, data: dict, pair: Optional[dict]) -> bool:
+    if pair is not None:
+        return any(str(leg.get("currency") or "") in _CHINA_CCY for leg in pair.get("legs") or [])
+    root = (data.get("roots") or {}).get(str(row.get("root_id") or ""))
+    return str(getattr(root, "currency", "") or "") in _CHINA_CCY
+
+
+def _split_hover(data: dict, row: dict) -> str:
+    """The engine's Daily split of the trade (PBRoot name) the row sits in: it is given per trade,
+    not per pair, so the hover says it is the whole trade's."""
+    name = str(row.get("group") or "")
+    entry = _strategy_entry(data, name) if name else None
+    split = (entry or {}).get("daily") or {}
+    if not split:
+        return ""
+    if split.get("reason"):
+        return f"trade {name} today, not split: {split['reason']}"
+    parts = [f"{word} {signed_money(_num(split.get(key)))}" for key, word in SPLIT_WORDS
+             if _num(split.get(key))]
+    return f"trade {name} today (the whole trade, not this row): " + " · ".join(parts) if parts else ""
+
+
+def _sigma_hover(data: dict, row: dict) -> str:
+    """Our move against the research app's 20-day daily vol (`sigma_move`), labelled research."""
+    r = row.get("research") or {}
+    if row["kind"] != "pair" or not r.get("sid") or row.get("move") is None:
+        return ""
+    stats = ((data.get("research") or {}).get("stats") or {}).get((r.get("sid"), r.get("inst")))
+    if stats is None:
+        return ""
+    try:
+        from engine.risk.research_spreads import sigma_move
+        sigma, why = sigma_move(row["move"], stats, unit="ratio" if row.get("ratio") else (row.get("unit") or None))
+    except Exception as exc:  # noqa: BLE001 -- context only: a reason, never a failure
+        sigma, why = None, f"{type(exc).__name__}: {exc}"
+    if sigma is None:
+        return f"move in σ (research): not given, {why}"
+    return f"move {signed_number(sigma, 1)}σ against the research app's 20-day daily vol (context, read-only)"
+
+
+def _decorate(row: dict, data: dict) -> None:
+    pair = _engine_pair(data, row.get("pair_id") or "") if row["kind"] == "pair" else None
+    row["type_group"] = _type_group(row)
+    row["type_text"] = ((trade_type_words(row.get("trade_type")) or "spread") if row["kind"] in ("pair", "spread")
+                        else _TYPE_WORDS.get(row["type_group"], "other"))
+    row["sector_key"] = _sector_group(row)
+    row["direction"], row["size_num"] = _direction(row, data, pair)
+    row["broken"] = _broken(row, pair)
+    row["trade_name"] = str(row.get("group") or row.get("strategy") or "")
+    if row["trade_name"] == SETTLED_GROUP:
+        row["trade_name"] = ""
+    entry = _strategy_entry(data, str(row.get("group") or "")) if row.get("group") else None
+    row["coverage"] = entry if entry is not None and _china(row, data, pair) else None
+    row["split_hover"] = _split_hover(data, row)
+    row["sigma_hover"] = _sigma_hover(data, row)
+
+
+def open_rows(data: dict) -> Tuple[List[dict], List[dict]]:
+    """(the open positions, the settled lines), built once per `gather` and kept on it.
+    From `book_rows(data, GROUP_STRATEGY)`: a pair row takes its two leg rows' trades and keeps the
+    leg rows under it (`leg_rows`, the grid's legs level); a pair whose contracts' fills sit on an earlier pair of the same
+    contracts says so and is not summed; every other open row stays as it is."""
+    cached = data.get("_open_rows")
+    if cached is not None:
+        return cached
+    rows: List[dict] = []
+    settled: List[dict] = []
+    pairs: Dict[Tuple[str, int], dict] = {}
+    for r in book_rows(data, GROUP_STRATEGY):
+        if r["kind"] == "settled":
+            settled.append(r)
+            continue
+        if r["kind"] == "pair":
+            r = {**r, "subtotal": False, "trade_ids": [], "leg_rows": []}
+            pairs[(r["group"], r["pair_n"])] = r
+            rows.append(r)
+            continue
+        key = (r.get("group"), r.get("pair_n"))
+        if r["kind"] == "leg" and r.get("part") == PART_PAIR and key in pairs:
+            p = pairs[key]
+            p["trade_ids"] += [t for t in r["trade_ids"] if t not in p["trade_ids"]]
+            p["leg_rows"].append(r)
+            continue
+        rows.append(r)
+    for p in pairs.values():
+        if p["trade_ids"]:
+            p["periods"] = _periods_of(data, p["trade_ids"])
+        else:
+            p["no_pnl"] = (f"{p['name']}: its fills' P&L is on an earlier pair of the same contracts in this trade "
+                           "(a fill is not split between pairs)")
+            p["periods"] = {k: (None, 0, [p["no_pnl"]], "") for k in PERIODS}
+    for r in rows:
+        _decorate(r, data)
+    for r in settled:
+        r.update(type_group=SETTLED_GROUP, sector_key=SETTLED_GROUP, type_text="", direction=None, size_num=None,
+                 broken=None, trade_name=str(r.get("group") or ""), coverage=None, split_hover="", sigma_hover="")
+    data["_open_rows"] = (rows, settled)
+    return rows, settled
+
+
+# --------------------------------------------------------------------------- the grid: the Book's one table (2026-09-29)
+# The user's boss, 2026-09-29: one big grouped table, as granular as possible in a logical way,
+# instead of a summary table over a flat list. Every level has the same columns (a cell that does
+# not apply is blank): the group rows are the summary. A node's P&L is its trades' per-trade
+# figures (`pnl.period_rows`, the header's split) summed, display; its notional is the engine's
+# figure on the row, a group's the known figures of its rows summed. Nothing is priced here.
+def _unit_of(product: str, base: str) -> str:
+    if product in ("FUTURE", "CMDTY_OPTION", "EQ_OPTION"):
+        return "lots"
+    if product == "LME_FWD":
+        return "t"
+    if product in FX_PRODUCTS:
+        return _METAL_UNITS.get(base, base or "units")
+    return "units"
+
+
+def trade_info(data: dict) -> Dict[str, dict]:
+    """{trade_id: what a fill's row shows}, off the shared filled reader's rows and the instruments
+    on file, built once per `gather` and kept on it."""
+    cached = data.get("_trade_info")
+    if cached is not None:
+        return cached
+    out: Dict[str, dict] = {}
+    df = data.get("df")
+    prev = data.get("prev_marks") or {}
+    roots, instruments = data.get("roots") or {}, data.get("instruments") or {}
+    if df is not None and not df.empty:
+        for r in df.to_dict("records"):
+            tid, inst, product = str(r["trade_id"]), str(r["instrument_id"]), str(r["product"])
+            info = instruments.get(inst) or {}
+            base = str(info.get("base_ccy") or "")
+            root = roots.get(base)
+            settle = str(r.get("settle_date") or "")
+            reason = str(r.get("reason") or "")
+            if product == "LME_FWD":
+                name = lme_name(root, base, settle)
+            elif product in FX_PRODUCTS:
+                pair = inst if product != "FX_OPTION" else base + str(info.get("quote_ccy") or "")
+                name = fx_name(pair, product, settle if product != "FX_OPTION" else (info.get("expiry_date") or settle),
+                               info.get("option_type", ""), info.get("strike"))
+            else:
+                name = contract_name(inst, root, base)
+            if product in FX_PRODUCTS and fx_is_hedge(product, base, str(info.get("quote_ccy") or ""), inst, root):
+                commodity, sector = FX_GROUP, FX_GROUP
+            elif product in FX_PRODUCTS:            # a precious-metal pair: a metals position
+                commodity, sector = PRECIOUS_GROUP, _sector_label("metals")
+            else:
+                commodity = _commodity_of([base], product, data)[0]
+                sector = (FX_GROUP if str(getattr(root, "sector", "") or "") == FX_SECTOR else
+                          _sector_label(str(getattr(root, "sector", "") or ("metals" if product == "LME_FWD" else ""))))
+            mark = _num(r.get("mark")) if not reason else None
+            unit = quoted_unit(root) if product not in FX_PRODUCTS else (inst if product in ("FX_SPOT", "FX_FWD") else "")
+            out[tid] = {
+                "trade_id": tid, "instrument_id": inst, "product": product, "trade_date": str(r.get("trade_date") or ""),
+                "status": str(r.get("status") or ""), "qty": _num(r.get("quantity")), "fill": _num(r.get("fill")),
+                "mark": mark, "mark_source": str(r.get("mark_source") or ""), "mark_date": str(r.get("mark_date") or ""),
+                "reason": reason, "note": str(r.get("note") or ""), "prev": prev.get(tid),
+                "local": _num(r.get("pnl_local")), "currency": str(info.get("quote_ccy") or ""),
+                "unit": _unit_of(product, base), "price_unit": unit if product != "LME_FWD" else (unit or "USD/t"),
+                "contract": (inst, settle if product in ("LME_FWD", *FX_PRODUCTS) else ""), "root_id": base,
+                "name": name, "commodity": commodity, "sector": sector or OTHER_GROUP,
+                "strategy": str(((data.get("labels") or {}).get(tid) or {}).get("strategy") or ""),
+            }
+    data["_trade_info"] = out
+    return out
+
+
+def _per_trade(data: dict) -> Dict[str, Optional[Dict[str, Tuple[Any, str, str]]]]:
+    """{period: {trade_id: (value, reason, note)}} off `pnl.period_rows`' rows (None for a period
+    that could not be built), kept on `data`."""
+    cached = data.get("_per_trade")
+    if cached is not None:
+        return cached
+    out: Dict[str, Any] = {}
+    for key in PERIODS:
+        view = (data.get("periods") or {}).get(key)
+        if view is None:
+            out[key] = None
+            continue
+        rows = view.rows
+        out[key] = {str(t): (v, str(r or ""), str(n or "")) for t, v, r, n in
+                    zip(rows["trade_id"], rows["value"], rows["reason"], rows["note"])} if not rows.empty else {}
+    data["_per_trade"] = out
+    return out
+
+
+def period_sum(data: dict, key: str, ids: Sequence[str]) -> Tuple[Optional[float], int, List[str], str]:
+    """`_period_of` over a lookup: the trades' figures of the period, the known ones summed; a
+    trade the period's rows do not list is not counted (as `_period_of`)."""
+    lookup = _per_trade(data).get(key)
+    if lookup is None:
+        return None, len(ids), [data.get("periods_error") or "the period figures could not be built"], ""
+    pairs, notes = [], []
+    for t in ids:
+        hit = lookup.get(str(t))
+        if hit is None:
+            continue
+        v, r, n = hit
+        pairs.append((v, f"{t}: {r}" if r else ""))
+        if n:
+            notes.append(n)
+    total, excluded, reasons = sum_known(pairs)
+    return total, excluded, reasons, "; ".join(dict.fromkeys(notes))
+
+
+def position_map(data: dict) -> Dict[str, dict]:
+    """{trade_id: the Book row (pair, leg left over, outright, option, LME prompt, FX trade, settled
+    line) that carries its P&L in the Spread type view}."""
+    cached = data.get("_position_map")
+    if cached is not None:
+        return cached
+    rows, settled = open_rows(data)
+    out: Dict[str, dict] = {}
+    for r in rows + settled:
+        for t in r["trade_ids"]:
+            out.setdefault(str(t), r)
+    data["_position_map"] = out
+    return out
+
+
+def explain_ids(data: dict) -> Dict[str, str]:
+    """{trade_id: the position id `engine.spreads.period_explain` gives its trade}: a position of
+    `book_spreads` (its own `position_id`: a trade (PBRoot name) is one position there, `STRATEGY-...`;
+    a spread of the unlabelled trades its `POSITION-...` id), else `OUTRIGHT-<instrument_id>` for a
+    future left outright, else `TRADE-<trade_id>`. The same rule as `period_explain._positions_of`,
+    read here so the P&L tab, the scorecard and the Risk tab can point at a Book row by that id."""
+    cached = data.get("_explain_ids")
+    if cached is not None:
+        return cached
+    out: Dict[str, str] = {}
+    spreads = data.get("spreads") or {}
+    for p in spreads.get("positions") or []:
+        for t in p.get("trade_ids") or []:
+            out.setdefault(str(t), str(p.get("position_id") or p.get("name")))
+    for o in spreads.get("outrights") or []:
+        out.setdefault(str(o.get("trade_id")), f"OUTRIGHT-{o.get('instrument_id') or ''}")
+    df = data.get("df")
+    if df is not None and not df.empty:
+        for t in df["trade_id"]:
+            out.setdefault(str(t), f"TRADE-{t}")
+    data["_explain_ids"] = out
+    return out
+
+
+def row_link_attrs(data: dict, node: dict) -> Dict[str, str]:
+    """The ids another tab links to a Book row by (`period_explain`'s position ids): `data-position`
+    on the row that IS that unit (a Trade-view group line for a trade name, `POSITION-STRATEGY-...`;
+    a spread of the unlabelled trades, `POSITION-...`; an outright contract, `OUTRIGHT-<instrument>`;
+    an option, LME ticket or FX trade, `TRADE-<trade_id>`), and on every row below a unit
+    `data-member-of`, the unit's id(s) its fills belong to."""
+    ids = explain_ids(data)
+    linked = sorted({ids[t] for t in node["tids"] if t in ids})
+    if not linked:
+        return {}
+    strategies = {str(p.get("position_id") or p.get("name")) for p in (data.get("spreads") or {}).get("positions") or []
+                  if str(p.get("kind") or "") == "strategy"}
+    out: Dict[str, str] = {}
+    if node["level"] == "group":
+        if node["id"].startswith(f"{GROUP_TRADE}:g:") and len(linked) == 1 and linked[0] in strategies:
+            out["data-position"] = linked[0]
+        return out
+    if len(linked) == 1 and linked[0] not in strategies and node["level"] in ("position", "instrument"):
+        out["data-position"] = linked[0]
+    out["data-member-of"] = " ".join(linked)
+    return out
+
+
+def _node(nid: str, level: str, depth: int, label: str, *, row: Optional[dict] = None, tids: Sequence[str] = (),
+          children: Sequence[dict] = (), sub: str = "", hover: str = "", default_open: bool = False,
+          leaf: Optional[str] = None, detail: bool = False) -> dict:
+    return {"id": nid, "level": level, "depth": depth, "label": label, "row": row, "tids": [str(t) for t in tids],
+            "children": list(children), "sub": sub, "hover": hover, "default_open": default_open, "leaf": leaf,
+            "detail": detail}
+
+
+def _trade_node(data: dict, tid: str, parent: str, depth: int, sub: str = "", with_name: bool = False) -> dict:
+    t = trade_info(data).get(str(tid)) or {"trade_date": "", "status": "", "instrument_id": "", "product": "", "name": tid}
+    status = str(t.get("status") or "").upper()
+    word = "Fill" if status in ("OPEN", "") else status.capitalize()
+    label = f"{t['name']} · {word.lower()} {short_date(t['trade_date'])}" if with_name else f"{word} {short_date(t['trade_date'])}"
+    hover = (f"Trade {tid}: {str(t.get('product') or '').replace('_', ' ').lower()} {t.get('instrument_id')}, dealt "
+             f"{t.get('trade_date')}, {status.lower() or 'status not given'}")
+    return _node(f"{parent}/t:{tid}", "trade", depth, label, tids=[tid], sub=sub or str(tid), hover=hover, leaf=str(tid))
+
+
+def _trade_nodes(data: dict, tids: Sequence[str], parent: str, depth: int, subs: Optional[Callable[[str], str]] = None,
+                 with_name: bool = False) -> List[dict]:
+    info = trade_info(data)
+    ordered = sorted((str(t) for t in tids), key=lambda t: ((info.get(t) or {}).get("trade_date", ""), t))
+    return [_trade_node(data, t, parent, depth, subs(t) if subs else "", with_name) for t in ordered]
+
+
+def _spread_legs(data: dict, row: dict, nid: str, depth: int) -> List[dict]:
+    """The legs of a spread of the unlabelled trades: one row per contract of its trades
+    (`contract_rows`), the engine's notional of the position's leg on it, its trades under it."""
+    position = _engine_position(data, row["id"])
+    legs = []
+    covered: set = set()
+    for leg in contract_rows(data, row["trade_ids"], kind="contract"):
+        inst = leg["id"].split("-", 1)[1] if "-" in leg["id"] else leg["id"]
+        pleg = _position_leg(position, str(inst).split("-")[0] if leg.get("instrument_group") == LME_GROUP else str(inst))
+        if pleg is not None:
+            leg["gross"], leg["net"] = _num(pleg.get("gross_usd")), _num(pleg.get("net_usd"))
+            leg["notional_reason"] = str(pleg.get("notional_reason") or ("" if leg["gross"] is not None else "no notional given"))
+            leg["notional_source"] = "the engine's notional of the spread's leg, at the day's marks and spots"
+        lid = f"{nid}/{leg['id']}"
+        covered.update(leg["trade_ids"])
+        legs.append(_node(lid, "leg", depth, leg["name"], row=leg, tids=leg["trade_ids"],
+                          children=_trade_nodes(data, leg["trade_ids"], lid, depth + 1), detail=True,
+                          hover=leg["name_hover"]))
+    rest = [t for t in row["trade_ids"] if t not in covered]
+    return legs + _trade_nodes(data, rest, nid, depth)
+
+
+def _position_node(data: dict, row: dict, parent: str, depth: int) -> dict:
+    """A position of the Spread type, Sector or Trade view: a pair with its two legs and their
+    fills, a spread with its legs, a one-contract position with its fills, a one-fill position."""
+    nid = f"{parent}/{row['id']}"
+    kind = row["kind"]
+    if kind == "trade":
+        return _node(nid, "position", depth, row["name"], row=row, tids=row["trade_ids"],
+                     leaf=row["trade_ids"][0] if row["trade_ids"] else None, detail=True, hover=row["name_hover"],
+                     sub=row.get("trade_name") or "")
+    if kind == "pair":
+        legs = []
+        for leg in row.get("leg_rows") or []:
+            lid = f"{nid}/{leg['id']}"
+            legs.append(_node(lid, "leg", depth + 1, leg["name"], row=leg, tids=leg["trade_ids"],
+                              children=_trade_nodes(data, leg["trade_ids"], lid, depth + 2), detail=True,
+                              hover=leg["name_hover"]))
+        children = legs
+    elif kind == "spread":
+        children = _spread_legs(data, row, nid, depth + 1)
+    else:
+        children = _trade_nodes(data, row["trade_ids"], nid, depth + 1)
+    return _node(nid, "position", depth, row["name"], row=row, tids=row["trade_ids"], children=children, detail=True,
+                 hover=row["name_hover"], sub=row.get("trade_name") or "")
+
+
+def _instrument_node(data: dict, row: dict, parent: str, depth: int) -> dict:
+    """A contract of the Commodity or Instrument view (its trades netted across trades), its fills
+    under it, each with the spread it sits in small and grey."""
+    nid = f"{parent}/{row['id']}"
+    pos = position_map(data)
+
+    def spread_of(t: str) -> str:
+        r = pos.get(t) or {}
+        if r.get("kind") in ("pair", "spread"):
+            return r["name"] + (f" · {r['trade_name']}" if r.get("trade_name") else "")
+        return str(r.get("trade_name") or "")
+
+    if row["kind"] == "trade":
+        tid = row["trade_ids"][0] if row["trade_ids"] else None
+        return _node(nid, "instrument", depth, row["name"], row=row, tids=row["trade_ids"], leaf=tid, detail=True,
+                     hover=row["name_hover"], sub=spread_of(tid) if tid else "")
+    return _node(nid, "instrument", depth, row["name"], row=row, tids=row["trade_ids"],
+                 children=_trade_nodes(data, row["trade_ids"], nid, depth + 1, subs=spread_of), detail=True,
+                 hover=row["name_hover"])
+
+
+def _settled_node(data: dict, view: str, tids: Sequence[str]) -> dict:
+    gid = f"{view}:g:{SETTLED_GROUP}"
+    pos = position_map(data)
+    return _node(gid, "group", 0, SETTLED_GROUP, tids=tids,
+                 children=_trade_nodes(data, tids, gid, 1, subs=lambda t: str((pos.get(t) or {}).get("trade_name") or t),
+                                       with_name=True),
+                 hover="Settled trades and closed-out options: their P&L stays in the book's LTD.")
+
+
+def _view_order(view: str, names: Sequence[str], data: dict) -> List[str]:
+    if view == GROUP_TYPE:
+        head, tail = list(TYPE_GROUP_ORDER[:-2]), [OTHER_GROUP]
+    elif view == GROUP_SECTOR:
+        head, tail = [_sector_label(s) for s in _SECTOR_ORDER if s != FX_SECTOR], [FX_GROUP, OTHER_GROUP]
+    elif view == GROUP_TRADE:
+        head, tail = [], [NO_STRATEGY_GROUP]
+    else:
+        return [g for g in _group_order(GROUP_COMMODITY, names, data) if g != SETTLED_GROUP]
+    return [g for g in head if g in names] + sorted(g for g in names if g not in head + tail) + [g for g in tail if g in names]
+
+
+def grid_tree(data: dict, view: str) -> List[dict]:
+    """The top nodes of the view, the settled group last; built once per view and `gather`."""
+    cache = data.setdefault("_grid", {})
+    if view in cache:
+        return cache[view]
+    nodes: List[dict] = []
+    if view in (GROUP_TYPE, GROUP_SECTOR, GROUP_TRADE):
+        rows, settled = open_rows(data)
+        key = {GROUP_TYPE: lambda r: r["type_group"], GROUP_SECTOR: lambda r: r["sector_key"],
+               GROUP_TRADE: lambda r: r["trade_name"] or NO_STRATEGY_GROUP}[view]
+        names = list(dict.fromkeys(key(r) for r in rows))
+        for label in _view_order(view, names, data):
+            gid = f"{view}:g:{label}"
+            members = sorted((r for r in rows if key(r) == label), key=_daily_abs)
+            children = [_position_node(data, r, gid, 1) for r in members]
+            nodes.append(_node(gid, "group", 0, label, tids=[t for c in children for t in c["tids"]], children=children,
+                               default_open=True))
+        left = [t for r in settled for t in r["trade_ids"]]
+    else:
+        crows = book_rows(data, GROUP_COMMODITY)
+        inst_rows = [r for r in crows if r["kind"] != "settled"]
+        left = [t for r in crows if r["kind"] == "settled" for t in r["trade_ids"]]
+        names = list(dict.fromkeys(r["commodity_group"] for r in inst_rows))
+        order = _view_order(view, names, data)
+        subs = ((data.get("curve") or {}).get("by_subsector") or {})
+        if view == GROUP_COMMODITY:
+            for label in order:
+                gid = f"{view}:g:{label}"
+                members = sorted((r for r in inst_rows if r["commodity_group"] == label), key=_curve_order)
+                children = [_instrument_node(data, r, gid, 1) for r in members]
+                group = _node(gid, "group", 0, label, tids=[t for c in children for t in c["tids"]],
+                              children=children, default_open=True)
+                group["commodity_sub"] = next((sub for sub in subs.values() if str(sub.get("name")) == label), None)
+                nodes.append(group)
+        else:
+            rank = {g: i for i, g in enumerate(order)}
+            for r in sorted(inst_rows, key=lambda r: (rank.get(r["commodity_group"], 99), _curve_order(r))):
+                nodes.append(_instrument_node(data, r, f"{view}:g", 0))
+    if left:
+        nodes.append(_settled_node(data, view, left))
+    cache[view] = nodes
+    return nodes
+
+
+# --- the values of a node
+def _sizes(data: dict, ids: Sequence[str], one_root: bool = False) -> dict:
+    """Net and gross lots as held over a set of fills: per contract netted, then summed when every
+    contract is in the same unit (lots, tonnes, one currency); 'mixed' with the split on hover
+    otherwise; with `one_root` (a group line) only when every contract is of one root, since lots of
+    different contracts do not add up to a position. Open fills only. Display: nothing converted."""
+    info = trade_info(data)
+    nets: Dict[Tuple[str, str], float] = {}
+    units: Dict[Tuple[str, str], str] = {}
+    names: Dict[Tuple[str, str], str] = {}
+    roots: set = set()
+    for t in ids:
+        ti = info.get(str(t))
+        if not ti or ti["status"] != "OPEN" or ti["qty"] is None:
+            continue
+        k = ti["contract"]
+        nets[k] = nets.get(k, 0.0) + ti["qty"]
+        units[k], names[k] = ti["unit"], ti["name"]
+        roots.add(ti["root_id"])
+    if not nets:
+        return {"net": None, "gross": None, "unit": "", "mixed": "", "fx": False}
+    used = set(units.values())
+    if len(used) == 1 and (not one_root or len(roots) == 1):
+        unit = used.pop()
+        fx = len(unit) == 3 and unit.isupper()
+        return {"net": sum(nets.values()), "gross": sum(abs(v) for v in nets.values()), "unit": unit, "mixed": "", "fx": fx}
+    items = [f"{names[k]} {_size_text(v, units[k])}" for k, v in nets.items()]
+    split = "; ".join(items[:LINES_ON_HOVER]) + (f"; and {len(items) - LINES_ON_HOVER} more" if len(items) > LINES_ON_HOVER else "")
+    why = "mixed units" if len(used) > 1 else "several contracts"
+    return {"net": None, "gross": None, "unit": "", "mixed": f"{why}, not added: {split}", "fx": False}
+
+
+def _size_text(value: Optional[float], unit: str) -> str:
+    if value is None:
+        return ""
+    if unit and len(unit) == 3 and unit.isupper() and unit.isalpha():
+        return size_words(value, ccy=unit)
+    return size_words(value, unit or "lots")
+
+
+def _local(data: dict, ids: Sequence[str]) -> Tuple[Optional[float], str, str]:
+    """(P&L in the contract's currency summed, the currency, why none) over fills of ONE currency;
+    none across currencies (never summed)."""
+    info = trade_info(data)
+    got = [info[t] for t in ids if t in info]
+    ccys = {g["currency"] for g in got}
+    if not got or len(ccys) != 1:
+        return None, "", "" if not got else "several currencies: never summed"
+    total, _excl, reasons = sum_known([(g["local"], f"{g['trade_id']}: {g['reason'] or 'no local P&L'}") for g in got])
+    return total, ccys.pop(), "; ".join(reasons)
+
+
+_ONE_CONTRACT = ("outright", "contract", "leg", "trade")
+
+
+def node_values(data: dict, node: dict, shown: Optional[set] = None) -> dict:
+    """Every column's value of a node over the fills shown (all when `shown` is None)."""
+    ids = node["tids"] if shown is None else [t for t in node["tids"] if t in shown]
+    row = node.get("row")
+    info = trade_info(data)
+    level = node["level"]
+    leaf = node.get("leaf")
+    v: Dict[str, Any] = {"ids": ids}
+    no_pnl = (row or {}).get("no_pnl") if row else ""
+    for key in PERIODS:
+        if ids:
+            v[key] = period_sum(data, key, ids)
+        elif no_pnl:
+            v[key] = (None, 0, [no_pnl], "")
+        else:
+            v[key] = None
+    # sizes (as held)
+    kind = (row or {}).get("kind", "")
+    sizes = _sizes(data, ids, one_root=level in ("group", "book"))
+    if leaf and level == "trade":
+        ti = info.get(leaf) or {}
+        q = ti.get("qty")
+        v.update(net=q, net_text=_cap(_size_text(q, ti.get("unit", ""))), gross=None, gross_text="",
+                 size_hover="the fill's quantity as booked")
+    elif kind in ("pair", "spread") and shown is None:
+        g = sizes if sizes["net"] is not None else _sizes(data, node["tids"])
+        v.update(net=row.get("size_num"), net_text=_cap(str(row.get("size") or "")),
+                 gross=g["gross"], gross_text=_cap(_size_text(g["gross"], g["unit"]).replace("long ", "")) if g["gross"] is not None else "",
+                 size_hover=f"the spread's size as held (the smaller side paired in full); {row.get('size_hover') or ''}".strip("; "),
+                 gross_hover=g["mixed"] or "the legs' lots added up, each contract netted first")
+    elif kind == "leg" and row.get("part") == PART_PAIR and shown is None:
+        lots = _num(row.get("lots"))
+        unit = "t" if row.get("instrument_group") == LME_GROUP else "lots"
+        v.update(net=lots, net_text=_cap(_size_text(lots, unit)), gross=abs(lots) if lots is not None else None,
+                 gross_text=_size_text(abs(lots), unit).replace("long ", "") if lots else "",
+                 size_hover=row.get("size_hover") or "this pair's lots on the contract")
+    elif level == "group" and node.get("commodity_sub") and shown is None:
+        sub = node["commodity_sub"]
+        net_units, unit = _num(sub.get("net_units")), str(sub.get("unit") or "")
+        v.update(net=net_units if sizes["net"] is None else sizes["net"],
+                 net_text=(_cap(_units_words(net_units, unit)) if net_units is not None else
+                           _cap(_size_text(sizes["net"], sizes["unit"])) if sizes["net"] is not None else ""),
+                 gross=sizes["gross"], gross_text=_size_text(sizes["gross"], sizes["unit"]).replace("long ", "") if sizes["gross"] else "",
+                 size_hover=str(sub.get("units_note") or f"the commodity's net as held, in {unit} (curve-positions' figure)"),
+                 mixed=sizes["mixed"])
+    else:
+        v.update(net=sizes["net"], net_text=_cap(_size_text(sizes["net"], sizes["unit"])) if sizes["net"] is not None else "",
+                 gross=sizes["gross"],
+                 gross_text=_size_text(sizes["gross"], sizes["unit"]).replace("long ", "") if sizes["gross"] else "",
+                 size_hover="the open fills' quantities, each contract netted first", mixed=sizes["mixed"])
+    # fill / mark / prev / move
+    if leaf and (level == "trade" or row is None or kind == "trade"):
+        ti = info.get(leaf) or {}
+        unit = ti.get("price_unit", "")
+        fill, mark, prev = ti.get("fill"), ti.get("mark"), ti.get("prev")
+        move = (mark - prev) if mark is not None and prev is not None else None
+        d = price_decimals_for(unit, fill)
+        v.update(fill=fill, fill_text=price_text(fill, unit, fill) if fill is not None else "",
+                 mark=mark, mark_text=price_text(mark, unit, fill) if mark is not None else NA,
+                 mark_hover=(f"the official mark on {data['as_of']}: {ti.get('mark_source') or 'source not named'}"
+                             f"{', dated ' + ti['mark_date'] if ti.get('mark_date') else ''}" if mark is not None
+                             else ti.get("reason") or "no mark"),
+                 prev=prev, prev_text=price_text(prev, unit, fill) if prev is not None else NA,
+                 prev_hover=(f"the mark on the Daily's reference close ({data.get('ref_used') or 'no reference date'})"
+                             if prev is not None else f"no mark on the Daily's reference close ({data.get('ref_used') or 'none'})"),
+                 move=move, move_text=signed_number(move, d) if move is not None else NA,
+                 move_hover=f"mark less the {data.get('ref_used')} close's" if move is not None else "no mark on one of the two closes",
+                 unit=unit if level != "trade" else "", direction=(1.0 if (ti.get("qty") or 0) > 0 else -1.0) if ti.get("qty") else None)
+        if ti.get("status") not in ("OPEN", ""):
+            v.update(mark_text="", prev_text="", move_text="", mark_hover="", prev_hover="", move_hover="", move=None,
+                     mark=None, prev=None)
+    elif row is not None and kind != "settled":
+        prev, prev_text, prev_hover = None, "", ""
+        if kind in ("pair", "spread"):
+            src = _engine_pair(data, row.get("pair_id") or "") if kind == "pair" else _engine_position(data, row["id"])
+            prev = _num((src or {}).get("level_prev"))
+            unit = str((src or {}).get("unit") or (src or {}).get("level_unit") or "")
+            prev_text = level_text(prev, unit) if prev is not None else NA
+            prev_hover = (f"the level on the {(src or {}).get('level_prev_date') or 'reference'} close" if prev is not None
+                          else str((src or {}).get("level_prev_reason") or "no level on the reference close"))
+        else:
+            prev = _prev_mark(data, row.get("detail_trade_ids") or row["trade_ids"])
+            unit = row.get("unit") or ""
+            prev_text = price_text(prev, unit, row.get("entry")) if prev is not None else NA
+            prev_hover = (f"the mark on the Daily's reference close ({data.get('ref_used')})" if prev is not None
+                          else f"no mark on the Daily's reference close ({data.get('ref_used') or 'none'})")
+        v.update(fill=row.get("entry"), fill_text=row.get("entry_text") or "", fill_hover=row.get("entry_hover") or "",
+                 mark=row.get("now"), mark_text=row.get("now_text") or "", mark_hover=row.get("now_hover") or "",
+                 prev=prev, prev_text=prev_text, prev_hover=prev_hover,
+                 move=row.get("move"), move_text=row.get("move_text") or "",
+                 move_hover="\n".join(t for t in (row.get("move_hover"), row.get("sigma_hover")) if t),
+                 unit=row.get("unit") or "", ratio=bool(row.get("ratio")),
+                 direction=row.get("direction") if row.get("direction") is not None else
+                 ((1.0 if (_num(row.get("lots")) or 0) > 0 else -1.0) if _num(row.get("lots")) else None))
+    # carry (research): a calendar position or pair, matched by the engine's id
+    v["carry"], v["carry_row"] = None, None
+    if level == "position" and kind in ("pair", "spread"):
+        cid = str(row.get("pair_id") or "") if kind == "pair" else str(row.get("id") or "")
+        crow = ((data.get("carry") or {}).get("by_id") or {}).get(cid)
+        if crow is not None and crow.get("calendar"):
+            v["carry"], v["carry_row"] = _num(crow.get("roll_down_usd")), crow
+    # research
+    r = (row or {}).get("research") if kind == "pair" and level == "position" else None
+    v.update(z=(r or {}).get("z") if r and not r.get("reason") else None,
+             pctile=(r or {}).get("pctile") if r and not r.get("reason") else None, research=r)
+    # P&L in the contract's currency: a fill, a leg, a one-contract position
+    if level == "trade" or level == "leg" or (level in ("position", "instrument") and kind in _ONE_CONTRACT and kind != "settled"):
+        v["local"], v["local_ccy"], v["local_why"] = _local(data, ids)
+    else:
+        v["local"], v["local_ccy"], v["local_why"] = None, "", ""
+    # notional (the engine's), next
+    if row is not None and level != "trade" and kind != "settled":
+        v.update(gross_usd=row.get("gross"), net_usd=row.get("net"), n_excl=0, n_reasons=[row.get("notional_reason") or ""],
+                 n_source=row.get("notional_source") or "", has_notional=True, next=row.get("next"))
+    elif level in ("group", "book"):
+        g_pairs, n_pairs, nexts = [], [], []
+        excl, reasons = 0, []
+        for c in node["children"]:
+            if (c["level"] == "trade" or (c["level"] == "group" and c["label"] == SETTLED_GROUP)
+                    or (shown is not None and not any(t in shown for t in c["tids"]))):
+                continue
+            cv = node_values(data, c, shown) if c["level"] == "group" else None
+            crow = c.get("row") or {}
+            if cv is not None:
+                g, n, ex, why = cv["gross_usd"], cv["net_usd"], cv["n_excl"], cv["n_reasons"]
+            else:
+                g, n, ex, why = crow.get("gross"), crow.get("net"), 0, [f"{c['label']}: {crow.get('notional_reason') or 'no notional'}"]
+            if g is None:
+                excl += max(ex, 1)
+                reasons += why
+            else:
+                excl += ex
+                reasons += why if ex else []
+                g_pairs.append((g, ""))
+                n_pairs.append((n, ""))
+            nxt = (cv or {}).get("next") if cv is not None else crow.get("next")
+            if nxt and nxt.get("iso"):
+                nexts.append(nxt)
+        gross = sum_known(g_pairs)[0]
+        v.update(gross_usd=gross, net_usd=sum_known(n_pairs)[0] if gross is not None else None, n_excl=excl,
+                 n_reasons=reasons, n_source="the rows' engine figures summed", has_notional=bool(g_pairs or excl),
+                 next=min(nexts, key=lambda n: (str(n["iso"]), 1 if n.get("estimated") else 0)) if nexts else None)
+    else:
+        v.update(gross_usd=None, net_usd=None, n_excl=0, n_reasons=[], n_source="", has_notional=False, next=None)
+    nxt = v.get("next") or {}
+    v["bd"] = nxt.get("bd") if nxt else None
+    return v
+
+
+# --- filters and sort
+GRID_COLUMNS = (
+    ("name", "Name", "l"), ("type", "Type", "l"), ("sector", "Sector", "l"), ("net", "Net lots", "l"),
+    ("gross", "Gross lots", "l"), ("fill", "Fill / Entry", ""), ("mark", "Mark / Level", ""), ("prev", "Prev close", ""),
+    ("move", "Move", ""), ("carry", "Carry / mo", "book-research"), ("z", "z", "book-research"), ("pctile", "%ile", "book-research"), ("daily", "Daily", ""),
+    ("mtd", "MTD", ""), ("ytd", "YTD", ""), ("ltd", "LTD", ""), ("local", "P&L local", ""), ("gross_usd", "Gross USD", ""),
+    ("net_usd", "Net USD", ""), ("next", "Next", "l"))
+MULTI_FILTERS = ("type", "sector", "commodity", "local")     # the multi-select dropdowns (local = the currency)
+TEXT_FILTERS = ("name",)
+NUMERIC_FILTERS = tuple(k for k, _l, _c in GRID_COLUMNS if k not in ("name", "type", "sector", "local"))
+FILTER_KEYS = TEXT_FILTERS + MULTI_FILTERS + NUMERIC_FILTERS
+_CMP = re.compile(r"^\s*(>=|<=|!=|==|=|>|<)?\s*([-+−]?\s*\d[\d,]*(?:\.\d*)?|[-+−]?\s*\.\d+)\s*([kmb])?\s*$", re.I)
+_SCALE = {"k": 1e3, "m": 1e6, "b": 1e9}
+
+
+def parse_compare(text: Optional[str]) -> Optional[Tuple[str, float]]:
+    """'> 0', '< -10000', '>= 1.5m', '= 3', '10k' (equal) -> (op, value); None for an empty or
+    unreadable box (then it filters nothing)."""
+    m = _CMP.match(str(text or "")) if text else None
+    if not m:
+        return None
+    op = {"==": "=", None: "="}.get(m.group(1), m.group(1))
+    num = float(m.group(2).replace(",", "").replace("−", "-").replace(" ", ""))
+    return op, num * _SCALE.get((m.group(3) or "").lower(), 1.0)
+
+
+def _passes(value: Optional[float], test: Tuple[str, float]) -> bool:
+    if value is None:
+        return False
+    op, x = test
+    return {"=": value == x, "!=": value != x, ">": value > x, "<": value < x, ">=": value >= x, "<=": value <= x}[op]
+
+
+def _numeric(v: dict, key: str) -> Optional[float]:
+    if key in PERIODS:
+        return (v.get(key) or (None,))[0]
+    if key == "next":
+        return v.get("bd")
+    return _num(v.get(key))
+
+
+def active_filters(filters: Optional[dict]) -> dict:
+    """The filters that filter something: {key: text | [values] | (op, x)}."""
+    out: Dict[str, Any] = {}
+    for key, value in (filters or {}).items():
+        if key in TEXT_FILTERS and str(value or "").strip():
+            out[key] = str(value).strip().lower()
+        elif key in MULTI_FILTERS and value:
+            out[key] = list(value)
+        elif key in NUMERIC_FILTERS:
+            test = parse_compare(value)
+            if test is not None:
+                out[key] = test
+    return out
+
+
+def shown_trades(data: dict, nodes: Sequence[dict], filters: dict) -> Optional[set]:
+    """The fills that pass every filter (None when none is set). A fill is tested on its own value
+    of a column, else on the nearest row above it that has one (a z-score is its pair's)."""
+    if not filters:
+        return None
+    info, pos = trade_info(data), position_map(data)
+    memo: Dict[str, dict] = {}
+    keep: set = set()
+
+    def values(n: dict) -> dict:
+        if n["id"] not in memo:
+            memo[n["id"]] = node_values(data, n)
+        return memo[n["id"]]
+
+    def walk(n: dict, chain: List[dict]) -> None:
+        chain = chain + [n]
+        if n.get("leaf"):
+            tid = n["leaf"]
+            ti = info.get(tid) or {}
+            prow = pos.get(tid) or {}
+            ok = True
+            for key, test in filters.items():
+                if key == "name":
+                    words = " ".join([c["label"] + " " + c.get("sub", "") for c in chain]
+                                     + [tid, ti.get("instrument_id", ""), ti.get("strategy", "")]).lower()
+                    ok = test in words
+                elif key == "type":
+                    ok = (prow.get("type_group") or SETTLED_GROUP) in test
+                elif key == "sector":
+                    ok = (prow.get("sector_key") if prow.get("kind") != "settled" else ti.get("sector")) in test
+                elif key == "commodity":
+                    ok = ti.get("commodity") in test
+                elif key == "local":
+                    ok = ti.get("currency") in test
+                else:
+                    value = None
+                    for c in reversed(chain):
+                        value = _numeric(values(c), key)
+                        if value is not None:
+                            break
+                    if value is None and key in ("z", "pctile") and prow.get("kind") == "pair":
+                        research = prow.get("research") or {}
+                        value = _num(research.get(key)) if not research.get("reason") else None
+                    ok = _passes(value, test)
+                if not ok:
+                    break
+            if ok:
+                keep.add(tid)
+            return
+        for c in n["children"]:
+            walk(c, chain)
+
+    for n in nodes:
+        walk(n, [])
+    return keep
+
+
+def filter_options(data: dict) -> Dict[str, List[dict]]:
+    """The choices of the four dropdowns, from the book on file."""
+    rows, _settled = open_rows(data)
+    info = trade_info(data)
+    types = [g for g in TYPE_GROUP_ORDER if any(r["type_group"] == g for r in rows)] + [SETTLED_GROUP]
+    sectors = sorted({r["sector_key"] for r in rows} | {t["sector"] for t in info.values()})
+    commodities = sorted({t["commodity"] for t in info.values()})
+    ccys = sorted({t["currency"] for t in info.values() if t["currency"]})
+    return {k: [{"label": x, "value": x} for x in vals]
+            for k, vals in (("type", types), ("sector", sectors), ("commodity", commodities), ("local", ccys))}
+
+
+def _sort_key(v: dict, key: str, node: dict) -> Any:
+    if key == "name":
+        return str(node["label"]).lower()
+    if key == "type":
+        row = node.get("row") or {}
+        return str(row.get("type_text") or "")
+    if key == "sector":
+        row = node.get("row") or {}
+        return str(row.get("sector_key") or "")
+    if key == "local":
+        return v.get("local")
+    return _numeric(v, key)
+
+
+def _sorted(nodes: Sequence[dict], values: Dict[str, dict], sort: Optional[dict]) -> List[dict]:
+    """Siblings in the order asked (missing figures last, the settled group last), else as built."""
+    key = (sort or {}).get("key")
+    if key not in {k for k, _l, _c in GRID_COLUMNS}:
+        return list(nodes)
+    fixed = [n for n in nodes if n["label"] == SETTLED_GROUP and n["level"] == "group"]
+    rest = [n for n in nodes if n not in fixed]
+    known = [n for n in rest if _sort_key(values[n["id"]], key, n) is not None]
+    missing = [n for n in rest if _sort_key(values[n["id"]], key, n) is None]
+    known.sort(key=lambda n: _sort_key(values[n["id"]], key, n), reverse=bool(sort.get("desc")))
+    return known + missing + fixed
+
+
+def next_sort(current: Optional[dict], key: str) -> dict:
+    """The sort after a click on `key`: the same column flips, a new one starts descending for a
+    figure and ascending for words."""
+    if (current or {}).get("key") == key:
+        return {"key": key, "desc": not bool(current.get("desc"))}
+    return {"key": key, "desc": key not in ("name", "type", "sector", "next")}
+
+
+def is_open(node: dict, state: Optional[dict]) -> bool:
+    state = state or {}
+    base = state.get("base") or "default"
+    opened = node["default_open"] if base == "default" else base == "open"
+    return (not opened) if node["id"] in set(state.get("flip") or []) else opened
+
+
+# --- the rows
+def _blank() -> html.Td:
+    return html.Td("")
+
+
+def _full_td(value: Optional[float], reasons: Sequence[str] = (), note: str = "") -> html.Td:
+    """A fill's money cell at the full figure (the kit: trade rows at full figures)."""
+    if value is None:
+        return html.Td(missing_cell("; ".join(reasons) or "no figure"))
+    text = f"{value:,.0f}".replace("-", MINUS)
+    text = ("+" + text) if value > 0 and text not in ("0",) else text
+    return html.Td(html.Span(text, className=sign_class(value) or None,
+                             title="\n".join(t for t in (full_usd(value), note) if t)))
+
+
+def _name_td(node: dict, v: dict, has_children: bool, opened: bool, detail_open: bool) -> html.Td:
+    children: List[Any] = []
+    if has_children:
+        children.append(html.Span("▾" if opened else "▸", id={"type": TOGGLE_TYPE, "idx": node["id"]}, n_clicks=0,
+                                  className="book-chevron", title="Collapse" if opened else "Expand"))
+    else:
+        children.append(html.Span("", className="book-chevron book-chevron--none"))
+    if node.get("detail"):
+        children.append(html.Span(node["label"], id={"type": ROW_TYPE, "idx": node["id"]}, n_clicks=0,
+                                  className="book-name-link" + (" book-name-link--open" if detail_open else ""),
+                                  title=plain_words(node.get("hover") or "") + "\nClick for its chart, fills and legs."))
+    else:
+        children.append(html.Span(node["label"], title=plain_words(node.get("hover") or "") or None))
+    if node.get("sub"):
+        children.append(html.Span(node["sub"], className="name-sub"))
+    row = node.get("row") or {}
+    if node["level"] == "position":
+        coverage = hedge_coverage_children(row.get("coverage"), words="CNH hedged")
+        if coverage:
+            children.append(html.Div(coverage, className="book-coverage"))
+    return html.Td(children, className=f"l book-name book-d{node['depth']}")
+
+
+def _carry_td(crow: Optional[dict]) -> html.Td:
+    """Carry / mo (research): the roll-down in USD per month, k / m, the roll-down in the spread's
+    unit and the engine's note on hover; blank off a calendar; a dash with the reason when the
+    research curve could not give it."""
+    if not crow:
+        return html.Td("", className="book-research")
+    usd = _num(crow.get("roll_down_usd"))
+    months = _num(crow.get("horizon_months")) or 1.0
+    unit = str(crow.get("unit") or "")
+    roll = _num(crow.get("roll_down"))
+    hover = "\n".join(t for t in (
+        f"roll-down {signed_number(roll, level_decimals(unit))} {unit} over {months:g} month(s)" if roll is not None else "",
+        f"{full_usd(usd)} a month on the position" if usd is not None else "",
+        str(crow.get("note") or ""), str(crow.get("reason") or ""),
+        "research: the research app's curve, context only, never in P&L or a total") if t)
+    if usd is None:
+        return html.Td(missing_cell(hover or "no roll-down"), className="book-research")
+    return html.Td(html.Span(signed_money(usd), className=sign_class(usd) or None, title=plain_words(hover)),
+                   className="book-research")
+
+
+def grid_tr(data: dict, node: dict, v: dict, marks: bool, opened: bool, detail_open: bool) -> html.Tr:
+    """One row of the grid: the same columns at every level, blank where a column does not apply."""
+    level, row = node["level"], node.get("row") or {}
+    kind = row.get("kind", "")
+    trade_level = level == "trade" or (node.get("leaf") and kind == "trade")
+    cells: List[Any] = [_name_td(node, v, bool(node["children"]), opened, detail_open)]
+    # type, sector
+    if level == "position":
+        if kind in ("pair", "spread") and row.get("trade_type"):
+            cells.append(html.Td(type_cell(row["trade_type"], row.get("type_source", ""), row.get("type_note", "")),
+                                 className="l book-type"))
+        else:
+            cells.append(html.Td(row.get("type_text") or "", className="l book-type"))
+    else:
+        cells.append(_blank())
+    cells.append(html.Td(row.get("sector_key") or (_sector_group(row) if row and level == "instrument" else ""),
+                         className="l book-type") if level in ("position", "instrument") else _blank())
+    # net and gross lots, as held
+    hover = ("as held: an option counts as its option lots, not at delta; delta is on the Exposure tab\n"
+             + str(v.get("size_hover") or ""))
+    if v.get("net_text"):
+        cells.append(html.Td(v["net_text"], className="l", title=plain_words(hover)))
+    elif v.get("mixed"):
+        cells.append(html.Td(html.Span("mixed", className="cell-unit"), className="l", title=plain_words(v["mixed"])))
+    else:
+        cells.append(_blank())
+    cells.append(html.Td(v.get("gross_text") or "", className="l",
+                         title=plain_words(hover + "\n" + str(v.get("gross_hover") or "")) if v.get("gross_text") else None))
+    # fill, mark, prev, move
+    if "fill_text" in v:
+        cells.append(html.Td(v["fill_text"], title=plain_words(v.get("fill_hover") or "") or None))
+        mark: List[Any] = [v["mark_text"]]
+        if v.get("mark") is not None and v.get("unit") and level != "trade":
+            mark.append(unit_suffix(v["unit"]))
+        if v.get("ratio"):
+            mark.append(unit_suffix("ratio"))
+        cells.append(html.Td(mark, title=plain_words(v.get("mark_hover") or "") or None,
+                             className="cell-missing" if v["mark_text"] == NA else None))
+        cells.append(html.Td(v.get("prev_text") or "", title=plain_words(v.get("prev_hover") or "") or None,
+                             className="cell-missing" if v.get("prev_text") == NA else None))
+        effect = v["move"] * v["direction"] if v.get("move") is not None and v.get("direction") else None
+        move_hover = "\n".join(t for t in (v.get("move_hover"), "in the position's favour" if effect and effect > 0 else
+                                           "against the position" if effect and effect < 0 else "") if t)
+        cells.append(html.Td(v.get("move_text") or "", title=plain_words(move_hover) or None,
+                             className=("cell-missing" if v.get("move_text") == NA else sign_class(effect) or None)))
+    else:
+        cells += [_blank(), _blank(), _blank(), _blank()]
+    cells.append(_carry_td(v.get("carry_row")))
+    # research
+    r = v.get("research")
+    if r:
+        if r.get("reason"):
+            cells += [html.Td(missing_cell(r["reason"]), className="book-research") for _ in range(2)]
+        else:
+            hover_r = plain_words(research_hover(r))
+            cells.append(html.Td(signed_number(r["z"], 2) if r.get("z") is not None else
+                                 missing_cell(f"no z-score for {r['key']}: not enough history in the research app"),
+                                 className="book-research", title=hover_r))
+            cells.append(html.Td(f"{r['pctile']:.0f}" if r.get("pctile") is not None else
+                                 missing_cell(f"no 5-year percentile for {r['key']} in the research app"),
+                                 className="book-research", title=hover_r))
+    else:
+        cells += [html.Td("", className="book-research"), html.Td("", className="book-research")]
+    # P&L
+    bold = level == "group"
+    for key in PERIODS:
+        p = v.get(key)
+        if p is None:
+            cells.append(_blank())
+            continue
+        value, excluded, reasons, note = p
+        extra = "\n".join(t for t in (note, row.get("split_hover", "") if key == "daily" and level == "position" else "") if t)
+        if trade_level and level == "trade":
+            cells.append(_full_td(value, reasons, extra))
+        else:
+            cells.append(_money_td(value, excluded, reasons, extra, bold=bold, markers=marks))
+    # P&L in the contract's currency
+    if v.get("local_ccy") or v.get("local_why"):
+        if v.get("local") is None:
+            cells.append(html.Td(missing_cell(v.get("local_why") or "no local P&L")))
+        else:
+            loc = v["local"]
+            text = f"{loc:,.0f}".replace("-", MINUS)
+            cells.append(html.Td([html.Span(("+" + text) if loc > 0 else text, className=sign_class(loc) or None),
+                                  unit_suffix(v["local_ccy"])],
+                                 title=f"{v['local_ccy']} {loc:,.2f}: the P&L in the contract's currency, never summed "
+                                       "across currencies"))
+    else:
+        cells.append(_blank())
+    # notional
+    if v.get("has_notional") and kind != "settled":
+        why = "; ".join(str(x) for x in (v.get("n_reasons") or [])[:LINES_ON_HOVER] if x) or "no notional"
+        cells += _notional_tds(v.get("gross_usd"), v.get("net_usd"), v.get("n_excl", 0), v.get("n_reasons") or [],
+                               v.get("n_source") or "", marks, marks, bold=bold)
+        if level != "group" and v.get("gross_usd") is None:
+            cells[-2] = html.Td(missing_cell(why if marks else NO_MARKS_REASON))
+            cells[-1] = html.Td(missing_cell(why if marks else NO_MARKS_REASON))
+    else:
+        cells += [_blank(), _blank()]
+    if row.get("broken") and level == "position":
+        text, why = row["broken"]
+        net_td = cells[-1]
+        net_td.children = list(net_td.children or []) + [
+            html.Span(text, className="marker marker--amber marker--small", title=plain_words(why))]
+    # next
+    if v.get("next") is not None or (level in ("position", "leg", "instrument") and row):
+        next_td = _next_td({"next": v.get("next"), "kind": kind})
+        if row.get("next_marker") and level == "position":
+            text, why = row["next_marker"]
+            next_td.children = [next_td.children, html.Span(text, className="marker marker--amber marker--small",
+                                                            title=plain_words(why))]
+        cells.append(next_td)
+    else:
+        cells.append(_blank())
+    cls = f"book-grid-row book-grid-{level}" + (" book-grid-muted" if row.get("no_pnl") else "")
+    return html.Tr(cells, className=cls, **row_link_attrs(data, node))
+
+
+def book_tr(data: dict, nodes: Sequence[dict], shown: Optional[set], marks: bool) -> html.Tr:
+    """The Book line: every fill shown, the groups' notionals summed; '= header' when nothing is
+    filtered, 'filtered' (and why it no longer equals the header) otherwise."""
+    every = _node("book", "book", 0, BOOK_LABEL, tids=[t for n in nodes for t in n["tids"]], children=nodes)
+    v = node_values(data, every, shown)
+    if shown is None:
+        note = "= header" if marks else "no marks on file"
+        title = ("Every trade of the as-of book is in one row above, so this line is the header's Daily, MTD, YTD and "
+                 "LTD: the known figures summed, what is left out named.")
+    else:
+        note = "filtered"
+        title = "The fills the filters leave, summed: this is not the header's figure while a filter is set."
+    cells: List[Any] = [html.Td([BOOK_LABEL, html.Span(note, className="book-note")], className="l book-name", title=title)]
+    cells += [_blank() for _ in range(11)]
+    for key in PERIODS:
+        value, excluded, reasons, _note = v[key] if v.get(key) else (None, 0, [], "")
+        cells.append(_money_td(value, excluded, reasons, bold=True, markers=marks))
+    cells.append(_blank())
+    cells += _notional_tds(v.get("gross_usd"), v.get("net_usd"), v.get("n_excl", 0), v.get("n_reasons") or [],
+                           "the groups' figures summed", marks, marks, bold=True)
+    cells.append(_next_td({"next": v.get("next"), "kind": "settled"}))
+    return html.Tr(cells, className="book-total")
+
+
+def grid_body(data: dict, view: str, state: Optional[dict] = None, sort: Optional[dict] = None,
+              filters: Optional[dict] = None, detail: Optional[str] = None,
+              conn: Optional[sqlite3.Connection] = None) -> Tuple[List[Any], str]:
+    """(the grid's rows, its meta line): the visible nodes of the view in the open state asked,
+    siblings sorted, the fills filtered, the clicked row's detail under it, the Book line last."""
+    marks = bool(data.get("marks_on_file"))
+    nodes = grid_tree(data, view)
+    flt = active_filters(filters)
+    shown = shown_trades(data, nodes, flt)
+    out: List[Any] = []
+    counts = {"position": 0, "trade": 0}
+
+    def emit(siblings: Sequence[dict]) -> None:
+        visible = [n for n in siblings if shown is None or any(t in shown for t in n["tids"])]
+        values = {n["id"]: node_values(data, n, shown) for n in visible}
+        for n in _sorted(visible, values, sort):
+            opened = is_open(n, state)
+            out.append(grid_tr(data, n, values[n["id"]], marks, opened, detail == n["id"]))
+            if detail == n["id"] and conn is not None and n.get("row") is not None:
+                out.append(html.Tr(html.Td(detail_for(conn, data, n["row"], key=n["id"]), colSpan=len(GRID_COLUMNS)),
+                                   className="book-detail-row"))
+            if opened and n["children"]:
+                emit(n["children"])
+
+    emit(nodes)
+    for n in nodes:
+        for c in n["children"]:
+            if c["level"] in ("position", "instrument") and (shown is None or any(t in shown for t in c["tids"])):
+                counts["position"] += 1
+        if n["level"] == "instrument" and (shown is None or any(t in shown for t in n["tids"])):
+            counts["position"] += 1
+    n_fills = len(shown) if shown is not None else len(trade_info(data))
+    out.append(book_tr(data, nodes, shown, marks))
+    meta = (f"· {counts['position']:,} {'positions' if view in (GROUP_TYPE, GROUP_SECTOR, GROUP_TRADE) else 'contracts'}"
+            f" · {n_fills:,} fills" + (" shown (filtered)" if shown is not None else ""))
+    return out, meta
+
+
+def grid_head(sort: Optional[dict] = None) -> html.Thead:
+    """The two head rows: the column titles (a click sorts) and the filter row, one control per
+    column. Static in the layout, so a filter box keeps its focus while the rows re-render."""
+    titles = []
+    for key, label, cls in GRID_COLUMNS:
+        active = (sort or {}).get("key") == key
+        arrow = ("▼" if sort.get("desc") else "▲") if active else ""
+        titles.append(html.Th([label, html.Span(arrow, id={"type": SORT_ARROW_TYPE, "idx": key}, className="book-sort-arrow")],
+                              id={"type": SORT_TYPE, "idx": key}, n_clicks=0,
+                              className=" ".join(c for c in (cls, "book-sortable") if c),
+                              title=plain_words(f"{GRID_TIPS.get(key, '')}\nClick to sort (within each group)."),
+                              style={"minWidth": "280px"} if key == "name" else None))
+    filters = []
+    for key, _label, cls in GRID_COLUMNS:
+        box: List[Any] = []
+        if key == "name":
+            box = [dcc.Input(id=filter_id("name"), type="text", debounce=True, placeholder="name, contract, trade id",
+                             className="book-filter-box", persistence=True, persistence_type="session"),
+                   dcc.Dropdown(id=filter_id("commodity"), multi=True, options=[], placeholder="commodity",
+                                className="blotter-filter-dropdown book-filter-dd", persistence=True,
+                                persistence_type="session")]
+        elif key in MULTI_FILTERS:
+            box = [dcc.Dropdown(id=filter_id(key), multi=True, options=[], placeholder="currency" if key == "local" else "all",
+                                className="blotter-filter-dropdown book-filter-dd", persistence=True,
+                                persistence_type="session")]
+        else:
+            box = [dcc.Input(id=filter_id(key), type="text", debounce=True, placeholder="",
+                             className="book-filter-box book-filter-num", persistence=True, persistence_type="session")]
+        tip = ("A comparison: > 0, < -10k, >= 1.5m, = 3" + (" (business days)" if key == "next" else "")
+               if key in NUMERIC_FILTERS else None)
+        filters.append(html.Th(box, className="book-filter-cell", title=tip))
+    return html.Thead([html.Tr(titles), html.Tr(filters, className="book-filter-row")])
+
+
+def filter_id(key: str) -> str:
+    return f"book-f-{key}"
+
+
+# --------------------------------------------------------------------------- tiles, Needs you, last load
+def tiles_row(rows: Sequence[dict], data: dict, marks: bool) -> html.Div:
+    """Open trades (the rows of Open trades), LTD and P&L today (the header's own figures and
+    markers), Gross and Net (the rows' engine notionals summed, "excl. N" for the rest), and CNH
+    hedged when exactly one trade has a coverage figure (the engine gives none for the book)."""
+    df = data.get("df")
+    n_fills = int(len(df)) if df is not None else 0
+    n_open = int((df["status"] == "OPEN").sum()) if df is not None and not df.empty else 0
+    gross, net, excluded, reasons = notional_total(rows)
+    why = ("; ".join(reasons[:LINES_ON_HOVER]) or "no notional") if marks else NO_MARKS_REASON
+
+    def tile(label: str, value: Any, hover: str) -> html.Div:
+        return html.Div(className="book-tile", children=[
+            html.Div(label, className="k"), html.Div(value, className="v", title=plain_words(hover) or None)])
+
+    daily, daily_hover = _header_figure(data, "daily", marks)
+    ltd, ltd_hover = _header_figure(data, "ltd", marks)
+    kinds = [(g, sum(1 for r in rows if r["type_group"] == g)) for g in TYPE_GROUP_ORDER]
+    tiles = [
+        tile("Open trades", f"{len(rows):,}", " · ".join(f"{n} {g.lower()}" for g, n in kinds if n)
+             + f"\n{_plural(n_fills, 'fill')} on file, {n_open} open"),
+        tile("LTD", ltd, f"{COLUMN_TIPS['LTD']}\n{ltd_hover}"),
+        tile("P&L today", daily, f"{COLUMN_TIPS['P&L today']}\n{daily_hover}"),
+        tile("Gross", _notional_cell(gross, why, "the engine's gross USD notional over the open trades, summed",
+                                     excluded=excluded, reasons=reasons, markers=marks, marks_on_file=marks),
+             COLUMN_TIPS["Gross"] if gross is not None else why),
+        tile("Net", _notional_cell(net, why, "the engine's net USD notional over the open trades, summed, long positive",
+                                   signed=True, excluded=excluded, reasons=reasons, markers=marks, marks_on_file=marks),
+             COLUMN_TIPS["Net"] if net is not None else why),
+    ]
+    covered = [s for s in ((data.get("spreads") or {}).get("strategies") or [])
+               if s.get("name") and _num(s.get("hedge_coverage_net")) is not None]
+    if len(covered) == 1:
+        s = covered[0]
+        tiles.append(tile(f"CNH hedged · {s['name']}", hedge_coverage_children(s, words=""),
+                          f"trade {s['name']}: the engine's hedge coverage of its CNY legs (the only trade with China "
+                          "legs and a coverage figure)"))
+    return html.Div(tiles, id=TILES_ID, className="book-tiles")
+
+
+def needs(data: dict, rows: Sequence[dict] = ()) -> List[dict]:
+    """At most four lines, only what Jason acts on: a first notice or expiry at RED / AMBER (or
+    past) with a real date, the marks missing (→ Data), the legs that could not be paired
+    (→ Blotter), and positions RED / AMBER on liquidity (`engine.limits.liquidity`, research data
+    with placeholder thresholds, → Risk). An error in any of them is a line of the Data issues
+    drawer instead; a liquidity failure hides its line."""
+    out: List[dict] = []
+    sched = (data.get("schedule") or {}).get("rows") or []
+    urgent = [r for r in sched if r.get("level") in ("EXPIRED", "RED", "AMBER") and not r.get("estimated")]
+    urgent.sort(key=lambda r: (_LEVEL_RANK.get(str(r.get("level")), 9),
+                               r.get("business_days") if r.get("business_days") is not None else 10 ** 6))
+    if urgent:
+        first = urgent[0]
+        more = f" (+{len(urgent) - 1} more)" if len(urgent) > 1 else ""
+        out.append(_need(str(first.get("level")), "red" if first.get("level") != "AMBER" else "warn",
+                         _event_words(data, first) + more,
+                         "\n".join(_event_words(data, r) for r in urgent[:LINES_ON_HOVER]), "", 0))
+    needed, missing = data.get("needs") or (0, [])
+    if missing and not data.get("needs_error"):
+        names: List[str] = []
+        for m in missing:
+            inst = str(m.get("instrument_id") or "")
+            info = data["instruments"].get(inst) or {}
+            root_id = info.get("base_ccy", "")
+            label = (contract_name(inst, data["roots"].get(root_id), root_id) if parse_contract_id(inst)
+                     else f"{short_root_name(data['roots'].get(root_id), root_id)} {short_date(m.get('settle_date'))}".strip()
+                     if root_id in data["roots"] else inst)
+            if label not in names:
+                names.append(label)
+        out.append(_need("MARKS", "warn", f"{len(missing)} of {needed} marks missing: {', '.join(names[:3])}"
+                                          + (f" +{len(names) - 3}" if len(names) > 3 else ""),
+                         "\n".join(f"{m['instrument_id']} {plain_words(m['mark_type']).lower()} {m['settle_date']}"
+                                   for m in missing[:LINES_ON_HOVER]), "Data", 1))
+    left = [r for r in rows if r["kind"] == "leg" and r.get("part") == PART_OUTRIGHT]
+    review = (data.get("spreads") or {}).get("review") or []
+    if left or review:
+        bits = []
+        if left:
+            bits.append(f"{_plural(len(left), 'leg')} could not be paired: " + ", ".join(r["name"] for r in left[:3])
+                        + (f" +{len(left) - 3}" if len(left) > 3 else ""))
+        if review:
+            bits.append(f"{_plural(len(review), 'set')} of trades could not be grouped")
+        hover = "\n".join([f"{r['name']} (trade {r.get('group')})" for r in left[:LINES_ON_HOVER]]
+                          + [plain_words(str(x.get("reason") or x.get("review_id") or "")) for x in review[:LINES_ON_HOVER]])
+        out.append(_need("PAIRS", "info", " · ".join(bits), hover, "Blotter", 2))
+    summary = (data.get("liquidity") or {}).get("summary") or {}
+    counts = summary.get("counts") or {}
+    red, amber = int(counts.get("RED") or 0), int(counts.get("AMBER") or 0)
+    if red or amber:
+        sentence = str(summary.get("sentence") or "")
+        first = sentence.split(";")[0].split(". ")[0].rstrip(".")
+        note = str((data.get("liquidity") or {}).get("placeholder_note") or "")
+        out.append(_need("LIQUIDITY", "red" if red else "warn",
+                         first or f"{_plural(red + amber, 'position')} large against the market's open interest or volume",
+                         "\n".join(t for t in (sentence, "Research data (the research app's open interest and "
+                                                                     "volume), read-only; the thresholds are placeholders.",
+                                                            note) if t),
+                         "Risk", 3))
+    out.sort(key=lambda n: n["rank"])
+    return out[:4]
+
+
+def needs_strip(data: dict, rows: Sequence[dict]) -> Optional[html.Div]:
+    """The slim Needs you strip under the tiles; None when nothing needs Jason."""
+    lines = []
+    for n, need in enumerate(needs(data, rows), start=1):
+        lines.append(html.Div(className="book-need", children=[
+            html.Span(need["chip"], className=f"book-need-chip book-need-chip--{need['kind']}"),
+            html.Span(need["text"], title=plain_words(need["hover"]) or None),
+            pointer(need["tab"], f"book-need-{n}", f"→ {need['tab']}") if need["tab"] else html.Span()]))
+    if not lines:
+        return None
+    return html.Div(lines, id=ALERTS_ID, className="book-needs-strip", title=plain_words(NEEDS_ABOUT))
+
+
+def last_load_line(data: dict) -> html.Div:
+    """One quiet line: what the last blotter load did (`upload_report`)."""
+    if data.get("load_error"):
+        return html.Div(id=LOAD_ID, className="book-last-load", children=[
+            html.Span("Last load", className="book-last-load-k"), missing_cell(data["load_error"])])
+    text, hover, clean = load_sentence(data.get("load"))
+    children: List[Any] = [html.Span("Last load", className="book-last-load-k", title=LOAD_ABOUT),
+                           html.Span(text, title=plain_words(hover) or None)]
+    if not clean:
+        children += [" · ", pointer("Data", "book-load-data", "what was skipped and why")]
+    return html.Div(id=LOAD_ID, className="book-last-load", children=children)
+
+
+# --------------------------------------------------------------------------- the row detail
+def _thin(dates: Sequence[str], as_of: str, n: int = HISTORY_POINTS) -> List[str]:
+    """At most `n` of the dates, evenly spread, plus the as-of."""
+    dates = list(dates)
+    if len(dates) > n:
+        step = math.ceil(len(dates) / n)
+        dates = dates[::step]
+    if as_of not in dates:
+        dates.append(as_of)
+    return sorted(set(dates))
+
+
+def level_history(conn: sqlite3.Connection, data: dict, row: dict, key: str = "") -> dict:
+    """{dates, values, reasons, unit, entry, what, reason} of the row's chart, memoised on the
+    database revision, the as-of and the row: a pair's or a spread's level from
+    `engine.spreads.history.position_history` (the one level rule, read off the screens' filled
+    reader), an outright's, option's, LME prompt's or FX trade's mark read off the same reader.
+    Nothing is priced here beyond what the reader values on each date."""
+    as_of = str(data["as_of"])
+
+    def build() -> dict:
+        from engine.spreads.history import history_dates, position_history
+        from ui.tabs.blotter_pricing import priced_value_book, pricing_snapshot
+        out: Dict[str, Any] = {"dates": [], "values": [], "reasons": [], "unit": row.get("unit") or "",
+                               "entry": row.get("entry"), "what": "level", "reason": "", "note": ""}
+        position = None
+        if row["kind"] == "pair":
+            p = _engine_pair(data, row.get("pair_id") or "") or {}
+            spec = p.get("level_spec")
+            if not spec:
+                out["reason"] = str(p.get("level_now_reason") or "the pair has no level formula")
+                return out
+            ids = sorted({str(t) for leg in spec.get("legs") or [] for t in leg.get("trade_ids") or []})
+            position = {"position_id": row["id"], "trade_ids": ids, "level_spec": spec,
+                        "level_now_reason": p.get("level_now_reason")}
+            out["unit"] = str(spec.get("unit") or "")
+            if str(p.get("unit") or "").lower() == "ratio":
+                out["entry"] = _num((p.get("level_alt") or {}).get("entry"))
+                out["note"] = f"in {out['unit']}: the ratio on the row is China over foreign of the same prices"
+            else:
+                out["entry"] = _num(p.get("level_entry"))
+        elif row["kind"] == "spread":
+            position = _engine_position(data, row["id"])
+            if not position or not position.get("level_spec"):
+                out["reason"] = str((position or {}).get("level_now_reason") or "the spread has no level formula")
+                return out
+            out["unit"], out["entry"] = str(position.get("level_unit") or ""), _num(position.get("level_entry"))
+        with pricing_snapshot(conn, "Book tab"):
+            if position is not None:
+                dates = _thin(history_dates(conn, position, as_of), as_of)
+                hist = position_history(conn, position, dates, value_fn=priced_value_book)
+                for pt in hist.get("points") or []:
+                    out["dates"].append(pt["date"])
+                    out["values"].append(_num(pt.get("level")))
+                    out["reasons"].append(str(pt.get("level_reason") or ""))
+                return out
+            out["what"] = "mark"
+            ids = [str(t) for t in (row.get("detail_trade_ids") or row["trade_ids"])]
+            if not ids:
+                out["reason"] = "no trade on this row"
+                return out
+            for day in _thin(history_dates(conn, ids, as_of), as_of):
+                frame = priced_value_book(conn, day)[0]
+                sub = frame[frame["trade_id"].astype(str).isin(ids)] if not frame.empty else frame
+                value, why = None, f"no trade of this row valued on {day}"
+                for _i, r in sub.iterrows():
+                    m = _num(r.get("mark"))
+                    if m is not None and not r.get("reason"):
+                        value, why = m, ""
+                        break
+                    why = str(r.get("reason") or why)
+                out["dates"].append(day)
+                out["values"].append(value)
+                out["reasons"].append(why)
+        return out
+
+    return _memo(f"history|{key or row['id']}", conn, as_of, build)
+
+
+def level_chart(hist: dict) -> Any:
+    """A small plotly line of the level (or mark) with a dashed line at the entry; the reason
+    when there is nothing to draw."""
+    known = [v for v in hist["values"] if v is not None]
+    if not known:
+        why = hist.get("reason") or "; ".join(dict.fromkeys(r for r in hist["reasons"] if r)) or "no level on file"
+        return html.Div(["No chart: ", html.Span(plain_words(why))], className="book-quiet")
+    import plotly.graph_objects as go
+    fig = go.Figure(go.Scatter(x=hist["dates"], y=hist["values"], mode="lines+markers", connectgaps=False,
+                               line={"color": "#0f1f3d", "width": 1.5}, marker={"size": 3},
+                               hovertemplate="%{x}<br>%{y}<extra></extra>"))
+    entry = hist.get("entry")
+    if entry is not None:
+        fig.add_hline(y=entry, line_dash="dash", line_color="#9ca3af", line_width=1,
+                      annotation_text="entry", annotation_position="top left",
+                      annotation_font={"size": 10, "color": "#6b7280"})
+    fig.update_layout(height=200, margin={"l": 50, "r": 10, "t": 8, "b": 24}, plot_bgcolor="#fff",
+                      paper_bgcolor="#fff", showlegend=False, font={"size": 11},
+                      xaxis={"showgrid": False}, yaxis={"gridcolor": "#eef1f4", "title": hist.get("unit") or None})
+    gaps = [r for v, r in zip(hist["values"], hist["reasons"]) if v is None]
+    notes = []
+    if gaps:
+        notes.append(f"{_plural(len(gaps), 'close')} with no {hist['what']}: "
+                     + "; ".join(dict.fromkeys(plain_words(r) for r in gaps if r))[:400])
+    if hist.get("note"):
+        notes.append(hist["note"])
+    return html.Div([dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"height": "200px"}),
+                     *[html.Div(n, className="book-quiet") for n in notes]])
+
+
+def _pair_payload(data: dict, row: dict) -> Optional[dict]:
+    """A pair's legs for `detail_legs_table`, read off the engine's pair: its level formula's legs
+    with the prices it read at entry, on the previous close and now, and the pair's lots."""
+    p = _engine_pair(data, row.get("pair_id") or "")
+    if p is None:
+        return None
+    spec = p.get("level_spec") or {}
+    prices = p.get("level_prices") or {}
+    if isinstance(prices, dict) and "alt" in prices:
+        prices = prices.get("alt") or {}
+    held = {str(leg.get("instrument_id")): leg for leg in p.get("legs") or []}
+    legs = []
+    for n, leg in enumerate(spec.get("legs") or p.get("legs") or []):
+        mine = held.get(str(leg.get("instrument_id"))) or {}
+        px = {}
+        for key in ("entry", "prev", "now"):
+            seq = prices.get(key) if isinstance(prices, dict) else None
+            px[key] = _num(seq[n]) if isinstance(seq, (list, tuple)) and len(seq) > n else None
+        legs.append({"instrument_id": leg.get("instrument_id"), "root_id": leg.get("root_id"),
+                     "weight": leg.get("weight", mine.get("weight")), "qty_factor": leg.get("qty_factor"),
+                     "conversion": leg.get("qty_conv"), "currency": leg.get("currency") or mine.get("currency"),
+                     "price_scale": leg.get("price_scale"), "entry_price": px["entry"], "prev_price": px["prev"],
+                     "now_price": px["now"], "lots": mine.get("lots"), "open_lots": mine.get("lots"),
+                     "reason": "" if spec else str(p.get("level_now_reason") or "")})
+    return {"legs": legs, "level_prev_date": p.get("level_prev_date"),
+            **{k: p.get(k) for k in ("level_entry_reason", "level_prev_reason", "level_now_reason")}}
+
+
+def detail_for(conn: sqlite3.Connection, data: dict, row: dict, key: str = "") -> Any:
+    """The panel under Open trades for a clicked row: the chart of its level (or mark) since its
+    first trade with the entry dashed, its fills (entries averaged), its legs."""
+    ids = row.get("detail_trade_ids") or row["trade_ids"]
+    head_children: List[Any] = []
+    if row["kind"] == "settled":
+        head_children = [about(f"{row['name']}" + (f" · {row['trade_name']}" if row.get("trade_name") else ""),
+                               row["name_hover"], level="h5", style={"margin": "0 0 6px"}),
+                         pointer("Blotter", "book-detail-trades", "→ Blotter")]
+        return html.Div(className="section section--secondary book-detail", children=[
+            html.Div(className="book-detail-head", children=head_children), _trade_lines(data, ids)])
+    unit = row.get("unit") or ("ratio" if row.get("ratio") else "")
+    summary = f"{row['name']} · {_cap(str(row['size']))} · entry {row['entry_text']} · level {row['now_text']} {unit}".strip()
+    hist = level_history(conn, data, row, key)
+    chart_title = "Level since the first trade" if hist["what"] == "level" else "Mark since the first trade"
+    children: List[Any] = [
+        html.Div(className="book-detail-head", children=[
+            about(summary, row["name_hover"], level="h5", style={"margin": "0 0 6px"}),
+            pointer("Blotter", "book-detail-trades", "→ Blotter")]),
+        about(chart_title, f"From our own official marks through the screens' filled reader, at most {HISTORY_POINTS} "
+                           "closes from the first trade date to the as-of; the dashed line is the entry.",
+              level="div", className="section-kicker"),
+        level_chart(hist),
+        about(f"Fills · entry {row['entry_text']}", "Every fill of the row, open or closed, at full figures; the entry is "
+                                                   "the lots-weighted average of the open fills (a pair's: its legs' "
+                                                   "fills in its level formula).",
+              level="div", className="section-kicker"),
+        _trade_lines(data, ids),
+    ]
+    payload = None
+    if row["kind"] == "pair":
+        payload = _pair_payload(data, row)
+    elif row["kind"] == "spread":
+        payload = detail_payloads(data.get("spreads") or {}).get(row["id"])
+    if payload and payload.get("legs"):
+        children += [about("Legs", "Each leg's prices as quoted (entry = its lots-weighted average fill), and the factor "
+                                   "that turns its price into the spread's unit.", level="div", className="section-kicker"),
+                     detail_legs_table(payload)]
+    return html.Div(className="section section--secondary book-detail", children=children)
+
+
+# --------------------------------------------------------------------------- assembling the tab
+def parts(data: dict, view: str = DEFAULT_VIEW, state: Optional[dict] = None, sort: Optional[dict] = None,
+          filters: Optional[dict] = None, detail: Optional[str] = None, conn: Optional[sqlite3.Connection] = None,
+          what: str = "all") -> dict:
+    """The tab's pieces from `gather`'s output, each for its own placeholder of the static layout:
+    `top` (tiles, Needs you), `prepull` (the line before the first pull), `options` (the dropdowns'
+    choices), `under` (the last load and the drawer) when `what` is "all" or "top"; `rows` (the
+    grid's rows, the Book line last) and `meta` when it is "all" or "grid"; `shown` (False for the
+    empty state)."""
+    view = view if view in dict(VIEW_OPTIONS) else DEFAULT_VIEW
+    out = dict(_EMPTY_PARTS)
+    if not data.get("n_total"):
+        return {**out, "top": empty_state(data)}
+    out["shown"] = True
+    rows, settled = open_rows(data)
+    marks = bool(data.get("marks_on_file"))
+    if what in ("all", "top"):
+        top: List[Any] = []
+        if data.get("spreads_error"):
+            top.append(message_box(data["spreads_error"]))
+        top.append(tiles_row(rows, data, marks))
+        strip = needs_strip(data, rows)
+        if strip is not None:
+            top.append(strip)
+        out.update(top=html.Div(top), options=filter_options(data),
+                   prepull=None if marks else html.Div(PREPULL_TEXT, className="book-prepull", title=NO_MARKS_REASON),
+                   under=[last_load_line(data), issues_drawer(issue_items(data, rows + settled), id=ISSUES_ID) or html.Div()])
+    if what in ("all", "grid"):
+        out["rows"], out["meta"] = grid_body(data, view, state, sort, filters, detail, conn)
+    return out
+
+
+def body(data: dict, view: str = DEFAULT_VIEW, state: Optional[dict] = None, sort: Optional[dict] = None,
+         filters: Optional[dict] = None) -> Tuple[html.Div, str, dict]:
+    """(the whole tab as one Div, the grid's meta, the toolbar's style): `parts` in the layout's
+    order, for a direct render (the smoke test, a script)."""
+    p = parts(data, view, state, sort, filters)
+    if not p["shown"]:
+        return html.Div([p["top"]]), "", HIDDEN
+    table = html.Table([grid_head(sort), html.Tbody(p["rows"], id=TBODY_ID)], id=TABLE_ID, className="book-table book-grid")
+    return html.Div([p["top"], p["prepull"] or html.Div(),
+                     html.Div(className="book-card book-grid-wrap", children=[table]),
+                     html.Div(className="book-under book-under--stack", children=p["under"])]), p["meta"], {}
+
+
+# --------------------------------------------------------------------------- CSV
+def csv_frame(data: dict, view: str, sort: Optional[dict] = None, filters: Optional[dict] = None) -> pd.DataFrame:
+    """The grid as shown (the filters and the sort applied, every level whatever is open), at full
+    figures, one line per row with its level and its path."""
+    nodes = grid_tree(data, view)
+    shown = shown_trades(data, nodes, active_filters(filters))
+    records: List[dict] = []
+
+    def walk(siblings: Sequence[dict], path: List[str]) -> None:
+        visible = [n for n in siblings if shown is None or any(t in shown for t in n["tids"])]
+        values = {n["id"]: node_values(data, n, shown) for n in visible}
+        for n in _sorted(visible, values, sort):
+            v, row = values[n["id"]], n.get("row") or {}
+            nxt = v.get("next") or {}
+            rec = {"level": n["level"], "path": " > ".join(path), "name": n["label"], "note": n.get("sub") or "",
+                   "type": row.get("type_text", "") if n["level"] == "position" else "",
+                   "sector": row.get("sector_key", "") if n["level"] in ("position", "instrument") else "",
+                   "net_lots": v.get("net"), "net_lots_words": v.get("net_text", ""), "gross_lots": v.get("gross"),
+                   "fill_or_entry": v.get("fill"), "mark_or_level": v.get("mark"), "prev_close": v.get("prev"),
+                   "move": v.get("move"), "unit": v.get("unit", ""), "research_carry_usd_per_month": v.get("carry"), "research_z": v.get("z"), "research_pctile": v.get("pctile")}
+            for key in PERIODS:
+                p = v.get(key)
+                rec[f"{key}_usd"] = p[0] if p else None
+                rec[f"{key}_excluded"] = p[1] if p else None
+            rec.update(pnl_local=v.get("local"), pnl_local_ccy=v.get("local_ccy", ""), gross_usd=v.get("gross_usd"),
+                       net_usd=v.get("net_usd"), flag=(row.get("broken") or ("", ""))[0] if n["level"] == "position" else "",
+                       next_event=nxt.get("event", ""), next_date=nxt.get("iso", ""), next_estimated=nxt.get("estimated", ""),
+                       trade_ids=" ".join(v["ids"]))
+            records.append(rec)
+            if n["children"]:
+                walk(n["children"], path + [n["label"]])
+
+    walk(nodes, [])
+    return pd.DataFrame(records)
+
+
+# --------------------------------------------------------------------------- shell
+_EMPTY_PARTS = {"top": None, "prepull": None, "rows": [], "meta": "", "options": {}, "under": None, "shown": False}
+
+
+def render_parts(as_of: Optional[str], db_path, view: str = DEFAULT_VIEW, state: Optional[dict] = None,
+                 sort: Optional[dict] = None, filters: Optional[dict] = None, detail: Optional[str] = None,
+                 what: str = "all") -> dict:
+    """`parts` for `as_of`, from one read-only connection closed straight after. A problem is a
+    message where the top would be, the other sections hidden."""
+    if not as_of:
+        return {**_EMPTY_PARTS, "top": message_box("No as-of date available.")}
+    try:
+        conn = _open(db_path)
+    except sqlite3.OperationalError as exc:
+        return {**_EMPTY_PARTS, "top": message_box(f"Database not available ({exc}).")}
+    try:
+        return parts(_gather(conn, as_of), view or DEFAULT_VIEW, state, sort, filters, detail, conn, what)
+    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
+        log.exception("book tab failed for %s", as_of)
+        return {**_EMPTY_PARTS, "top": _problem(as_of, exc)}
+    finally:
+        conn.close()
+
+
+def render(as_of: Optional[str], db_path, view: str = DEFAULT_VIEW) -> Tuple[Any, str, dict]:
+    """(the whole tab as one Div, the grid's meta, the toolbar style) for `as_of`: `body` on one
+    read-only connection closed straight after. A problem is a message where the body would be."""
+    if not as_of:
+        return message_box("No as-of date available."), "", {}
+    try:
+        conn = _open(db_path)
+    except sqlite3.OperationalError as exc:
+        return message_box(f"Database not available ({exc})."), "", {}
+    try:
+        return body(_gather(conn, as_of), view or DEFAULT_VIEW)
+    except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
+        log.exception("book tab failed for %s", as_of)
+        return _problem(as_of, exc), "", {}
+    finally:
+        conn.close()
+
+
+def render_detail(node_id: Optional[str], as_of: Optional[str], db_path, view: str = DEFAULT_VIEW) -> Any:
+    """The detail of one node of the view (a script's or a test's direct call; the app renders it
+    inline under its row)."""
+    if not node_id or not as_of:
+        return None
+    try:
+        conn = _open(db_path)
+    except sqlite3.OperationalError as exc:
+        return message_box(f"Database not available ({exc}).")
+    try:
+        data = _gather(conn, as_of)
+        found: List[dict] = []
+
+        def walk(nodes: Sequence[dict]) -> None:
+            for n in nodes:
+                if n["id"] == node_id:
+                    found.append(n)
+                walk(n["children"])
+        walk(grid_tree(data, view))
+        if not found or found[0].get("row") is None:
+            return None
+        return detail_for(conn, data, found[0]["row"], key=found[0]["id"])
+    except Exception as exc:  # noqa: BLE001 -- the reason under the row, never a 500
+        log.exception("book tab detail failed for %s", node_id)
+        return message_box(f"The position's detail could not be built ({type(exc).__name__}: {exc}).")
+    finally:
+        conn.close()
+
+
+def render_csv(as_of: Optional[str], db_path, view: str, sort: Optional[dict] = None, filters: Optional[dict] = None):
+    if not as_of:
+        return None
+    try:
+        conn = _open(db_path)
+    except sqlite3.OperationalError:
+        return None
+    try:
+        frame = csv_frame(_gather(conn, as_of), view if view in dict(VIEW_OPTIONS) else DEFAULT_VIEW, sort, filters)
+        return dcc.send_data_frame(frame.to_csv, f"book-{as_of}.csv", index=False)
+    except Exception:  # noqa: BLE001
+        log.exception("book tab csv failed for %s", as_of)
+        return None
+    finally:
+        conn.close()
+
+
+def layout(default_date: Optional[str] = None) -> html.Div:
+    """The static shell (2026-09-29): the title, the top placeholder (tiles, Needs you), the grid's
+    toolbar (the view switch, Expand all / Collapse all / Clear filters, its meta, Download CSV),
+    the line before the first pull, the grid (its two head rows static, so a filter box keeps its
+    focus; its body a placeholder), the under-section, the session stores (open rows, sort, the
+    row whose detail is open) and the safety interval. No date picker."""
+    return html.Div(className="book-tab", children=[
+        html.Div(id=TOOLBAR_ID, className="book-title-row", children=[about("Book", TITLE_ABOUT, level="h3")]),
+        html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
+        html.Div(id=GRID_SECTION_ID, className="book-section", style=HIDDEN, children=[
+            html.Div(className="book-section-head book-grid-toolbar", children=[
+                html.Span("Group by", className="book-section-title"),
+                _switch(VIEW_ID, VIEW_OPTIONS, DEFAULT_VIEW),
+                html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="book-download book-tool"),
+                html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="book-download book-tool"),
+                html.Button("Clear filters", id=CLEAR_FILTERS_ID, n_clicks=0, className="book-download book-tool"),
+                html.Span(id=GRID_META_ID, className="book-section-meta"),
+                html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
+                            title="The grid as shown (filters and sort applied, every level), at full figures"),
+                dcc.Download(id=DOWNLOAD_ID)]),
+            html.Div(id=PREPULL_ID),
+            html.Div(className="book-card book-grid-wrap", children=[
+                html.Table([grid_head(), html.Tbody(id=TBODY_ID)], id=TABLE_ID, className="book-table book-grid")]),
+        ]),
+        html.Div(id=UNDER_ID, className="book-under book-under--stack", style=HIDDEN),
+        dcc.Store(id=EXPAND_STORE_ID, storage_type="session"),
+        dcc.Store(id=SORT_STORE_ID, storage_type="session"),
+        dcc.Store(id=DETAIL_STORE_ID, storage_type="session"),
+        dcc.Store(id=EMPTY_UPLOAD_SINK_ID),
+        dcc.Interval(id=REFRESH_ID, interval=safety_refresh_ms(), n_intervals=0),
+    ])
+
+
+build_layout = layout
+
+
+def _clicked() -> bool:
+    """True when the input that fired the callback was really clicked (a re-rendered chevron or
+    name comes back with n_clicks 0, which must not count as a click)."""
+    trig = dash.ctx.triggered or []
+    return bool(trig and trig[0].get("value"))
+
+
+def _filters_of(values: Sequence[Any]) -> dict:
+    return dict(zip(FILTER_KEYS, values))
+
+
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """The body on the header's as-of, every data revision, the safety interval and the group
-    switch; the row detail on a click; the CSV; the empty state's Upload button."""
+    """The top (tiles, Needs you, the last load, the drawer, the dropdowns' choices) on the as-of,
+    the data revision and the safety interval; the grid on those and the view, the open rows, the
+    sort, the detail and the filters; the stores from the chevrons, the buttons, the column heads
+    and the names; Clear filters; the CSV; the empty state's Upload button."""
+    filter_inputs = [Input(filter_id(k), "value") for k in FILTER_KEYS]
 
     @app.callback(
         Output(BODY_ID, "children"),
-        Output(SUMMARY_TABLE_ID, "children"),
-        Output(BREAKDOWN_TABLE_ID, "children"),
-        Output(POSITIONS_TABLE_ID, "children"),
-        Output(UNDER_ID, "children"),
-        Output(POSITIONS_SUMMARY_ID, "children"),
         Output(TOOLBAR_ID, "style"),
-        Output(SUMMARY_SECTION_ID, "style"),
-        Output(BREAKDOWN_SECTION_ID, "style"),
-        Output(POSITIONS_SECTION_ID, "style"),
+        Output(GRID_SECTION_ID, "style"),
+        Output(PREPULL_ID, "children"),
+        Output(UNDER_ID, "children"),
         Output(UNDER_ID, "style"),
+        *[Output(filter_id(k), "options") for k in MULTI_FILTERS],
         Input(AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
         Input(REFRESH_ID, "n_intervals"),
-        Input(GROUP_ID, "value"),
-        Input(BREAKDOWN_ID, "value"),
     )
-    def _update(as_of, _data_rev=None, _n_intervals=0, by=DEFAULT_GROUP, breakdown_by=DEFAULT_BREAKDOWN):
-        p = render_parts(as_of, get_db_path(), by or DEFAULT_GROUP, breakdown_by or DEFAULT_BREAKDOWN)
+    def _update(as_of, _data_rev=None, _n_intervals=0):
+        p = render_parts(as_of, get_db_path(), what="top")
         shown = {} if p["shown"] else HIDDEN
-        return (p["top"], p["summary"], p["breakdown"], p["positions"] or message_box(f"No open position on {as_of}."),
-                p["under"], p["counts"], shown, shown, shown, shown, shown)
+        options = p.get("options") or {}
+        return (p["top"], shown, shown, p["prepull"], p["under"], shown, *[options.get(k, []) for k in MULTI_FILTERS])
 
-    @app.callback(Output(DETAIL_ID, "children"), Input({"type": ROW_TYPE, "idx": ALL}, "n_clicks"),
-                  State(AS_OF_STORE_ID, "data"), prevent_initial_call=True)
-    def _detail(_clicks, as_of):
+    @app.callback(
+        Output(TBODY_ID, "children"),
+        Output(GRID_META_ID, "children"),
+        Output({"type": SORT_ARROW_TYPE, "idx": ALL}, "children"),
+        Input(AS_OF_STORE_ID, "data"),
+        Input(DATA_REVISION_ID, "data"),
+        Input(REFRESH_ID, "n_intervals"),
+        Input(VIEW_ID, "value"),
+        Input(EXPAND_STORE_ID, "data"),
+        Input(SORT_STORE_ID, "data"),
+        Input(DETAIL_STORE_ID, "data"),
+        *filter_inputs,
+    )
+    def _grid(as_of, _data_rev, _n_intervals, view, state, sort, detail, *filter_values):
+        p = render_parts(as_of, get_db_path(), view or DEFAULT_VIEW, state, sort, _filters_of(filter_values), detail,
+                         what="grid")
+        arrows = [(("▼" if (sort or {}).get("desc") else "▲") if (sort or {}).get("key") == k else "")
+                  for k, _label, _cls in GRID_COLUMNS]
+        return p["rows"], p["meta"], arrows
+
+    @app.callback(Output(EXPAND_STORE_ID, "data"),
+                  Input({"type": TOGGLE_TYPE, "idx": ALL}, "n_clicks"), Input(EXPAND_ALL_ID, "n_clicks"),
+                  Input(COLLAPSE_ALL_ID, "n_clicks"), State(EXPAND_STORE_ID, "data"), prevent_initial_call=True)
+    def _expand(_toggles, _all, _none, state):
         trig = dash.ctx.triggered_id
-        if not isinstance(trig, dict) or not any(_clicks or []):
+        if not _clicked():
             return dash.no_update
-        return render_detail(trig.get("idx"), as_of, get_db_path())
+        if trig == EXPAND_ALL_ID:
+            return {"base": "open", "flip": []}
+        if trig == COLLAPSE_ALL_ID:
+            return {"base": "closed", "flip": []}
+        if isinstance(trig, dict):
+            state = dict(state or {"base": "default", "flip": []})
+            flip = list(state.get("flip") or [])
+            nid = str(trig.get("idx") or "")
+            state["flip"] = [f for f in flip if f != nid] if nid in flip else flip + [nid]
+            return state
+        return dash.no_update
+
+    @app.callback(Output(SORT_STORE_ID, "data"), Input({"type": SORT_TYPE, "idx": ALL}, "n_clicks"),
+                  State(SORT_STORE_ID, "data"), prevent_initial_call=True)
+    def _sort(_clicks, current):
+        trig = dash.ctx.triggered_id
+        if not isinstance(trig, dict) or not _clicked():
+            return dash.no_update
+        return next_sort(current, str(trig.get("idx") or ""))
+
+    @app.callback(Output(DETAIL_STORE_ID, "data"), Input({"type": ROW_TYPE, "idx": ALL}, "n_clicks"),
+                  State(DETAIL_STORE_ID, "data"), prevent_initial_call=True)
+    def _detail(_clicks, current):
+        trig = dash.ctx.triggered_id
+        if not isinstance(trig, dict) or not _clicked():
+            return dash.no_update
+        nid = str(trig.get("idx") or "")
+        return None if current == nid else nid
+
+    @app.callback(*[Output(filter_id(k), "value") for k in FILTER_KEYS], Input(CLEAR_FILTERS_ID, "n_clicks"),
+                  prevent_initial_call=True)
+    def _clear(n_clicks):
+        if not n_clicks:
+            return [dash.no_update] * len(FILTER_KEYS)
+        return [[] if k in MULTI_FILTERS else "" for k in FILTER_KEYS]
 
     @app.callback(Output(DOWNLOAD_ID, "data"), Input(CSV_BUTTON_ID, "n_clicks"), State(AS_OF_STORE_ID, "data"),
-                  State(GROUP_ID, "value"), prevent_initial_call=True)
-    def _csv(n_clicks, as_of, by):
+                  State(VIEW_ID, "value"), State(SORT_STORE_ID, "data"), *[State(filter_id(k), "value") for k in FILTER_KEYS],
+                  prevent_initial_call=True)
+    def _csv(n_clicks, as_of, view, sort, *filter_values):
         if not n_clicks:
             return dash.no_update
-        return render_csv(as_of, get_db_path(), by)
+        return render_csv(as_of, get_db_path(), view, sort, _filters_of(filter_values))
 
     app.clientside_callback(_OPEN_UPLOAD_JS, Output(EMPTY_UPLOAD_SINK_ID, "data"),
                             Input({"type": EMPTY_UPLOAD_TYPE, "idx": ALL}, "n_clicks"), prevent_initial_call=True)

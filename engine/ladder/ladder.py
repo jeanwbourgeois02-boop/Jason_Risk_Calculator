@@ -15,11 +15,13 @@ no cash-balance rows".
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pandas as pd
 
 from engine.ladder.exposure import COMMODITY_CCYS
+from engine.pnl.valuation import closed_out_options
 
 # ------------------------------------------------------------------------- cash ladder
 _LEG_SQL = """
@@ -83,6 +85,14 @@ def cash_ladder(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
 # prompt date, like any FX leg, so this query matches the Ladder's grid); its metal leg
 # (ccy = the root id, settles_cash 0) is never a currency. No screen calls delta_per_ccy;
 # the golden book pins it.
+#
+# Closed-out FX options (user, 2026-09-29: "this needs to be fixed surely"; CLAUDE.md "A
+# closed-out option is not live"): every trade of an option group bought and sold back in
+# full as of :as_of is left out of both FX_OPTION branches and of the missing-SPOT check,
+# whatever DELTA marks are on file for it. The group is the valuation's own
+# (engine.pnl.valuation.closed_out_options, imported, never re-derived); its trade ids
+# arrive as a JSON list in :closed_out (`closed_out_param`). A part sell-back is not
+# closed out there, so it stays live on its marks.
 _DELTA_SQL = """
 WITH d AS (
   SELECT l.ccy, l.amount AS delta
@@ -95,12 +105,14 @@ WITH d AS (
   FROM trades_official t JOIN instruments i USING (instrument_id)
   JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
   WHERE t.product = 'FX_OPTION'
+    AND t.trade_id NOT IN (SELECT value FROM json_each(:closed_out))
   UNION ALL
   SELECT i.quote_ccy, -t.quantity * m.value * s.value
   FROM trades_official t JOIN instruments i USING (instrument_id)
   JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
   LEFT JOIN marks_official s ON s.instrument_id = i.base_ccy || i.quote_ccy AND s.mark_type = 'SPOT' AND s.as_of_date = :as_of
   WHERE t.product = 'FX_OPTION'
+    AND t.trade_id NOT IN (SELECT value FROM json_each(:closed_out))
 )
 SELECT ccy, SUM(delta) AS delta FROM d GROUP BY ccy
 """
@@ -118,7 +130,19 @@ FROM trades_official t JOIN instruments i USING (instrument_id)
 JOIN marks_official m ON m.instrument_id = t.instrument_id AND m.mark_type = 'DELTA' AND m.as_of_date = :as_of
 LEFT JOIN marks_official s ON s.instrument_id = i.base_ccy || i.quote_ccy AND s.mark_type = 'SPOT' AND s.as_of_date = :as_of
 WHERE t.product = 'FX_OPTION' AND s.value IS NULL
+  AND t.trade_id NOT IN (SELECT value FROM json_each(:closed_out))
 """
+
+
+def closed_out_fx_options(conn: sqlite3.Connection, as_of_date: str) -> list:
+    """The FX option trade ids closed out as of `as_of_date`, sorted: the valuation's own
+    grouping (`engine.pnl.valuation.closed_out_options`), which the delta leaves out."""
+    return sorted(closed_out_options(conn, as_of_date))
+
+
+def closed_out_param(conn: sqlite3.Connection, as_of_date: str) -> str:
+    """`closed_out_fx_options` as the JSON list the `:closed_out` parameter takes."""
+    return json.dumps(closed_out_fx_options(conn, as_of_date))
 
 
 def delta_per_ccy(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
@@ -136,8 +160,13 @@ def delta_per_ccy(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
     Adds `delta_usd` = delta x official SPOT (quote->USD) for that ccy on as_of_date; 1.0
     for USD; NaN when no SPOT mark exists for that ccy (never estimated, never taken from
     positions.fx_to_usd).
+
+    An FX option group closed out as of `as_of_date` (bought and sold back in full,
+    `engine.pnl.valuation.closed_out_options`) contributes no delta, marks or no marks
+    (user, 2026-09-29); `closed_out_fx_options` names those trades.
     """
-    missing = pd.read_sql_query(_OPTION_MISSING_SPOT_SQL, conn, params={"as_of": as_of_date})
+    params = {"as_of": as_of_date, "closed_out": closed_out_param(conn, as_of_date)}
+    missing = pd.read_sql_query(_OPTION_MISSING_SPOT_SQL, conn, params=params)
     if not missing.empty:
         ids = ", ".join(sorted(missing["instrument_id"]))
         raise ValueError(
@@ -145,7 +174,7 @@ def delta_per_ccy(conn: sqlite3.Connection, as_of_date: str) -> pd.DataFrame:
             f"quote-ccy delta, instrument(s): {ids}"
         )
 
-    delta = pd.read_sql_query(_DELTA_SQL, conn, params={"as_of": as_of_date})
+    delta = pd.read_sql_query(_DELTA_SQL, conn, params=params)
     if delta["delta"].isna().any():
         bad = ", ".join(sorted(delta.loc[delta["delta"].isna(), "ccy"]))
         raise ValueError(f"delta_per_ccy({as_of_date}): NULL delta for ccy(s): {bad}")

@@ -1,6 +1,6 @@
 ---
 name: bloomberg-field-assumptions
-description: Unverified Bloomberg field and ticker guesses the ticker check relies on (LME, options on futures, bulk fields), as of 2026-09-24
+description: Unverified Bloomberg field and ticker guesses the ticker check relies on (LME, options, bulk fields, the 2026-09-29 desk checks)
 metadata:
   type: project
 ---
@@ -12,6 +12,13 @@ Nothing below has been seen on a terminal yet (no Bloomberg on the dev PC; the u
 - **Option ticker form:** we write 'CLX6C 70 Comdty' (no trailing zeros, one-digit year). Bloomberg's chain may write '70.00'. The check asks our form as well and calls it FORM_MISMATCH only if Bloomberg refuses our form or resolves it to another option.
 - **OPT_EXER_TYP** is read as 'American' / 'European' by prefix. OPT_UNDL_TICKER may come without a yellow key.
 - **LME:** 'LMCADY' (cash), 'LMCADS03' (3M) and the dated 'LPV6' (monthly) come from engine/lme. The prompt-date field is bbg-curves' `LME_PROMPT_DATE_FIELD` ('FUT_DLV_DT_LAST'). A 3M date one LME business day behind today counts as "not rolled yet", not a mismatch.
+
+- **Desk checks (added 2026-09-29), all unverified:**
+  - Delivery type: no known field; the check asks candidates FUT_DELIVERY_TYPE, FUT_SETTLE_TYP, CASH_SETTLED, FUT_DLV_TYP and uses the first that answers (a Y/N on a CASH field = cash/physical). If none answers, the report says SKIPPED and asks the user to FLDS <GO>. Record the real field here once seen.
+  - Holidays: CALENDAR_NON_SETTLEMENT_DATES (bulk) asked on one front generic per calendar with overrides CALENDAR_START_DATE / CALENDAR_END_DATE only, assuming a future's own settlement calendar is its exchange's. If it answers a country calendar instead, fill `CALENDAR_CODES` (SETTLEMENT_CALENDAR_CODE override). Bulk rows parsed for any date-like value (sub-field name assumed 'Holiday Date').
+  - PX_SETTLE history on Chinese contracts assumed to be the exchange's volume-weighted settlement; PX_LAST their last trade.
+  - SGX USD/CNH: contracts.csv has UC + Curncy (a guess); the check also tries UC Comdty, XUC Curncy, XUC Comdty.
+  - LME OPEN_INT / PX_VOLUME: asked on LM<code>DS03 and on the research app's two-digit-year monthly tickers ('LPZ26 Comdty').
 
 **Why:** the user runs the check only when they finally have Bloomberg access (2026-09-24). Every guess here is something the first real run confirms or corrects.
 **How to apply:** when a real report arrives, check these guesses first. Record what Bloomberg said, word for word. Related: [[worksheet-fixable-fields]].

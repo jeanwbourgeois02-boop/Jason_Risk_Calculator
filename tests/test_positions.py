@@ -29,7 +29,7 @@ def _book():
         ("f1", "CLZ6 Comdty", "FUTURE", -3.0, 70.0), ("o1", "EURUSD111926C-1", "FX_OPTION", 2e6, 0.01),
     ]
     for tid, inst, product, qty, px in trades:
-        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (tid, "XLSX", inst, product, tid, "2026-09-01", qty, px, "acc", "cp", "", "t", "d", "", "", ""))
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("j1", 1, "FX_NEAR", "USD", 1e6, "2026-09-01", "2026-10-20", 150.0, 1),
@@ -120,7 +120,7 @@ def test_a_stored_value_that_is_not_a_number_blanks_one_block_with_its_reason_no
 def _krw_forward(conn):
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                  "bbg_ticker, expiry_date) VALUES ('USDKRW','FX','USD','KRW',1,0,'USDKRW Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("k1", "XLSX", "USDKRW", "FX_FWD", "k1", "2026-09-01", 1e6, 1400.0, "acc", "cp", "", "t", "d", "", "", ""))
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("k1", 1, "FX_NEAR", "USD", 1e6, "2026-09-01", "2026-10-20", 1400.0, 1),
@@ -199,7 +199,7 @@ def _add_futures(conn, prices=True, hg_price=True):
         conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                      "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
                      (inst, "FUTURE", root_id, root.currency, root.multiplier, 0, inst, expiry))
-        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (tid, "XLSX", inst, "FUTURE", tid, "2026-09-01", lots, fill, "acc", "cp", "", "t", "d", "", "", ""))
         conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
                      (tid, 1, "NOTIONAL", root.currency, lots * root.multiplier * fill, "2026-09-01", expiry, fill, 0))

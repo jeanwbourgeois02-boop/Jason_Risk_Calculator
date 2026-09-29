@@ -5,7 +5,8 @@
 Keys (see the yaml for the meaning of each):
   vol_target_usd, vol_target_placeholder, vol_target_note, stress_pct, blended {trail_window_bd, w_trail, w_stress, stress_start,
   stress_end, cutover}, var_window_bd, var_confidence, worst_day_start,
-  shock_dates [{date, name}, ...].
+  shock_dates [{date, name}, ...], var_contribution_days, correlation_min_days (the risk by
+  position, `positions.py`, 2026-09-29).
 `load_config` returns a plain dict of those, dates as ISO strings, plus `file` (the path
 read) and `loaded` (False when the defaults are in use).
 """
@@ -37,6 +38,10 @@ DEFAULTS: Dict[str, Any] = {
     },
     "var_window_bd": 252,
     "var_confidence": 0.95,
+    # risk by position (2026-09-29, positions.py): the book's tail days nearest its VaR quantile
+    # averaged for each position's contribution, and the fewest common days a correlation needs
+    "var_contribution_days": 5,
+    "correlation_min_days": 60,
     "worst_day_start": "2008-01-01",        # dashboard.py `_worst_start`
     "shock_dates": [                        # core/risk.py STRESS_IGNORE_DATES
         {"date": "2015-01-15", "name": "SNB floor removal"},
@@ -73,6 +78,8 @@ def _merged(file_values: Dict[str, Any]) -> Dict[str, Any]:
     cfg["stress_pct"] = float(cfg["stress_pct"])
     cfg["var_window_bd"] = int(cfg["var_window_bd"])
     cfg["var_confidence"] = float(cfg["var_confidence"])
+    cfg["var_contribution_days"] = max(1, int(cfg["var_contribution_days"]))
+    cfg["correlation_min_days"] = max(3, int(cfg["correlation_min_days"]))
     cfg["vol_target_placeholder"] = bool(cfg["vol_target_placeholder"])
     cfg["vol_target_note"] = str(cfg["vol_target_note"] or "")
     b = cfg["blended"]

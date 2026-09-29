@@ -11,7 +11,9 @@ TERM_STRUCTURE | ''``, from the label alone). This module gives every position o
   type, source ``mixed labels``, the note naming both.
 - **No label: inferred** from the open legs' roots in contract-master (``config/contracts.csv``:
   sector, subsector, exchange), source ``inferred``. A leg whose root is of sector ``fx`` (the SGX
-  USD/CNH future) or an FX product is a hedge: it is left out of the type and named in the note.
+  USD/CNH future) or an FX product is a hedge: it is left out of the type and named in the note;
+  an FX product on a precious-metal pair (XAUUSD) is not a hedge (``hedges.py``, user 2026-09-29)
+  but is left out of the type too, named as a position of its own.
   Several subsectors -> ``CROSS_PRODUCT``; one subsector on several exchanges ->
   ``CROSS_EXCHANGE``; one subsector, one exchange, several roots -> ``CROSS_PRODUCT`` (two
   contracts of one product); one root over several contract months -> ``TERM_STRUCTURE``; one
@@ -35,6 +37,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+from engine.spreads.hedges import is_precious_pair
 
 CROSS_EXCHANGE = "CROSS_EXCHANGE"
 CROSS_PRODUCT = "CROSS_PRODUCT"
@@ -120,6 +124,9 @@ def infer(legs: Sequence[TypeLeg], roots: Dict[str, object]) -> Inference:
         root = roots.get(leg.root_id) if leg.root_id else None
         if root is not None and getattr(root, "sector", "") == FX_SECTOR:
             hedges.append(_hedge_name(root, leg))
+        elif root is None and leg.product in FX_PRODUCTS and is_precious_pair(leg.root_id, "", leg.instrument_id):
+            extras.append(f"{leg.instrument_id or leg.product} is a precious-metal position of its own, not a "
+                          f"hedge, and not on a root of config/contracts.csv, so it is not counted for the type")
         elif root is None and leg.product in FX_PRODUCTS:
             hedges.append(_hedge_name(None, leg))
         elif root is not None:

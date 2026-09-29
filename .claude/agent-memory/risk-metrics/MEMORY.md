@@ -2,3 +2,5 @@
 - [Definitions and choices](definitions_2026_09_22.md) — the dashboard's metric definitions in metrics.py, what was not replicated, the rates/equity rows removed 2026-09-24, the synthetic-parquet tests and the pickle stand-in used without pyarrow.
 - [Commodity underlyers, Phase 4](commodity_phase4_2026_09_24.md) — COMMODITY parts, SECTOR/SPREAD views, crisis fallback, shock days, LME mapping, how tests run without pyarrow.
 - [Perf profile 2026-09-28](perf_profile_2026_09_28.md) — book_risk cold 3 s / warm 0.6 s on the sample; caches survive a sample switch; the 16 s chip is GIL contention, not the engine; the two fixes are risk-history and spreads-engine.
+- [Position risk 2026-09-29](position_risk_2026_09_29.md) — positions by period_explain ids, component-VaR tail rule, correlation window, hedge exception (partial_reason).
+- [Never kill all python](feedback_never_kill_all_python.md) — no taskkill by image name; no `py -3 -` heredocs; scripts in scratchpad with timeout and </dev/null.

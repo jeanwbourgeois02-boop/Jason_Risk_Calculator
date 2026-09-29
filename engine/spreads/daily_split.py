@@ -17,8 +17,12 @@ Which trades are included follows ``engine.pnl.reference.diff_split`` exactly: p
 dates, or priced today with no row on the reference close (new since it: its whole LTD counts,
 ``L_p = 0``, as ``period_rows`` says "trading P&L"); a trade priced on one side only is
 excluded with its reason, never faked. A priced row whose local P&L or spot is not a number
-(a closed-out option carries no local figure) is counted whole as spread and named in
-``reasons``: the identity holds, the split is not silent.
+(a closed-out option carries no local figure) is counted whole as spread here and named in
+``reasons``: the identity holds, the split is not silent. Its one caller since 2026-09-29,
+``period_explain.classify_trades`` (the P&L explain and the Book's strategy Daily split alike),
+reads that reason and puts such a trade in ``other`` instead, never in spread; it also takes
+new trades, realised trades and hedges out before calling this, so ``hedge_ids`` and the
+new-trade branch below are not used by it.
 
 No valuation, no database, no new mark: only the columns ``value_book`` already gives.
 """
@@ -66,7 +70,8 @@ def daily_split(rows_t: pd.DataFrame, rows_prev: pd.DataFrame, trade_ids: Iterab
     - ``excluded``: ``[(trade_id, why)]`` for the trades of ``trade_ids`` left out (unpriced
       today, or priced today but not on the reference close).
     - ``reasons``: ``{trade_id: sentence}`` for included trades whose split needed a note (a
-      row with no local P&L or spot: counted whole as spread; a trade new since the close).
+      row with no local P&L or spot: counted whole as spread here, which ``classify_trades``
+      moves to ``other``; a trade new since the close).
     - ``included``: the trade ids counted, sorted.
     - ``by_trade``: ``{trade_id: {spread, fx, hedge}}`` for the included trades.
     """

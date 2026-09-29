@@ -31,6 +31,15 @@ blended:
 var_window_bd: 252
 var_confidence: 0.95
 
+# Risk by position (2026-09-29, engine/risk/positions.py). A position's contribution to the
+# book's VaR is its own P&L averaged over the var_contribution_days days of the book's last
+# var_window_bd whose rank is nearest the VaR quantile (5 of 252: the 12th to 16th worst days),
+# sign flipped, then scaled so the contributions add up to the book's VaR exactly. The
+# correlation between positions needs at least correlation_min_days common days (it uses the
+# last var_window_bd of them when there are that many).
+var_contribution_days: 5
+correlation_min_days: 60
+
 # The worst day ex shocks is the minimum daily P&L from this date to the lag-2 date
 # (dashboard.py _worst_start).
 worst_day_start: 2008-01-01

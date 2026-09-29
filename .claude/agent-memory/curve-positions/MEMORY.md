@@ -1,2 +1,3 @@
 - [curve_positions conventions](curve_positions_conventions.md) — exact spot, gross_lots, flat contracts, multiplier check; Phase 5 delta (options, LME, averaging); golden pin
 - [by_subsector conventions](by_subsector_conventions.md) — commodity across exchanges keyed by subsector; mass-unit netting, unit t > kg > largest gross, fx its own line, golden pin
+- [leftover conventions](leftover_conventions.md) — months_units in delta units, leftover from strategies, pair residual on the leg with its sign, reconciliation

@@ -115,7 +115,7 @@ def _book(*, settle="2026-10-20"):
         ("z1", "USDCZK", ("USD", -80_000.0), ("CZK", 2_000_000.0), 25.0),
     ]
     for tid, pair, (bccy, bamt), (qccy, qamt), px in fx:
-        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (tid, "XLSX", pair, "FX_FWD", tid, "2026-09-01", bamt, px, "acc", "cp", "", "t", "d", "", "", ""))
         conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
             (tid, 1, "FX_NEAR", bccy, bamt, "2026-09-01", settle, px, 1),
@@ -592,7 +592,7 @@ def _fx_chf(conn):
     """A USDCHF forward long 0.8m CHF, marked at 0.64: $1.25m of CHF."""
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                  "bbg_ticker, expiry_date) VALUES ('USDCHF','FX','USD','CHF',1,0,'USDCHF Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("c1", "XLSX", "USDCHF", "FX_FWD", "c1", "2026-09-01", -1_000_000.0, 0.8, "acc", "cp", "", "t", "d", "", "", ""))
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("c1", 1, "FX_NEAR", "USD", -1_000_000.0, "2026-09-01", "2026-10-20", 0.8, 1),

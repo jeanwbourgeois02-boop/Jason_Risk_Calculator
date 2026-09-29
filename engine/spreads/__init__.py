@@ -93,9 +93,28 @@ the larger side its nearest whole lots. Each pair carries its level (a matching 
 the plain China-over-foreign ratio where the desk screens one, a calendar's near - far, else USD
 per common unit), the USD of a 1.0 move on the paired lots, its residual units and USD, gross
 notional and next event; the strategy its residuals (whole lots left, options), its hedges (a
-USD/CNH future, an FX spot / forward / swap under its PBRoot), the hedge coverage of its CNY
-legs (a long China leg is hedged by a short USD/CNH position) and the Daily split of
-``daily_split.py`` (spread / fx / hedge, an identity over the ``value_book`` rows).
+USD/CNH future, an FX spot / forward / swap / option on a currency pair under its PBRoot), the
+hedge coverage of its CNY legs (a long China leg is hedged by a short USD/CNH position) and the
+Daily split, by the P&L explain's own bucket order since 2026-09-29 (new trades, realised,
+hedge, spread / fx, other; ``period_explain.classify_trades``).
+
+Period explain (2026-09-29; ``period_explain.py``, user yes under hard rule 7): a period's P&L
+(Daily, 5d, MTD, YTD, LTD, the header's figure from ``engine.pnl.series.period_pnl``) split into
+spread, FX, hedge, new trades, realised and other, each included trade in one bucket, summing to
+the total exactly, and the same by the Book's positions. ``daily_split``'s identity over a period.
+
+Hedges (``hedges.py``, the one test; user 2026-09-29): a USD/CNH future, an FX spot / forward /
+swap / option on a currency pair is a hedge; a precious-metal pair (XAU, XAG, XPT, XPD) never is:
+it is a position of its own.
+
+Scorecard (2026-09-29; ``scorecard.py``): the trader's ideas (the Book's positions, the
+explain's row ids from ``positions_of``) open and closed, each closed idea at its LTD on the day
+it went flat or settled, with win rate, payoff ratio, expectancy and holding days, by spread
+type and by trade name; an unpriced idea left out with its reason.
+
+Carry (2026-09-29; ``carry.py``): the roll-down of each calendar position and term-structure
+pair over the next contract step on the research app's curve, in the pair's unit and in USD.
+Research context: never a mark, never in P&L, delta or a total.
 
 Tables: ``spread_overrides`` (``overrides.py``), created defensively here. Its read is wired into
 the rule; nothing writes it yet.
@@ -105,10 +124,15 @@ from engine.spreads.book import (
     HAND_KINDS, KIND_BUNDLE, KIND_PINNED, KIND_STRATEGY, PERIODS, REVIEW_ACCOUNTS, REVIEW_AMBIGUOUS, REVIEW_RATIO,
     SPREAD_PRODUCTS, book_spreads, positions_from,
 )
+from engine.spreads.carry import carry
 from engine.spreads.grouping import CALENDAR, TOLERANCE
+from engine.spreads.hedges import FX_HEDGE_PRODUCTS, PRECIOUS_METALS, is_hedge, is_precious_pair
 from engine.spreads.history import history_dates, position_history
 from engine.spreads.levels import research_key
 from engine.spreads.daily_split import daily_split
+from engine.spreads.period_explain import COMPONENTS as EXPLAIN_COMPONENTS, EXPLAIN_KEYS, period_explain, positions_of
+from engine.spreads.rolls import rolls
+from engine.spreads.scorecard import scorecard
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
 from engine.spreads.strategies import strategies_from, strategy_entry
 from engine.spreads.templates import Template, TemplateLeg, load_templates
@@ -118,11 +142,12 @@ from engine.spreads.trade_type import (
 )
 
 __all__ = [
+    "FX_HEDGE_PRODUCTS", "PRECIOUS_METALS", "carry", "is_hedge", "is_precious_pair", "positions_of", "rolls", "scorecard",
     "CALENDAR", "CROSS_EXCHANGE", "CROSS_PRODUCT", "HAND_KINDS", "Inference", "KIND_BUNDLE", "KIND_PINNED",
-    "KIND_STRATEGY", "NO_TYPE", "PERIODS", "PIN", "REVIEW_ACCOUNTS", "REVIEW_AMBIGUOUS", "REVIEW_RATIO",
+    "EXPLAIN_COMPONENTS", "EXPLAIN_KEYS", "KIND_STRATEGY", "NO_TYPE", "PERIODS", "PIN", "REVIEW_ACCOUNTS", "REVIEW_AMBIGUOUS", "REVIEW_RATIO",
     "SHAPE_TYPES", "SOURCE_INFERRED", "SOURCE_LABEL", "SOURCE_MIXED", "SOURCE_NONE", "SPLIT", "SPREAD_PRODUCTS",
     "TERM_STRUCTURE", "TOLERANCE", "TRADE_TYPES", "Template", "TemplateLeg", "TypeLeg", "book_spreads", "classify",
     "daily_split", "ensure_overrides_table", "history_dates", "infer", "load_templates", "outright_fields",
-    "override_problems", "position_history", "positions_from", "read_overrides", "research_key", "strategies_from",
+    "override_problems", "period_explain", "position_history", "positions_from", "read_overrides", "research_key", "strategies_from",
     "strategy_entry", "type_fields",
 ]

@@ -37,7 +37,7 @@ def _db(tmp_path, option_trade_date="2026-09-15", option_expiry="2026-10-15"):
         ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"),
         (OPTION_ID, "FX_OPTION", "USD", "JPY", 1, 0, OPTION_ID, option_expiry),
     ])
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+    conn.executemany("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
         ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-09-14", -1e6, 0.65, "acc", "cp", "", "t", "d", "", "", ""),
         ("o1", "XLSX", OPTION_ID, "FX_OPTION", "o1", option_trade_date, 1e6, 0.01, "acc", "cp", "", "t", "d", "", "", ""),
     ])

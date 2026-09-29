@@ -52,6 +52,7 @@ from __future__ import annotations
 from contextlib import closing
 from pathlib import Path
 import base64
+import json
 import sqlite3
 
 import pandas as pd
@@ -154,7 +155,11 @@ def _stage_and_publish(db_path, load_fn):
     - a Trade Id the file loaded that was already on file (REPLACED) has its `trade_legs`
       and `realised_pnl` rows deleted from `live`, so the upsert re-inserts exactly the
       file's legs (a leg count can shrink) and the ledger freezes the trade again;
-      a `trades.theme` set by hand is kept where the file's row carries none;
+      a `trades.theme` set by hand is kept where the file's row carries none; every other
+      `trades` column is the file's (`broker_symbol` / `broker_price`, the Symbol and
+      Price cells as written, 2026-09-29, included: `blotter.load` inserts every `Trade`
+      field by name and this upsert copies every column by name, so a column added to
+      `trades` and `common.Trade` needs no change here);
     - a Trade Id the file cancels (`ParseResult.cancelled_trade_ids`, read with getattr)
       that is on file and not also loaded, and every `source = 'MANUAL'` trade the file
       does not name, is deleted from every trade-keyed table (REMOVED), on both
@@ -401,8 +406,9 @@ def record_upload_report(db_path, filename, result, n_underlying: int, library_t
     the previous one). The kind counts are `loaded_breakdown`'s (the trades that LOADED, never
     the parser's row counters); `excluded_rows` is the book filter's total (status, fund, trader,
     desk) with `filter_summary()` as its wording; `change` is `_stage_and_publish`'s merge
-    accounting (`added`, `replaced`, `removed`, `on_file_after`; zeros when not given). Never
-    fails an import: a database error is swallowed and False returned."""
+    accounting (`added`, `replaced`, `removed`, `on_file_after`; zeros when not given). The same
+    row, with the merge's trade ids, is appended to `upload_history` in the same transaction.
+    Never fails an import: a database error is swallowed and False returned."""
     import datetime as _dt
     counts = loaded_counts(result.trades)
     change = change or {}
@@ -424,6 +430,8 @@ def record_upload_report(db_path, filename, result, n_underlying: int, library_t
                 conn.execute("DELETE FROM upload_report")
                 conn.execute(f"INSERT INTO upload_report ({names}) VALUES ({','.join('?' for _ in UPLOAD_REPORT_COLUMNS)})",
                              [row[c] for c in UPLOAD_REPORT_COLUMNS])
+                # The same upload appended to the history, in the same transaction (2026-09-29).
+                _append_history(conn, row, change)
         finally:
             conn.close()
     except sqlite3.Error:
@@ -446,6 +454,110 @@ def last_upload_report(conn: sqlite3.Connection) -> dict | None:
     out = {col: _REPORT_DEFAULTS.get(col, 0) for col in UPLOAD_REPORT_COLUMNS}
     out.update(zip(present, row))
     return out
+
+
+# Every successful upload, one row each (user, 2026-09-29: the Blotter tab is the audit trail
+# of the uploaded file, so a missing trade can be traced to the file it came from). Written
+# with `upload_report`, in the same transaction, after a successful publish; never back-filled
+# from `upload_report` (an old database starts its history at its next upload). The counts are
+# `upload_report`'s; the *_ids columns are the merge's trade ids as JSON arrays. `removed_ids`
+# holds every trade the upload removed: the cancelled ones (counted in `removed`) and an old
+# database's manual entries (counted in `removed_manual`).
+UPLOAD_HISTORY_DDL = ("CREATE TABLE IF NOT EXISTS upload_history ("
+                      "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                      "filename TEXT NOT NULL DEFAULT '', uploaded_at TEXT NOT NULL DEFAULT '', "
+                      "futures INTEGER NOT NULL DEFAULT 0, options_on_futures INTEGER NOT NULL DEFAULT 0, "
+                      "lme_forwards INTEGER NOT NULL DEFAULT 0, fx_forwards INTEGER NOT NULL DEFAULT 0, "
+                      "fx_spot INTEGER NOT NULL DEFAULT 0, fx_options INTEGER NOT NULL DEFAULT 0, "
+                      "excluded_rows INTEGER NOT NULL DEFAULT 0, excluded_text TEXT NOT NULL DEFAULT '', "
+                      "underlying_futures_written INTEGER NOT NULL DEFAULT 0, "
+                      "library_tickers INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '', "
+                      "added INTEGER NOT NULL DEFAULT 0, replaced INTEGER NOT NULL DEFAULT 0, "
+                      "removed INTEGER NOT NULL DEFAULT 0, removed_manual INTEGER NOT NULL DEFAULT 0, "
+                      "on_file_after INTEGER NOT NULL DEFAULT 0, "
+                      "added_ids TEXT NOT NULL DEFAULT '[]', replaced_ids TEXT NOT NULL DEFAULT '[]', "
+                      "removed_ids TEXT NOT NULL DEFAULT '[]')")
+_HISTORY_ID_COLUMNS = ("added_ids", "replaced_ids", "removed_ids")
+UPLOAD_HISTORY_COLUMNS = UPLOAD_REPORT_COLUMNS + ("removed_manual",) + _HISTORY_ID_COLUMNS
+# trade_upload_trail's action per id column, in the order an upload applies them.
+_TRAIL_ACTIONS = (("added_ids", "added"), ("replaced_ids", "replaced"), ("removed_ids", "removed"))
+
+
+def _append_history(conn: sqlite3.Connection, row: dict, change: dict) -> None:
+    """Append one `upload_history` row: `row` is the `upload_report` row just written, `change`
+    the merge accounting with its id lists. Runs inside the caller's transaction."""
+    conn.execute(UPLOAD_HISTORY_DDL)
+    ids = {"added_ids": list(change.get("added_ids") or ()),
+           "replaced_ids": list(change.get("replaced_ids") or ()),
+           "removed_ids": list(change.get("removed_ids") or ()) + list(change.get("removed_manual_ids") or ())}
+    values = {**row, "removed_manual": int(change.get("removed_manual", 0) or 0),
+              **{col: json.dumps([str(t) for t in v]) for col, v in ids.items()}}
+    conn.execute(f"INSERT INTO upload_history ({','.join(UPLOAD_HISTORY_COLUMNS)}) "
+                 f"VALUES ({','.join('?' for _ in UPLOAD_HISTORY_COLUMNS)})",
+                 [values[c] for c in UPLOAD_HISTORY_COLUMNS])
+
+
+def _history_ids(text) -> list:
+    try:
+        found = json.loads(text or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [str(t) for t in found] if isinstance(found, list) else []
+
+
+def upload_history(conn: sqlite3.Connection, limit: int | None = None) -> list[dict]:
+    """Every recorded upload, newest first: one dict per `upload_history` row, keyed `id` then
+    `UPLOAD_HISTORY_COLUMNS`, with `added_ids` / `replaced_ids` / `removed_ids` as lists of
+    trade ids. `limit` keeps the newest N. [] on a database with no history (no upload since
+    2026-09-29). Read-only: never creates the table."""
+    if not _table_exists(conn, "upload_history"):
+        return []
+    cols = ("id",) + UPLOAD_HISTORY_COLUMNS
+    sql = f"SELECT {','.join(cols)} FROM upload_history ORDER BY id DESC"
+    params: tuple = ()
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = (max(int(limit), 0),)
+    out = []
+    for values in conn.execute(sql, params):
+        entry = dict(zip(cols, values))
+        for col in _HISTORY_ID_COLUMNS:
+            entry[col] = _history_ids(entry[col])
+        out.append(entry)
+    return out
+
+
+def trade_upload_trail(conn: sqlite3.Connection, trade_id) -> list[dict]:
+    """The uploads that added, replaced or removed `trade_id`, newest first: one dict per
+    (upload, action), {id, filename, uploaded_at, action}, action 'added' | 'replaced' |
+    'removed'. [] when no recorded upload touched it (or no history exists). Read-only."""
+    if not _table_exists(conn, "upload_history"):
+        return []
+    tid = str(trade_id)
+    needle = json.dumps(tid)          # the id as it sits inside the JSON arrays, quotes included
+    rows = conn.execute("SELECT id, filename, uploaded_at, added_ids, replaced_ids, removed_ids FROM upload_history "
+                        "WHERE instr(added_ids, ?) > 0 OR instr(replaced_ids, ?) > 0 OR instr(removed_ids, ?) > 0 "
+                        "ORDER BY id DESC", (needle, needle, needle)).fetchall()
+    out = []
+    for upload_id, filename, uploaded_at, *id_texts in rows:
+        for (col, action), text in zip(_TRAIL_ACTIONS, id_texts):
+            if tid in _history_ids(text):
+                out.append({"id": upload_id, "filename": filename, "uploaded_at": uploaded_at, "action": action})
+    return out
+
+
+def last_upload_issues(conn: sqlite3.Connection) -> list[dict]:
+    """The last upload's rows that did not become trades, and its file-level warnings, as
+    `record_upload_issues` stored them: [{row_no, symbol, kind, reason, filename, uploaded_at}]
+    in row order. kind is REJECTED (the parser could not read the row), NOT LOADED (a type the
+    app does not load) or WARNING (a line about the file as a whole: row_no 0, symbol '').
+    [] when no upload has been recorded. Read-only."""
+    if not _table_exists(conn, "upload_issues"):
+        return []
+    found = conn.execute("SELECT row_no, symbol, kind, reason, filename, uploaded_at FROM upload_issues "
+                         "ORDER BY row_no, rowid").fetchall()
+    return [{"row_no": n, "symbol": sym, "kind": kind, "reason": why, "filename": name, "uploaded_at": at}
+            for n, sym, kind, why, name, at in found]
 
 
 def import_blotter_report(payload, filename, db_path) -> dict:

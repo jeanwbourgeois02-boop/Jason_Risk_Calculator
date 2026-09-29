@@ -1,1 +1,2 @@
 - [Margin and limits conventions](margin_limits_conventions.md) — cells, credit budget, spot-month rule, placeholder-rate policy (2026-09-24)
+- [Liquidity check](liquidity_check.md) — OI / ADV check choices: weakest leg by level, excluded options, lot conversion (2026-09-29)

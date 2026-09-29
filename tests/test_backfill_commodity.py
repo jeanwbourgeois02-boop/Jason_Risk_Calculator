@@ -34,7 +34,7 @@ def _instrument(conn, instrument_id, root, quote, multiplier, ticker, expiry):
 
 
 def _future_trade(conn, trade_id, instrument_id, quote, contracts, price, multiplier, expiry, trade_date="2026-08-10"):
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (trade_id, "XLSX", instrument_id, "FUTURE", trade_id, trade_date, contracts, price,
                   "acc", "cp", "", "t", "d", "", "", ""))
     conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
@@ -199,7 +199,7 @@ def test_a_cny_futures_usd_conversion_close_is_backfilled_from_its_library_row(t
 
 _INSTRUMENT = ("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)")
-_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+_TRADE = "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 _LEG = "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)"
 
 

@@ -18,7 +18,7 @@ def _db(tmp_path):
         ("USDJPY", "FX", "USD", "JPY", 1, 0, "USDJPY Curncy", "9999-12-31"),
         ("EURSEK", "FX", "EUR", "SEK", 1, 0, "EURSEK Curncy", "9999-12-31"),
     ])
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+    conn.executemany("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
         ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-08-10", -1e6, 0.65, "acc", "cp", "HAHY7", "t", "d", "", "", ""),
         ("j1", "XLSX", "USDJPY", "FX_FWD", "j1", "2026-08-10", 1e6, 150.0, "acc", "cp", "HAHY7", "t", "d", "", "", ""),
     ])
@@ -70,7 +70,7 @@ def test_build_requests_spot_per_pair_and_forward_per_open_date(tmp_path):
 def test_build_requests_includes_open_futures(tmp_path):
     p, conn = _db(tmp_path)
     conn.execute("INSERT INTO instruments VALUES ('CLV6 Comdty','FUTURE','CL','USD',1000,0,'CLV6 Comdty','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*1000*7528.25,'2026-08-10','2026-09-18',0,0)")
     conn.commit()
@@ -91,7 +91,7 @@ def _cross_db(tmp_path, with_usd_leg_instruments=False):
     if with_usd_leg_instruments:
         conn.execute("INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
         conn.execute("INSERT INTO instruments VALUES ('USDSEK','FX','USD','SEK',1,0,'USDSEK Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('e1','XLSX','EURSEK','FX_FWD','e1','2026-08-10',1e6,11.20,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('e1','XLSX','EURSEK','FX_FWD','e1','2026-08-10',1e6,11.20,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("e1", 1, "FX_NEAR", "EUR", 1e6, "2026-08-10", "2026-09-16", 11.20, 1),
@@ -133,7 +133,7 @@ def test_build_requests_cross_leg_not_duplicated_when_directly_traded(tmp_path):
     """A leg that's also directly traded (its pair already an open FX position) must not
     produce a second, duplicate SPOT request."""
     p, conn = _cross_db(tmp_path, with_usd_leg_instruments=True)
-    conn.execute("INSERT INTO trades VALUES ('u1','XLSX','EURUSD','FX_FWD','u1','2026-08-10',1e6,1.08,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('u1','XLSX','EURUSD','FX_FWD','u1','2026-08-10',1e6,1.08,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("u1", 1, "FX_NEAR", "EUR", 1e6, "2026-08-10", "2026-09-16", 1.08, 1),
@@ -192,7 +192,7 @@ def _same_day_db(tmp_path, settle: str = "2026-08-20"):
     p = tmp_path / "risk.db"
     conn = schema.connect(p)
     conn.execute("INSERT INTO instruments VALUES ('AUDUSD','FX','AUD','USD',1,0,'AUDUSD Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('a1','XLSX','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('a1','XLSX','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", settle, 0.65, 1),
@@ -255,7 +255,7 @@ def test_fwd_outright_mixes_same_day_spot_mark_and_later_curve_lookup(tmp_path, 
     later (still goes through the FWD_CURVE path) -- must not interfere with each other."""
     p, conn = _same_day_db(tmp_path, settle="2026-08-20")
     conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('j1','XLSX','USDJPY','FX_FWD','j1','2026-08-10',1e6,150.0,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('j1','XLSX','USDJPY','FX_FWD','j1','2026-08-10',1e6,150.0,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("j1", 1, "FX_NEAR", "USD", 1e6, "2026-08-10", "2026-09-18", 150.0, 1),
@@ -356,7 +356,7 @@ def test_pull_once_includes_future_px_via_px_settle_fallback_when_no_live_px_las
     report MISSING (2026-09-17 fix)."""
     p, conn = _db(tmp_path)
     conn.execute("INSERT INTO instruments VALUES ('CLV6 Comdty','FUTURE','CL','USD',1000,0,'CLV6 Comdty','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*1000*7528.25,'2026-08-10','2026-09-18',0,0)")
     conn.commit()
@@ -384,7 +384,7 @@ def test_pull_once_future_px_uses_live_px_last_when_available(tmp_path, monkeypa
     directly, never falling back to a historical request at all."""
     p, conn = _db(tmp_path)
     conn.execute("INSERT INTO instruments VALUES ('CLV6 Comdty','FUTURE','CL','USD',1000,0,'CLV6 Comdty','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('f1','XLSX','CLV6 Comdty','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',6*1000*7528.25,'2026-08-10','2026-09-18',0,0)")
     conn.commit()
@@ -462,7 +462,7 @@ def _option_db(tmp_path, base="EUR", quote="SEK", option_id="EURSEK091826C-1", p
     conn = schema.connect(p)
     conn.execute(f"INSERT INTO instruments VALUES ('{option_id}','FX_OPTION','{base}','{quote}',1,0,"
                 f"'{pair_ticker}','{expiry}')")
-    conn.execute(f"INSERT INTO trades VALUES ('o1','XLSX','{option_id}','FX_OPTION','o1','2026-08-14',"
+    conn.execute(f"INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('o1','XLSX','{option_id}','FX_OPTION','o1','2026-08-14',"
                 f"1000000,0.01,'acc','cp','HAHY7','t','d','','','')")
     conn.execute(f"INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','{base}',1000000,'2026-08-14','{expiry}',0,0)")
     conn.commit()
@@ -799,7 +799,7 @@ def test_build_requests_includes_option_pair_spot_and_expiry_forward(tmp_path):
         ("USDMXN120126C-2", "FX_OPTION", "USD", "MXN", 1, 0, "USDMXN120126C-2", "2026-12-01"),
         ("USDBRL120126C-3", "FX_OPTION", "USD", "BRL", 1, 0, "USDBRL120126C-3", "2026-12-01"),
     ])
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+    conn.executemany("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
         ("o1", "XLSX", "USDJPY111926P-1", "FX_OPTION", "o1", "2026-08-19", 1e6, 0.1425, "acc", "cp", "", "t", "d", "", "", ""),
         ("o2", "XLSX", "USDMXN120126C-2", "FX_OPTION", "o2", "2026-08-19", 1e6, 0.01, "acc", "cp", "", "t", "d", "", "", ""),
         ("o3", "XLSX", "USDBRL120126C-3", "FX_OPTION", "o3", "2026-08-19", 1e6, 0.01, "acc", "cp", "", "t", "d", "", "", ""),
@@ -969,7 +969,7 @@ def _options_only_db(tmp_path, options, base="EUR", quote="SEK"):
     for trade_id, option_id, trade_date, qty, expiry in options:
         conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                      (option_id, "FX_OPTION", base, quote, 1, 0, option_id, expiry))
-        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (trade_id, "XLSX", option_id, "FX_OPTION", trade_id, trade_date, qty, 0.01,
                       "acc", "cp", "", "t", "d", "", "", ""))
         conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
@@ -1023,7 +1023,7 @@ def test_build_requests_option_conversion_spot_not_duplicated_when_a_forward_alr
     conversion pair, a cross's own conversion legs, or another option's own pair."""
     p, conn = _cross_db(tmp_path, with_usd_leg_instruments=True)     # a EURSEK forward: asks for EURUSD + USDSEK SPOT
     conn.execute("INSERT INTO instruments VALUES ('EURSEK112526C-3','FX_OPTION','EUR','SEK',1,0,'x','2026-11-25')")
-    conn.execute("INSERT INTO trades VALUES ('o3','XLSX','EURSEK112526C-3','FX_OPTION','o3','2026-08-10',1e6,0.01,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('o3','XLSX','EURSEK112526C-3','FX_OPTION','o3','2026-08-10',1e6,0.01,"
                  "'acc','cp','','t','d','','','')")
     conn.commit()
     spot_ids = [r.instrument_id for r in live.build_requests(conn, "2026-08-17") if r.mark_type == "SPOT"]
@@ -1369,7 +1369,7 @@ def _fx_option_db(tmp_path):
     from engine.options.store import set_option_terms
     p, conn = _db(tmp_path)
     conn.execute("INSERT INTO instruments VALUES ('USDJPY111926P-1','FX_OPTION','USD','JPY',1,0,'USDJPY Curncy','2026-11-19')")
-    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','USDJPY111926P-1','FX_OPTION','o1','2026-08-14',1000000,0.01,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('o1','XLSX','USDJPY111926P-1','FX_OPTION','o1','2026-08-14',1000000,0.01,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','USD',1000000,'2026-08-14','2026-11-19',0,0)")
     conn.commit()
@@ -1572,7 +1572,7 @@ def _rollover_db(tmp_path):
         ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"),
         ("CLZ6 Comdty", "FUTURE", "CL", "USD", 1000, 0, "CLZ6 Comdty", "2026-12-18"),
     ])
-    conn.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+    conn.executemany("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
         ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", "2026-09-10", -1e6, 0.65, "acc", "cp", "", "t", "d", "", "", ""),
         ("a2", "XLSX", "AUDUSD", "FX_FWD", "a2", "2026-09-10", 2e6, 0.66, "acc", "cp", "", "t", "d", "", "", ""),
         ("f1", "XLSX", "CLZ6 Comdty", "FUTURE", "f1", "2026-09-10", 2, 7500.0, "acc", "cp", "", "t", "d", "", "", ""),
@@ -1824,7 +1824,7 @@ def test_options_step_prices_a_book_of_options_on_futures_with_no_fx_option(tmp_
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                  "bbg_ticker, expiry_date) VALUES ('CLZ26C 75 Comdty','CMDTY_OPTION','NYMEX:CL','USD',1000,0,"
                  "'CLZ6C 75 Comdty','2026-11-17')")
-    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','CLZ26C 75 Comdty','CMDTY_OPTION','o1','2026-09-10',3,1.25,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('o1','XLSX','CLZ26C 75 Comdty','CMDTY_OPTION','o1','2026-09-10',3,1.25,"
                  "'acc','cp','','t','d','','','')")
     conn.commit()
 
@@ -1866,7 +1866,7 @@ def _lme_db(tmp_path, with_fx=False):
         conn = schema.connect(p)
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                  "bbg_ticker, expiry_date) VALUES ('LME:CA','LME_FWD','LME:CA','USD',1.0,0,'LMCADY Comdty','9999-12-31')")
-    conn.execute("INSERT INTO trades VALUES ('l1','XLSX','LME:CA','LME_FWD','l1','2026-09-10',25.0,9700.0,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('l1','XLSX','LME:CA','LME_FWD','l1','2026-09-10',25.0,9700.0,"
                  "'acc','cp','','t','d','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("l1", 1, "FX_NEAR", "LME:CA", 25.0, "2026-09-10", _LME_PROMPT, 9700.0, 0),

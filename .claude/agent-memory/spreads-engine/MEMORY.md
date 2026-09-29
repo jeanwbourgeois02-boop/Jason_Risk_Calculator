@@ -4,4 +4,7 @@
 - [Perf: book_spreads](perf-book-spreads.md) — 2026-09-28: the reference close is scope-dependent (never hoist it), the all-priced shortcut, C yaml loader, how to force unpriced trades in tests
 - [Strategy and trade type](strategy-and-trade-type.md) — 2026-09-28: trades.strategy is the position first; type rules, flat-calendar and same-exchange choices, outright rows
 - [Gross/net notional](gross-net-notional.md) — 2026-09-28: gross_usd / net_usd / notional_reason per spread, position, outright; open option blanks the group; closed = 0
-- [Strategies as pairs](strategies-pairs.md) — 2026-09-28: label rule first then fallback with a note, whole-lot pairing, raw China/foreign ratio, hedges = fx roots only, split only when the Daily exists
+- [Strategies as pairs](strategies-pairs.md) — 2026-09-28: label rule first then fallback with a note, whole-lot pairing, raw China/foreign ratio, hedges via hedges.py (FX options yes, XAU no), CNY coverage, split only when the Daily exists
+- [Period explain](period-explain.md) — 2026-09-29: one bucket order (explain + Book Daily split), positions_of, hedges.py (XAU no, FX option yes)
+- [Scorecard and carry](scorecard-and-carry.md) — 2026-09-29: ideas closed at flat, P&L at as-of LTD, stats; calendar roll-down on the research curve, common date
+- [Rolls](rolls.md) — 2026-09-29: rolls from fills, position per trade name, pooled pass, roll-ins kept labelled; real book: 2 cattle roll-ins, 1 HRC roll

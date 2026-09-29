@@ -79,7 +79,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-from engine.pnl.valuation import LISTED_OPTION_PRODUCTS
+from engine.pnl.valuation import LISTED_OPTION_PRODUCTS, closed_out_options
 
 FX_PRODUCTS = frozenset({"FX_SPOT", "FX_FWD", "FX_SWAP"})
 # Products whose cash legs (settles_cash = 1) are ladder records while a non-cash leg of
@@ -325,8 +325,16 @@ def option_records_from_db(conn, as_of_date: str,
     option with no official DELTA mark, or with a DELTA but no official SPOT for its
     pair, contributes nothing and is listed in `unresolved` with the reason -- never
     dropped silently, never valued at a substitute (CLAUDE.md: the engine must raise
-    rather than drop a NULL delta; here the ladder shows it as unresolved instead)."""
+    rather than drop a NULL delta; here the ladder shows it as unresolved instead).
+
+    Every trade of an FX option group closed out as of `as_of_date` (bought and sold back
+    in full: `engine.pnl.valuation.closed_out_options`, the valuation's own grouping) is
+    left out, marks or no marks (user, 2026-09-29; CLAUDE.md "A closed-out option is not
+    live"). It is not a gap, so it is not in `unresolved`;
+    `engine.ladder.ladder.closed_out_fx_options` names those trades. A part sell-back
+    stays live on its marks."""
     mapping = DEFAULT_BOOK_MAPPING if book_mapping is None else book_mapping
+    closed = closed_out_options(conn, as_of_date)
     records: List[dict] = []
     unresolved: List[Unresolved] = []
     seen: set = set()
@@ -336,6 +344,8 @@ def option_records_from_db(conn, as_of_date: str,
         if trade_id in seen:
             continue  # latest official mark per trade wins (ORDER BY snapped_at DESC)
         seen.add(trade_id)
+        if str(trade_id) in closed:
+            continue  # closed out as of as_of_date: no delta (docstring)
         pair = f"{base_ccy}{quote_ccy}"
         if delta is None:
             unresolved.append(Unresolved(trade_id, instrument_id,

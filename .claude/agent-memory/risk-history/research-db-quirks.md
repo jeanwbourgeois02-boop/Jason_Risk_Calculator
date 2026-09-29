@@ -15,5 +15,7 @@ Facts about `../Commodity Dashboard/var/rv.sqlite`, checked 2026-09-24 on the de
 - **Curve units.** `research_curve` gives `settle` in quote units (raw x price_scale) and `raw_settle` as stored; our FUTURE_PX marks are Bloomberg's raw quoted price, so a screen comparing with our marks must use `raw_settle` (or scale ours). Dev mock expiries are not real (CLU26 on 2026-09-30).
 - The FX pairs stored are all USD-base (USDCNH, USDCNY, USDEUR, USDGBP, USDJPY, USDMYR, USDCAD). CNY goes through USDCNH by default (the research app's rule).
 
+- **Open interest and volume** (checked 2026-09-29 for `contract_liquidity`): `price_daily.open_interest` / `volume` are Bloomberg OPEN_INT / PX_VOLUME per contract, rebuilt from generics 1..calendar_depth, so a deferred month beyond the depth has no figures at all. The research app pulls volume only for its last 400 days (`BBG_VOLUME_HISTORY_DAYS`): older real rows can have NULL volume. Its mock notes the Chinese exchanges' January 2020 switch from double- to single-sided OI counting and does not model it; mock vol/OI is ~0.7-0.8 on SHFE/INE/DCE vs ~0.06 on COMEX/NYMEX/LME (generator turnover, not evidence). LME is the research app's monthly contract (LPZ26 for copper Dec), not a prompt. Mock DB rebuilt 2026-09-28, data to 2026-09-28.
+
 **Why:** these facts decide whether a position's risk history is right or silently empty.
 **How to apply:** re-check the root and depth differences on the Bloomberg PC's copy, and after any contract-master change to `bbg_root`. See [[dev-pc-parquet-and-package-init]].

@@ -38,6 +38,10 @@ What is served (all on `CommodityHistory`, from `load_commodity_history`):
     day's USD per quote unit from the research app's own pair (CNY through USDCNH by
     default, the research app's own rule; USDCNY only when asked), the last rate on or
     before the day within `FX_TOLERANCE_DAYS`. Returns are summed P&L, never re-marked.
+  * `contract_liquidity(contract_ids, as_of, window=20)` (also a module function): each
+    contract's latest open interest and its average daily volume over the last `window`
+    days, in the research contract's lots, for a liquidity check of position size; the
+    caveats (Chinese counting, LME, the research depth) are on the module function.
   * `window_move(root_id, months_to_expiry, start, end)` (also a module function on the
     default history): the fractional settlement change of the one contract that was
     `months_to_expiry` months out on the `start` close, held to the `end` close with no
@@ -81,6 +85,7 @@ from __future__ import annotations
 
 import bisect
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,10 +94,11 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
-from data.contracts.tickers import month_from_code, parse_bbg_ticker
+from data.contracts.tickers import month_from_code, padded_root, parse_bbg_ticker, parse_option_ticker
+from data.contracts.universe import load_roots
 
 __all__ = ["CommodityHistory", "DEFAULT_FX_PAIR", "DEFAULT_PATH", "ENV_VAR", "LABEL", "candidates",
-           "load_commodity_history", "research_curve", "window_move"]
+           "contract_liquidity", "load_commodity_history", "research_curve", "window_move"]
 
 LABEL = "research"
 
@@ -102,6 +108,42 @@ DEFAULT_PATH = _REPO.parent / "Commodity Dashboard" / "var" / "rv.sqlite"
 TABLES = ("instrument", "contract", "price_daily", "fx_daily")
 CONNECT_TIMEOUT_SECONDS = 5.0
 FX_TOLERANCE_DAYS = 7
+# The liquidity check (`contract_liquidity`): days in the volume average, and how old the
+# latest open interest may be before the note says so.
+LIQUIDITY_WINDOW = 20
+LIQUIDITY_STALE_DAYS = 7
+CHINA_EXCHANGES = ("SHFE", "DCE", "ZCE", "INE", "GFEX")
+_CHINA_NOTE = ("{exchange}: open interest and volume as the research app stores them from Bloomberg, no factor "
+               "applied; the Chinese exchanges counted open interest double-sided until January 2020 and "
+               "single-sided since (the research app's note), and whether Bloomberg's figures for this contract "
+               "are single- or double-sided is not verified on a terminal")
+_LME_ID_RE = re.compile(r"^(?P<root>LME:[A-Z0-9]+)\s+(?P<prompt>\d{4}-\d{2}-\d{2})$")
+
+
+def _our_root_of(contract_id: str) -> Optional[str]:
+    """Our root id for a canonical contract id, by its Bloomberg root in `config/contracts.csv`;
+    None when no root or more than one has it (the id is then matched as it is)."""
+    parts = parse_bbg_ticker(contract_id)
+    if parts is None:
+        return None
+    try:
+        roots = load_roots()
+    except Exception:  # noqa: BLE001 -- no universe: the id is matched as it is
+        return None
+    hits = [r.root_id for r in roots.values()
+            if r.bbg_root.strip().upper() == parts[0] and r.bbg_yellow_key.upper() == parts[3].upper()]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _our_lot(root_id: Optional[str]) -> Optional[Tuple[float, str]]:
+    """(contract_size, size_unit) of our root, or None."""
+    if not root_id:
+        return None
+    try:
+        r = load_roots().get(_norm(root_id).replace(" ", ""))
+    except Exception:  # noqa: BLE001 -- no universe: no lot comparison
+        return None
+    return (float(r.contract_size), r.size_unit) if r is not None else None
 # The pair each currency converts through when the caller names none (the research
 # app's fx_daily rule: "convert CNY prices with USDCNH unless a spread names USDCNY").
 DEFAULT_FX_PAIR = {"CNY": "USDCNH", "CNH": "USDCNH"}
@@ -683,6 +725,152 @@ class CommodityHistory:
                          fx_pair=fx_pair, fx_missing_days=missing)
         return usd
 
+    # --------------------------------------------------------------- liquidity
+    def _liquidity_target(self, contract_id: str, root_id: Optional[str]) -> Tuple[Optional[str], Optional[str], dict]:
+        """(the research contract id, our root id, extras) for one of our contract ids, or
+        (None, our root id, extras with 'reason'). Extras: 'notes', 'underlying'."""
+        extra: dict = {"notes": [], "underlying": None}
+        text = " ".join(str(contract_id or "").split())
+        lme = _LME_ID_RE.match(text.upper())
+        if lme:
+            root = root_id or lme.group("root")
+            prompt = lme.group("prompt")
+            key = _norm(root).replace(" ", "")
+            mine = self.contracts[self.contracts["instrument_id"] == key]
+            year, month = int(prompt[:4]), int(prompt[5:7])
+            hit = mine[(mine["year"] == year) & (mine["month"] == month)]
+            if hit.empty:
+                extra["reason"] = (f"LME prompt {prompt}: no {root} contract for {prompt[:7]} in the research "
+                                   f"database ({self.path})")
+                return None, root, extra
+            extra["notes"].append(f"LME: the research app's {hit.index[0]}, the monthly contract of the prompt "
+                                  "month; a ticket's own prompt date has no volume or open interest of its own, "
+                                  "and whether Bloomberg reports these per monthly prompt is not verified")
+            return str(hit.index[0]), root, extra
+        opt = parse_option_ticker(text) if parse_bbg_ticker(text) is None else None
+        if opt is not None:
+            broot, code, digits, _, _, key = opt
+            extra["underlying"] = f"{padded_root(broot)}{code}{digits} {key}"
+            extra["reason"] = ("an option on a future: the research app keeps open interest and volume for "
+                               f"futures only; ask for its underlying {extra['underlying']}")
+            return None, root_id or _our_root_of(extra["underlying"]), extra
+        root = root_id or _our_root_of(text)
+        research_id, why = self.resolve_contract(text, root)
+        if research_id is None:
+            extra["reason"] = why
+            return None, root, extra
+        return research_id, root, extra
+
+    def contract_liquidity(self, contract_ids, as_of, window: int = LIQUIDITY_WINDOW) -> Dict[str, dict]:
+        """Open interest and average daily volume per contract; see the module function."""
+        if isinstance(contract_ids, dict):
+            items = [(str(k), (str(v) if v else None)) for k, v in contract_ids.items()]
+        else:
+            items = [(str(k), None) for k in (contract_ids or [])]
+        window = max(1, int(window or LIQUIDITY_WINDOW))
+        try:
+            day = pd.Timestamp(as_of).normalize()
+            as_of_iso = day.strftime("%Y-%m-%d")
+        except (TypeError, ValueError):
+            day, as_of_iso = None, str(as_of)
+        out: Dict[str, dict] = {}
+        plan: Dict[str, Tuple[str, dict]] = {}
+        for cid, root in items:
+            rec = {"contract_id": cid, "root_id": root, "source_contract_id": None, "research_root": None,
+                   "open_interest": None, "oi_date": None, "adv": None, "adv_days": 0, "window": window,
+                   "volume_last": None, "volume_date": None, "lot_size": None, "lot_unit": "", "exchange": "",
+                   "underlying": None, "label": LABEL, "as_of": as_of_iso, "reason": "", "note": ""}
+            out[cid] = rec
+            if not self.available:
+                rec["reason"] = self.reason
+                continue
+            if day is None:
+                rec["reason"] = f"as-of {as_of!r} is not a date"
+                continue
+            research_id, our_root, extra = self._liquidity_target(cid, root)
+            rec["root_id"] = our_root
+            rec["underlying"] = extra["underlying"]
+            if research_id is None:
+                rec["reason"] = extra.get("reason") or f"contract {cid} is not in the research database"
+                continue
+            plan[cid] = (research_id, extra)
+        if not plan:
+            return out
+        wanted = sorted({rid for rid, _ in plan.values()})
+        try:
+            df = _query(Path(self.path),
+                        "SELECT contract_id, date, open_interest, volume FROM price_daily WHERE date <= ? "
+                        "AND contract_id IN (" + ",".join("?" * len(wanted)) + ") ORDER BY contract_id, date",
+                        (as_of_iso, *wanted))
+        except Exception as exc:  # noqa: BLE001 -- a failed read is a reason, never a crash
+            for cid in plan:
+                out[cid]["reason"] = f"{self.path} could not be read ({type(exc).__name__}: {exc})"
+            return out
+        groups = {k: g for k, g in df.groupby("contract_id", sort=False)}
+        for cid, (rid, extra) in plan.items():
+            rec = out[cid]
+            notes: List[str] = list(extra["notes"])
+            research_root = str(self.contracts.at[rid, "instrument_id"])
+            rec.update(source_contract_id=rid, research_root=research_root, exchange=research_root.split(":")[0])
+            if research_root in self.instruments.index:
+                inst = self.instruments.loc[research_root]
+                size = inst.get("contract_size")
+                rec["lot_size"] = float(size) if size is not None and pd.notna(size) else None
+                rec["lot_unit"] = str(inst.get("size_unit") or "")
+                if inst.get("exchange"):
+                    rec["exchange"] = str(inst.get("exchange"))
+            ours = _our_lot(rec["root_id"])
+            if ours and rec["lot_size"] is not None and (abs(ours[0] - rec["lot_size"]) > 1e-9
+                                                         or _norm(ours[1]) != _norm(rec["lot_unit"])):
+                notes.append(f"a research lot is {rec['lot_size']:g} {rec['lot_unit']}, ours "
+                             f"{ours[0]:g} {ours[1]}: the figures are in research lots")
+            if rec["exchange"].upper() in CHINA_EXCHANGES:
+                notes.append(_CHINA_NOTE.format(exchange=rec["exchange"].upper()))
+            g = groups.get(rid)
+            if g is None or g.empty:
+                rec["reason"] = self._no_liquidity_reason(rid, research_root, as_of_iso)
+                rec["note"] = "; ".join(notes)
+                continue
+            oi = g.dropna(subset=["open_interest"])
+            vol = g.dropna(subset=["volume"])
+            missing = []
+            if oi.empty:
+                missing.append("no open interest on file on or before " + as_of_iso)
+            else:
+                rec["open_interest"] = float(oi["open_interest"].iloc[-1])
+                rec["oi_date"] = str(oi["date"].iloc[-1])[:10]
+                gap = (day - pd.Timestamp(rec["oi_date"])).days
+                if gap > LIQUIDITY_STALE_DAYS:
+                    notes.append(f"latest open interest is {gap} days before {as_of_iso}")
+            if vol.empty:
+                missing.append("no volume on file on or before " + as_of_iso
+                               + " (the research app pulls volume only for its most recent history)")
+            else:
+                last = vol.tail(window)
+                rec["adv"] = float(last["volume"].mean())
+                rec["adv_days"] = int(len(last))
+                rec["volume_last"] = float(vol["volume"].iloc[-1])
+                rec["volume_date"] = str(vol["date"].iloc[-1])[:10]
+                if rec["adv_days"] < window:
+                    notes.append(f"average over {rec['adv_days']} day(s) only, fewer than {window} with volume on file")
+            rec["reason"] = "; ".join(missing)
+            rec["note"] = "; ".join(notes)
+        return out
+
+    def _no_liquidity_reason(self, research_id: str, research_root: str, as_of_iso: str) -> str:
+        """Why a resolved contract has no figures on or before `as_of_iso`."""
+        ids, ltds = self._strip(research_root)
+        depth = None
+        if research_root in self.instruments.index:
+            d = self.instruments.at[research_root, "calendar_depth"]
+            depth = int(d) if d is not None and pd.notna(d) else None
+        listed = [c for c, t in zip(ids, ltds) if t > as_of_iso]
+        if depth and research_id in listed and listed.index(research_id) + 1 > depth:
+            return (f"{research_id} is month {listed.index(research_id) + 1} of the listed strip on {as_of_iso}; "
+                    f"the research app keeps figures only for the {depth} nearest {research_root} contracts, "
+                    "so a deferred month this far out has none")
+        return f"no open interest or volume on file for {research_id} on or before {as_of_iso}"
+
 
 # ------------------------------------------------------------------------ load
 def candidates() -> List[dict]:
@@ -717,9 +905,11 @@ def _load(path: Path) -> CommodityHistory:
                                         f"(no {', '.join(missing)} table)")
             inst_cols = {r[1] for r in conn.execute("PRAGMA table_info(instrument)")}
             unit_col = "quote_unit" if "quote_unit" in inst_cols else "'' AS quote_unit"
+            extra_cols = ", ".join(c if c in inst_cols else f"NULL AS {c}"
+                                   for c in ("contract_size", "size_unit", "exchange"))
             instruments = pd.read_sql_query(
                 "SELECT instrument_id, name, sector, currency, price_scale, bbg_root, calendar_depth, "
-                f"{unit_col} FROM instrument", conn)
+                f"{unit_col}, {extra_cols} FROM instrument", conn)
             contracts = pd.read_sql_query(
                 "SELECT contract_id, instrument_id, year, month, last_trade_date FROM contract", conn)
             fx = pd.read_sql_query("SELECT pair, date, rate FROM fx_daily", conn)
@@ -810,3 +1000,44 @@ def window_move(root_id: str, months_to_expiry: float, start, end,
     (fractional settlement change of the contract `months_to_expiry` months out on `start`,
     held to `end` without a roll, '') or (None, reason)."""
     return load_commodity_history(path).window_move(root_id, months_to_expiry, start, end)
+
+
+def contract_liquidity(contract_ids, as_of, window: int = LIQUIDITY_WINDOW,
+                       db_path: Union[str, Path, None] = None) -> Dict[str, dict]:
+    """Each contract's open interest and average daily volume from the research app's
+    `price_daily` (Bloomberg's OPEN_INT and PX_VOLUME as it stores them), for a liquidity check
+    of position size against the market. Read-only through the cached
+    `load_commodity_history(db_path)`; CONTEXT only, labelled 'research': never a mark, never
+    in P&L or delta (hard rule 2), nothing asks Bloomberg (hard rule 8). Never raises.
+
+    `contract_ids`: our canonical ids ('CLZ26 Comdty', 'CUX26 Comdty'), or a dict {our id:
+    our root_id} when the root is known (it matters where the research app's Bloomberg root
+    is still its 'ZZ' placeholder: the id is then matched on (root, year, month), as for the
+    history). With ids alone, the root is found in `config/contracts.csv` by the id's
+    Bloomberg root. Also accepted: an LME ticket's 'LME:CA 2026-12-10' (curve-positions' id;
+    read from the research app's contract of the prompt month) and an option id
+    ('CLZ26C 75 Comdty', which has no figures: its `underlying` future id is given to ask for).
+
+    Returns {our id: {contract_id, root_id (ours), source_contract_id (the research id
+    read), research_root, open_interest (lots, the latest on or before `as_of`), oi_date,
+    adv (mean daily volume in lots over the last `window` days with a volume on or before
+    `as_of`), adv_days (how many it used), window, volume_last, volume_date, lot_size and
+    lot_unit (the research contract's lot, which the figures are in), exchange, underlying,
+    label 'research', as_of, reason ('' when both figures are there, else what is missing
+    and why), note (caveats, '' when none)}}. A value not on file is None, with the reason.
+
+    Caveats, in `note` or `reason` where they apply:
+      * The research app keeps a contract's rows only while it is among its root's
+        `calendar_depth` nearest contracts, so a deferred month beyond that depth has no
+        figures (the reason says so).
+      * Chinese exchanges (SHFE, DCE, ZCE, INE, GFEX): no factor is applied. The research
+        app's own note is that these exchanges counted open interest double-sided until
+        January 2020 and single-sided since; whether Bloomberg's figures for a contract are
+        single- or double-sided is not verified on a terminal. The dev PC's research data is
+        mock, so it cannot settle it.
+      * LME: the monthly contract of the prompt month, not the ticket's own prompt; whether
+        Bloomberg reports LME volume and open interest per monthly prompt is not verified.
+      * The figures are in the research contract's lots; a lot size that differs from ours
+        is named.
+    """
+    return load_commodity_history(db_path).contract_liquidity(contract_ids, as_of, window)

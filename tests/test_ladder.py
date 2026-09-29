@@ -165,7 +165,7 @@ def _insert_instrument(conn, instrument_id, base_ccy, quote_ccy, asset_class="FX
 
 def _insert_trade(conn, trade_id, instrument_id, product, quantity, account="ACC", package_id=None):
     conn.execute(
-        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, "MANUAL", instrument_id, product, package_id or trade_id, AS_OF, quantity, 1.0,
          account, "CPTY", "STRAT", "TRADER", "synthetic", "", "", ""),
     )

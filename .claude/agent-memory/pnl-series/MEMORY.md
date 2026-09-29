@@ -1,3 +1,4 @@
 - [Lane inheritance](lane-inheritance.md) — split from pnl-engine 2026-09-24; which tests in shared test_pnl.py are mine vs pnl-valuation's
 - [Stress API 2026-09-24](stress-api-2026-09-24.md) — EQUITY move and futures line removed; load_scenarios drops EQUITY and equity-only scenarios
 - [FX blotter notional in USD](fx-blotter-notional-usd.md) — futures notional at spot of as_of since 2026-09-24; notional_reason column; crosses still base qty
+- [Daily series 2026-09-29](daily-series-2026-09-29.md) — engine/pnl/series.py: per-day filled valuation memo (never in the DB), periods, months, track record on the header rule, weekend as-of

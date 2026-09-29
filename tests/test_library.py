@@ -15,7 +15,7 @@ from data.ingest import schema
 
 _SAMPLE_CSV = Path(__file__).resolve().parents[1] / "data" / "sample" / "blotter_sample.csv"
 _INSTRUMENT = "INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)"
-_TRADE = "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+_TRADE = "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 _LEG = "INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)"
 
 

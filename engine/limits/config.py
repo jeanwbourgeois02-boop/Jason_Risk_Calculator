@@ -8,6 +8,14 @@ file is not an error: every rate and limit is then unset (``loaded`` False, ``no
 
 Nothing here has a default number: an unset rate is None and the commodity is n/a; an unset
 limit is None and the check is NOT_SET.
+
+The ``liquidity:`` section (2026-09-29) holds the liquidity check's parameters
+(``engine/limits/liquidity.py``): ``participation`` (share of the average daily volume one can
+trade, (0, 1]), ``amber_pct_oi`` / ``red_pct_oi`` (share of open interest, (0, 1]),
+``amber_days_to_exit`` / ``red_days_to_exit`` (days, > 0), ``window`` (days in the volume
+average, a whole number >= 1) and ``placeholder`` (true while the figures are not Jason's). A
+null figure switches off the test it drives (never replaced by a number); amber above red is
+refused. A file with no section has no liquidity thresholds (``liquidity`` empty).
 """
 
 from __future__ import annotations
@@ -25,6 +33,8 @@ DEFAULT_LIMITS_PATH = Path(__file__).resolve().parents[2] / "config" / "limits.y
 CREDIT_KEYS = ("calendar", "benchmark", "processing", "substitution")
 EXCHANGE_KEYS = ("spot_month", "single_month", "all_months")
 DEFAULT_WARN_FRACTION = 0.8
+LIQUIDITY_KEYS = ("placeholder", "participation", "amber_pct_oi", "red_pct_oi", "amber_days_to_exit",
+                  "red_days_to_exit", "window")
 
 
 class LimitsConfigError(ValueError):
@@ -47,6 +57,7 @@ class LimitsConfig:
     lots_per_month_default: Optional[float] = None
     lots_per_month: Dict[str, Optional[float]] = field(default_factory=dict)
     exchange: Dict[str, Dict[str, Optional[float]]] = field(default_factory=dict)
+    liquidity: Dict[str, Any] = field(default_factory=dict)
     file: str = ""
     loaded: bool = False
     note: str = ""
@@ -105,7 +116,7 @@ def _number(value: Any, where: str, low: float = 0.0, high: Optional[float] = No
         raise LimitsConfigError(f"{where}: {value!r} is not a number (null leaves it unset)")
     x = float(value)
     if not math.isfinite(x) or x < low or (low_open and x == low) or (high is not None and x > high):
-        span = f"{'(' if low_open else '['}{low:g}, {high:g}]" if high is not None else f">= {low:g}"
+        span = f"{'(' if low_open else '['}{low:g}, {high:g}]" if high is not None else f"{'>' if low_open else '>='} {low:g}"
         raise LimitsConfigError(f"{where}: {value!r} is out of range ({span})")
     return x
 
@@ -125,6 +136,29 @@ def _named(section: Any, known: Iterable[str], what: str, where: str, **bounds) 
     return out
 
 
+def _liquidity(section: Any) -> Dict[str, Any]:
+    """The ``liquidity:`` section checked; {} when the file has none."""
+    if section is None:
+        return {}
+    raw = _keys(section, LIQUIDITY_KEYS, "liquidity")
+    placeholder = raw.get("placeholder", True)
+    if not isinstance(placeholder, bool):
+        raise LimitsConfigError(f"liquidity.placeholder: {placeholder!r} is not true or false")
+    out: Dict[str, Any] = {"placeholder": placeholder}
+    for key in ("participation", "amber_pct_oi", "red_pct_oi"):
+        out[key] = _number(raw.get(key), f"liquidity.{key}", 0.0, 1.0, low_open=True)
+    for key in ("amber_days_to_exit", "red_days_to_exit"):
+        out[key] = _number(raw.get(key), f"liquidity.{key}", 0.0, low_open=True)
+    window = raw.get("window")
+    if window is not None and (isinstance(window, bool) or not isinstance(window, int) or window < 1):
+        raise LimitsConfigError(f"liquidity.window: {window!r} is not a whole number of days >= 1")
+    out["window"] = window
+    for amber, red in (("amber_pct_oi", "red_pct_oi"), ("amber_days_to_exit", "red_days_to_exit")):
+        if out[amber] is not None and out[red] is not None and out[amber] > out[red]:
+            raise LimitsConfigError(f"liquidity.{amber} ({out[amber]:g}) is above liquidity.{red} ({out[red]:g})")
+    return out
+
+
 def load_limits(path: Optional[Union[str, Path]] = None, roots: Optional[dict] = None) -> LimitsConfig:
     """``config/limits.yaml`` read and checked (see the module docstring)."""
     path = Path(path) if path is not None else DEFAULT_LIMITS_PATH
@@ -139,7 +173,7 @@ def load_limits(path: Optional[Union[str, Path]] = None, roots: Optional[dict] =
     root_ids = set(roots)
     sectors = {r.sector for r in roots.values()}
 
-    top = _keys(raw, ("margin", "warn_fraction", "desk_limits", "exchange_limits"), path.name)
+    top = _keys(raw, ("margin", "warn_fraction", "desk_limits", "exchange_limits", "liquidity"), path.name)
     margin = _keys(top.get("margin"), ("outright_rate", "usd_per_lot", "spread_credit"), "margin")
     outright = _keys(margin.get("outright_rate"), ("sectors", "roots"), "margin.outright_rate")
     rate = {"low": 0.0, "high": 1.0}
@@ -169,6 +203,8 @@ def load_limits(path: Optional[Union[str, Path]] = None, roots: Optional[dict] =
         entry = _keys(v, EXCHANGE_KEYS, f"exchange_limits.{rid}")
         exchange[rid] = {key: _number(entry.get(key), f"exchange_limits.{rid}.{key}") for key in EXCHANGE_KEYS}
 
+    liquidity = _liquidity(top.get("liquidity"))
+
     return LimitsConfig(
         sector_rates=sector_rates, root_rates=root_rates, usd_per_lot=per_lot, spread_credit=credit,
         warn_fraction=warn,
@@ -180,5 +216,5 @@ def load_limits(path: Optional[Union[str, Path]] = None, roots: Optional[dict] =
         net_usd_sector=_named(sec.get("sectors"), sectors, "sector", "desk_limits.net_usd_per_sector.sectors"),
         lots_per_month_default=_number(lpm.get("default"), "desk_limits.lots_per_contract_month.default"),
         lots_per_month=_named(lpm.get("roots"), root_ids, "contract root", "desk_limits.lots_per_contract_month.roots"),
-        exchange=exchange, file=str(path), loaded=True, note="",
+        exchange=exchange, liquidity=liquidity, file=str(path), loaded=True, note="",
     )

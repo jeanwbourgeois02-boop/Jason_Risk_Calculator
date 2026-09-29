@@ -202,11 +202,13 @@ def _excludes(details: List[dict], what: str = "contracts") -> str:
 
 
 def commodity_underlyers(conn: sqlite3.Connection, as_of: str, history, curve: dict,
-                         spreads: Optional[dict]) -> Tuple[List[dict], Dict[str, pd.Series], List[str]]:
+                         spreads: Optional[dict], per_lot: Optional[_PerLot] = None
+                         ) -> Tuple[List[dict], Dict[str, pd.Series], List[str]]:
     """(rows, {row key: daily USD P&L}, missing) for the COMMODITY, SECTOR and SPREAD
     underlyers (module docstring). Each row carries `key` (unique across the Risk tab's rows),
-    `role`, `parts` (the row keys a view sums) and `contracts` / `legs` (the per-contract detail)."""
-    per_lot = _PerLot(history, as_of)
+    `role`, `parts` (the row keys a view sums) and `contracts` / `legs` (the per-contract detail).
+    `per_lot`: a `_PerLot` to share with the position risk (`positions.py`), else a new one."""
+    per_lot = per_lot if per_lot is not None else _PerLot(history, as_of)
     rows: List[dict] = []
     series: Dict[str, pd.Series] = {}
     missing: List[str] = []

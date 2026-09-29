@@ -16,3 +16,10 @@
 - [Strategy means spread type](feedback-strategy-means-spread-type.md) — user correction 2026-09-28: strategy = cross exchange / cross product / term structure; the PBRoot name is the "trade"; a blotter row a "fill"
 - [Lazy tab bodies 2026-09-28](lazy-tab-bodies-2026-09-28.md) — only the Book builds with the page; build_tab_bodies + TAB_BUILT_ID store build a tab on first selection; the Dash insert-fires-outputs rule; browser proof recipe
 - [Book research context + polish 2026-09-28](book-research-context-polish-2026-09-28.md) — pair rows carry the research app's z / %ile / SVG sparkline (read-only, the Phase E rule reversed for the Book); section_head + fold meta, static By strategy row with Download CSV, loaded_line; proof recipe
+- [Exposure layout 2026-09-29](exposure-layout-2026-09-29.md) — Physical|Lots|USD, one-row single-exchange commodities, Net/Leftover fallbacks, hedge from spreads hedges, panel ids + plotly category axis
+- [Data tab rebuild 2026-09-29](data-tab-rebuild-2026-09-29.md) — status line of links, one Missing table, Marks check over a store, reference closes, diagnostics fold; smoke-test signature; tint trap
+- [P&L history + explain 2026-09-29](pnl-history-explain-2026-09-29.md) — period switch, explain tiles, LTD+daily chart, best/worst, months, track record off engine series; header-match proof
+- [Blotter tab = audit trail 2026-09-29](blotter-tab-audit-trail-2026-09-29.md) — Trades relabelled Blotter, no P&L; blotter_view/fills_frame, Options sub-tab only with an open option, 3-output _update
+- [Book one grid 2026-09-29](book-one-grid-2026-09-29.md) — Book = one grouped tree table (views, chevrons, static filter row, sibling sort, inline detail), link ids, identity rule, Chrome proof recipe
+- [Risk four blocks 2026-09-29](risk-four-blocks-2026-09-29.md) — headline / by position (+liquidity) / correlation / one stress list; clientside group switch; margin hidden while placeholder
+- [Blotter raw cells 2026-09-29](blotter-raw-cells-2026-09-29.md) — fills table shows broker_symbol / broker_price as written; '' reasons; ×100 only when price = cell × scale

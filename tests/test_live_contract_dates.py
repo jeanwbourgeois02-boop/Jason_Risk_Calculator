@@ -30,7 +30,7 @@ def _db(tmp_path, extra_futures=()):
                      "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
                      (iid, "FUTURE", "NYMEX:" + iid[:2], "USD", 1000.0, 0, ticker, expiry))
         tid = f"f{n}"
-        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (tid, "XLSX", iid, "FUTURE", tid, "2026-09-10", 2, 70.0, "acc", "cp", "", "t", "d", "", "", ""))
         conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
                      (tid, 1, "NOTIONAL", "USD", 2 * 1000 * 70.0, "2026-09-10", expiry, 70.0, 0))
@@ -245,7 +245,7 @@ def _option_db(tmp_path):
     conn.execute("INSERT INTO instruments (instrument_id, asset_class, base_ccy, quote_ccy, multiplier, is_ndf, "
                  "bbg_ticker, expiry_date) VALUES (?,?,?,?,?,?,?,?)",
                  (OPTION_ID, "CMDTY_OPTION", "NYMEX:CL", "USD", 1000.0, 0, OPTION_TICKER, OPTION_ESTIMATE))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("o1", "XLSX", OPTION_ID, "CMDTY_OPTION", "o1", "2026-09-10", 3, 1.25, "acc", "cp", "", "t", "d", "", "", ""))
     conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
                  ("o1", 1, "NOTIONAL", "USD", 3 * 1000 * 1.25, "2026-09-10", OPTION_ESTIMATE, 1.25, 0))

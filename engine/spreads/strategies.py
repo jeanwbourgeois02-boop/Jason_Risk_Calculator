@@ -27,7 +27,10 @@ strategy is a ``hedge``, never paired, whatever its status (a settled one still 
 its settlement day, which is hedge in the split); so is an FX spot / forward / swap booked under
 the strategy's PBRoot (user, 2026-09-28: a rule, Jason's export has no such row yet), its USD
 notional the USD leg's signed amount from the fill (long USD positive; None with a reason when
-the pair has no USD leg). An option is a residual, not paired, said so. An LME prompt pairs by
+the pair has no USD leg), and an FX option on a currency pair (user, 2026-09-29), its USD
+notional the USD leg of its delta (``hedges.py`` is the one test). A precious-metal pair (XAU,
+XAG, XPT, XPD on either side) is never a hedge (user, 2026-09-29): an FX product on one is a
+residual of its own, said so. An option on a future is a residual, not paired, said so. An LME prompt pairs by
 its prompt month. The unlabelled trades ('' entry) have no type
 of their own: there a cross pair is made only where a ``config/spreads/`` template names the two
 roots (so gold is never paired with aluminium because both are December), and calendars as
@@ -47,14 +50,16 @@ Notionals come from ``book.notional`` (lots x multiplier x mark x spot off the l
 with the business days between the two legs' events (``legs_apart_bd``, flagged over 5).
 
 Per strategy: the pairs, residuals and hedges, the type, gross / net notional, the hedge
-coverage and the Daily split of ``daily_split.py``. **Coverage sign** (user, 2026-09-28, from
+coverage and the Daily split (below). **Coverage sign** (user, 2026-09-28, from
 Jason's own fills: buy SHFE zinc, sell USD/CNH at matched notional): a long China leg is long
 USDCNH at its notional (its CNY price rises with USDCNH through import parity) and is hedged by
 a SHORT USD/CNH position, so the right hedge has the opposite sign to ``cny_net_usd``:
 ``hedge_coverage_net = -hedge_usd / cny_net_usd`` (1.0 = fully hedged), ``unhedged_cny =
 cny_net_usd + hedge_usd``, and a hedge with the same sign as the exposure is warned in
-``hedge_reason``. The Daily split is that of
-``daily_split.py``. Every open lot of the book is in exactly one pair, residual or hedge; a
+``hedge_reason``. The Daily split follows the P&L explain's one bucket order
+(``period_explain.classify_trades``, user yes 2026-09-29): new trades, realised, hedge, then
+spread / FX by ``daily_split``'s identity, and ``other`` for a trade that cannot be split, so the
+Book and the P&L tab put a trade in the same bucket. Every open lot of the book is in exactly one pair, residual or hedge; a
 trade's id is listed once, on the pair or residual its lots were allocated to (by trade date),
 and ``contract_trade_ids`` on a leg lists every trade of the contract.
 
@@ -74,16 +79,15 @@ import pandas as pd
 
 from data.contracts import ContractRoot, quantity_factor
 from engine.pnl.valuation import usd_per_quote
-from engine.spreads.daily_split import daily_split
 from engine.spreads.grouping import LEFTOVER_FLOOR, Leg, calendar_shape, template_shape
+from engine.spreads.hedges import FX_HEDGE_PRODUCTS, fx_non_hedge_why, is_hedge
 from engine.spreads.levels import LevelLeg, LevelSpec, converted, spec_for, spec_to_dict, usd_per_level_unit
 from engine.spreads.templates import Template, lot_in_quote_units
 from engine.spreads.trade_type import CROSS_EXCHANGE, CROSS_PRODUCT, TERM_STRUCTURE, type_fields
 
 PAIRABLE_PRODUCTS = ("FUTURE", "LME_FWD")
-FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")     # under a strategy's PBRoot: its currency hedge (user, 2026-09-28)
+FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP")     # the FX products whose hedge row is per pair and value date
 OPTION_PRODUCTS = ("FX_OPTION", "CMDTY_OPTION", "EQ_OPTION")
-FX_SECTOR = "fx"
 CHINA = "CN"
 RULES = (TERM_STRUCTURE, CROSS_EXCHANGE, CROSS_PRODUCT)   # the fallback order after the labelled rule
 COMMON_UNITS = ("t", "bbl", "mmbtu")                       # one per dimension of contract-master's unit table
@@ -151,13 +155,18 @@ def _build_legs(book, tids: Sequence[str]) -> Tuple[List[PLeg], List[str], List[
     for tid in tids:
         t = book.by_id[tid]
         root = book.roots.get(t["base_ccy"])
-        if (root is not None and root.sector == FX_SECTOR) or t["product"] in FX_PRODUCTS:
+        if is_hedge(root, t["product"], t["base_ccy"], t["quote_ccy"], t["instrument_id"]):
             hedges.append(tid)      # open or settled: its Daily is hedge in the split either way
             continue
         if not book.is_open(tid):
             closed.append(tid)
             continue
-        if t["product"] in OPTION_PRODUCTS:
+        if t["product"] in FX_HEDGE_PRODUCTS and t["product"] not in OPTION_PRODUCTS:
+            # a precious-metal spot / forward / swap: a position of its own (user, 2026-09-29)
+            options.append({"trade_id": tid, "instrument_id": t["instrument_id"], "root_id": str(t["base_ccy"] or ""),
+                            "product": t["product"], "lots": book.lots(tid),
+                            "why": fx_non_hedge_why(t["base_ccy"], t["quote_ccy"], t["instrument_id"])})
+        elif t["product"] in OPTION_PRODUCTS:
             options.append({"trade_id": tid, "instrument_id": t["instrument_id"], "root_id": str(t["base_ccy"] or ""),
                             "product": t["product"], "lots": book.lots(tid),
                             "why": "an option is not paired: it stays outright inside its strategy"})
@@ -629,6 +638,41 @@ def _fx_usd_leg(t: dict, quantity: float) -> Optional[float]:
     return None
 
 
+def _official(book, instrument_id: str, mark_type: str) -> Optional[float]:
+    row = book.conn.execute(
+        "SELECT value FROM marks_official WHERE instrument_id = ? AND mark_type = ? AND as_of_date = ? "
+        "ORDER BY snapped_at DESC LIMIT 1", (instrument_id, mark_type, book.as_of)).fetchone()
+    return _num(row[0]) if row else None
+
+
+def _fx_option_usd(book, open_ids: Sequence[str]) -> Tuple[Optional[float], str]:
+    """(the USD leg of the open FX options' delta, signed long USD positive, why when None): per
+    option, base delta = notional x its official DELTA mark of ``as_of`` (exact, never estimated,
+    as every exposure delta); on a USD-based pair that is the USD leg, on a USD-quoted pair the
+    USD leg is minus base delta x the pair's official SPOT of ``as_of``; a pair with no USD leg,
+    or a DELTA or SPOT not on file, gives None with the sentence (never a partial sum)."""
+    total, whys = 0.0, []
+    for tid in open_ids:
+        t = book.by_id[tid]
+        qty, delta = book.lots(tid), _official(book, t["instrument_id"], "DELTA")
+        base, quote = str(t["base_ccy"] or ""), str(t["quote_ccy"] or "")
+        if delta is None:
+            whys.append(f"{t['instrument_id']}: no official DELTA on {book.as_of}, so the option's hedge size is "
+                        f"not known")
+        elif base == "USD":
+            total += qty * delta
+        elif quote == "USD":
+            spot = _official(book, base + quote, "SPOT")
+            if spot is None:
+                whys.append(f"{t['instrument_id']}: no official {base}{quote} SPOT on {book.as_of} for the USD leg "
+                            f"of its delta")
+            else:
+                total += -qty * delta * spot
+        else:
+            whys.append(f"{t['instrument_id']}: the pair has no USD leg, so the option's USD hedge size is not read")
+    return (None, "; ".join(whys)) if whys else (total, "")
+
+
 def _hedge_row(book, tids: Sequence[str]) -> dict:
     t = book.by_id[tids[0]]
     root = book.roots.get(t["base_ccy"])
@@ -641,6 +685,8 @@ def _hedge_row(book, tids: Sequence[str]) -> dict:
     if bad:
         out["notional_reason"] = (f"{', '.join(bad)}: trades.quantity is not a number, so the hedge's lots and "
                                   f"USD notional are not known")
+    elif t["product"] == "FX_OPTION":
+        out["usd_notional"], out["notional_reason"] = _fx_option_usd(book, [i for i in open_ids if i not in bad])
     elif t["product"] in FX_PRODUCTS:
         usd = [_fx_usd_leg(book.by_id[i], book.lots(i)) for i in open_ids if i not in bad]
         if any(u is None for u in usd):
@@ -657,18 +703,32 @@ def _hedge_row(book, tids: Sequence[str]) -> dict:
     return out
 
 
+CNY_CCYS = ("CNY", "CNH")
+
+
+def _cny_hedge(h: dict) -> bool:
+    """A hedge of the CNY legs: a USD/CNH future or an FX product on a CNH / CNY pair."""
+    return str(h.get("currency") or "") in CNY_CCYS or str(h.get("root_id") or "") in CNY_CCYS
+
+
 def _coverage(book, legs: List[PLeg], hedges: List[dict]) -> dict:
-    """The hedges' USD notional against the CNY legs' notional (open lots, ``book.notional``)."""
-    out = {"hedge_usd": None, "cny_gross_usd": None, "cny_net_usd": None, "hedge_coverage": None,
-           "hedge_coverage_net": None, "unhedged_cny": None, "hedge_reason": ""}
-    cny = [leg for leg in legs if leg.currency in ("CNY", "CNH")]
+    """The CNY hedges' USD notional against the CNY legs' notional (open lots, ``book.notional``).
+    ``hedge_usd`` is every hedge of the strategy (None when one has no USD figure); the coverage,
+    ``unhedged_cny`` and the sign warning read ``hedge_cny_usd``, the hedges on a CNH / CNY pair
+    only (2026-09-29: a EURUSD option or forward in the strategy covers no China leg)."""
+    out = {"hedge_usd": None, "hedge_cny_usd": None, "cny_gross_usd": None, "cny_net_usd": None,
+           "hedge_coverage": None, "hedge_coverage_net": None, "unhedged_cny": None, "hedge_reason": ""}
+    cny = [leg for leg in legs if leg.currency in CNY_CCYS]
     if not hedges and not cny:
         out["hedge_reason"] = "no CNY legs and no hedge in this strategy"
         return out
-    whys = [h["notional_reason"] for h in hedges if h["usd_notional"] is None]
-    hedge_usd = sum(h["usd_notional"] for h in hedges if h["usd_notional"] is not None)
+    if not any(h["usd_notional"] is None for h in hedges):
+        out["hedge_usd"] = float(sum(h["usd_notional"] for h in hedges))
+    cny_hedges = [h for h in hedges if _cny_hedge(h)]
+    whys = [h["notional_reason"] for h in cny_hedges if h["usd_notional"] is None]
+    hedge_usd = float(sum(h["usd_notional"] for h in cny_hedges if h["usd_notional"] is not None))
     if not whys:
-        out["hedge_usd"] = hedge_usd
+        out["hedge_cny_usd"] = hedge_usd
     if not cny:
         out["hedge_reason"] = "; ".join(whys) or "no CNY legs in this strategy: nothing for the hedge to cover"
         return out
@@ -688,7 +748,7 @@ def _coverage(book, legs: List[PLeg], hedges: List[dict]) -> dict:
     # right hedge has the opposite sign to the CNY net (user, 2026-09-28, from Jason's own fills)
     out.update(cny_gross_usd=gross, cny_net_usd=net, unhedged_cny=net + hedge_usd)
     out["hedge_coverage"] = abs(hedge_usd) / gross if gross > _EPS else None
-    out["hedge_coverage_net"] = -hedge_usd / net if abs(net) > _EPS else None
+    out["hedge_coverage_net"] = (-hedge_usd / net) + 0.0 if abs(net) > _EPS else None   # + 0.0: never -0.0
     if abs(net) <= _EPS:
         out["hedge_reason"] = "the CNY legs net to zero notional: nothing left for the hedge to cover"
     elif hedge_usd * net > 0:
@@ -713,13 +773,23 @@ def _prev_rows(book, sid: str) -> Tuple[str, Dict[str, dict]]:
     return day, rows
 
 
-def _split(book, sid: str, tids: Sequence[str], hedge_ids: Sequence[str], spread: dict) -> dict:
-    """``daily_split`` over the very rows the strategy's Daily was measured from, only when that
-    Daily exists (then every trade is included and ``total`` equals it to the cent); otherwise
-    the empty split with ``reason`` (never a partial figure standing in for the Daily)."""
+SPLIT_COMPONENTS = ("spread", "fx", "hedge", "new_trades", "realised", "other")
+
+
+def _split(book, sid: str, tids: Sequence[str], spread: dict) -> dict:
+    """The strategy's Daily split by the P&L explain's one bucket order (``period_explain.
+    classify_trades``, user yes 2026-09-29: a trade dealt today is ``new_trades``, one settled
+    today ``realised``, then ``hedge``, then ``spread`` / ``fx``, and a trade that cannot be split
+    ``other``, on both screens alike), over ``period_pnl``'s per-trade figures from the very rows
+    the strategy's Daily was measured from (its own reference close, as the Daily chose it), only
+    when that Daily exists (then every trade is included and ``total`` equals it to the cent);
+    otherwise the empty split with ``reason`` (never a partial figure standing in for the Daily)."""
+    from engine.pnl.series import DailySeries, period_pnl
+    from engine.pnl.valuation import COLUMNS
+    from engine.spreads.period_explain import classify_trades
     day, _rows = _prev_rows(book, sid)
     daily_value = (spread.get("pnl_usd") or {}).get("daily")
-    empty = {"spread": 0.0, "fx": 0.0, "hedge": 0.0, "total": 0.0, "excluded": [], "reasons": {}, "included": [],
+    empty = {**{k: 0.0 for k in SPLIT_COMPONENTS}, "total": 0.0, "excluded": [], "reasons": {}, "included": [],
              "by_trade": {}, "date": day, "reason": ""}
     if daily_value is None:
         why = (spread.get("pnl_reasons") or {}).get("daily") or "no Daily P&L"
@@ -731,12 +801,27 @@ def _split(book, sid: str, tids: Sequence[str], hedge_ids: Sequence[str], spread
         empty["reason"] = "the rows the Daily was measured from were not kept, so it is not split"
         return empty
     try:
-        frame = pd.DataFrame(list(rows.values())) if rows else pd.DataFrame(columns=["trade_id", "reason", "pnl_usd"])
-        split = daily_split(book.frames.scoped(book.as_of, frozenset(tids)), frame, tids, hedge_ids)
+        ids = frozenset(tids)
+        ref = pd.DataFrame(list(rows.values())) if rows else pd.DataFrame(columns=list(COLUMNS))
+        end = book.frames.scoped(book.as_of, ids)
+        frames = {day: ref[ref["trade_id"].isin(ids)] if len(ref) else ref, book.as_of: end}
+        series = DailySeries(book.as_of, tuple(sorted(frames)), frames, frozenset(book.holidays), None, 0, 0.0)
+        pp = period_pnl(series, day, book.as_of)
+        if pp.ref_used != day or not pp.available or pp.total is None:
+            empty["reason"] = (f"the Daily's reference close {day} did not give the split its figures "
+                               f"({pp.reason or f'measured from {pp.ref_used}'}), so it is not split")
+            return empty
+        insts = {str(book.by_id[t]["instrument_id"]): (str(book.by_id[t]["base_ccy"] or ""),
+                                                       str(book.by_id[t]["quote_ccy"] or "")) for t in ids}
+        parts, bucket, other = classify_trades(pp, book.roots, insts, ltd=False)
     except Exception as exc:  # noqa: BLE001 -- said on the entry, never a failure of book_spreads
         empty["reason"] = f"the Daily could not be split ({type(exc).__name__}: {exc})"
         return empty
-    split["date"], split["reason"] = day, ""
+    by_trade = {t: {k: p[k] for k in SPLIT_COMPONENTS} for t, p in sorted(parts.items())}
+    split = {**{k: float(sum(p[k] for p in by_trade.values())) for k in SPLIT_COMPONENTS},
+             "total": float(sum(p["_amount"] for p in parts.values())), "excluded": list(pp.excluded),
+             "reasons": {o["trade_id"]: o["why"] for o in other}, "included": sorted(parts),
+             "by_trade": by_trade, "bucket": dict(sorted(bucket.items())), "date": day, "reason": ""}
     if split["excluded"] or abs(split["total"] - float(daily_value)) > 0.005:
         split["reason"] = (f"the split's total {split['total']:.2f} is not the strategy's Daily "
                            f"{float(daily_value):.2f}: {len(split['excluded'])} trade(s) excluded")
@@ -763,7 +848,7 @@ def strategy_entry(book, name: str, tids: Sequence[str], spread: Optional[dict])
                  for leg in legs if abs(rem[leg.contract_id]) > _EPS]
     residuals += options
     hedges = _hedge_rows(book, hedge_ids)
-    split = _split(book, sid, tids, hedge_ids, spread)
+    split = _split(book, sid, tids, spread)
     return {
         "name": name, "spread_id": sid, "trade_ids": tids, "closed_trade_ids": closed,
         "type": labelled, "type_source": spread.get("type_source", ""), "type_note": spread.get("type_note", ""),

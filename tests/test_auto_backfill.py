@@ -48,7 +48,7 @@ def _db(tmp_path, earliest_trade_date: str):
     conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  ("AUDUSD", "FX", "AUD", "USD", 1, 0, "AUDUSD Curncy", "9999-12-31"))
     settle = _settle_date()
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("a1", "XLSX", "AUDUSD", "FX_FWD", "a1", earliest_trade_date, -1e6, 0.65,
                   "acc", "cp", "HAHY7", "t", "d", "", "", ""))
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
@@ -121,7 +121,7 @@ def test_auto_backfill_option_only_book_fills_closing_spots_then_reports_complet
     conn = schema.connect(p)
     conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  ("EURSEK-OPT-1", "FX_OPTION", "EUR", "SEK", 1, 0, "EURSEK-OPT-1", expiry))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("o1", "XLSX", "EURSEK-OPT-1", "FX_OPTION", "o1", earliest.isoformat(), 1e6, 0.01,
                   "acc", "cp", "", "t", "d", "", "", ""))
     conn.execute("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)",
@@ -378,7 +378,7 @@ def test_auto_backfill_does_not_ask_bloomberg_again_for_a_day_that_cannot_comple
     requests.clear()
     conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  ("NZDUSD", "FX", "NZD", "USD", 1, 0, "NZDUSD Curncy", "9999-12-31"))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("n1", "XLSX", "NZDUSD", "FX_FWD", "n1", "2026-09-18", 1e6, 0.59, "acc", "cp", "", "t", "d", "", "", ""))
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("n1", 1, "FX_NEAR", "NZD", 1e6, "2026-09-18", _settle_date(), 0.59, 1),
@@ -578,7 +578,7 @@ def test_auto_backfill_works_a_day_whose_closes_are_complete_but_whose_inputs_ar
     named in the status block's reasons and tried again within the hour, not on every run."""
     p, conn = _db(tmp_path, "2026-09-16")                                        # AUDUSD forward, Wed 09-16 on
     conn.execute("INSERT INTO instruments VALUES ('USDJPY101526C-1','FX_OPTION','USD','JPY',1,0,'USDJPY101526C-1','2026-10-15')")
-    conn.execute("INSERT INTO trades VALUES ('o1','XLSX','USDJPY101526C-1','FX_OPTION','o1','2026-09-16',1e6,0.01,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('o1','XLSX','USDJPY101526C-1','FX_OPTION','o1','2026-09-16',1e6,0.01,"
                  "'acc','cp','','t','d','','','')")
     conn.execute("INSERT INTO trade_legs VALUES ('o1',1,'NOTIONAL','USD',1e6,'2026-09-16','2026-10-15',0,0)")
     conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
@@ -693,7 +693,7 @@ def test_a_day_whose_only_failure_is_a_ticker_bloomberg_rejects_waits_for_the_ti
     # what a day lacks changes (a new trade dated 09-18): that day is due at once, the others still wait
     conn.execute("INSERT INTO instruments VALUES (?,?,?,?,?,?,?,?)",
                  ("NZDUSD", "FX", "NZD", "USD", 1, 0, "NZDUSD Curncy", "9999-12-31"))
-    conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("n1", "XLSX", "NZDUSD", "FX_FWD", "n1", "2026-09-18", 1e6, 0.59, "acc", "cp", "", "t", "d", "", "", ""))
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("n1", 1, "FX_NEAR", "NZD", 1e6, "2026-09-18", _settle_date(), 0.59, 1),
@@ -709,7 +709,7 @@ def test_a_recent_day_with_no_settlement_yet_is_retried_hourly_until_it_is_older
     monkeypatch.setattr(live, "book_today", lambda: _MONDAY)
     p, conn = _db(tmp_path, "2026-09-16")
     conn.execute("INSERT INTO instruments VALUES ('ESZ6 Index','FUTURE','ES','USD',50,0,'ESZ6 Index','2026-12-18')")
-    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESZ6 Index','FUTURE','f1','2026-09-16',2,6500,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('f1','XLSX','ESZ6 Index','FUTURE','f1','2026-09-16',2,6500,"
                  "'acc','cp','','t','d','','','')")
     conn.execute("INSERT INTO trade_legs VALUES ('f1',1,'NOTIONAL','USD',2*50*6500,'2026-09-16','2026-12-18',0,0)")
     conn.commit()

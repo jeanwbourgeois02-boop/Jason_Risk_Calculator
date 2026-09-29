@@ -66,7 +66,8 @@ def set_active_db(path: Union[str, Path, None]) -> Path:
 # Book, Exposure, P&L, Risk, Trades, plus Data), after the screens redesign of
 # 2026-09-25 ("the spread is the unit"); the app opens on the first. Each label maps to its
 # stable key: the tab bar's value and the body id `tab-body-<key>`. The key never holds '&' or
-# a space, and a renamed tab keeps its key ("Exposure" is still "curve", "Trades" still
+# a space, and a renamed tab keeps its key ("Exposure" is still "curve", "Blotter" (the Trades tab of
+# 2026-09-28, a Blotter again since 2026-09-29) still
 # "blotter", "Data" still "market-data"), so nothing keyed on a body id moves. The Spreads
 # ("spreads") and FX & cash ("ladder") tabs left the bar in wave 3, Timing & cash ("expiries")
 # later the same day (`HIDDEN_TAB_KEYS`): a tab link to any of those keys is dead
@@ -76,7 +77,7 @@ TAB_KEYS = {
     "Exposure": "curve",
     "P&L": "pnl",
     "Risk": "risk",
-    "Trades": "blotter",
+    "Blotter": "blotter",
     "Data": "market-data",
 }
 VISIBLE_TABS = list(TAB_KEYS)

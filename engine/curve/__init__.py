@@ -3,7 +3,8 @@ which contract month, in lots, in physical units, in USD notional and in delta (
 options on them, LME forwards; the declining delta of monthly-average contracts).
 
 ``curve_positions(conn, as_of)`` is the one entry point; ``positions.py`` holds it, ``rows.py``
-builds one row per position, ``averaging.py`` the averaging contracts' delta factor;
+builds one row per position, ``averaging.py`` the averaging contracts' delta factor,
+``leftover.py`` the part of the net in no spread (read from spreads-engine's strategies);
 ``subsector_name`` gives the plain name of a commodity across exchanges ('copper' -> 'Copper').
 """
 

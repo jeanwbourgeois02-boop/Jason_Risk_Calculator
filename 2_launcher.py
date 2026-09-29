@@ -1018,7 +1018,7 @@ def cmd_reprice(args) -> int:
 
 # The ticker check's own flags, passed through as given (data/bloomberg/ticker_check.py::_parser).
 BBG_CHECK_FLAGS = (("dry_run", "--dry-run"), ("book", "--book"), ("search", "--search"),
-                   ("lme", "--lme"), ("options", "--options"))
+                   ("lme", "--lme"), ("options", "--options"), ("desk", "--desk"))
 BBG_CHECK_OPTIONS = (("sector", "--sector"), ("db", "--db"), ("host", "--host"), ("port", "--port"),
                      ("out", "--out"), ("limit", "--limit"))
 
@@ -1164,6 +1164,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only the LME curve tickers (cash, 3M, first monthly); a plain run includes them")
     bc.add_argument("--options", action="store_true",
                     help="only the options on futures (each root's option chain); a plain run includes them")
+    bc.add_argument("--desk", action="store_true",
+                    help="only the desk checks (settlement, open interest, LME liquidity, SGX history, delivery, "
+                         "holidays, history depth, contract dates); a plain run includes them")
     bc.add_argument("--host", help="Bloomberg API host (default localhost)")
     bc.add_argument("--port", type=int, help="Bloomberg API port (default 8194)")
     bc.add_argument("--out", help="folder for the reports (default reports/)")

@@ -1098,15 +1098,23 @@ def _retired_option_root(row: pd.Series) -> Optional[str]:
     return None
 
 
-def _common(row: pd.Series) -> dict:
+def _common(row: pd.Series, price_percent: str = PERCENT_REFUSE) -> dict:
     """The Trade fields every row kind fills the same way. ``strategy`` and ``trade_type`` are
     read off the prime broker's PBRoot cell (``common.parse_pb_root``; '' each when absent) and
-    ``pb_root`` keeps the cell as written: the export has no Strategy column of its own."""
+    ``pb_root`` keeps the cell as written: the export has no Strategy column of its own.
+
+    ``broker_symbol`` / ``broker_price`` are the Symbol and Price cells as written (2026-09-29,
+    display only): the Price text is kept only when it reads as a number under the row kind's
+    own percent rule (``price_percent``: an FX option's premium may carry '%'), so a fill
+    rebuilt from NetInvoice or another column, or a blank cell, gives ''."""
     pb_root = _s(row.get("PBRoot"))
     strategy, trade_type = parse_pb_root(pb_root)
+    price_cell = _s(row.get("Price"))
+    broker_price = price_cell if price_cell and not math.isnan(_num(price_cell, price_percent)) else ""
     return dict(account=_s(row.get("ExtAccount")), counterparty=_s(row.get("Counterparty")),
                 strategy=strategy, trader=_s(row.get("Trader")), description=_s(row.get("Description")),
-                pb_root=pb_root, trade_type=trade_type)
+                pb_root=pb_root, trade_type=trade_type,
+                broker_symbol=_s(row.get("Symbol")), broker_price=broker_price)
 
 
 def _warn(res: ParseResult, row_no: int, symbol: str, message: str) -> None:
@@ -1711,7 +1719,8 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     ))
     res.trades.append(Trade(
         trade_id=trade_id, source=SOURCE, instrument_id=symbol, product="FX_OPTION",
-        package_id=trade_id, trade_date=trade_date, quantity=signed_notional, price=premium, **_common(row),
+        package_id=trade_id, trade_date=trade_date, quantity=signed_notional, price=premium,
+        **_common(row, PERCENT_FRACTION),
     ))
     res.legs.append(TradeLeg(
         trade_id, 1, "NOTIONAL", base_ccy, signed_notional, trade_date, expiry, premium, 0))

@@ -86,8 +86,13 @@ CREATE TABLE IF NOT EXISTS trades (
   description     TEXT NOT NULL,
   theme           TEXT NOT NULL DEFAULT '',
   pb_root         TEXT NOT NULL DEFAULT '',        -- the broker's raw PBRoot cell ('JSHY10.3_COPAR3'); '' = none
-  trade_type      TEXT NOT NULL DEFAULT ''         -- CROSS_EXCHANGE | CROSS_PRODUCT | TERM_STRUCTURE | '' from the
+  trade_type      TEXT NOT NULL DEFAULT '',        -- CROSS_EXCHANGE | CROSS_PRODUCT | TERM_STRUCTURE | '' from the
                                                    -- PBRoot decimal alone (.3 | .4 | .5); never inferred here
+  broker_symbol   TEXT NOT NULL DEFAULT '',        -- the file's Symbol cell as written ('CLZ6-USAA'); '' = not
+                                                   -- recorded (a trade loaded before 2026-09-29)
+  broker_price    TEXT NOT NULL DEFAULT ''         -- the file's Price cell exactly as written, TEXT so thousands
+                                                   -- separators and the broker's units survive ('9,512.50', '3.32');
+                                                   -- '' = not recorded, or the price was rebuilt from NetInvoice
 );
 
 CREATE TABLE IF NOT EXISTS instrument_theme (
@@ -219,7 +224,7 @@ WHERE f.source = CASE f.mark_type
     END);
 
 -- trades_official: a plain passthrough of `trades` (SELECT *, so a column added to
--- `trades` -- strategy, pb_root, trade_type -- is exposed with no edit here), kept as a
+-- `trades` -- strategy, pb_root, trade_type, broker_symbol, broker_price -- is exposed with no edit here), kept as a
 -- named view so every engine query can read "the official trades" without caring
 -- whether that is ever filtered again in future. Until 2026-09-17 this filtered out `source = 'BNP'` (the
 -- once-daily BNP EOD snapshot, kept alongside the live blotter as a second trade

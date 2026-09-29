@@ -79,6 +79,14 @@ class Trade:
     # the name after the underscore, `trade_type` the decimal's meaning.
     pb_root: str = ""
     trade_type: str = ""   # CROSS_EXCHANGE | CROSS_PRODUCT | TERM_STRUCTURE | ''
+    # The file's own cells, as written (user, 2026-09-29: the Trades tab shows the blotter exactly
+    # as the broker wrote it). `broker_symbol` is the Symbol cell stripped of surrounding
+    # whitespace; `broker_price` the Price cell as text, thousands separators and the broker's
+    # own units kept ('3.32' $/lb cattle, '78,450' SHFE copper), '' when the cell was blank or not
+    # a number (the fill was then rebuilt from NetInvoice or another column). Display only:
+    # `price` above is the fill every calculation reads.
+    broker_symbol: str = ""
+    broker_price: str = ""
 
 
 @dataclass(frozen=True)

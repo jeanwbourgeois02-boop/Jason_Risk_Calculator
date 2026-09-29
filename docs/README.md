@@ -141,6 +141,8 @@ py 2_launcher.py bbg-check                        Bloomberg PC: check every cont
                                                   (--dry-run, --lme, --options, --root ROOT_ID ..., --sector S, --book, --db PATH, --search, --limit N,
                                                   --host, --port, --out; --lme / --options run only the LME curve tickers / the options on futures,
                                                   a plain run does both as well as the roots)
+                                                  --desk runs only the desk checks (settlement, open interest, LME liquidity, SGX history,
+                                                  delivery, holidays, history depth, contract dates); a plain run includes them
 py 2_launcher.py contracts-apply <worksheet>      apply the worksheet rows marked apply=yes to config/contracts.csv (--dry-run); exit 1 if a row was refused
 py 2_launcher.py doctor --bloomberg               every prerequisite, the request-by-request probe, and the ticker check (202 securities, 5 requests)
 .venv\Scripts\python -m tests.golden_book --write   re-pin tests/golden/book.json: only on the user's yes, it defines what the book is worth

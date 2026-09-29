@@ -22,6 +22,12 @@ Rules built into `upload._stage_and_publish` (the accounting comes back as `chan
 - `upload_report` gained `added`, `replaced`, `removed`, `on_file_after`; `record_upload_report`
   ALTERs a missing column in, `last_upload_report` fills defaults without migrating (read-only safe).
 
+- every other `trades` column is the file's and needs no code here: `blotter.load` inserts every
+  `common.Trade` field by name and the publish upserts every column by name (PRAGMA table_info).
+  Proven 2026-09-29 with `broker_symbol` / `broker_price` (raw Symbol / Price cells): landed with
+  no change to upload.py, replaced ids got the file's cells, a trade not in the file kept its own.
+  Old rows keep '' until re-uploaded.
+
 **How to apply:** never reintroduce a DELETE of the whole book; a wording test pins
 "N trades in the file: a added, r already on file (replaced by the file's rows), c removed as
 cancelled; t trades on file." The old data-ingest note "Upload full replace" is superseded.

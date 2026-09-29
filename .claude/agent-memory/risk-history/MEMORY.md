@@ -1,5 +1,5 @@
 - [Dev PC parquet gap and package init](dev-pc-parquet-and-package-init.md) — no pyarrow here; engine/risk/__init__ imports metrics, so a removed name breaks collection
-- [Research db quirks](research-db-quirks.md) — rv.sqlite: 102 roots' ids differ (ZZ placeholders), raw x multiplier, WAL side files, depth, starts 2020-09-21
+- [Research db quirks](research-db-quirks.md) — rv.sqlite: ZZ placeholder ids, raw x multiplier, WAL files, depth, OI/volume caveats (China, LME, 400d volume)
 - [Research spread keys](research-spread-keys.md) — cal id / near-year instance rule, tracked instances only, values in quote units, 5 templates absent
 - [No python stdin heredocs](feedback-no-python-stdin-heredoc.md) — `py -3 -` heredocs hang and cannot be killed here; use scratchpad scripts
 - [Benchmarking book_risk](benchmarking-book-risk.md) — set COMMODITY_HISTORY_DB when timing a HEAD copy (else history silently absent); noisy PC, alternate runs

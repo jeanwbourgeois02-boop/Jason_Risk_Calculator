@@ -697,3 +697,143 @@ p { margin: 8px 0; }
 .book-table tr.book-strategy td { background: #eef1f6; font-weight: 700; color: var(--navy); border-top: 1px solid var(--line); padding-top: 6px; padding-bottom: 6px; }
 .book-table.book-summary tr.book-summary-row td.book-name { font-weight: 600; color: var(--navy); }
 .book-table.book-summary td .marker--amber { padding: 0 4px; border-radius: 3px; font-size: 11px; }
+/* the Book's one grouped table (ui/tabs/book.py, 2026-09-29): toolbar, the tree rows with their chevrons,
+   the filter row under the column heads, the inline detail, the Needs you strip, the quiet lines */
+.book-grid-toolbar { align-items: center; }
+.book-grid-toolbar .book-tool { margin-left: 10px; }
+.book-grid-toolbar .book-section-meta { margin-left: 6px; }
+.book-card.book-grid-wrap { overflow: visible; }
+.book-table.book-grid td, .book-table.book-grid th { padding-left: 7px; padding-right: 7px; }
+.book-table.book-grid th.book-sortable { cursor: pointer; user-select: none; }
+.book-table.book-grid th.book-sortable:hover { color: var(--navy); }
+.book-sort-arrow { font-size: 9px; margin-left: 3px; }
+.book-table.book-grid tr.book-filter-row th { padding: 3px 4px 5px; background: #fafbfc; text-transform: none; letter-spacing: 0; font-weight: 400; vertical-align: top; }
+.book-filter-box { width: 100%; min-width: 48px; box-sizing: border-box; font: inherit; font-size: 11.5px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; background: #fff; color: #1f2937; }
+.book-filter-box:focus { outline: none; border-color: var(--navy); }
+.book-filter-num { text-align: right; }
+.book-filter-dd { min-width: 96px; text-align: left; margin-top: 3px; }
+.book-filter-row th:first-child .book-filter-dd { margin-top: 3px; }
+.book-filter-dd .dash-dropdown-trigger { min-height: 24px; padding: 1px 6px; }
+.book-chevron { display: inline-block; width: 14px; color: var(--muted); cursor: pointer; user-select: none; font-size: 11px; }
+.book-chevron:hover { color: var(--navy); }
+.book-chevron--none { cursor: default; }
+.book-name-link { cursor: pointer; }
+.book-name-link:hover { text-decoration: underline; }
+.book-name-link--open { font-weight: 700; }
+.book-table.book-grid td.book-d0 { padding-left: 8px; }
+.book-table.book-grid td.book-d1 { padding-left: 24px; }
+.book-table.book-grid td.book-d2 { padding-left: 40px; }
+.book-table.book-grid td.book-d3 { padding-left: 56px; }
+.book-table.book-grid td.book-name { max-width: 420px; }
+.book-table.book-grid tr.book-grid-group td { background: #f7f8fb; font-weight: 600; color: var(--navy); }
+.book-table.book-grid tr.book-grid-leg td { color: #4b5563; }
+.book-table.book-grid tr.book-grid-trade td { color: #6b7280; font-size: 12px; height: 22px; }
+.book-table.book-grid tr.book-grid-muted td { color: #9ca3af; }
+.book-table.book-grid tr.book-grid-row:hover td { background: #f3f5f9; }
+.book-table.book-grid tr.book-grid-group:hover td { background: #eef1f7; }
+.book-coverage { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 30px; }
+.book-table.book-grid tr.book-detail-row td { background: #fbfbfd; white-space: normal; height: auto; padding: 8px 14px 12px; text-align: left; }
+.book-detail-head { display: flex; align-items: baseline; gap: 10px; }
+.book-needs-strip { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 2px 12px; margin: 0 0 12px; }
+.book-prepull { font-size: 12.5px; color: var(--muted); margin: 0 0 8px; }
+.book-quiet { font-size: 12px; color: var(--muted); }
+.book-last-load { font-size: 12.5px; color: var(--muted); }
+.book-last-load-k { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; margin-right: 8px; }
+.book-under.book-under--stack { flex-direction: column; gap: 8px; }
+
+/* Exposure (2026-09-29) */
+.curve-tilt { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin: 0 0 10px; font-size: 12px; }
+.curve-tilt-title { font-size: 10.5px; font-weight: 600; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.curve-tilt-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.curve-tilt-label { color: var(--navy); font-weight: 600; }
+.curve-tilt-track { position: relative; width: 110px; height: 8px; background: #f1f3f6; border-radius: 4px; }
+.curve-tilt-track::before { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: #b8bfca; }
+.curve-tilt-bar { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.curve-tilt-bar--pos { background: var(--pos); }
+.curve-tilt-bar--neg { background: var(--neg); }
+.curve-grid-card { overflow-x: auto; }
+.book-table.curve-grid tr.curve-commodity td.l { font-weight: 700; color: var(--navy); }
+.book-table.curve-grid tr.curve-exchange td { color: #4b5563; font-size: 12px; height: 22px; }
+.book-table.curve-grid tr.curve-exchange td.l { padding-left: 24px; font-weight: 400; }
+.book-table.curve-grid tr.curve-sector-first td { border-top: 1px solid #d5dae2; }
+.book-table.curve-grid tr.curve-click { cursor: pointer; }
+.book-table.curve-grid tr.curve-click:hover td.l { text-decoration: underline; }
+.curve-leftover-hot { background: #fdf0d5; color: #8a5a00; font-weight: 700; padding: 1px 5px; border-radius: 3px; }
+.curve-leftover-zero { color: #a3aab5; }
+.curve-panel-slot:empty { display: none; }
+.curve-panel { margin-top: 12px; }
+.curve-panel-charts { display: flex; gap: 14px; flex-wrap: wrap; }
+.curve-panel-chart { flex: 1 1 420px; min-width: 0; }
+.curve-subhead { font-size: 10.5px; font-weight: 600; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; margin: 12px 0 4px; }
+.curve-held-line { font-size: 11.5px; color: var(--muted); }
+
+/* Blotter (2026-09-29) -- ui/tabs/blotter.py: the last upload line, the rows that did not become
+   trades, the file warnings, the fills table (the Book's table classes, wide, scrolling sideways
+   when the window is narrow). Layout only; the visual polish is a later pass. */
+.blotter-view { margin-top: 4px; }
+.blotter-upload-line { font-size: 13px; color: var(--text); margin: 0 0 4px; cursor: help; }
+.blotter-file-warning { font-size: 12.5px; color: #4b5563; margin: 4px 0; }
+.blotter-file-warning .marker { margin-left: 0; }
+.blotter-rejects { margin: 4px 0 8px; }
+.blotter-rejects td.blotter-why { white-space: normal; max-width: 720px; line-height: 1.35; }
+.blotter-fills-count { margin: 6px 0 4px; }
+.blotter-fills-scroll { overflow-x: auto; }
+.blotter-fills-table td[title] { cursor: help; }
+.blotter .blotter-date-range { min-width: 240px; }
+
+/* P&L (2026-09-29) */
+.pnl-tiles { margin-top: 2px; }
+.pnl-tile-sub { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+.pnl-note { font-style: italic; }
+.pnl-chart-card { padding: 4px 6px 0; }
+.pnl-contrib { margin-top: 0; }
+.pnl-contrib-list { display: flex; flex-direction: column; }
+.tab-link.pnl-contrib-row { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 72px; align-items: center; gap: 10px; width: 100%; padding: 4px 0; border: none; border-bottom: 1px solid #eef1f4; background: none; font: inherit; font-size: 12.5px; color: var(--text); text-align: left; text-decoration: none; cursor: pointer; }
+.tab-link.pnl-contrib-row:last-child { border-bottom: none; }
+.tab-link.pnl-contrib-row:hover { background: #f3f5f9; text-decoration: none; }
+.pnl-contrib-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pnl-bar-track { display: block; height: 8px; background: #f1f3f6; border-radius: 2px; }
+.pnl-bar { display: block; height: 8px; border-radius: 2px; }
+.pnl-bar--best { background: var(--pos); }
+.pnl-bar--worst { background: var(--neg); margin-left: auto; }
+.pnl-contrib-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.pnl-months-table th:not(.l), .pnl-months-table td:not(.l) { min-width: 84px; }
+.pnl-track { display: flex; flex-wrap: wrap; gap: 6px 28px; align-items: baseline; font-size: 13px; padding: 2px 0 8px; }
+.pnl-track-item { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pnl-track-k { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-right: 8px; }
+
+/* Data (2026-09-29): the status line of links, the block spacing, the marks-check count */
+.data-status-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 4px; font-size: 13px; margin: 2px 0 14px; }
+.data-status-link { color: var(--navy); text-decoration: none; border-bottom: 1px dotted #9ca3af; }
+.data-status-link:hover { border-bottom-color: var(--navy); }
+.data-status-link--warn { color: #8a4b00; border-bottom-color: #d69e2e; }
+.data-status-sep { color: #9ca3af; }
+.market-data .data-block { margin-bottom: 12px; scroll-margin-top: 90px; }
+.market-data .data-marks-meta { align-self: center; margin-left: auto; }
+.blotter-fills-table td.blotter-wrap { white-space: normal; max-width: 260px; line-height: 1.3; }
+.blotter-view { min-width: 0; max-width: 100%; }
+
+/* Risk (2026-09-29) */
+.risk-question { color: var(--muted); font-size: 13px; margin-left: 12px; }
+.risk-headline .cards { margin-bottom: 6px; }
+.risk-reach { color: var(--muted); font-size: 12px; margin: 0 0 16px; cursor: help; }
+.risk-block { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px 12px; margin: 0 0 14px; }
+.risk-section-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.risk-section-head .risk-h { margin: 0; }
+.risk-section-head .book-switch { margin-left: auto; }
+.risk-grey { color: #8a919c; font-size: 11px; font-weight: 400; margin-left: 6px; text-transform: none; letter-spacing: 0; }
+.risk-quiet { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.risk-quiet[title] { cursor: help; }
+.risk-note-line { font-size: 12.5px; color: var(--text); margin: 8px 0 0; }
+.risk-note-line[title] { cursor: help; }
+.risk-table { max-width: 820px; }
+.risk-table td.risk-member { padding-left: 24px; }
+.risk-table th.risk-bar-head, .risk-table td.risk-bar-cell { width: 180px; }
+.risk-bar { position: relative; width: 160px; height: 10px; margin-left: auto; background: linear-gradient(to right, transparent calc(50% - .5px), #c3c9d3 calc(50% - .5px), #c3c9d3 calc(50% + .5px), transparent calc(50% + .5px)); }
+.risk-bar-fill { position: absolute; top: 1px; height: 8px; border-radius: 2px; }
+.risk-bar-fill--pos { left: 50%; background: var(--navy); }
+.risk-bar-fill--neg { right: 50%; background: var(--pos); }
+.risk-stress td.risk-kind { color: var(--muted); }
+.risk-stress td.book-name { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+.risk-liquidity-table { max-width: 900px; }
+.risk-heatmap { max-width: 1100px; }

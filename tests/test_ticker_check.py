@@ -357,7 +357,8 @@ def test_no_blpapi_exits_2_with_the_reason(tmp_path, monkeypatch, capsys):
     code = tc.main(["--root", "NYMEX:CL", "--out", str(tmp_path / "reports")], now=NOW, roots=[CL])
     assert code == 2
     assert "blpapi is not installed" in capsys.readouterr().out
-    assert not (tmp_path / "reports").exists()
+    reports = list((tmp_path / "reports").glob("bbg_check_*.txt"))     # the desk checks' report, written anyway
+    assert len(reports) == 1 and "did not run" in reports[0].read_text(encoding="utf-8")
 
 
 def test_no_session_exits_2_with_the_reason(tmp_path, capsys):

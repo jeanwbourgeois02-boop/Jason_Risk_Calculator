@@ -1650,24 +1650,22 @@ def _build_chart(conn: sqlite3.Connection, as_of: str, db_path=None):
     gap where nothing priced, the excluded count and the fill in the hover text. A book
     with no day to chart gets a sentence saying so, never a blank graph.
 
-    `db_path` (optional) enables the `_cached_ltd` memoisation; omitted (e.g. direct
-    unit tests against an in-memory/temp connection with no path handy) falls back to
-    one `priced_value_book` call per day -- correctness is identical either way, only
-    the cost of repeated renders differs."""
+    The points are `engine.pnl.series.daily_series(conn, as_of).chart_points()` (2026-09-29),
+    memoised on the database revision the connection reads; `db_path` is accepted and unused
+    (the callers' interface is unchanged)."""
     days = _chart_days(conn, as_of)
     if not days:
         return html.P(f"No trades dated on or before {as_of}: nothing to chart.",
                       className="header-figure-caption")
+    # Since 2026-09-29 the points are the book's daily series (`engine.pnl.series.daily_series`,
+    # memoised in process on the database revision), the one the P&L tab reads, so the chart and
+    # the tab price each day once between them. `db_path` is kept for the callers' interface;
+    # `_cached_ltd` stays for any other caller.
+    from engine.pnl.series import daily_series
+    points = daily_series(conn, as_of).chart_points()
     xs, ys, texts = [], [], []
-    mtime = os.path.getmtime(db_path) if db_path is not None else None
-    for d in days:
-        xs.append(d.isoformat())
-        if db_path is not None:
-            value, n_unpriced, n_total, n_filled = _cached_ltd(str(db_path), mtime, d.isoformat())
-        else:
-            from ui.tabs.blotter_pricing import priced_value_book as _pvb
-            _df, _, _ = _pvb(conn, d.isoformat())
-            (value, n_unpriced, n_total), n_filled = _priced_day(_df), _filled_count(_df)
+    for day, value, n_unpriced, n_total, n_filled in points:
+        xs.append(day)
         ys.append(value)
         filled = f"{n_filled} valued at an earlier close" if n_filled else ""   # the fill, 2026-09-21
         if value is None:

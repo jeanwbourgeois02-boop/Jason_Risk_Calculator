@@ -177,3 +177,13 @@ The first real export, `data/template PnL tool.csv` (git-ignored, never committe
    spread rule reads `trades.strategy`), or two spellings (`COPAR3` / `copar 3`: "stand as two
    positions, one per spelling; if they are one strategy, tell us", since nothing normalises the name).
    A blank PBRoot, or one with no strategy after the underscore, is in no set. Nothing is renamed.
+
+## The file's own cells, kept as written (2026-09-29)
+
+- `trades.broker_symbol` is the Symbol cell as written, stripped of surrounding spaces only. It
+  never falls back to the Underlying Symbol column.
+- `trades.broker_price` is the Price cell as written, as text: thousands separators and the
+  broker's own units are kept ('78,450', '3.32' for cattle in dollars per pound). It is '' when
+  the cell is blank or not a number, which means the fill was rebuilt from NetInvoice.
+- Both are for display on the Blotter tab only; nothing calculates from them. Trades loaded
+  before 2026-09-29 read '' until the file is uploaded again.

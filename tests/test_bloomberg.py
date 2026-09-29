@@ -233,14 +233,14 @@ def test_export_request(tmp_path):
     conn.execute("INSERT INTO instruments VALUES ('EURUSD','FX','EUR','USD',1,0,'EURUSD Curncy','9999-12-31')")
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
     conn.execute(
-        "INSERT INTO trades VALUES ('t1','MANUAL','EURUSD','FX_FWD','t1','2026-08-17',100.0,1.1,"
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('t1','MANUAL','EURUSD','FX_FWD','t1','2026-08-17',100.0,1.1,"
         "'ACC','CPTY','STRAT','TRADER','synthetic','','','')"
     )
     conn.execute(
         "INSERT INTO trade_legs VALUES ('t1',1,'FX_NEAR','EUR',100.0,'2026-08-17','2026-09-16',1.1,1)"
     )
     conn.execute(
-        "INSERT INTO trades VALUES ('t2','MANUAL','ESU6 Index','FUTURE','t2','2026-08-17',10.0,4500.0,"
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('t2','MANUAL','ESU6 Index','FUTURE','t2','2026-08-17',10.0,4500.0,"
         "'ACC','CPTY','STRAT','TRADER','synthetic','','','')"
     )
     conn.execute(
@@ -266,7 +266,7 @@ def test_export_request_excludes_expired_future(tmp_path):
     # Expired future (expiry_date <= as_of) with an open leg: must NOT be requested.
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-08-10')")
     conn.execute(
-        "INSERT INTO trades VALUES ('t1','MANUAL','ESU6 Index','FUTURE','t1','2026-07-01',10.0,4500.0,"
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('t1','MANUAL','ESU6 Index','FUTURE','t1','2026-07-01',10.0,4500.0,"
         "'ACC','CPTY','STRAT','TRADER','synthetic','','','')"
     )
     conn.execute(
@@ -277,7 +277,7 @@ def test_export_request_excludes_expired_future(tmp_path):
     # Unexpired future with an open trade_legs row: must be requested.
     conn.execute("INSERT INTO instruments VALUES ('ESH7 Index','FUTURE','ES','USD',50,0,'ESH7 Index','2027-03-19')")
     conn.execute(
-        "INSERT INTO trades VALUES ('t2','MANUAL','ESH7 Index','FUTURE','t2','2026-08-01',5.0,4500.0,"
+        "INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('t2','MANUAL','ESH7 Index','FUTURE','t2','2026-08-01',5.0,4500.0,"
         "'ACC','CPTY','STRAT','TRADER','synthetic','','','')"
     )
     conn.execute(
@@ -1646,11 +1646,11 @@ def _inventory_db():
     conn.execute("INSERT INTO instruments VALUES ('AUDUSD','FX','AUD','USD',1,0,'AUDUSD Curncy','9999-12-31')")
     conn.execute("INSERT INTO instruments VALUES ('USDJPY','FX','USD','JPY',1,0,'USDJPY Curncy','9999-12-31')")
     conn.execute("INSERT INTO instruments VALUES ('ESU6 Index','FUTURE','ES','USD',50,0,'ESU6 Index','2026-09-18')")
-    conn.execute("INSERT INTO trades VALUES ('a1','XLSX','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('a1','XLSX','AUDUSD','FX_FWD','a1','2026-08-10',-1e6,0.65,"
                  "'acc','cp','HAHY7','t','d','','','')")
-    conn.execute("INSERT INTO trades VALUES ('j1','XLSX','USDJPY','FX_FWD','j1','2026-08-10',1e6,150.0,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('j1','XLSX','USDJPY','FX_FWD','j1','2026-08-10',1e6,150.0,"
                  "'acc','cp','HAHY7','t','d','','','')")
-    conn.execute("INSERT INTO trades VALUES ('f1','XLSX','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
+    conn.execute("INSERT INTO trades (trade_id, source, instrument_id, product, package_id, trade_date, quantity, price, account, counterparty, strategy, trader, description, theme, pb_root, trade_type) VALUES ('f1','XLSX','ESU6 Index','FUTURE','f1','2026-08-10',6,7528.25,"
                  "'acc','cp','HAHY7','t','d','','','')")
     conn.executemany("INSERT INTO trade_legs VALUES (?,?,?,?,?,?,?,?,?)", [
         ("a1", 1, "FX_NEAR", "AUD", -1e6, "2026-08-10", "2026-09-16", 0.65, 1),
