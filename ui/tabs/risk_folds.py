@@ -30,7 +30,7 @@ from dash import dcc, html
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
     cap, plain_ids, MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text,
-    short_date, sum_known,
+    short_date, sum_known, contract_name, is_fx_pair, quoted_unit,
 )
 
 log = logging.getLogger(__name__)
@@ -388,17 +388,19 @@ def _unit_value(r: dict, unit: str) -> Tuple[Optional[float], str]:
     return _num(r.get("delta_lots")), (r.get("reason") or "no delta in lots")
 
 
-def _cell(rows: Sequence[dict], unit: str) -> Tuple[Optional[float], str, List[str]]:
-    """(the rows' figure in `unit` summed, why none, the contracts in it): never a partial sum."""
-    total, whys, names = 0.0, [], []
+def _cell(rows: Sequence[dict], unit: str) -> Tuple[Optional[float], str, List[str], int]:
+    """(the known figures of the rows in `unit` summed, None when none is known; why a row has none;
+    the contracts in it; how many rows are left out of the sum): a display sum with its "Excl. N"."""
+    total, whys, names, known = 0.0, [], [], 0
     for r in rows:
         v, why = _unit_value(r, unit)
-        names.append(f"{r.get('contract_id')}: {lots_text(_num(r.get('delta_lots')))} delta lots")
+        names.append(f"{plain_ids(str(r.get('contract_id') or ''))}: {lots_text(_num(r.get('delta_lots')))} delta lots")
         if v is None:
-            whys.append(f"{r.get('contract_id')}: {why}")
+            whys.append(f"{plain_ids(str(r.get('contract_id') or ''))}: {why}")
         else:
             total += v
-    return (None if whys else total), "; ".join(whys), names
+            known += 1
+    return (total if known else None), "\n".join(whys), names, len(whys)
 
 
 def grid_cells(ctx: dict, sub_key: str, unit: str) -> Tuple[List[dict], List[str], List[str]]:
@@ -434,16 +436,17 @@ def _grid_text(v: float, unit: str, word: str) -> str:
     return lots_text(v)
 
 
-def _grid_td(cell: Optional[Tuple[Optional[float], str, List[str]]], unit: str, word: str) -> html.Td:
+def _grid_td(cell: Optional[tuple], unit: str, word: str) -> html.Td:
     if cell is None:
         return html.Td("")
-    v, why, names = cell
+    v, why, names, n_excl = (tuple(cell) + (0,))[:4]
     if v is None:
         return html.Td(missing_cell(why))
     cls = "risk-grid-long" if v > 0 else ("risk-grid-short" if v < 0 else "")
     full = format_cell(v) if unit != "lots" else lots_text(v)
-    return html.Td(_grid_text(v, unit, word), className=cls or None,
-                   title=plain_words(_lines(f"{full} {word}", *names[:8])))
+    return html.Td([html.Span(_grid_text(v, unit, word), title=plain_words(_lines(f"{full} {word}", *names[:8]))),
+                    marker(f"Excl. {n_excl}", _lines(f"Excludes {_plural(n_excl, 'contract')} with no figure", why),
+                           "marker--small") if n_excl else None], className=cls or None)
 
 
 def month_grid(ctx: dict, sub_key: str, unit: str) -> html.Div:
@@ -800,7 +803,13 @@ def book_positions(conn: sqlite3.Connection, as_of: str) -> Tuple[Optional[dict]
     from ui.tabs.blotter_pricing import screen_memo
     try:
         from engine.ladder.positions import book_positions as build
-        return screen_memo("risk-book-positions", conn, as_of, lambda: build(conn, as_of)), ""
+        from ui.tabs.blotter_pricing import raw_value_book, shared_curve, shared_spreads
+
+        def compute():
+            # the shared valuation, curve and spreads the tab already holds: no date valued twice (S6)
+            return build(conn, as_of, value_fn=raw_value_book, curve=shared_curve(conn, as_of),
+                         spreads=shared_spreads(conn, as_of))
+        return screen_memo("risk-book-positions", conn, as_of, compute), ""
     except Exception as exc:  # noqa: BLE001 -- the fold says why
         log.exception("risk: book positions failed for %s", as_of)
         return None, f"the currency delta could not be built ({type(exc).__name__}: {exc})"
@@ -1151,13 +1160,16 @@ def stress_table(entries: Sequence[dict]) -> html.Table:
 
 def stress_fold(ctx: dict, stress: Optional[dict], is_open: bool, more_open: bool) -> html.Div:
     entries = stress_entries(ctx, stress) if stress is not None else []
-    worst = next((e for e in entries if e["total"] is not None), None)
+    priced = [e for e in entries if e["total"] is not None and not (abs(e["total"]) < 0.5 and e["excl"])]
+    worst = priced[0] if priced else None
     if stress is None:
-        count: Any = "click to run the scenarios"
+        count: Any = "Click to run the scenarios"
     elif not entries:
-        count = "no scenario on file"
+        count = "No scenario on file"
+    elif worst is None:
+        count = f"{_plural(len(entries), 'scenario')} · no scenario priced yet"
     else:
-        count = f"{_plural(len(entries), 'scenario')}" + (f" · worst {km_text(worst['total'])} ({worst['name']})" if worst else "")
+        count = f"{_plural(len(entries), 'scenario')} · worst {km_text(worst['total'])} ({worst['name']})"
     body: List[Any] = []
     if is_open:
         if stress is None:
@@ -1178,8 +1190,28 @@ def stress_fold(ctx: dict, stress: Optional[dict], is_open: bool, more_open: boo
 
 
 # --------------------------------------------------------------------------- Price check
+def _pc_unit(r: dict, roots: Dict[str, Any]) -> str:
+    """The unit a price-check row's prices are quoted in (`price_text` reads its tick from it): the
+    contract's quote unit, the pair for an FX rate."""
+    if str(r.get("kind")) == "fx":
+        pair = str(r.get("contract_id") or r.get("root_id") or "")[:6]
+        return pair if is_fx_pair(pair) else ""
+    return quoted_unit(roots.get(str(r.get("root_id") or ""))) if roots.get(str(r.get("root_id") or "")) else ""
+
+
+def _pc_name(r: dict) -> str:
+    cid = str(r.get("contract_id") or "")
+    name = contract_name(cid) if cid else ""
+    return name or plain_ids(cid or str(r.get("root_id") or ""))
+
+
 def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
     pc = pc or {}
+    try:
+        from data.contracts import load_roots
+        roots = dict(load_roots())
+    except Exception:  # noqa: BLE001 -- the prices then show at their own decimals
+        roots = {}
     rows = pc.get("rows") or []
     flagged = sum(1 for r in rows if r.get("flagged"))
     if not pc:
@@ -1207,17 +1239,18 @@ def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
                 flag = bool(r.get("flagged"))
                 factor = _num(r.get("factor"))
                 ours_hover = _lines(f"{r.get('ours_kind') or ''} of {r.get('ours_date') or ''}".strip(), r.get("note") or "")
+                unit = _pc_unit(r, roots)
                 body_rows.append(html.Tr([
                     html.Td(html.Span("Off" if flag else ("OK" if factor is not None else MISSING),
                                       className="cell-amber tk-bold" if flag else "tk-sub"), className="l"),
                     html.Td({"future": "Future", "lme": "LME", "fx": "FX"}.get(str(r.get("kind")), str(r.get("kind") or "")),
                             className="l"),
-                    html.Td(html.Span(plain_ids(str(r.get("contract_id") or r.get("root_id") or "")),
-                                      title=_lines(str(r.get("contract_id") or r.get("root_id") or ""),
+                    html.Td(html.Span(_pc_name(r),
+                                      title=_lines(f"Bloomberg: {r.get('contract_id') or r.get('root_id') or ''}",
                                                    f"Research: {r.get('research_contract_id') or ''}")), className="l"),
-                    html.Td(html.Span(price_text(_num(r.get("ours"))), title=plain_words(ours_hover) or None)
+                    html.Td(html.Span(price_text(_num(r.get("ours")), unit), title=plain_words(ours_hover) or None)
                             if _num(r.get("ours")) is not None else missing_cell(r.get("reason") or "no price of ours")),
-                    html.Td(html.Span(price_text(_num(r.get("research"))),
+                    html.Td(html.Span(price_text(_num(r.get("research")), unit),
                                       title=plain_words(f"settle of {r.get('research_date') or ''}"))
                             if _num(r.get("research")) is not None else missing_cell(r.get("reason") or "no research price")),
                     html.Td(html.Span(f"×{factor:.2f}", className="cell-amber" if flag else None,

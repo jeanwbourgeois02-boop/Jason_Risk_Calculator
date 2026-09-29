@@ -882,8 +882,7 @@ def positions_rows(conn: sqlite3.Connection, as_of: str, pos: Optional[dict] = N
     (ui.tabs.ranking): a missing one is None. `pos`: `book_positions`' result when the
     caller already has it (`positions_table` reads it once for both tables)."""
     if pos is None:
-        from engine.ladder.positions import book_positions
-        pos = book_positions(conn, as_of)
+        pos = _book_positions(conn, as_of)
     records, tips = [], []
 
     def add(label, units, usd, detail="", reason="", indent=False, rate="", kind="", said=""):
@@ -1108,6 +1107,14 @@ def commodity_positions_section(block: Optional[dict]) -> html.Div:
     return html.Div(className="positions-commodities", children=children)
 
 
+def _book_positions(conn: sqlite3.Connection, as_of: str) -> dict:
+    """`engine.ladder.positions.book_positions` on the screens' shared valuation, curve and spreads."""
+    from engine.ladder.positions import book_positions
+    from ui.tabs.blotter_pricing import raw_value_book, shared_curve, shared_spreads
+    return book_positions(conn, as_of, value_fn=raw_value_book, curve=shared_curve(conn, as_of),
+                          spreads=shared_spreads(conn, as_of))
+
+
 def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
     """The Positions block as it was on the Total book: the Commodities first (Jason's book is
     mostly commodities; `commodity_positions_section`), then the FX lines (`fx_positions_table`),
@@ -1115,8 +1122,7 @@ def positions_table(conn: sqlite3.Connection, as_of: str) -> html.Div:
     renders this whole block: the Exposure tab shows the commodity positions from
     curve-positions itself and takes only the FX part (`fx_positions_table`, "Currency and FX
     exposure"); kept as one function for the tests and older notes that read it."""
-    from engine.ladder.positions import book_positions
-    pos = book_positions(conn, as_of)
+    pos = _book_positions(conn, as_of)
     commodities = _safe_section("Commodity positions", lambda: commodity_positions_section(pos.get("commodities")))
     return html.Div(className="section", children=[
         about("Positions", POSITIONS_ABOUT),

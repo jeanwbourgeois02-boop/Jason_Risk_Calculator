@@ -43,7 +43,7 @@ from ui.tabs import data_kit as kit
 from ui.tabs.formatting import (
     cap, tidy,
     MISSING, amount_words, compact, day_text, fx_name, is_fx_pair, missing_cell, parse_contract_id, plain_words,
-    price_text, quoted_unit,
+    price_text, quoted_unit, price_decimals, decimals_of,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -88,7 +88,6 @@ _FILE_COUNT_KEYS = ("futures", "options_on_futures", "lme_forwards", "fx_forward
 SYMBOL_NOT_RECORDED = "symbol not recorded: loaded before 29 Sep, re-upload to fill"
 PRICE_NOT_RECORDED = "price not recorded: loaded before 29 Sep, re-upload the file to fill it"
 PRICE_FROM_NETINVOICE = "the file's Price cell was blank or not a number: the fill was rebuilt from NetInvoice"
-NO_TIMES = "the file's execution and last-modified times are not stored, so fills of one day keep the file's order"
 NO_TRADE_NAME = "no trade name: the file's PBRoot cell has no text after the underscore"
 NOT_IN_TRADE = ("in no trade on the Book: the fill carries no trade name (its PBRoot cell has no text after the "
                 "underscore), so it sits beside the trades, not in one")
@@ -348,7 +347,9 @@ def _build_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, Li
             price_unit = ""
         else:
             price_unit = quoted_unit(root)
-        stored = price_text(price, price_unit, fill=price) if price is not None else MISSING
+        # the stored fill exactly (its own decimals, never fewer than the unit's tick): an audit figure
+        stored = (price_text(price, price_unit, decimals=max(price_decimals(price_unit), decimals_of(price)))
+                  if price is not None else MISSING)
         tip = [f"Stored price {stored}" + (f" {price_unit}" if price_unit else "")
                + " (Bloomberg's units, the price every P&L figure uses)"]
         if scaled:
@@ -518,7 +519,7 @@ def _row(r: dict, as_of: str) -> html.Tr:
     trade = (html.Span(r["strategy"], className="tk-name", title=plain_words(f"PBRoot {r['pb_root']}")
                        if r["pb_root"] else None)
              if r["strategy"] else missing_cell(NO_TRADE_NAME))
-    date_tip = f"Trade date {r['trade_date']} as the file gave it; {NO_TIMES}."
+    date_tip = f"Trade date {_long_date(r['trade_date'])}"
     if r.get("broker_price"):
         price = html.Span(r["broker_price"], title=plain_words(r["broker_price_tip"]))
     else:
@@ -530,8 +531,8 @@ def _row(r: dict, as_of: str) -> html.Tr:
         landed = html.Span("not in a trade", className="cell-amber", title=plain_words(r["landed_tip"]))
     if r.get("unrecognised"):
         # every row loads (2026-09-29): on file as a trade, its contract not recognised: a red flag
-        landed = html.Span([html.Span("● not recognised", className="cell-red",
-                                      title=plain_words(r["unrecognised_reason"])),
+        landed = html.Span([html.Span("● Not recognised", className="cell-red",
+                                      title=reason_words(r["unrecognised_reason"])),
                             html.Span(" · ", className="tk-sub"), landed])
     lots = html.Span(r["lots_text"], title=plain_words(r["lots_tip"]) or None) if r["lots_text"] else missing_cell()
     return html.Tr([
@@ -669,13 +670,18 @@ def _in_file(report: dict) -> int:
     return sum(int(report.get(k) or 0) for k in _FILE_COUNT_KEYS)
 
 
+def _long_date(iso) -> str:
+    """'Tue 22 Sep 2026' (the text as it is when it is not a date)."""
+    try:
+        return dt.date.fromisoformat(str(iso)[:10]).strftime("%a %d %b %Y").replace(" 0", " ")
+    except (TypeError, ValueError):
+        return str(iso or "")
+
+
 def reason_words(reason) -> str:
-    """The upload's reason in plain words, with no file path ('config/contracts.csv' is the
-    contract universe)."""
-    text = plain_words(reason)
-    for path, words in (("config/contracts.csv", "the contract universe"), ("config/book.yaml", "the book filter")):
-        text = text.replace(f"not in {path}", f"not in {words}").replace(path, words)
-    return cap(text)
+    """The upload's reason in plain words, with no file path (`formatting.plain_words`: the
+    contract list, the book filter)."""
+    return cap(plain_words(reason))
 
 
 def what_to_do(kind: str, reason: str) -> str:
@@ -691,7 +697,7 @@ def what_to_do(kind: str, reason: str) -> str:
     if "ambiguous" in why or "candidates" in why:
         return "Name the exchange in the row (Currency or Execution Venue), then re-upload."
     if any(w in why for w in ("not in the contract universe", "contracts.csv", "unknown", "no contract")):
-        return "Check the symbol; if it is right, the contract must be added to the contract universe. Then re-upload."
+        return "Check the symbol; if it is right, add the contract to the contract list. Then re-upload."
     if "contradict" in why or "disagree" in why:
         return "Correct the two cells that disagree in the file, then re-upload."
     if "fund" in why or "trader" in why or "desk" in why:
@@ -706,13 +712,24 @@ def need_fix_count(report: Optional[dict], issues: List[dict]) -> Optional[int]:
     recognised: every row loads, 2026-09-29): the report's `need_fix`, else its rows of kind
     UNRECOGNISED in the upload's issues; None when neither the report nor the issues know the kind
     (an upload recorded before the rule: the line keeps its old wording)."""
-    listed = sum(1 for i in issues if str(i.get("kind") or "") == UNRECOGNISED)
+    listed = sum(1 for i in issues if str(i.get("kind") or "") == UNRECOGNISED and _of_upload(i, report))
     if report is not None and "need_fix" in report:
-        return max(int(report.get("need_fix") or 0), listed)
+        return int(report.get("need_fix") or 0)
     return listed if listed else None
 
 
-def last_upload_line(report: dict, n_rejects: int, need_fix: Optional[int] = None) -> list:
+def _of_upload(issue: dict, report: Optional[dict]) -> bool:
+    """Whether a need-fix row is the last upload's own (an earlier upload's trade still on file keeps
+    its row, with that upload's file name and time)."""
+    if report is None:
+        return True
+    name, at = str(issue.get("filename") or ""), str(issue.get("uploaded_at") or "")
+    if name and name != str(report.get("filename") or ""):
+        return False
+    return not at or not report.get("uploaded_at") or at[:16] == str(report.get("uploaded_at"))[:16]
+
+
+def last_upload_line(report: dict, n_rejects: int, need_fix: Optional[int] = None, older: int = 0) -> list:
     """The one line: file · time · rows · new · updated · removed as cancelled · N rows need a fix
     (red, a link to the list, when any) · not loaded (amber, only when an older upload left some) ·
     prices converted; every figure's detail on hover. `need_fix` None: an upload recorded before
@@ -751,6 +768,10 @@ def last_upload_line(report: dict, n_rejects: int, need_fix: Optional[int] = Non
                                       "blank until the symbol is added to the contract list. Click for the list."))
         else:
             parts.append(html.Span("0 need a fix", title="Every row of the file was recognised"))
+        if older:
+            parts.append(html.A(f"+ {older:,} older on file need{'s' if older == 1 else ''} a fix", href=f"#{REJECTS_ID}",
+                                className="cell-red", title="Trades from earlier uploads still on file whose contract "
+                                                            "the app does not recognise: listed below"))
         if n_rejects:
             parts.append(html.Span(f"{n_rejects:,} not loaded", className="cell-amber",
                                    title="Rows an older parser did not turn into trades: listed below"))
@@ -791,8 +812,8 @@ def rejects_table(rows: List[dict], need_fix: Sequence[dict] = (), warnings: Seq
             kit.td(html.Span(str(i.get("symbol") or "") or MISSING, className="cell-red"), left=True),
             kit.td(reason_words(i.get("reason")), left=True,
                    title="on file as a trade; its P&L is blank until the contract is mapped"),
-            kit.td("Check the symbol; if it is right, the contract must be added to the contract universe. The trade "
-                   "prices then without a new upload.", left=True),
+            kit.td("Check the symbol; if it is right, add the contract to the contract list. The trade then prices "
+                   "without a new upload.", left=True),
         ]))
     for i in rows:
         kind = str(i.get("kind") or "")
@@ -854,9 +875,10 @@ def last_upload_block(conn: sqlite3.Connection) -> html.Div:
     row_warnings = [w for w in warnings if w.get("row_no") or w.get("trade_id")]
     file_warnings = [w for w in warnings if not (w.get("row_no") or w.get("trade_id"))]
     n_fix = need_fix_count(report, issues)
+    n_older = sum(1 for i in need if not _of_upload(i, report))
     children: list = []
     if report is not None:
-        children.append(html.Div([title, " ", *last_upload_line(report, len(rejects), n_fix)],
+        children.append(html.Div([title, " ", *last_upload_line(report, len(rejects), n_fix, n_older)],
                                  className="blotter-upload-line"))
     else:
         children.append(html.Div([title, ": ", html.Span("No summary recorded", className="book-section-meta")]))
@@ -1014,9 +1036,11 @@ def register(app, get_db_path: Callable[[], object]) -> None:
         @app.callback(Output(FILTER_STORE_ID, "data", allow_duplicate=True),
                       Output(BAR_REV_ID, "data", allow_duplicate=True),
                       Output(FILLS_STORE_ID, "data", allow_duplicate=True),
-                      Input(FILLS_STORE_ID, "data"), State(BAR_REV_ID, "data"),
+                      # fired when the Blotter mounts (its table's slot appears), the request read then:
+                      # never while the tab is not in the page (its outputs would not exist)
+                      Input(FILLS_BODY_ID, "id"), State(FILLS_STORE_ID, "data"), State(BAR_REV_ID, "data"),
                       prevent_initial_call="initial_duplicate")
-        def _see_fills(request, rev):
+        def _see_fills(_mounted, request, rev):
             """A Book trade's "See fills" ({"trade": name}, set as the tab switches here): the fills
             filtered to that trade alone, with the chip; the request is then consumed (None), so a
             later visit keeps whatever filter the user sets."""

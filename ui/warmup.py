@@ -16,12 +16,17 @@ arguments as the tabs, so each tab's first render is a memo hit:
   6. book       `book.gather(conn, as_of)` (its period rows price the reference closes)
   7. header     `header._build_figures(conn, as_of)` inside the header's own `pricing_snapshot`,
                 `header.needed_marks(conn, as_of)`
-  8. series     `engine.pnl.series.daily_series(conn, as_of)` (the P&L tab and the header chart)
+  8. series     `engine.pnl.series.daily_series(conn, as_of, value_fn=raw_value_book)` (P&L, header chart)
   9. pnl        `pnl.base(conn, as_of)`, `pnl.period(conn, as_of, pnl.DEFAULT_PERIOD)`
  10. curve      `shared_spreads(conn, as_of)` (the engine's own reader), `shared_curve(conn, as_of)`
  11. risk       `risk.gather(conn, as_of)`, `shared_trade_risk(conn, as_of, wait=True)`
  12. risk_folds `risk_folds.book_positions(conn, as_of)`, `risk.stress_result(conn, as_of)` (the
                 currency and stress folds, computed when opened)
+ 13. pnl_periods `pnl.period(conn, as_of, choice)` for every choice but Custom
+ 14. book_panels `book.history(conn, data, trade)` for every open trade (a row's panel chart)
+ 15. data       `market_data.warm(conn, as_of)`: the Data tab's own memos
+Since 2026-09-29 (S6) the daily series, the curve positions and the book positions read the one
+shared valuation per date (`blotter_pricing.raw_value_book`), so steps 8 to 14 price no date twice.
 
 The memos that also read the research app's database and the risk config carry those files'
 (mtime_ns, size) in their key (`blotter_pricing.research_inputs_key`), so everything the warm-up
@@ -240,6 +245,7 @@ def _screens(conn, as_of: str, step) -> None:
     def book():
         from ui.tabs import book as book_tab
         book_tab.gather(conn, as_of)
+        book_tab.price_checks(conn, as_of)      # the marks check's flags on the Book (the Data tab's memo too)
     step("book", book)
 
     def header():
@@ -251,7 +257,7 @@ def _screens(conn, as_of: str, step) -> None:
 
     def series():
         from engine.pnl.series import daily_series
-        daily_series(conn, as_of)
+        daily_series(conn, as_of, value_fn=bp.raw_value_book)   # the P&L tab's and the header chart's own call
     step("series", series)
 
     def pnl():
@@ -278,3 +284,44 @@ def _screens(conn, as_of: str, step) -> None:
         rf.book_positions(conn, as_of)
         risk_tab.stress_result(conn, as_of)
     step("risk_folds", risk_folds)
+
+    def risk_subsets():
+        # the Risk headline's and the group rows' VaR (subset_var of the trades showing), unfiltered,
+        # for each grouping of the switch
+        from ui.tabs import risk as risk_tab
+        from ui.tabs import trade_filter as tf
+        data = risk_tab.gather(conn, as_of)
+        risk = bp.shared_trade_risk(conn, as_of, wait=True)
+        rows = [(t, r) for t, r in risk_tab.rows_of(data, risk) if r]
+        risk_tab.subset(conn, as_of, [str(r.get("trade")) for _t, r in rows])
+        for group in (tf.GROUP_BY_TYPE, tf.GROUP_BY_COMMODITY):
+            by = {}
+            for t, r in rows:
+                by.setdefault(tf.group_of(t, group), []).append(str(r.get("trade")))
+            for names in by.values():
+                risk_tab.subset(conn, as_of, names)
+    step("risk_subsets", risk_subsets)
+
+    def pnl_periods():
+        # every period of the P&L switch but Custom (MTD is warmed above)
+        from ui.tabs import pnl as pnl_tab
+        for choice, _label in pnl_tab.PERIOD_CHOICES:
+            if choice not in ("custom", pnl_tab.DEFAULT_PERIOD):
+                pnl_tab.period(conn, as_of, choice)
+    step("pnl_periods", pnl_periods)
+
+    def book_panels():
+        # each open trade's level since its first fill (a row's panel), read on the shared valuation
+        from ui.tabs import book as book_tab
+        data = book_tab.gather(conn, as_of)
+        for t in data.get("trades") or []:
+            if t.get("status") == "open" and not t.get("pseudo"):
+                book_tab.history(conn, data, t)
+    step("book_panels", book_panels)
+
+    def data_tab():
+        from ui.tabs import market_data as md
+        warm = getattr(md, "warm", None)
+        if callable(warm):
+            warm(conn, as_of)
+    step("data", data_tab)

@@ -990,9 +990,9 @@ def _sector_label(sector: str) -> str:
 
 
 def _fmt_compact(value) -> str:
-    """'+12.3m', '−4.1m', '+812k', 'n/a' for None / NaN: the sector line's short form."""
+    """'+12.3m', '−4.1m', '+812k', the em dash for None / NaN: the sector line's short form."""
     if value is None or value != value:
-        return "n/a"
+        return MISSING
     a = abs(float(value))
     sign = "+" if value > 0 else ("−" if value < 0 else "")
     for div, suffix in ((1e9, "b"), (1e6, "m"), (1e3, "k")):
@@ -1002,7 +1002,7 @@ def _fmt_compact(value) -> str:
 
 
 def _fmt_usd_or_na(value) -> str:
-    return "n/a" if value is None or value != value else _fmt_usd(float(value))
+    return MISSING if value is None or value != value else _fmt_usd(float(value))
 
 
 def _short_reason(reason: str) -> str:
@@ -1021,7 +1021,7 @@ def _commodity_detail(block: dict) -> str:
         lines.append(line + (f" ({s['reason']})" if s.get("reason") else ""))
         for c in s.get("commodities") or []:
             lots = c.get("net_lots")
-            lots_text = f"{lots:+,.0f} lots" if lots is not None else "lots n/a"
+            lots_text = f"{lots:+,.0f} lots" if lots is not None else f"lots {MISSING}"
             text = f"  {c.get('name') or c.get('root_id')}: {lots_text}, net {_fmt_usd_or_na(c.get('net_usd'))}"
             if c.get("net_usd") is None and c.get("reason"):
                 text += f" ({c['reason']})"
@@ -1171,7 +1171,7 @@ def _business_days_words(row: dict) -> str:
 
 
 def _business_days_short(row: dict) -> str:
-    """The chip's count: '8 bd', 'today', 'expired', 'bd n/a' (the reason on hover)."""
+    """The chip's count: '8 bd', 'today', 'expired', 'bd unknown' (the reason on hover)."""
     n = row.get("business_days")
     if row.get("level") == "EXPIRED":
         return "expired"
@@ -1529,8 +1529,8 @@ def _risk_definitions(summary: dict) -> list:
     window = config.get("var_window_bd") or 252
     b = config.get("blended") or {}
     var, vol, pct = _num(book.get("var95_1d_usd")), _num(book.get("vol_blended_ann_usd")), _num(book.get("vol_vs_target_pct"))
-    var_words = _fmt_usd(var) if var is not None else "n/a"
-    vol_words = _fmt_usd(vol) if vol is not None else f"n/a ({_metric_reason(book, 'vol_blended_ann_usd')})"
+    var_words = _fmt_usd(var) if var is not None else f"not available ({_metric_reason(book, 'var95_1d_usd')})"
+    vol_words = _fmt_usd(vol) if vol is not None else f"not available ({_metric_reason(book, 'vol_blended_ann_usd')})"
     lines = [
         f"1y {conf:g}% VaR (1-day): {var_words}. Minus the {100 - conf:g}th percentile of the book's last "
         f"{window} daily $ P&Ls, today's positions held constant over the history: a typical bad day, "
@@ -1540,7 +1540,7 @@ def _risk_definitions(summary: dict) -> list:
         f"{_weight_text(b.get('w_trail'))} x trailing {b.get('trail_window_bd', 500)}-day vol + "
         f"{_weight_text(b.get('w_stress'))} x crisis vol ({b.get('stress_start', '2008-01-01')} to "
         f"{b.get('stress_end', '2010-12-31')}), each the daily $ P&L's standard deviation x sqrt(252), "
-        f"at the lag-2 date {book.get('lag2_date') or 'n/a'}"
+        f"at the lag-2 date {book.get('lag2_date') or '(none given)'}"
         + (f"; {book['vol_note']}" if book.get("vol_note") else "") + ".",
         f"Vol target: {_target_words(config)}.",
         "The Risk tab shows each figure by underlyer.",
@@ -1564,7 +1564,7 @@ def _risk_card(summary: Optional[dict]) -> html.Div:
                             hover="The book's VaR and vol against the target are being worked out from the risk "
                                   "history; they show here in a few seconds.")
     if summary.get("error"):
-        return _header_card(RISK_TITLE, "VaR n/a", "header-figure-value header-figure-value--muted",
+        return _header_card(RISK_TITLE, f"VaR {MISSING}", "header-figure-value header-figure-value--muted",
                             card_id=VAR_CHIP_ID, value_style=_chip_style(_MUTED_CHIP), hover=summary["error"])
     book, config = summary.get("book") or {}, summary.get("config") or {}
     var, vol, pct = _num(book.get("var95_1d_usd")), _num(book.get("vol_blended_ann_usd")), _num(book.get("vol_vs_target_pct"))
@@ -1576,16 +1576,16 @@ def _risk_card(summary: Optional[dict]) -> html.Div:
     target = _target_words(config)
     if pct is not None:
         over = bool(book.get("over_vol_target"))
-        sentence = (f"blended annual vol {_fmt_usd(vol) if vol is not None else 'n/a'} is {_pct_text(pct)} of the "
+        sentence = (f"Blended annual vol {_fmt_usd(vol) if vol is not None else MISSING} is {_pct_text(pct)} of the "
                     f"vol target ({target})" + (": over the target" if over else ""))
         markers.append((f"{_pct_text(pct)} of target", sentence, _OVER_TARGET_MARKER if over else None))
     elif var is not None:
-        markers.append(("vol n/a", f"blended annual vol n/a: {_metric_reason(book, 'vol_blended_ann_usd')}"))
+        markers.append((f"Vol {MISSING}", f"Blended annual vol not available: {_metric_reason(book, 'vol_blended_ann_usd')}"))
     if var is None:
         why = _metric_reason(book, "var95_1d_usd")
-        return _header_card(RISK_TITLE, "VaR n/a", "header-figure-value header-figure-value--muted",
+        return _header_card(RISK_TITLE, f"VaR {MISSING}", "header-figure-value header-figure-value--muted",
                             card_id=VAR_CHIP_ID, value_style=_chip_style(_MUTED_CHIP),
-                            hover=_joined(f"1y VaR n/a: {why}", *definitions[1:]), markers=markers)
+                            hover=_joined(f"1y VaR not available: {why}", *definitions[1:]), markers=markers)
     hover = _joined(*definitions[:3], out_sentence, definitions[3])
     return _header_card(RISK_TITLE, f"VaR {short_money(var, '$')}", "header-figure-value", card_id=VAR_CHIP_ID,
                         value_style=_chip_style(_NEUTRAL_CHIP), hover=hover, markers=markers)
@@ -1596,7 +1596,9 @@ def _commodity_cards(conn: sqlite3.Connection, as_of: str) -> list:
     commodity futures. Each engine call that fails costs its own card only, with the reason."""
     try:
         from engine.ladder.positions import book_positions
-        block = book_positions(conn, as_of).get("commodities") or {}
+        from ui.tabs.blotter_pricing import raw_value_book, shared_curve, shared_spreads
+        block = book_positions(conn, as_of, value_fn=raw_value_book, curve=shared_curve(conn, as_of),
+                               spreads=shared_spreads(conn, as_of)).get("commodities") or {}
     except Exception as exc:  # noqa: BLE001
         block = {"available": False, "reason": _failure_reason("commodity positions could not be computed", exc, conn)}
     try:
@@ -1697,7 +1699,8 @@ def _build_chart(conn: sqlite3.Connection, as_of: str, db_path=None):
     # the tab price each day once between them. `db_path` is kept for the callers' interface;
     # `_cached_ltd` stays for any other caller.
     from engine.pnl.series import daily_series
-    points = daily_series(conn, as_of).chart_points()
+    from ui.tabs.blotter_pricing import raw_value_book
+    points = daily_series(conn, as_of, value_fn=raw_value_book).chart_points()
     xs, ys, texts = [], [], []
     for day, value, n_unpriced, n_total, n_filled in points:
         xs.append(day)

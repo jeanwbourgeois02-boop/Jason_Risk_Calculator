@@ -35,6 +35,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import math
+import re
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -93,7 +94,7 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
     ("what", "What it is", "l", "The trade in plain words, with the share of its currency exposure hedged."),
     ("size", "Size", "", "The lots of each side (side A first); the value per side, the balance and the USD per "
                          "1-unit move of the level on hover."),
-    ("entry", "Entry", "", "The level at entry: the fills' size-weighted level (a calendar far minus near in its "
+    ("entry", "Entry", "", "The level at entry: the fills' size-weighted level (a calendar near minus far in its "
                            "unit, a China-against-West pair the converted ratio China over foreign)."),
     ("now", "Now", "", "The same level at the latest official marks."),
     ("z", "z", "", "Where Now sits in one year of this exact level: (Now minus the mean) over the standard "
@@ -133,10 +134,18 @@ def _lines(*parts: Any) -> str:
     return "\n".join(str(p) for p in parts if p)
 
 
+METAL_PAIRS = ("XAU", "XAG", "XPT", "XPD")
+
+
 def unit_words(unit: Optional[str]) -> str:
-    """'$/bbl' for 'USD/bbl'; '' for a ratio (it has no unit)."""
+    """'$/bbl' for 'USD/bbl'; '$/oz' for a precious-metal pair ('XAUUSD'); '' for a ratio or another
+    currency pair's rate (neither has a unit)."""
     u = str(unit or "")
-    return "" if u == "ratio" else u.replace("USD/", "$/")
+    if u == "ratio":
+        return ""
+    if is_fx_pair(u[:6]) and len(u) == 6:
+        return "$/oz" if u[:3] in METAL_PAIRS and u[3:] == "USD" else ""
+    return u.replace("USD/", "$/")
 
 
 def level_text(value: Any, level: dict, signed: bool = False) -> str:
@@ -286,14 +295,15 @@ _OPEN_UPLOAD_JS = (
 def _fill_info(conn: sqlite3.Connection) -> Dict[str, dict]:
     """{trade_id: {trade_date, quantity, price, broker_price, broker_symbol, pb_root, instrument_id,
     product}} as on file (display: the fills behind a leg's average, the raw PBRoot cells)."""
-    cols = "trade_id, trade_date, quantity, price, instrument_id, product, pb_root, broker_price, broker_symbol"
+    cols = "trade_id, trade_date, quantity, price, instrument_id, product, pb_root, broker_price, broker_symbol, strategy"
     for sql in (f"SELECT {cols} FROM trades", "SELECT trade_id, trade_date, quantity, price, instrument_id, product, "
-                                              "pb_root, '', '' FROM trades",
-                "SELECT trade_id, trade_date, quantity, price, instrument_id, product, '', '', '' FROM trades"):
+                                              "pb_root, '', '', strategy FROM trades",
+                "SELECT trade_id, trade_date, quantity, price, instrument_id, product, '', '', '', '' FROM trades"):
         try:
             return {str(r[0]): {"trade_date": str(r[1] or ""), "quantity": _num(r[2]), "price": _num(r[3]),
                                 "instrument_id": str(r[4] or ""), "product": str(r[5] or ""), "pb_root": str(r[6] or ""),
-                                "broker_price": str(r[7] or ""), "broker_symbol": str(r[8] or "")}
+                                "broker_price": str(r[7] or ""), "broker_symbol": str(r[8] or ""),
+                                "strategy": str(r[9] or "")}
                     for r in conn.execute(sql)}
         except sqlite3.Error:
             continue
@@ -392,6 +402,87 @@ def _gather(conn: sqlite3.Connection, as_of: str) -> dict:
     return data
 
 
+# --------------------------------------------------------------------------- prices to check (the marks check)
+CHECK_LABEL = "price to check"
+
+
+def price_checks(conn: sqlite3.Connection, as_of: str) -> dict:
+    """{"fills": {trade_id: [sentence]}, "legs": {(instrument_id, trade_id): [sentence]}}: every official
+    mark the Data tab's marks check flags (`data.bloomberg.inventory.mark_checks`, status CHECK, read
+    through `data_checks.check_frame`, the Data tab's own memo) against the fills it prices (`blocks`).
+    A flagged price stays the official mark the P&L uses; the Book only says so (an amber flag and a
+    grey ≈ on the figures it drives). Memoised per revision, as-of and book day."""
+    from data.bloomberg.live import book_today
+    today = book_today().isoformat()
+
+    def compute():
+        from ui.tabs import data_checks as dc
+        fills: Dict[str, List[str]] = {}
+        legs: Dict[tuple, List[str]] = {}
+        for row in dc.mark_records(conn, as_of):
+            if row.get("status") != "CHECK":
+                continue
+            words = dc.problem_words(row, as_of, today)[0]
+            sentence = f"{row['name']}: {words[:1].lower() + words[1:]}"
+            for tid in row.get("blocks") or []:
+                fills.setdefault(str(tid), []).append(sentence)
+                legs.setdefault((str(row.get("instrument_id") or ""), str(tid)), []).append(sentence)
+        return {"fills": fills, "legs": legs}
+    return _memo("price-checks", conn, as_of, compute, extra=(today,))
+
+
+def check_lines(data: dict, ids: Sequence[str]) -> List[str]:
+    """The flagged prices behind these fills, one sentence each (none: [])."""
+    by = (data.get("checks") or {}).get("fills") or {}
+    return list(dict.fromkeys(x for i in ids for x in by.get(str(i), [])))
+
+
+def leg_check_lines(data: dict, leg: dict) -> List[str]:
+    by = (data.get("checks") or {}).get("legs") or {}
+    inst = str(leg.get("instrument_id") or leg.get("contract_id") or "")
+    return list(dict.fromkeys(x for i in leg.get("trade_ids") or [] for x in by.get((inst, str(i)), [])))
+
+
+def with_checks(data: dict, checks: dict) -> dict:
+    """The gathered book with the price checks on it: a shallow copy (the shared gather is never
+    edited) whose trades carry one amber "price to check" flag per flagged price behind their fills."""
+    out = dict(data, checks=checks)
+    if not (checks or {}).get("fills"):
+        return out
+    trades = []
+    for t in data.get("trades") or []:
+        lines = check_lines(out, [str(i) for i in t.get("trade_ids") or []])
+        if lines:
+            t = dict(t, flags=list(t.get("flags") or []) + [
+                {"code": "price_check", "label": CHECK_LABEL, "sentence": x, "severity": "amber"} for x in lines])
+        trades.append(t)
+    out["trades"] = trades
+    return out
+
+
+def check_mark(lines: Sequence[str]):
+    """The grey ≈ before a figure a flagged price drives (its sentences on hover), or None."""
+    if not lines:
+        return None
+    return html.Span("≈ ", className="cell-estimated",
+                     title=plain_words(_lines("Price to check: this figure uses a price the Data tab's marks check "
+                                              "flags", *lines)))
+
+
+def gathered(conn: sqlite3.Connection, as_of: str) -> dict:
+    """`gather` with the price checks on it (`with_checks`): what the Book renders."""
+    data = gather(conn, as_of)
+    if not data.get("n_trades"):
+        return data
+    try:
+        checks = price_checks(conn, as_of)
+    except Exception as exc:  # noqa: BLE001 -- the table still shows; the drawer says why
+        log.exception("Book: the marks check could not be read for %s", as_of)
+        return dict(data, errors=list(data.get("errors") or []) + [
+            ("Marks check", f"the prices to check could not be read ({type(exc).__name__}: {exc})")])
+    return with_checks(data, checks)
+
+
 # --------------------------------------------------------------------------- figures per trade
 def fill_sum(data: dict, key: str, ids: Sequence[str]) -> Tuple[Optional[float], int, List[str]]:
     """(known sum, count excluded, reasons) of the period `key` over the fills `ids`: each fill's
@@ -412,12 +503,14 @@ def _excl_hover(n: int, reasons: Sequence[str]) -> str:
 
 
 def money_td(total: Optional[float], n_excl: int, reasons: Sequence[str], hover: str = "",
-             className: str = "") -> html.Td:
+             className: str = "", check: Sequence[str] = ()) -> html.Td:
     """A k / m money cell with its 'excl. N' marker (the reasons on hover); the dash with every
-    reason when nothing is known."""
+    reason when nothing is known. With `check` (the flagged prices behind it) the figure is grey,
+    never green or red, after a grey ≈: a price to check never reads as a real gain or loss."""
     if total is None:
         return html.Td(missing_cell(_lines(*list(dict.fromkeys(reasons))[:8]) or "no figure"), className=className or None)
-    return html.Td([km_cell(total, hover=hover),
+    return html.Td([check_mark(check), km_cell(total, hover=hover, colour=not check,
+                                               className="cell-estimated" if check else ""),
                     marker(f"excl. {n_excl}", _excl_hover(n_excl, reasons), "marker--small") if n_excl else None],
                    className=className or None)
 
@@ -472,38 +565,81 @@ def coverage_words(hedge: dict) -> str:
     return f"{hedge.get('currency') or 'CNH'} {pct_text(cov)} hedged"
 
 
-def _what_td(t: dict) -> html.Td:
+_HEDGED_TAIL = re.compile(r",?\s*\b[A-Z]{3} hedged$")
+
+
+def what_text(t: dict) -> str:
+    """What the trade is, in words: the engine's sentence; for a closed trade (the engine says
+    "nothing open") the contracts it held."""
     what = str(t.get("what_it_is") or "")
+    if t.get("status") == "closed" and what.strip().lower() in ("", "nothing open"):
+        legs = [leg for leg in t.get("legs") or [] if not leg.get("hedge")] or list(t.get("legs") or [])
+        names = list(dict.fromkeys(str(leg.get("name") or "") for leg in legs if leg.get("name")))
+        if names:
+            return "Held " + " / ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
+    return what
+
+
+def _what_td(t: dict) -> html.Td:
+    what = what_text(t)
     cov = coverage_words(t.get("hedge") or {})
+    if cov:
+        what = _HEDGED_TAIL.sub("", what)     # the coverage says it, with its figure
     legs = [str(leg.get("name") or "") for leg in t.get("legs") or []]
-    hover = _lines(what, *(f"· {n}" for n in legs if n))
-    return html.Td([html.Span(cap(what), title=plain_words(hover) or None),
-                    html.Span(f" · {cov}", className="tk-sub") if cov else None], className="l tk-what")
+    hover = _lines(what, cov, *(f"· {n}" for n in legs if n))
+    return html.Td([html.Span(cap(what), className="tk-clip", title=plain_words(hover) or None),
+                    html.Span(f" · {cov}", className="tk-sub tk-cov") if cov else None],
+                   className="l tk-what" + (" tk-what--cov" if cov else ""))
+
+
+def _lots_pair(a: float, b: float) -> str:
+    if not a or not b:
+        n = a or b
+        return f"{n:,.0f} {'lot' if round(n) == 1 else 'lots'}"
+    return f"{a:,.0f} : {b:,.0f}"
+
+
+def sub_sides(t: dict, sub: dict) -> Tuple[float, float]:
+    """(side A lots, side B lots) of one part of a trade (display: its legs' lots added per side). Side
+    A is the trade's first side (`size.sides[0]`, its roots); a part on one root (a calendar) is long
+    against short."""
+    sides = (t.get("size") or {}).get("sides") or []
+    a_roots = {str(r) for r in (sides[0].get("root_ids") or [])} if sides else set()
+    root_of = {str(leg.get("contract_id")): str(leg.get("root_id") or "") for leg in t.get("legs") or []}
+    legs = [(root_of.get(str(x.get("contract_id")), ""), _num(x.get("lots")) or 0.0) for x in sub.get("legs") or []]
+    roots = {r for r, _l in legs}
+    if len(roots) <= 1 or not (roots & a_roots) or roots <= a_roots:
+        return sum(q for _r, q in legs if q > 0), sum(-q for _r, q in legs if q < 0)
+    return sum(abs(q) for r, q in legs if r in a_roots), sum(abs(q) for r, q in legs if r not in a_roots)
 
 
 def size_text(t: dict) -> Tuple[str, str]:
-    """(the Size cell, why when blank)."""
+    """(the Size cell, why when blank): the lots of side A against side B ("91 : 167"); a trade of
+    several parts shows its largest part and "+N more"."""
     size = t.get("size") or {}
     sides = size.get("sides") or []
+    subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
+    if len(subs) > 1:
+        best = max(subs, key=lambda x: sum(abs(_num(leg.get("lots")) or 0.0) for leg in x.get("legs") or []))
+        a, b = sub_sides(t, best)
+        if a or b:
+            return f"{_lots_pair(a, b)} +{len(subs) - 1} more", ""
     if len(sides) < 2:
         return "", str(size.get("reason") or "no size")
     a, b = (abs(_num(s.get("lots")) or 0.0) for s in sides[:2])
     if not a and not b:
         return "", str(size.get("reason") or "nothing open")
-    if not a or not b:
-        n = a or b
-        text = f"{n:,.0f} {'lot' if n == 1 else 'lots'}"
-    else:
-        text = str(size.get("ratio_text") or f"{a:,.0f} : {b:,.0f}")
-    subs = t.get("sub_spreads") or []
-    if tf.type_code(t) == "MIXED" and len(subs) > 1:
-        text += f" +{len(subs) - 1} more"
-    return text, ""
+    return _lots_pair(a, b), ""
 
 
 def size_hover(t: dict, r: Optional[dict], research: dict) -> str:
     size, level = t.get("size") or {}, t.get("level") or {}
     lines = []
+    subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
+    if len(subs) > 1:
+        for x in subs:
+            a, b = sub_sides(t, x)
+            lines.append(f"{cap(str(x.get('what_it_is') or ''))}: {_lots_pair(a, b)}")
     for leg in t.get("legs") or []:
         if leg.get("status") == "open" and not leg.get("hedge"):
             lines.append(f"{leg.get('name')}: {_num(leg.get('lots')) or 0:+,.0f} lots")
@@ -515,8 +651,9 @@ def size_hover(t: dict, r: Optional[dict], research: dict) -> str:
                      + (f"; {abs(metal):,.0f} {s.get('physical_unit') or ''}" if metal else ""))
     gap = _num(size.get("value_gap"))
     if gap is not None:
+        tol = pct_text(size.get("tolerance") or 0.1)
         lines.append(f"Balance: the sides differ by {pct_text(gap)} of their value "
-                     f"({'unbalanced' if size.get('unbalanced') else 'balanced'} beyond {pct_text(size.get('tolerance') or 0.1)})")
+                     + (f"(unbalanced: beyond {tol})" if size.get("unbalanced") else f"(balanced: within {tol})"))
     elif size.get("reason"):
         lines.append(str(size["reason"]))
     usd, words = _usd_per_move(level)
@@ -551,16 +688,17 @@ def _entry_td(t: dict) -> html.Td:
                                hover))
 
 
-def _now_td(t: dict) -> html.Td:
+def _now_td(t: dict, check: Sequence[str] = ()) -> html.Td:
     level = t.get("level") or {}
     carry = ""
     if tf.type_code(t) == "CALENDAR" or level.get("source") == "calendar":
         c = _num(t.get("carry_per_month"))
         carry = (f"Carry per month: {full_signed(c)} USD (the legs' roll-down on one curve, research)"
                  if c is not None else f"Carry per month: not summed ({t.get('carry_reason') or 'not given'})")
-    hover = _lines((level.get("sources") or {}).get("now", ""), level.get("note") or "", carry)
+    hover = _lines((level.get("sources") or {}).get("now", ""), level.get("note") or "", carry,
+                   *(f"Price to check: {x}" for x in check))
     return html.Td(_level_cell(level.get("now"), level, str(level.get("now_reason") or level.get("reason") or ""),
-                               hover, estimated=_estimated_level(t)))
+                               hover, estimated=_estimated_level(t) or bool(check)))
 
 
 def _z_td(r: Optional[dict], ready: bool, research: dict) -> html.Td:
@@ -599,7 +737,7 @@ def sigma_words(r: Optional[dict], ready: bool, level: dict) -> str:
     return f"Move in σ: {z_text(ms)}{sd_text}"
 
 
-def _today_td(t: dict, r: Optional[dict] = None, ready: bool = True) -> html.Td:
+def _today_td(t: dict, r: Optional[dict] = None, ready: bool = True, check: Sequence[str] = ()) -> html.Td:
     level = t.get("level") or {}
     ch = _num(level.get("change"))
     if ch is None:
@@ -607,9 +745,16 @@ def _today_td(t: dict, r: Optional[dict] = None, ready: bool = True) -> html.Td:
     usd = _num(level.get("usd_per_unit"))
     effect = ch * usd if usd is not None else None
     cls = sign_class(effect) if effect is not None else ""
+    if effect is None and level.get("mode") == "price":
+        leg = _price_leg(t)
+        held = _num((leg or {}).get("lots")) or 0.0
+        cls = sign_class(ch * held) if held else ""      # a rise helps a long, hurts a short (display only)
     hover = _lines(f"Since the {level.get('prev_date') or 'previous'} close ({level_text(level.get('prev'), level)})",
                    f"Worth {full_signed(effect)} USD to the trade" if effect is not None else "",
-                   sigma_words(r, ready, level))
+                   sigma_words(r, ready, level), *(f"Price to check: {x}" for x in check))
+    if check:
+        return html.Td(html.Span("≈ " + level_text(ch, level, signed=True), className="cell-estimated",
+                                 title=plain_words(hover)))
     return html.Td(html.Span(level_text(ch, level, signed=True), className=cls or None, title=plain_words(hover)))
 
 
@@ -624,9 +769,17 @@ def next_parts(t: dict, as_of: str) -> Tuple[str, str, str]:
     bd = nx.get("business_days")
     level = str(nx.get("level") or "").upper()
     est = bool(nx.get("estimated"))
-    hover = _lines(f"{event} of {nx.get('contract_id') or ''} on {nx.get('date')}"
-                   + (f", {bd} business days to go" if bd is not None else ""),
-                   f"engine level {level}" if level else "", nx.get("reason") or "")
+    what = str(nx.get("leg") or "") or contract_name(str(nx.get("contract_id") or "")) or str(nx.get("contract_id") or "")
+    alert = str(nx.get("alert_date") or "")
+    to_go = f", {bd} business {'day' if bd == 1 else 'days'} to go" if bd is not None else ""
+    if est:
+        first = (f"Estimated {event} of {what}: {day_text(nx.get('date'), as_of)}; the alert is held early, "
+                 f"to {day_text(alert or nx.get('date'), as_of)}{to_go}")
+    elif alert and alert != str(nx.get("date") or ""):
+        first = f"{cap(event)} of {what} on {day_text(nx.get('date'), as_of)}; alert on {day_text(alert, as_of)}{to_go}"
+    else:
+        first = f"{cap(event)} of {what} on {day_text(nx.get('date'), as_of)}{to_go}"
+    hover = _lines(first, f"Alert level: {level.lower()}" if level else "", nx.get("reason") or "")
     if est:
         return f"≈ {text}", "cell-estimated", hover
     return text, {"RED": "cell-red", "EXPIRED": "cell-red", "AMBER": "cell-amber"}.get(level, ""), hover
@@ -718,15 +871,16 @@ def trade_tr(data: dict, t: dict, r: Optional[dict], ready: bool, opened: bool) 
     name_hover = _lines(f"PBRoot: {', '.join(pbs)}" if pbs else "", f"{_plural(len(ids), 'fill')}")
     tv = dict(t, level=display_level(data, t))
     closed = bool(tv["level"].get("closed"))
+    check = check_lines(data, ids)
     cells = [
         html.Td([html.Span("▾ " if opened else "▸ ", className="tk-chev"),
                  html.Span(name, className="tk-name", title=name_hover or None)], className="l"),
-        _type_td(t), _what_td(t), _size_td(t, r, data.get("research") or {}), _entry_td(tv), _now_td(tv),
+        _type_td(t), _what_td(t), _size_td(t, r, data.get("research") or {}), _entry_td(tv), _now_td(tv, check),
         html.Td(missing_cell("closed: no z")) if closed else _z_td(r, ready, data.get("research") or {}),
-        _today_td(tv, r, ready),
-        money_td(*daily, hover=_split_hover(t)),
+        _today_td(tv, r, ready, check),
+        money_td(*daily, hover=_split_hover(t), check=check),
         money_td(*ltd, hover=_lines(f"MTD {km_text(mtd[0])}", f"YTD {km_text(ytd[0])}",
-                                    "the final P&L: the trade is flat" if closed else "")),
+                                    "the final P&L: the trade is flat" if closed else ""), check=check),
         _closed_td(t, data["as_of"]) if closed else _next_td(t, data["as_of"]), _flags_td(t),
     ]
     return html.Tr(cells, id={"type": ROW_TYPE, "idx": name}, n_clicks=0,
@@ -784,9 +938,20 @@ def total_tr(data: dict, shown: Sequence[dict], filtered: bool) -> html.Tr:
                  else missing_cell("no gross"), html.Span(" gross", className="cell-unit"),
                  marker(f"excl. {g_n}", _lines(*g_r), "marker--small") if g_n else None]),
         html.Td(""), html.Td(""), html.Td(""), html.Td(""),
-        money_td(*tot["daily"]), money_td(*tot["ltd"], hover=f"MTD {km_text(tot['mtd'][0])}"),
+        _checked_money(data, shown, tot["daily"]),
+        _checked_money(data, shown, tot["ltd"], hover=f"MTD {km_text(tot['mtd'][0])}"),
         html.Td(nx_cell, className="l"), html.Td(""),
     ], className="tk-total book-total")
+
+
+def _checked_money(data: dict, shown: Sequence[dict], fig, hover: str = "") -> html.Td:
+    """A total's money cell and, when a price to check drives some of the rows, the trades named."""
+    names = [str(t.get("trade")) for t in shown if check_lines(data, [str(i) for i in t.get("trade_ids") or []])]
+    td = money_td(*fig, hover=hover)
+    if names and fig[0] is not None:
+        td.children = list(td.children) + [marker(f"≈ {len(names)} to check", _lines(
+            "Includes the P&L of trades priced off a price the marks check flags:", *names), "marker--small")]
+    return td
 
 
 def group_tr(data: dict, label: str, rows: Sequence[dict], folded: bool) -> html.Tr:
@@ -970,6 +1135,7 @@ def value_hover(data: dict, leg: dict, rows: pd.DataFrame) -> str:
 def leg_tr(data: dict, leg: dict, level_note: str) -> html.Tr:
     ids = [str(i) for i in leg.get("trade_ids") or []]
     hedge = bool(leg.get("hedge"))
+    check = leg_check_lines(data, leg)
     unrec = bool(leg.get("unrecognised"))
     unit = "" if unrec else _leg_unit(data, leg)
     lots = _num(leg.get("lots"))
@@ -993,8 +1159,10 @@ def leg_tr(data: dict, leg: dict, level_note: str) -> html.Tr:
     mark = _num(leg.get("mark"))
     est = is_estimated_mark(leg.get("mark_source"))
     m_hover = mark_hover(data, leg, unit, fill, level_note)
-    mark_cell = (html.Span(("≈ " if est else "") + price_text(mark, unit, fill), title=plain_words(m_hover),
-                           className="cell-estimated" if est else None)
+    if check:
+        m_hover = _lines(m_hover, *(f"Price to check: {x}" for x in check))
+    mark_cell = (html.Span(("≈ " if est or check else "") + price_text(mark, unit, fill), title=plain_words(m_hover),
+                           className=("cell-estimated" if est else "") + (" cell-amber" if check else "") or None)
                  if mark is not None else missing_cell(_lines(leg.get("mark_reason") or "no mark",
                                                               "" if unrec else m_hover)))
     daily = fill_sum(data, "daily", ids)
@@ -1071,9 +1239,11 @@ def panel_legs(data: dict, t: dict) -> html.Table:
     level = t.get("level") or {}
     note = str(level.get("note") or "")
     legs = _leg_order(t)
+    if legs and all(leg.get("hedge") for leg in legs):
+        legs = [dict(leg, hedge=False) for leg in legs]     # a trade of hedges only: no leg is "the hedge" of another
     body: List[Any] = []
-    subs = t.get("sub_spreads") or []
-    if tf.type_code(t) == "MIXED" and len(subs) > 1:
+    subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
+    if len(subs) > 1:
         taken: set = set()
         for sub in subs:
             mine = [leg for leg in legs if not leg.get("hedge") and leg.get("contract_id") not in taken
@@ -1196,13 +1366,19 @@ def level_figure(hist: dict, t: dict) -> dict:
             traces.append({"x": [r[0] for r in rolls], "y": [r[1] for r in rolls], "type": "scatter", "mode": "markers",
                            "name": "roll", "text": [r[2] for r in rolls],
                            "marker": {"symbol": "diamond", "size": 9, "color": "#c9a227"},
-                           "hovertemplate": "roll %{x|%d %b}: %{text}<extra></extra>"})
+                           "hovertemplate": "Roll %{x|%d %b}: %{text}<extra></extra>"})
         ytitle = unit or "ratio"
     else:
         ys = [_num(p.get("ltd_usd")) for p in pts]
         traces.append({"x": xs, "y": ys, "type": "scatter", "mode": "lines", "name": "LTD",
                        "line": {"color": "#0f1f3d", "width": 2},
                        "hovertemplate": "%{x|%d %b %Y}: LTD %{y:$,.0f}<extra></extra>"})
+        rolls = [(p["date"], _num(p.get("ltd_usd")), "; ".join(p.get("rolls") or [])) for p in pts if p.get("rolls")]
+        if rolls:
+            traces.append({"x": [r[0] for r in rolls], "y": [r[1] for r in rolls], "type": "scatter", "mode": "markers",
+                           "name": "roll", "text": [r[2] for r in rolls],
+                           "marker": {"symbol": "diamond", "size": 9, "color": "#c9a227"},
+                           "hovertemplate": "Roll %{x|%d %b}: %{text}<extra></extra>"})
         ytitle = "LTD USD"
     return {"data": traces, "layout": {
         "height": 220, "margin": {"l": 56, "r": 24, "t": 10, "b": 28}, "showlegend": False,
@@ -1244,8 +1420,14 @@ def panel_tr(conn: sqlite3.Connection, data: dict, t: dict) -> html.Tr:
             html.Div([panel_legs(data, t), panel_facts(t)], className="tk-panel-legs"),
             panel_chart(conn, data, t)]))
     n = len(t.get("trade_ids") or [])
+    later = sum(1 for f in (data.get("fills") or {}).values()
+                if f.get("strategy") == name and f.get("trade_date", "") > str(data.get("as_of") or ""))
+    fills_label = (f"See fills ({n} + {later} after {day_text(data.get('as_of'), data.get('as_of'))})" if later
+                   else f"See fills ({n})")
     parts.append(html.Div(className="tk-links", children=[
-        tf.link(f"See fills ({n})", "blotter", name, "book-fills", "Open the Blotter filtered to this trade's fills"),
+        tf.link(fills_label, "blotter", name, "book-fills",
+                "Open the Blotter filtered to this trade's fills" + (
+                    f": it also lists the {later} dealt after the as-of date" if later else "")),
         tf.link("P&L history", "pnl", name, "book-pnl", "Open the P&L tab filtered to this trade"),
         tf.link("Risk", "risk", name, "book-risk", "Open the Risk tab filtered to this trade"),
     ]))
@@ -1342,7 +1524,7 @@ def headline(data: dict, state: Optional[dict]) -> html.Div:
     named = [t for t in data.get("trades") or [] if not t.get("pseudo")]
     shown_named = [t for t in shown if not t.get("pseudo")]
     n_open = sum(1 for t in named if t.get("status") == "open")
-    count = (f"{len(shown_named)} of {len(named)}" if tf.is_filtered(s) else f"{len(named)} · {n_open} open")
+    count = (f"{len(shown_named)} of {len(named)}" if tf.is_filtered(s) else f"{_plural(len(named), 'trade')} · {n_open} open")
 
     def money(k):
         v, n, r = tot[k]
@@ -1363,7 +1545,8 @@ def headline(data: dict, state: Optional[dict]) -> html.Div:
         event = str(n.get("event") or "")
         est = "≈ " if n.get("estimated") else ""
         nx_value = html.Span(f"{est}{nx['trade'].get('trade')} {event} " +
-                             (f"in {bd} {'day' if bd == 1 else 'days'}" if bd is not None else f"on {day_text(n.get('date'))}"),
+                             (f"in {bd} business {'day' if bd == 1 else 'days'}" if bd is not None
+                              else f"on {day_text(n.get('date'))}"),
                              className=next_parts(nx["trade"], data["as_of"])[1] or None)
         nx_hover = next_parts(nx["trade"], data["as_of"])[2]
     flags = tot["flags"]
@@ -1458,7 +1641,7 @@ def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, so
         if trades_on_file(conn) == 0:
             out["body"] = empty_state(idx=TAB)
             return out
-        data = gather(conn, as_of)
+        data = gathered(conn, as_of)
         from ui.tabs.blotter_pricing import shared_trade_risk
         try:
             risk = shared_trade_risk(conn, as_of, wait=wait_risk)
@@ -1501,7 +1684,7 @@ def options_of(as_of: str, db_path) -> Dict[str, List[dict]]:
     try:
         if trades_on_file(conn) == 0:
             return {}
-        return tf.options_for(gather(conn, as_of).get("trades") or [])
+        return tf.options_for(gathered(conn, as_of).get("trades") or [])
     finally:
         conn.close()
 
@@ -1628,7 +1811,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         conn = _open(get_db_path())
         try:
             from ui.tabs.blotter_pricing import shared_trade_risk
-            data = gather(conn, as_of)
+            data = gathered(conn, as_of)
             frame = csv_frame(data, state, sort, shared_trade_risk(conn, as_of, wait=False))
         finally:
             conn.close()

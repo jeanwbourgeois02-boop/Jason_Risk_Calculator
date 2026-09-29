@@ -119,6 +119,20 @@ def trade_type_label(trade: dict, short: bool = False) -> str:
     return type_label(code, short=short)
 
 
+NOT_TYPED_CODE = "NOT_TYPED"   # the Type filter's value for a trade `trade_type_label` calls "Not typed"
+
+
+def type_key(trade: dict) -> str:
+    """The Type filter's value of a trade: its engine type, or `NOT_TYPED_CODE` for a trade of only
+    unrecognised contracts, so the filter's label is the row's own ("Not typed", never "Hedges only")."""
+    return NOT_TYPED_CODE if trade_type_label(trade) == NOT_TYPED else type_code(trade)
+
+
+def key_label(key: str, short: bool = False) -> str:
+    """A Type filter value in words (`type_key`)."""
+    return NOT_TYPED if key == NOT_TYPED_CODE else type_label(key, short=short)
+
+
 def family_label(trade: dict) -> str:
     """The trade's commodity family in words ('Copper', 'Ferrous', 'Cross-product', 'FX'); 'Other'
     when the engine gives none."""
@@ -151,7 +165,7 @@ def keeps(trade: dict, state: Optional[dict]) -> bool:
     text = s["search"].strip().lower()
     if text and not all(word in _search_blob(trade) for word in text.split()):
         return False
-    if s["type"] and type_code(trade) not in s["type"]:
+    if s["type"] and type_key(trade) not in s["type"]:
         return False
     if s["commodity"] and family_label(trade) not in s["commodity"]:
         return False
@@ -181,6 +195,7 @@ def group_order(labels: Iterable[str], group: str) -> List[str]:
     labels = list(dict.fromkeys(labels))
     if group == GROUP_BY_TYPE:
         rank = {type_label(c): n for n, c in enumerate(TYPE_ORDER)}
+        rank[NOT_TYPED] = len(TYPE_ORDER)
         return sorted(labels, key=lambda x: (rank.get(x, 99), x))
     return sorted(labels, key=lambda x: (x in _LAST_FAMILIES, _LAST_FAMILIES.index(x) if x in _LAST_FAMILIES else 0, x))
 
@@ -199,11 +214,11 @@ def options_for(trades: Sequence[dict]) -> Dict[str, List[dict]]:
             out[v] = out.get(v, 0) + 1
         return out
     named = [t for t in trades if str(t.get("trade") or "") and t.get("trade") != UNASSIGNED]
-    types = count([type_code(t) for t in named])
+    types = count([type_key(t) for t in named])
     fams = count([family_label(t) for t in named])
     return {
-        "type": [{"label": f"{type_label(c)} ({types[c]})", "value": c} for c in TYPE_ORDER if c in types]
-        + [{"label": f"{type_label(c)} ({n})", "value": c} for c, n in types.items() if c not in TYPE_ORDER],
+        "type": [{"label": f"{key_label(c)} ({types[c]})", "value": c} for c in TYPE_ORDER if c in types]
+        + [{"label": f"{key_label(c)} ({n})", "value": c} for c, n in types.items() if c not in TYPE_ORDER],
         "commodity": [{"label": f"{f} ({fams[f]})", "value": f} for f in group_order(fams, GROUP_BY_COMMODITY)],
         "trade": [{"label": str(t["trade"]), "value": str(t["trade"])}
                   for t in sorted(named, key=lambda t: str(t["trade"]))],

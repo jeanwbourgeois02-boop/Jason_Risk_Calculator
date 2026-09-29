@@ -285,6 +285,9 @@ def layout(data: dict = None):
     ])
 
 
+UPLOADING_LABEL = "Uploading…"
+
+
 def register(app, get_db_path):
     @app.callback(
         Output(STAGE_ID, "style"), Output(FILENAME_ID, "children"),
@@ -317,6 +320,15 @@ def register(app, get_db_path):
         Input(CONFIRM_ID, "n_clicks"),
         State(FILE_UPLOAD_ID, "contents"), State(FILE_UPLOAD_ID, "filename"),
         prevent_initial_call=True,
+        # While the import runs (checker C, 2026-09-29): the Upload button and Confirm disabled, their
+        # labels "Uploading…"; Dash puts them back when the callback returns.
+        running=[
+            (Output(FILE_UPLOAD_ID, "disabled"), True, False),
+            (Output(FILE_UPLOAD_ID, "children"), html.Button(UPLOADING_LABEL, className="btn btn--locked", disabled=True),
+             sample_book.upload_button(False)),
+            (Output(CONFIRM_ID, "disabled"), True, False),
+            (Output(CONFIRM_ID, "children"), UPLOADING_LABEL, "Confirm insert"),
+        ],
     )
     def _confirm(clicks, contents, filename):
         keep = (no_update, no_update, no_update, no_update)  # source line, stage, data rev, book rev

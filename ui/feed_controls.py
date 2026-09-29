@@ -157,15 +157,23 @@ def _parse_time(text) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.astimezone()
 
 
+def _ny(moment: datetime) -> datetime:
+    from zoneinfo import ZoneInfo
+    return moment.astimezone(ZoneInfo("America/New_York"))
+
+
 def short_time(text, now: Optional[datetime] = None) -> str:
-    """'14:32:05' for a timestamp dated today (local), 'YYYY-MM-DD HH:MM' otherwise, and
-    the raw text when it is not a timestamp at all."""
+    """New York time, no seconds, labelled (checker C, 2026-09-29: one form for one pull on every
+    screen, as the Blotter's): '14:32 NY' for a timestamp of today in New York, 'Mon 28 Sep 14:32 NY'
+    otherwise, and the raw text when it is not a timestamp at all."""
     parsed = _parse_time(text)
     if parsed is None:
         return str(text or "")
-    local = parsed.astimezone()
-    today = (now.astimezone() if now else datetime.now().astimezone()).date()
-    return local.strftime("%H:%M:%S") if local.date() == today else local.strftime("%Y-%m-%d %H:%M")
+    local = _ny(parsed)
+    today = _ny(now if now else datetime.now().astimezone()).date()
+    if local.date() == today:
+        return f"{local:%H:%M} NY"
+    return f"{local:%a} {local.day} {local:%b} {local:%H:%M} NY"
 
 
 def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None,
@@ -255,8 +263,8 @@ def _joined(*parts: str) -> str:
 
 
 def _hhmm(text) -> str:
-    parsed = _parse_time(text)
-    return parsed.astimezone().strftime("%H:%M") if parsed is not None else ""
+    """The top bar's 'Last pull …' time: `short_time` ('09:14 NY' today, the day before it otherwise)."""
+    return short_time(text) if _parse_time(text) is not None else ""
 
 
 def bar_state(status: Optional[dict], line: str) -> Tuple[str, str, str]:

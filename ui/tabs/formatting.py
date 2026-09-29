@@ -235,6 +235,11 @@ _PLAIN_PHRASES: Tuple[Tuple[str, str], ...] = (
      "of the headline VaR", "its currency risk is counted under the currencies of the headline VaR, not per trade"),
     ("book_positions", "the currency positions"),
     ("UNRECOGNISED:", "contract not recognised: "), ("UNRECOGNISED", "contract not recognised"),
+    # the parser's file paths, in a trader's words (checker C, 2026-09-29)
+    ("add it to config/contracts.csv", "add the contract to the contract list"),
+    ("is not in config/contracts.csv", "is not in the contract list"),
+    ("config/contracts.csv", "the contract list"), ("config/book.yaml", "the book filter"),
+    ("the contract universe", "the contract list"),
 )
 
 
@@ -1173,6 +1178,8 @@ def pct_text(fraction, signed: bool = False) -> str:
     if _is_missing(fraction):
         return MISSING
     p = float(fraction) * 100.0
+    if p == 0:
+        return "0 %"
     body = f"{abs(p):.1f}" if abs(p) < 9.95 else f"{abs(p):.0f}"
     sign = MINUS if p < 0 and float(body) != 0 else ("+" if signed and p > 0 else "")
     return f"{sign}{body} %"

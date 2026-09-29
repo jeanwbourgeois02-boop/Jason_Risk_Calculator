@@ -273,7 +273,12 @@ def subset(conn: sqlite3.Connection, as_of: str, names: Sequence[str]) -> Option
         return None
     try:
         from engine.risk.trades import subset_var
-        return subset_var(conn, as_of, list(names))
+        from ui.tabs.blotter_pricing import screen_memo
+        key = tuple(sorted(str(n) for n in names))
+        # memoised per revision, as-of, research inputs and the set of names (a group switch or a row
+        # opened asks the same sets again): the engine's own figure, shared, never edited
+        return screen_memo("risk-subset", conn, as_of, lambda: subset_var(conn, as_of, list(key)),
+                           extra=(*_outside_key(), key))
     except Exception as exc:  # noqa: BLE001 -- the headline says why
         log.exception("Risk: subset VaR failed for %s", as_of)
         return {"var_usd": None, "var_reason": f"{type(exc).__name__}: {exc}", "daily_risk_usd": None,
@@ -488,8 +493,7 @@ def _exit_td(data: dict, t: dict, r: Optional[dict], ready: bool) -> html.Td:
 
 
 def _type_td(t: dict) -> html.Td:
-    code = tf.type_code(t)
-    return html.Td(html.Span(tf.type_label(code, short=True) if not t.get("pseudo") else NA,
+    return html.Td(html.Span(tf.trade_type_label(t, short=True) if not t.get("pseudo") else NA,
                              title=plain_words(t.get("type_note") or "") or None), className="l")
 
 
@@ -546,7 +550,8 @@ def _var_td(sub: Optional[dict], ready: bool, key: str = "daily_risk_usd") -> ht
 def total_tr(rows: Sequence[tuple], all_rows: Sequence[tuple], sub: Optional[dict], ready: bool, filtered: bool) -> html.Tr:
     named = [t for t, _r in all_rows if not t.get("pseudo")]
     shown_named = [t for t, _r in rows if not t.get("pseudo")]
-    label = f"Filtered · {len(shown_named)} of {len(named)}" if filtered else f"Book · {_plural(len(named), 'trade')}"
+    label = (f"Filtered · {len(shown_named)} of {len(named)} open" if filtered
+             else f"Book · {len(named)} open {'trade' if len(named) == 1 else 'trades'}")
     s = _sums(rows)
     return html.Tr([html.Td(label, className="l"), html.Td(""), _var_td(sub, ready),
                     _sum_td(s["share"], "the shares of the rows showing added (component VaR shares add up)", pct=True),
@@ -784,7 +789,9 @@ def headline(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> 
     ready = risk is not None
     all_named = [t for t, _r in v["rows"] if not t.get("pseudo")]
     shown_named = [t for t, _r in v["shown_rows"] if not t.get("pseudo")]
-    count = f"{len(shown_named)} of {len(all_named)}" if v["filtered"] else f"{len(all_named)} open"
+    every = [t for t in (data.get("trade_book") or {}).get("trades") or [] if not t.get("pseudo")]
+    count = (f"{len(shown_named)} of {len(all_named)} open" if v["filtered"]
+             else f"{_plural(len(every), 'trade')} · {len(all_named)} open")
 
     def pending():
         return missing_cell(COMPUTING)

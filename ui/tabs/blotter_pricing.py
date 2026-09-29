@@ -342,7 +342,7 @@ def shared_curve(conn: sqlite3.Connection, as_of: str) -> dict:
             spreads = shared_spreads(conn, as_of)
         except Exception:  # noqa: BLE001 -- the engine then reads them itself and names the failure
             spreads = None
-        return curve_positions(conn, as_of, spreads=spreads)
+        return curve_positions(conn, as_of, spreads=spreads, value_fn=raw_value_book)
     return screen_memo("curve", conn, as_of, compute)
 
 

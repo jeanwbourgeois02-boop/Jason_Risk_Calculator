@@ -989,7 +989,11 @@ p { margin: 8px 0; }
 .tk-table .tk-chev { color: var(--muted); font-size: 10px; display: inline-block; width: 12px; }
 .tk-table .tk-name { font-weight: 700; }
 .tk-table .tk-sub { color: var(--muted); font-weight: 400; font-size: 11.5px; }
-.tk-table td.tk-what { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+.tk-table td.tk-what { max-width: 320px; white-space: nowrap; }
+/* What it is: the text clipped with an ellipsis, the hedge coverage beside it always whole (checker A) */
+.tk-table td.tk-what .tk-clip { display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; vertical-align: bottom; }
+.tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 200px; }
 .tk-table .tk-bold { font-weight: 700; }
 .tk-table .tk-flags, .tk-table .tk-flag-dot { color: var(--warn); font-weight: 700; cursor: help; }
 .tk-table .tk-flag-dot { margin-left: 4px; font-size: 9px; vertical-align: middle; }
@@ -1078,3 +1082,26 @@ p { margin: 8px 0; }
 .risk-fx-line { margin: 10px 2px 0; font-size: 12.5px; }
 .risk-fx-line .tk-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-right: 6px; }
 .risk-subhead { margin: 14px 0 4px; display: flex; align-items: baseline; gap: 6px; }
+/* A narrow window (checker A, 2026-09-29): the trade tables fit the width instead of scrolling
+   sideways, so Next and the flags stay in view and the heads and the total row stay sticky: What it
+   is shrinks (ellipsis, full text on hover), the cells pad less, the filter bar wraps. */
+@media (max-width: 1400px) {
+  .book-main > .tk-table-slot, .book-main .tk-table-slot { overflow-x: visible; }
+  .book-main .tk-table-slot .book-table.book-grid thead th { position: sticky; }
+  .book-main .tk-table-slot .book-table.book-grid tr.book-total td { position: sticky; }
+  .book-main .book-table.book-grid td, .book-main .book-table.book-grid th { padding-left: 5px; padding-right: 5px; }
+  .tk-table td.tk-what { max-width: 190px; }
+  .tk-table td.tk-what .tk-clip { max-width: 180px; }
+  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 96px; }
+  .tf-bar.blotter-filter-bar { flex-wrap: wrap; }
+  /* a cell's markers (Excl. 2, Mock history) go under its figure rather than widen the column */
+  .book-main .book-table.book-grid td { white-space: normal; }
+  .book-main .book-table.book-grid td > span, .book-main .book-table.book-grid td .marker { white-space: nowrap; }
+  .book-main .book-table.book-grid td .marker--small { display: block; margin-left: 0; }
+}
+@media (max-width: 1200px) {
+  .book-main .book-table.book-grid td, .book-main .book-table.book-grid th { font-size: 12px; padding-left: 4px; padding-right: 4px; }
+  .tk-table td.tk-what { max-width: 140px; }
+  .tk-table td.tk-what .tk-clip { max-width: 130px; }
+  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 60px; }
+}

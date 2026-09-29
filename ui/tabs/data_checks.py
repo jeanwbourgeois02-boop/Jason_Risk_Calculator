@@ -150,6 +150,17 @@ def check_frame(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
     return screen_memo("mark-checks", conn, as_of, lambda: mark_checks(conn, as_of, today=today), extra=(today,))
 
 
+def mark_records(conn: sqlite3.Connection, as_of: str) -> List[dict]:
+    """`mark_rows` of `check_frame`, memoised per database revision, as-of and book day: the one
+    copy the Data tab's tables, its CSV and the Book's "price to check" flags read. Shared: never
+    edit (filter and sort into new lists)."""
+    from data.bloomberg.live import book_today
+    from ui.tabs.blotter_pricing import screen_memo
+    today = book_today().isoformat()
+    return screen_memo("mark-rows", conn, as_of, lambda: mark_rows(conn, as_of, check_frame(conn, as_of)),
+                       extra=(today,))
+
+
 def mark_rows(conn: sqlite3.Connection, as_of: str, frame: pd.DataFrame) -> List[dict]:
     """The marks check as JSON-safe rows (the tab keeps them in a store for its filter, sort and
     CSV): every column of `mark_checks` plus the words and texts the table shows; MISSING, CHECK,
@@ -188,7 +199,7 @@ def mark_rows(conn: sqlite3.Connection, as_of: str, frame: pd.DataFrame) -> List
             "mark": price_text(value, unit) if value is not None else (_s(r.get("value")) or MISSING),
             "mark_tip": ("" if mark_date == as_of or not mark_date
                          else f"no mark for {short_date(as_of)}: the last on file is from {short_date(mark_date)}"),
-            "source": source_label(_s(r.get("source"))) or MISSING, "source_code": str(r.get("source") or ""),
+            "source": source_label(_s(r.get("source"))) or MISSING, "source_code": _s(r.get("source")),
             "time": mark_time_words(mark_date or as_of, snapped) if snapped else MISSING, "snapped_at": snapped,
             "prev": price_text(prev, unit) if prev is not None else MISSING, "prev_raw": prev,
             "prev_date": short_date(_s(r.get("prev_date"))) if _s(r.get("prev_date")) else "",
@@ -256,8 +267,9 @@ def pull_problems(status: Optional[dict]) -> List[dict]:
     out: List[dict] = []
     if not status:
         return out
+    from ui.feed_controls import short_time
     when = str(status.get("time") or "")
-    stamp = f" (pull of {when[:16].replace('T', ' ')})" if when else ""
+    stamp = f" (pull of {short_time(when)})" if when else ""
     steps = status.get("steps") or []
     errors = status.get("step_errors") or {}
     if steps:

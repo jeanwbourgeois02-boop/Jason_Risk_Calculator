@@ -1175,6 +1175,26 @@ def header_reference_labels(as_of: date) -> Dict[str, List[str]]:
     return out
 
 
+def missing_close_words(missing: List[dict], day: str, backfill: Optional[dict]) -> str:
+    """Why a reference close is incomplete: the prices with no close that day by name, then what
+    the backfill says of the day when it says more than its default (checker C, 2026-09-29: a close
+    on file with two prices that never existed read "none has reached this date yet")."""
+    from ui.tabs.header import past_close_explanation
+    words = {"FUTURE_PX": "price", "SPOT": "spot", "FWD_OUTRIGHT": "forward"}
+    names = []
+    for m in missing:
+        iid, mt = str(m.get("instrument_id") or ""), str(m.get("mark_type") or "")
+        what = words.get(mt, plain_words(mt).lower())
+        if mt == "FWD_OUTRIGHT" and m.get("settle_date"):
+            what += f" for {short_date(str(m.get('settle_date')))}"
+        names.append(f"{plain_ids(iid)} {what}".strip())
+    head = (f"{len(names)} price{'s' if len(names) != 1 else ''} with no close on {short_date(day)}: "
+            + ", ".join(names[:8]) + (f" and {len(names) - 8} more" if len(names) > 8 else ""))
+    tail = past_close_explanation(backfill, day)
+    generic = "none has reached this date yet" in tail
+    return head if generic else f"{head}; {tail}"
+
+
 def past_close_rows(conn: sqlite3.Connection, header_as_of: str, backfill: Optional[dict] = None) -> List[dict]:
     """One row per date of `data.bloomberg.backfill.reference_dates(header_as_of)`, newest
     first: which figures read it, needed / present / complete, and when it is incomplete the
@@ -1182,7 +1202,7 @@ def past_close_rows(conn: sqlite3.Connection, header_as_of: str, backfill: Optio
     `ui.tabs.header.needed_marks`, which for a past date is `close_completeness(day, day)`,
     the past-close needs list the backfill fills; the header's sentence counts the same way."""
     from data.bloomberg.backfill import reference_dates
-    from ui.tabs.header import backfill_status, needed_marks, past_close_explanation
+    from ui.tabs.header import backfill_status, needed_marks
     day0 = date.fromisoformat(header_as_of)
     labels = header_reference_labels(day0)
     if backfill is None:
@@ -1194,7 +1214,7 @@ def past_close_rows(conn: sqlite3.Connection, header_as_of: str, backfill: Optio
         if not needed:
             state, why, flag = "nothing needed", "no FX, futures or option trade was open that day", ""
         elif missing:
-            state, why, flag = f"incomplete: {len(missing)} missing", past_close_explanation(backfill, day), "incomplete"
+            state, why, flag = f"incomplete: {len(missing)} missing", missing_close_words(missing, day, backfill), "incomplete"
         else:
             state, why, flag = "complete", "", ""
         rows.append({"date": day, "read_by": ", ".join(labels.get(day, [])), "needed": needed,
@@ -1537,6 +1557,7 @@ MARKS_DOWNLOAD_ID = "market-data-marks-download"
 CONTRACT_DATES_PANEL_ID = "market-data-contract-dates"
 DIAGNOSTICS_ID = "market-data-diagnostics"
 DIAG_BODY_ID = "market-data-diagnostics-body"
+DIAG_SUMMARY_ID = "market-data-diagnostics-summary"   # its clicks build the fold's body (never before it opens)
 
 _HIDDEN = {"display": "none"}
 _SECTOR_ORDER = ("energy", "metals", "agriculture", "ferrous", "chemicals", "freight")
@@ -1764,7 +1785,7 @@ def reference_close_rows(conn: sqlite3.Connection, as_of: str, df_today: Optiona
     from engine.pnl.ledger import period_reference_dates
     from engine.pnl.reference import diff_split, resolve_reference
     from ui.tabs.blotter_pricing import priced_value_book
-    from ui.tabs.header import backfill_status, needed_marks, past_close_explanation
+    from ui.tabs.header import backfill_status, needed_marks
     refs = period_reference_dates(as_of)
     if backfill is None:
         backfill = backfill_status(conn)
@@ -1789,7 +1810,7 @@ def reference_close_rows(conn: sqlite3.Connection, as_of: str, df_today: Optiona
         if not needed:
             state, why = "nothing needed", "no trade was open that day"
         elif missing:
-            state, why = f"{len(missing):,} missing", past_close_explanation(backfill, day)
+            state, why = f"{len(missing):,} missing", missing_close_words(missing, day, backfill)
         else:
             state, why = "complete", ""
         rows.append({"period": label, "date": short_date(day), "date_iso": day,
@@ -1937,7 +1958,36 @@ def _failed_panel(title: str, exc: Exception) -> html.Div:
     return _panel(title, [message_box(f"This panel could not be built ({type(exc).__name__}: {exc}).")])
 
 
-def render(as_of_date: Optional[str], db_path) -> tuple:
+def warm(conn: sqlite3.Connection, as_of: str) -> None:
+    """Fill the tab's memos for `as_of` (ui/warmup.py): the body, as the callback renders it."""
+    path = next((p for _s, name, p in conn.execute("PRAGMA database_list") if name == "main"), None)
+    if path:
+        render(as_of, path, diag=False)
+
+
+def marks_token(as_of: Optional[str], n: int) -> dict:
+    """What the marks check's store holds (2026-09-29, performance): not the rows (about 50 kB on
+    every tab switch) but the as-of and a stamp; the table, its filter and its CSV read the rows
+    from the server's memo (`data_checks.mark_records`)."""
+    import time
+    return {"as_of": as_of, "n": n, "at": time.time()}
+
+
+def _token_rows(token, db_path) -> List[dict]:
+    """The marks check's rows for the store's token (a list stored by an older page is used as is)."""
+    if isinstance(token, list):
+        return token
+    as_of = (token or {}).get("as_of")
+    if not as_of:
+        return []
+    conn = _connect_readonly(db_path)
+    try:
+        return data_checks.mark_records(conn, as_of)
+    finally:
+        conn.close()
+
+
+def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
     """The body callback's outputs for `as_of_date` (the header's as-of): the status line, the
     problems (rows for the store) and the card's style, the marks-check rows (store), its
     sector / commodity options, its empty line and its bar's style, the reference closes, the
@@ -1972,7 +2022,7 @@ def render(as_of_date: Optional[str], db_path) -> tuple:
 
         mark_rows: List[dict] = []
         try:
-            mark_rows = data_checks.mark_rows(conn, as_of_date, data_checks.check_frame(conn, as_of_date))
+            mark_rows = data_checks.mark_records(conn, as_of_date)
         except Exception as exc:  # noqa: BLE001
             log.exception("Data tab: the marks check failed for %s", as_of_date)
             issues.append((SUSPECT_TITLE, f"The marks check could not be built ({type(exc).__name__}: {exc})."))
@@ -2014,7 +2064,7 @@ def render(as_of_date: Optional[str], db_path) -> tuple:
         except Exception as exc:  # noqa: BLE001
             dates_panel, dates = _failed_panel(CONTRACT_DATES_TITLE, exc), (0, 0)
 
-        diag = safe_panel(DIAG_TITLE, lambda: diagnostics_body(conn, as_of_date, feed_status))
+        diag = safe_panel(DIAG_TITLE, lambda: diagnostics_body(conn, as_of_date, feed_status)) if diag else blank
         arrived = sum(1 for r in mark_rows if r["arrived"])
         line = status_line(feed_status, n_pull, (len(mark_rows), arrived), closes, dates)
     finally:
@@ -2092,7 +2142,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         html.Div(id=PAST_CLOSES_PANEL_ID, className="data-block"),
         html.Div(id=CONTRACT_DATES_PANEL_ID, className="data-block"),
         html.Details(id=DIAGNOSTICS_ID, className="details data-block", children=[
-            html.Summary(DIAG_TITLE, title=DIAG_ABOUT, className="about-title"),
+            html.Summary(DIAG_TITLE, id=DIAG_SUMMARY_ID, n_clicks=0, title=DIAG_ABOUT, className="about-title"),
             html.Div(id=DIAG_BODY_ID),
             html.Div(className="bbg-check-block", children=[
                 html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
@@ -2123,16 +2173,37 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(MARKS_TOOLS_ID, "style"),
         Output(PAST_CLOSES_PANEL_ID, "children"),
         Output(CONTRACT_DATES_PANEL_ID, "children"),
-        Output(DIAG_BODY_ID, "children"),
         Output(ISSUES_ID, "children"),
         Input(HEADER_AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
         Input(BOOK_REVISION_ID, "data"),
     )
     def _update_body(as_of_date, *_triggers):
-        out = render(as_of_date, get_db_path())
+        # The Diagnostics fold's body is built by its own callback when the fold is opened, and the
+        # marks check's rows stay on the server (`marks_token`): 2026-09-29, performance.
+        out = list(render(as_of_date, get_db_path(), diag=False))
+        out[3] = marks_token(as_of_date, len(out[3] or []))
+        del out[9]
         return tuple(x if isinstance(x, (list, dict)) and i in (1, 2, 3, 4, 6) else compact(x)
                      for i, x in enumerate(out))
+
+    @app.callback(Output(DIAG_BODY_ID, "children"), Input(DIAG_SUMMARY_ID, "n_clicks"),
+                  State(HEADER_AS_OF_STORE_ID, "data"), prevent_initial_call=True)
+    def _diagnostics(clicks, as_of_date):
+        if not clicks or not as_of_date:
+            return dash.no_update
+        db_path = get_db_path()
+        try:
+            from data.bloomberg.live import read_status
+            status = read_status(db_path)
+        except Exception:  # noqa: BLE001 -- an unreadable status file is "no pull recorded"
+            status = None
+        conn = _connect_readonly(db_path)
+        try:
+            body = safe_panel(DIAG_TITLE, lambda: diagnostics_body(conn, as_of_date, status))
+        finally:
+            conn.close()
+        return compact(tidy(body))
 
     @app.callback(Output(PROBLEMS_SLOT_ID, "children"), Output(PROBLEMS_META_ID, "children"),
                   Input(PROBLEMS_STORE_ID, "data"), Input(PROBLEMS_SORT_ID, "data"))
@@ -2147,8 +2218,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     @app.callback(Output(MARKS_TABLE_WRAP_ID, "children"), Output(MARKS_META_ID, "children"),
                   Input(MARKS_STORE_ID, "data"), Input(MARKS_STATUS_ID, "value"), Input(MARKS_FILTER_ID, "value"),
                   Input(MARKS_SEARCH_ID, "value"), Input(MARKS_SORT_ID, "data"))
-    def _marks(rows, statuses, groups, search, sort):
-        rows = rows or []
+    def _marks(token, statuses, groups, search, sort):
+        rows = _token_rows(token, get_db_path())
         if not rows:
             return html.Div(), ""
         shown = data_checks.filter_marks(rows, statuses, groups, search)
@@ -2171,9 +2242,10 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
                   State(MARKS_STORE_ID, "data"), State(MARKS_STATUS_ID, "value"), State(MARKS_FILTER_ID, "value"),
                   State(MARKS_SEARCH_ID, "value"), State(MARKS_SORT_ID, "data"), State(HEADER_AS_OF_STORE_ID, "data"),
                   prevent_initial_call=True)
-    def _marks_csv(n_clicks, rows, statuses, groups, search, sort, as_of_date):
+    def _marks_csv(n_clicks, token, statuses, groups, search, sort, as_of_date):
         if not n_clicks:
             return None
+        rows = _token_rows(token, get_db_path())
         shown = kit.sort_records(data_checks.filter_marks(rows, statuses, groups, search), sort, data_checks.MARK_SORT)
         cols = data_checks.MARK_CSV_COLUMNS
         frame = pd.DataFrame([{k: r.get(k) for k in cols} for r in shown], columns=cols)
