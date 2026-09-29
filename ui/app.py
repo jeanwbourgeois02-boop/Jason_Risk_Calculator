@@ -448,6 +448,9 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     # words instead of doing nothing on a machine without Bloomberg.
     if start_feed:
         app.bloomberg_feed, app.bloomberg_feed_reason = start_bloomberg_feed_with_reason(resolved)
+        # The launcher's app only: fill every screen's caches in the background (ui/warmup.py).
+        from ui import warmup
+        warmup.start(active_db_path, today_ny)
     else:
         app.bloomberg_feed, app.bloomberg_feed_reason = None, FEED_NOT_REQUESTED
     return app

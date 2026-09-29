@@ -187,6 +187,16 @@ def components(db_path: Union[str, Path], build: str = "") -> list:
     ]
 
 
+def warm_screens(get_db_path: Callable[[], object]) -> None:
+    """Start the screens' warm-up for the database's new revision (ui/warmup.py, debounced)."""
+    try:
+        from ui import warmup
+        from ui.tabs.controls import today_ny
+        warmup.after_change(get_db_path, today_ny)
+    except Exception:  # noqa: BLE001 -- speed only, never the poll's answer
+        pass
+
+
 def register(app, get_db_path: Callable[[], object], build: str = "", tick=None) -> None:
     """The page's one poll (2026-09-29, performance: every callback a tick fires is a round trip
     and a redux dispatch per mounted component, so a tick runs ONE callback). `_poll` publishes
@@ -236,5 +246,6 @@ def register(app, get_db_path: Callable[[], object], build: str = "", tick=None)
         publish, new_pending = decide(data_rev, pending, file_signature(db_path))
         if publish is None:
             return (no_update, no_update, (new_pending if new_pending != pending else no_update), stale, *rest)
+        warm_screens(get_db_path)   # a pull, a backfill or any write landed: warm the screens' caches for it
         book = book_signature(db_path)
         return (publish, (book if book and book != book_rev else no_update), new_pending, stale, *rest)

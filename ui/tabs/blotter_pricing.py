@@ -273,7 +273,6 @@ def priced_value_book(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFram
 # engine's `value_book`, unfilled, or the screens' filled reader), and the stored object is
 # shared, so a caller never edits what it gets.
 _MEMOS: "collections.OrderedDict[tuple, object]" = collections.OrderedDict()
-OUTSIDE_INPUTS_SECONDS = 900      # the research histories and config live outside the database
 
 
 def screen_memo(kind: str, conn: sqlite3.Connection, as_of: str, compute, extra: tuple = ()):
@@ -290,16 +289,23 @@ def screen_memo(kind: str, conn: sqlite3.Connection, as_of: str, compute, extra:
 
 def outside_inputs_key(*paths) -> tuple:
     """A key part for a result that also reads files outside the database (the Risk tab's
-    config and the research app's histories): each path's mtime, and the quarter-hour, so such
-    a result is read again at most 15 minutes after its outside inputs change (the safety timer
-    the tabs carried until 2026-09-29)."""
+    config and the research app's histories): each path's (mtime_ns, size), None when it is
+    missing. A path ending in `-wal` that is empty also counts as None: a read-only open of a
+    WAL database leaves an empty `-wal` beside it, and that is no change of data (the rule
+    `engine.risk.commodity_history._cache_key` keys its own history cache on).
+
+    Since 2026-09-29 (the warm-up) there is no quarter-hour in the key: a result stays cached
+    until one of its files changes. A write by the research app lands in its WAL file (size
+    and mtime change) or, after a checkpoint, in the main file, so both are stamped; the as-of
+    day is already in every memo key (`screen_memo`), so the 17:00 roll re-reads it too."""
     out = []
     for p in paths:
         try:
-            out.append(os.path.getmtime(p))
-        except (OSError, TypeError):
+            st = os.stat(p)
+            out.append(None if str(p).endswith("-wal") and not st.st_size else (st.st_mtime_ns, st.st_size))
+        except (OSError, TypeError, ValueError):
             out.append(None)
-    return (*out, int(time.time() // OUTSIDE_INPUTS_SECONDS))
+    return tuple(out)
 
 
 def raw_value_book(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
@@ -346,17 +352,17 @@ def shared_curve(conn: sqlite3.Connection, as_of: str) -> dict:
 # daily risk per trade) are computed once per (database revision, as-of, outside inputs) and
 # shared by the Book, the P&L tab and the Risk tab: one valuation per date (the filled reader for
 # the trade book, the engine's own for the risk, as each tab read them before). Both also read the
-# research app's database (roll-down, z, history), so their key carries its mtime and the
-# quarter-hour (`outside_inputs_key`). Shared: never edit the result.
+# research app's database (roll-down, z, history), so their key carries its file stamps and the
+# config files' (`outside_inputs_key`). Shared: never edit the result.
 def research_inputs_key() -> tuple:
     """The outside-inputs key of a result that reads the research app's history and the risk
-    config: their mtimes and the quarter-hour."""
+    config: each file's (mtime_ns, size), the research database's WAL file included."""
     from pathlib import Path
     config = Path(__file__).resolve().parents[2] / "config"
     try:
         from engine.risk import commodity_history as ch
         research = os.environ.get(ch.ENV_VAR, "").strip() or str(ch.DEFAULT_PATH)
-    except Exception:  # noqa: BLE001 -- the quarter-hour still refreshes it
+    except Exception:  # noqa: BLE001 -- then keyed on the config alone
         research = None
     return outside_inputs_key(config / "risk.yaml", config / "commodity_stress.yaml", config / "limits.yaml",
                               research, f"{research}-wal" if research else None)

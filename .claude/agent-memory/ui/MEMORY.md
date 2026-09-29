@@ -32,4 +32,4 @@
 - [Risk per-trade table 2026-09-29](risk-trade-table-phase-g-2026-09-29.md) — Phase G 2b: trade table + store-driven folds, curve.py deleted, risk_limits.py, subset_var headline, sticky-head trap
 - [Smoke test five tabs 2026-09-29](smoke-test-five-tabs-2026-09-29.md) — what test_ui_smoke reads now: body callbacks, Markdown drawer count, book.totals = header
 - [Phase G round 3a 2026-09-29](phase-g-round3a-2026-09-29.md) — red flags/UNRECOGNISED, closed fold, leg hovers, FX forwards + Greeks folds, usd_per_pct, stress by_position, need-fix; heredoc and HEAD-ingest traps
-- [Screens warm-up 2026-09-29](warmup-2026-09-29.md) — ui/warmup.py fills every tab memo after start/upload/pull; call the tabs' own functions; quarter-hour key trap; timing recipe
+- [Screens warm-up 2026-09-29](warmup-2026-09-29.md) — ui/warmup.py fills every tab memo after start/upload/pull; call the tabs' own functions; file-stamp keys, no quarter-hour; hooks; timing recipe

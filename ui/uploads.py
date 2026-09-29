@@ -333,6 +333,7 @@ def register(app, get_db_path):
         # The box is transient; the log keeps the whole sentence, the counters and the notes.
         log.info("%s (blotter): %s [rejects=%s warnings=%s notes=%s]", filename, report["message"],
                  report["rejects"], report["warnings"], report["notes"])
+        revision.warm_screens(get_db_path)   # fill the screens' caches for the new book (ui/warmup.py)
         from ui.app import load_summary
         data = load_summary(db_path)
         result = report_result(report)
@@ -407,6 +408,7 @@ def register(app, get_db_path):
             return (no_update, no_update, no_update, no_update,
                     html.Span(f"The sample book could not be {'built' if target == 'sample' else 'left'}: {exc}",
                               className="source-result--error"), no_update, no_update, no_update, no_update)
+        revision.warm_screens(get_db_path)   # the book now shown: warm its caches (ui/warmup.py)
         from ui.app import load_summary
         active = outcome["active"]
         data = load_summary(active)

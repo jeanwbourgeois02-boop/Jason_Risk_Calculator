@@ -1906,7 +1906,13 @@ def diagnostics_body(conn: sqlite3.Connection, as_of: str, status: Optional[dict
     recorded (folded); the connection check button sits after it in the static layout."""
     left = data_checks.left_out_block(status)
     feed = status_block(status)
+    try:
+        from ui.warmup import status_line
+        warm_text, warm_hover = status_line()
+    except Exception as exc:  # noqa: BLE001 -- one line, never the fold
+        warm_text, warm_hover = f"Warm-up: status not readable ({type(exc).__name__})", ""
     parts = [
+        html.Div(warm_text, title=warm_hover or None, className="status-line"),
         about("The last pull, step by step", "What the last Pull Bloomberg now did, each step's outcome.", level="h5"),
         data_checks.steps_table(status),
         about("Past closes (the backfill)", "What the backfill after the last pull asked, and what went wrong.",
