@@ -4,22 +4,26 @@ tiles, one summary table with a break-down switch, a flat Open trades list). Voc
 2026-09-28): a **spread type** is cross exchange / cross product / term structure; Jason's PBRoot
 name (COPAR3, CATTLE, `trades.strategy`) is his **trade**, never called a strategy on screen (the
 code keeps `strategy` as the field name of the PBRoot label). Since 2026-09-29 (user: "i want
-everything to be in a table"), top to bottom, at most two cards under the title:
+everything to be in a table"), one card under the title (the Needs you card left the same day,
+user: "kind of useless": expiry alerts are coloured in the Next column, liquidity is on Risk):
 
-  1. Needs you (`needs_card`, only when non-empty): a small table, Level | What | When | Go, one row
-     per first notice, last trade, expiry or prompt at EXPIRED / RED / AMBER with a real date and
-     per position RED / AMBER on liquidity (research data, → Risk).
-  2. The book card (`book_card`): the strip (`grid_strip`: Group by Spread type | Commodity |
-     Instrument | Sector | Trade, the search, Download CSV; the four multi-selects, "+ figures" for
-     the comparison boxes, Expand all / Collapse all, Clear filters, the meta), then one grouped
-     table (group -> position -> legs -> fills), its first body row the Book line ("Book · N open",
-     = the header's Daily, MTD, YTD and LTD to the cent, sticky under the heads), the settled group
-     last; a click on a name opens its chart, fills and legs under it. The footer: the line before
-     the first pull, the last load (`upload_report`) and the Data issues drawer, whose first lines
-     are the marks missing (→ Data) and the legs that could not be paired (→ Blotter).
+  The book card (`book_card`): the strip (`grid_strip`: Group by Spread type | Commodity |
+  Instrument | Sector | Trade, the search, Download CSV; the multi-selects (Trade, Symbol,
+  Commodity, Type, Sector, Currency), "+ figures" for the comparison boxes, Expand all / Collapse
+  all, Clear filters, the meta), then one grouped table (group -> position -> legs -> fills), its
+  first body row the Book line ("Book · N open", = the header's Daily, MTD, YTD and LTD to the
+  cent, sticky under the heads), the settled group last; a click on a name opens its chart, fills
+  and legs under it. The footer: the line before the first pull, the last load (`upload_report`)
+  and the Data issues drawer, whose first lines are the marks missing (→ Data) and the legs that
+  could not be paired (→ Blotter).
 
-The tiles row left on 2026-09-29: its figures are on the Book line and in the header; a trade's CNH
-hedge coverage sits on its own row ("CNH 92 % hedged").
+A spread is spreads-engine's pair (2026-09-29: sized by value, one spread per trade name holding two
+commodities, across months): its row reads its two sides ("Feeder / Live cattle", the months small),
+Net lots per side ("+91 / −167"), Gross the legs' lots, the Ratio ("1 : 1.84", the values and the
+balance on hover), the level in the legs' own unit, and the lots left over after sizing; every leg
+below it with its side. The Trade (PBRoot name) and Symbol (the broker's, as written) columns sort
+and filter like the others. The tiles row left on 2026-09-29: its figures are on the Book line and
+in the header; a trade's CNH hedge coverage sits on its own row ("CNH 92 % hedged").
 
 Every row's period figure is the P&L tab's own per-trade figure (`ui.tabs.pnl.period_rows`, the
 header's split), the known ones summed (display); nothing is priced or recomputed here. The empty
@@ -50,8 +54,9 @@ from ui.tabs import ranking as rk
 from ui.tabs.formatting import compact
 from ui.tabs.formatting import (
     HAND_KINDS, MINUS, MISSING, SOURCE_MIXED, TRADE_TYPE_TITLES, about, contract_name, date_cell,
-    fx_name, issues_drawer, lme_name, missing_cell, money_cell, parse_contract_id, plain_words, price_text, quoted_unit,
-    short_date, short_money, short_root_name, sign_class, signed_money, signed_number, size_words, spread_name,
+    fx_name, issues_drawer, lme_name, missing_cell, money_cell, pair_name, parse_contract_id, plain_words, price_text,
+    quoted_unit, short_date, short_money, short_root_name, short_symbol, sign_class, signed_money, signed_number,
+    size_words, spread_name,
     sum_known, tab_link, trade_type_words, type_cell, type_disagrees, unit_suffix,
 )
 from ui.tabs.header import AS_OF_STORE_ID
@@ -65,7 +70,6 @@ CSV_BUTTON_ID = "book-csv"
 DOWNLOAD_ID = "book-download"
 TABLE_ID = "book-table"
 DETAIL_LEGS_ID = "book-detail-legs"
-ALERTS_ID = "book-alerts"
 LOAD_ID = "book-load"
 ISSUES_ID = "book-issues"
 EMPTY_UPLOAD_TYPE = "book-empty-upload"    # the empty state's Upload button (clicks the top bar's input), a pattern id
@@ -113,8 +117,6 @@ TITLE_ABOUT = ("The book at the header's as-of date. A spread type is cross exch
                "sector, commodity, instrument or trade, the Book line = the header. Open trades: one row per pair, "
                "leg left over, option, LME prompt and FX trade; click a line above to filter it, a column head to "
                "sort, a row for its chart, fills and legs.")
-NEEDS_ABOUT = ("What needs you today, most urgent first, one line per kind: an expiry or first notice within the "
-               "alert window, the marks missing, the legs that could not be paired.")
 LOAD_ABOUT = "What the last blotter load did, as the upload recorded it."
 COLUMN_TIPS = {
     "Spread": "The pair, leg, option, LME prompt or FX trade in plain words, Jason's trade name (PBRoot) small and "
@@ -317,13 +319,14 @@ def _tip(text: str) -> dict:
 
 
 def detail_legs_table(payload: Dict[str, Any]) -> dash_table.DataTable:
-    """The legs in the shape's order: weight, lots, currency, the prices as quoted at entry, at
-    the previous close and now, and the conversion to the spread's unit."""
+    """The legs in the shape's order (a spread's every leg, side A first, with its side): weight,
+    lots, currency, the prices as quoted at entry, at the previous close and now, and the
+    conversion to the spread's unit."""
     rows, tips = [], []
     reasons = {"entry_price": payload.get("level_entry_reason"), "prev_price": payload.get("level_prev_reason"),
                "now_price": payload.get("level_now_reason")}
     for leg in payload.get("legs") or []:
-        rec: Dict[str, Any] = {"contract": contract_label(leg.get("instrument_id")),
+        rec: Dict[str, Any] = {"side": str(leg.get("side") or ""), "contract": contract_label(leg.get("instrument_id")),
                                "weight": _num(leg.get("weight")), "lots": _num(leg.get("lots")),
                                "open_lots": _num(leg.get("open_lots")), "currency": leg.get("currency") or ""}
         tip: Dict[str, dict] = {}
@@ -350,7 +353,8 @@ def detail_legs_table(payload: Dict[str, Any]) -> dash_table.DataTable:
         tips.append(tip)
     px = rk.rate(4, nully="", trim=True)
     prev_date = payload.get("level_prev_date") or "previous"
-    columns = [rk.text("Contract", "contract"), rk.numeric("Weight", "weight", rk.rate(6, trim=True)),
+    columns = ([rk.text("Side", "side")] if any(r.get("side") for r in rows) else []) + [
+               rk.text("Contract", "contract"), rk.numeric("Weight", "weight", rk.rate(6, trim=True)),
                rk.numeric("Lots", "lots", rk.amount(2, nully="", trim=True)),
                rk.numeric("Open lots", "open_lots", rk.amount(2, nully="", trim=True)),
                rk.text("Ccy", "currency"), rk.numeric("Entry px", "entry_price", px),
@@ -432,8 +436,16 @@ def _labels(conn: sqlite3.Connection) -> Dict[str, dict]:
     """{trade_id: {strategy, trade_type, pb_root}}: the broker's labels on every trade on file
     (2026-09-28: Jason's strategy name and the trade type from the PBRoot), read as they are; {}
     on a database from before the columns."""
+    try:       # the broker's symbol as written (2026-09-29, the Book's Symbol column; '' before the column)
+        return {str(t): {"strategy": str(st or ""), "trade_type": str(tt or ""), "pb_root": str(pb or ""),
+                         "broker_symbol": str(sym or "")}
+                for t, st, tt, pb, sym in conn.execute(
+                    "SELECT trade_id, strategy, trade_type, pb_root, broker_symbol FROM trades")}
+    except sqlite3.Error:
+        pass
     try:
-        return {str(t): {"strategy": str(st or ""), "trade_type": str(tt or ""), "pb_root": str(pb or "")}
+        return {str(t): {"strategy": str(st or ""), "trade_type": str(tt or ""), "pb_root": str(pb or ""),
+                         "broker_symbol": ""}
                 for t, st, tt, pb in conn.execute("SELECT trade_id, strategy, trade_type, pb_root FROM trades")}
     except sqlite3.Error:
         return {}
@@ -523,12 +535,6 @@ def gather(conn: sqlite3.Connection, as_of: str) -> dict:
     except Exception as exc:  # noqa: BLE001 -- research context: the column is then blank, the reason in the drawer
         log.exception("book tab: carry failed for %s", as_of)
         data["carry"], data["carry_error"] = None, _failure("the carry (roll-down) could not be read", exc)
-    try:
-        from engine.limits import liquidity
-        data["liquidity"] = liquidity(conn, as_of, spreads=data.get("spreads"), curve=data.get("curve"))
-    except Exception:  # noqa: BLE001 -- research context for one Needs you line: a failure hides the line
-        log.exception("book tab: the liquidity check failed for %s", as_of)
-        data["liquidity"] = None
     try:
         from engine.expiry import expiry_schedule
         data["schedule"], data["schedule_error"] = expiry_schedule(conn, as_of), ""
@@ -1129,18 +1135,95 @@ def _position_leg(position: Optional[dict], inst: str) -> Optional[dict]:
     return None
 
 
+def _lots_text(v: Optional[float], sign: bool = True) -> str:
+    """'+91', '−167', '14.5': lots with a real minus, whole lots without decimals."""
+    if v is None:
+        return NA
+    d = 0 if abs(v - round(v)) < 1e-6 else 1
+    return signed_number(v, d) if sign else f"{abs(v):,.{d}f}"
+
+
+def pair_ratio(p: dict, roots: Optional[dict] = None) -> dict:
+    """The ratio of a spreads-engine pair as the Book shows it: {short: '1 : 1.84' (side B's lots per
+    side A lot, the engine's `ratio_text`), hover: the lots per side, the values at the fill (and at
+    the day's marks when on file), the balance and the weight ratio, balanced: the engine's flag,
+    reason: why it has no balance}. Display only: every figure is the engine's."""
+    roots = roots or {}
+    text = str(p.get("ratio_text") or "")
+    short = text[text.find("(") + 1:text.rfind(")")] if "(" in text and ")" in text else ""
+    if not short and _num(p.get("lots_ratio")) is not None:
+        short = f"1 : {_num(p.get('lots_ratio')):.2f}"
+    sides = [s for s in p.get("sides") or [] if s][:2]
+    words = []
+    for side in sides:
+        rids = [str(r) for r in side.get("root_ids") or [side.get("key")] if r]
+        words.append(" + ".join(dict.fromkeys(short_root_name(roots.get(r), r) for r in rids)).lower())
+    la, lb = _num(p.get("lots_a")), _num(p.get("lots_b"))
+    lots_bit = (f"{_lots_text(la)} {words[0] if words else 'side A'} : {_lots_text(lb)} {words[1] if len(words) > 1 else 'side B'} lots"
+                if la is not None and lb is not None else "")
+    va, vb, bal = _num(p.get("value_a_usd")), _num(p.get("value_b_usd")), _num(p.get("value_balance"))
+    tol = _num(p.get("balance_tolerance"))
+    balanced = p.get("balanced")
+    basis = str(p.get("balance_basis") or "value")
+    within = (f"balanced within {tol:.0%}" if balanced else f"not balanced within {tol:.0%}") if tol is not None and balanced is not None else ""
+    value_bit = ""
+    if va is not None and vb is not None:
+        value_bit = (f"{short_money(abs(va), '$')} : {short_money(abs(vb), '$')} at the fill"
+                     + (f" (balance {bal:.2f}" + (f", {within}" if within and basis == "value" else "") + ")" if bal is not None else ""))
+    ma, mb, mbal = _num(p.get("value_mark_a_usd")), _num(p.get("value_mark_b_usd")), _num(p.get("value_balance_mark"))
+    mark_bit = (f"{short_money(abs(ma), '$')} : {short_money(abs(mb), '$')} at the day's marks"
+                + (f" (balance {mbal:.2f})" if mbal is not None else "")) if ma is not None and mb is not None else ""
+    pa, pb, wbal = _num(p.get("physical_a")), _num(p.get("physical_b")), _num(p.get("weight_balance"))
+    unit = str(p.get("physical_unit") or "")
+    weight_bit = (f"by weight {abs(pa):,.0f} : {abs(pb):,.0f} {unit}".rstrip()
+                  + (f" (balance {wbal:.2f}" + (f", {within}" if within and basis == "weight" else "") + ")" if wbal is not None else "")
+                  if pa is not None and pb is not None else "")
+    sizing = {"value": "sized by value at the fill", "weight": "sized by weight (its value at the fill is not known)",
+              "template": "sized by its template's quantities", "lots": "a calendar: sized in lots"}.get(str(p.get("sizing") or ""), "")
+    reason = str(p.get("value_reason") or "")
+    hover = " · ".join(t for t in (lots_bit, value_bit or (f"no value at the fill: {reason}" if reason else ""),
+                                    mark_bit, weight_bit, sizing) if t)
+    return {"short": short, "hover": hover, "balanced": balanced, "reason": reason or str(p.get("value_mark_reason") or "")}
+
+
+def pair_leftover(data: dict, p: dict) -> Tuple[str, str]:
+    """('left over +1 lot FCV26', hover) for the lots of a spread beyond its sizing (the engine's
+    `leftover_lots` on `leftover_contract_id`), ('', '') when none or under a tenth of a lot."""
+    lots = _num(p.get("leftover_lots"))
+    reason = str(p.get("leftover_reason") or "")
+    if lots is None or abs(lots) < 0.1:
+        return ("", reason) if reason else ("", "")
+    leg = (p.get("leftover_legs") or [{}])[0] or {}
+    cid = str(p.get("leftover_contract_id") or leg.get("contract_id") or "")
+    if str(leg.get("product") or "") == "LME_FWD":
+        where = lme_name(data["roots"].get(str(leg.get("root_id") or "")), str(leg.get("root_id") or ""), str(leg.get("prompt") or ""))
+    else:
+        where = contract_label(cid)
+    n = abs(lots)
+    shown = f"{n:.0f}" if abs(n - round(n)) < 0.05 else f"{n:.1f}"
+    text = f"left over {'+' if lots > 0 else MINUS}{shown} lot{'' if shown == '1' else 's'} {where}".strip()
+    usd, units = _num(p.get("leftover_usd")), _num(p.get("leftover_units"))
+    hover = ("The lots beyond the spread's sizing, on the contract nearest the balance: "
+             f"{lots:+.2f} lots of {cid}" + (f", {short_money(abs(usd), '$')} at the fill" if usd is not None else
+                                             f", {units:+,.1f} {p.get('residual_unit') or ''}" if units is not None else "")
+             + (f". {reason}" if reason else "")).replace("-", MINUS)
+    return text, hover
+
+
 def pair_row(data: dict, strategy: str, n: int, p: dict) -> dict:
-    """The Strategy view's pair row: a sub-header between the strategy line and its two leg rows.
-    Its name is the two legs', its type in words (the engine's rule; "inferred" or "fallback"
-    small, the note on hover), its size in words, the engine's gross and net on the paired lots,
-    its levels in the pair's unit (the other form and the $ per unit on hover), its period
-    figures its legs' trades' (`subtotal`: never added into the group line again), Next from the
-    earlier leg. Nothing is priced here."""
+    """The Strategy view's pair row (spreads-engine's pair, 2026-09-29: sized by value, one spread per
+    trade name holding two commodities, across months, legs of each side under it). Its name is
+    `pair_name` (the two sides, 'Feeder / Live cattle', the months small), its type in words (the
+    engine's rule), Net lots per side ('+91 / −167'), Gross the legs' lots, the Ratio ('1 : 1.84',
+    `pair_ratio`), the lots left over (`pair_leftover`), the engine's gross and net, its levels in
+    the legs' own unit (the front months on hover), its period figures its legs' trades'
+    (`subtotal`: never added into the group line again), Next the earliest leg's. Nothing is priced
+    here."""
     legs = p.get("legs") or []
-    names = [_leg_name(data, str(l.get("instrument_id") or ""), str(l.get("product") or ""), str(l.get("root_id") or ""),
-                       str(l.get("prompt") or "")) for l in legs]
+    roots = data["roots"]
+    name, months = pair_name(p, roots)
     unit = str(p.get("unit") or "")
-    ratio = unit.lower() == "ratio"
+    ratio_unit = unit.lower() == "ratio"
     entry, now, move = _num(p.get("level_entry")), _num(p.get("level_now")), _num(p.get("level_change"))
     upu = _num(p.get("usd_per_unit"))
     alt_unit, alt = str(p.get("unit_alt") or ""), p.get("level_alt") or None
@@ -1149,68 +1232,70 @@ def pair_row(data: dict, strategy: str, n: int, p: dict) -> dict:
     if alt_unit and alt:
         hover_alt = (f"in {alt_unit}: entry {level_text(_num(alt.get('entry')), alt_unit)}, now "
                      f"{level_text(_num(alt.get('now')), alt_unit)}, move {level_text(_num(alt.get('change')), alt_unit, sign=True)}")
+    level_label = str(p.get("level_label") or "")
+    level_of = f"the level {level_label}" if level_label else "the level"
     move_hover = "\n".join(t for t in (
-        (f"{signed_number(move, d)} × {short_money(upu, '$')} per {unit or 'unit'} (the USD P&L of a 1.0 move on the paired lots)"
+        (f"{signed_number(move, d)} × {short_money(upu, '$')} per {unit or 'unit'} (the USD P&L of a 1.0 move on the paired size)"
          if move is not None and upu is not None else
          str(p.get("level_change_reason") or p.get("level_prev_reason") or p.get("usd_per_unit_reason") or "no level change given")),
         hover_alt) if t)
     trade_ids = [str(t) for t in p.get("trade_ids") or []]
     all_ids = list(dict.fromkeys(str(t) for l in legs for t in (l.get("contract_trade_ids") or l.get("trade_ids") or [])))
-    size = _num(p.get("size"))
-    size_unit = str(p.get("size_unit") or "")
-    direction = str(p.get("direction") or "long")
-    size_words_text = size_words(-size if direction == "short" and size is not None else size, size_unit or "lots") if size is not None else NA
-    legs_words = "; ".join(f"{nm}: {size_words(_leg_qty(l, data), 't' if str(l.get('product')) == 'LME_FWD' else 'lots')}"
-                           for nm, l in zip(names, legs))
+    sides = [s for s in p.get("sides") or [] if s][:2]
+    side_lots = [_num(s.get("net_lots")) for s in sides] if len(sides) == 2 else [_num(p.get("lots_a")), _num(p.get("lots_b"))]
+    size_text = " / ".join(_lots_text(x) for x in side_lots) if all(x is not None for x in side_lots) else NA
+    gross_lots = sum(abs(_num(l.get("lots")) or 0.0) for l in legs) if legs else None
+    by_side: Dict[str, List[str]] = {}
+    for l in legs:
+        by_side.setdefault(str(l.get("side") or ""), []).append(
+            f"{contract_label(l.get('contract_id') or l.get('instrument_id'))} {_lots_text(_num(l.get('lots')))}")
+    legs_words = " / ".join(", ".join(v) for v in by_side.values())
     type_code = str(p.get("type") or "")
     source = str(p.get("type_source") or "")
     tag = source if source in ("inferred", "fallback") else ""
     note = str(p.get("note") or "")
     how = {"label": "the trade's own label", "inferred": "read from the legs"}.get(source, FALLBACK_WORDS)
     type_hover = f"Strategy: {trade_type_words(type_code) or 'pair'} ({how})" + (f". {note}" if note else "")
-    residual = _num(p.get("residual_units")) or 0.0
-    size_marker = None
-    if abs(residual) > 1e-9:
-        r_unit = str(p.get("residual_unit") or size_unit)
-        r_usd = _num(p.get("residual_usd"))
-        text = f"residual {signed_number(residual, 1)} {r_unit}"
-        size_marker = (text, f"the pair holds {signed_number(residual, 2)} {r_unit} beyond an exact match: the larger side pairs "
-                             f"the whole lots nearest to the smaller side"
-                             + (f"; the pair's net USD notional (the two legs' notionals netted, the residual and the price "
-                                f"basis between the legs together) is its Net column: {signed_money(r_usd, '$')}" if r_usd is not None else ""))
     next_marker = None
     if p.get("legs_apart_flag"):
         apart = _num(p.get("legs_apart_bd"))
         dates = []
-        for nm, l in zip(names, legs):
+        for l in legs:
+            nm = _leg_name(data, str(l.get("instrument_id") or ""), str(l.get("product") or ""), str(l.get("root_id") or ""),
+                           str(l.get("prompt") or ""))
             cid = str(l.get("contract_id") or l.get("instrument_id") or "")
             ev = _next_from_schedule(data, [cid])
             dates.append(f"{nm}: {ev['event']} {ev['iso']}{' (estimated)' if ev['estimated'] else ''}" if ev else f"{nm}: no event on the roll calendar")
         next_marker = (f"legs {int(abs(apart)) if apart is not None else '?'} bd apart",
-                       "the two legs' events are not on the same day: " + "; ".join(dates))
+                       "the legs' events are not on the same day: " + "; ".join(dates))
     root_ids = [str(l.get("root_id") or "") for l in legs]
     products = {str(l.get("product") or "FUTURE") for l in legs}
     commodity_group, subsector = _commodity_of(root_ids, "FUTURE" if products - set(FX_PRODUCTS) else next(iter(products), ""), data)
     gross, net = _num(p.get("gross_usd")), _num(p.get("net_usd"))
     template = str(p.get("template_name") or "")
+    leftover, leftover_hover = pair_leftover(data, p)
+    ratio = pair_ratio(p, roots)
     return _row(
         id=f"{PAIR_PREFIX}-{p.get('pair_id') or f'{strategy}|{n}'}", kind="pair", part=PART_PAIR, pair_id=str(p.get("pair_id") or ""),
         pair_n=n, leg_n=-1, subtotal=True, group=strategy, strategy=strategy, strategies=[strategy] if strategy else [],
         trade_type=type_code, type_source=source, type_note=note, type_words=trade_type_words(type_code) or "pair", type_tag=tag,
         commodity_group=commodity_group, subsector=subsector, root_id=root_ids[0] if root_ids else "",
         gross=gross, net=net, notional_reason=str(p.get("notional_reason") or ("" if gross is not None else "no notional given")),
-        notional_source="the engine's notional on the paired lots at the day's marks and spots (both legs, gross; net long positive)",
-        name=" / ".join(names) or str(p.get("pair_id") or "pair"),
+        notional_source="the engine's notional on the spread's legs at the day's marks and spots (gross; net long positive)",
+        name=name, months=months, leftover=leftover, leftover_hover=leftover_hover, ratio_info=ratio,
         name_hover=(f"{'Template ' + template + '. ' if template else ''}{legs_words}. {type_hover}. "
-                    f"Its P&L below is its legs' trades' ({_plural(len(trade_ids), 'trade')}). Click for its legs and trades."),
-        size=size_words_text, size_hover=f"the paired size: the smaller side in full ({size:g} {size_unit}), {direction}" if size is not None else "no size",
-        size_marker=size_marker, unit="" if ratio else unit, ratio=ratio,
+                    f"Its P&L below is its legs' trades ({_plural(len(trade_ids), 'trade')}). Click for its legs and trades."),
+        size=size_text, side_lots=side_lots, gross_lots=gross_lots,
+        size_hover=("the lots per side, side A / side B (each side's contracts netted); "
+                    + (ratio["hover"] or "no ratio given")),
+        unit="" if ratio_unit else unit, ratio=ratio_unit,
         entry=entry, entry_text=level_text(entry, unit),
         entry_hover=(str(p.get("level_entry_reason") or "no entry level given") if entry is None
-                     else f"{level_text(entry, unit)} {unit}: the lots-weighted fills of the two legs" + (f"; {hover_alt}" if hover_alt else "")),
+                     else f"{level_text(entry, unit)} {unit} at entry: {level_of}, the legs' lots-weighted fills"
+                          + (f"; {hover_alt}" if hover_alt else "")),
         now=now, now_text=level_text(now, unit),
         now_hover=(str(p.get("level_now_reason") or "no level given") if now is None
-                   else f"{level_text(now, unit)} {unit} at the day's official marks" + (f"; {hover_alt}" if hover_alt else "")),
+                   else f"{level_text(now, unit)} {unit}: {level_of} at the day's official marks" + (f"; {hover_alt}" if hover_alt else "")),
         move=move, move_text=level_text(move, unit, sign=True), move_hover=move_hover, move_sign=move,
         periods=_periods_of(data, trade_ids), next=_next_from_engine(p.get("next_event")), next_marker=next_marker,
         trade_ids=trade_ids, detail_trade_ids=all_ids, sector=_sector_of(root_ids, data["roots"]),
@@ -1380,10 +1465,9 @@ def engine_leg_row(data: dict, strategy: str, leg: dict, part: str, position: Op
     return _row(
         id=f"{LEG_PREFIX}-{strategy}{suffix}-{inst}" + (f"-{prompt}" if prompt else ""), kind="leg", part=part,
         pair_id=str((pair or {}).get("pair_id") or ""), pair_n=pair_n, leg_n=leg_n, no_pnl=no_pnl,
-        group=strategy, root_id=root_id, lots=qty, gross=gross, net=net, notional_reason=notional_reason, notional_source=notional_source,
+        group=strategy, root_id=root_id, lots=qty, leg_lots=_num(leg.get("lots")), side=str(leg.get("side") or ""), gross=gross, net=net, notional_reason=notional_reason, notional_source=notional_source,
         name=name, name_hover=f"{inst}{f' {prompt}' if prompt else ''}: {what}; {pnl_words}. Trades {', '.join(all_ids)}. Click for its trades.",
-        size=size, size_hover=("this pair's share of the contract, from the engine's pairing (the smaller side in full, the "
-                               "larger side's nearest whole lots)" if part == PART_PAIR else
+        size=size, size_hover=("this spread's lots on the contract, from the engine's sizing" if part == PART_PAIR else
                                "the trade's lots on the contract left after its pairs"),
         unit=unit, entry=fill, entry_text=price_text(fill, unit, raw),
         entry_hover="the lots-weighted fill of the contract's open trades" if fill is not None else "no fill on the value rows",
@@ -1904,9 +1988,7 @@ def issue_items(data: dict, rows: Sequence[dict]) -> List[Tuple[str, str]]:
             continue                       # the unlabelled trades are position rows under No strategy, not pairs
         for p in s.get("pairs") or []:
             if str(p.get("type_source") or "") == "fallback":
-                legs = p.get("legs") or []
-                names = " / ".join(_leg_name(data, str(l.get("instrument_id") or ""), str(l.get("product") or ""),
-                                             str(l.get("root_id") or ""), str(l.get("prompt") or "")) for l in legs)
+                names = pair_name(p, data["roots"])[0]
                 items.append(("Pairing", f"{who}: {names}: {plain_words(p.get('note')) or FALLBACK_WORDS}"))
         for note in s.get("notes") or []:
             if note:
@@ -2059,16 +2141,26 @@ SPLIT_WORDS = (("spread", "spread"), ("fx", "FX"), ("hedge", "hedge"), ("new_tra
 AS_HELD = "as held: an option counts as its option lots, not at delta; delta is on the Exposure tab"
 GRID_TIPS = {
     "name": "The group, the position (a pair, a leg left over, an option, an LME prompt, an FX trade), its legs, its "
-            "fills. Click the chevron to open a row, the name for its chart, fills and legs. Jason's trade name "
-            "(PBRoot) small and grey; the legs and ids on hover.",
+            "fills. Click the chevron to open a row, the name for its chart, fills and legs. A spread across months "
+            "its months small and grey, and the lots left over; the legs and ids on hover.",
+    "trade": "Jason's trade name (the PBRoot name after the underscore, CATTLE), the broker's PBRoot cell on hover; "
+             "'mixed' when the fills under a row carry different names.",
+    "symbol": "The broker's symbol as written in the file (FCV6-USAA); a spread its legs' symbols without the suffix "
+              "(FCV6 / FCX6 / LCV6 / LCZ6); a dash for a fill loaded before the column existed (re-upload to fill).",
+    "ratio": "A spread's lots ratio, side B's lots per side A lot (the engine's, 1 : 1.84); the lots, the values of "
+             "each side at the fill and at the day's marks, the balance and the weight ratio on hover; an amber marker "
+             "when the sides do not balance within 10 %.",
     "type": "Cross exchange, cross product or term structure for a pair (the engine's rule); outright, option, LME "
             "forward or FX hedge otherwise.",
     "sector": "The contract's sector; FX hedges on their own.",
-    "net": f"Net lots, {AS_HELD}. A fill its quantity; a contract its fills netted; a group the contracts' nets added "
+    "net": f"Net lots, {AS_HELD}. A spread its lots per side (side A / side B); a fill its quantity; a contract its "
+           "fills netted; a group the contracts' nets added "
            "where the units agree (lots, tonnes, one currency), 'mixed' otherwise; a commodity in one physical unit "
            "(curve-positions' figure).",
-    "gross": f"Gross lots, {AS_HELD}: each contract's net, without its sign, added up where the units agree.",
-    "fill": "A fill's price; a leg's or contract's lots-weighted average fill; a pair's level at entry.",
+    "gross": f"Gross lots, {AS_HELD}: each contract's net, without its sign, added up where the units agree (a spread "
+             "its legs' lots).",
+    "fill": "A fill's price; a leg's or contract's lots-weighted average fill; a spread's level at entry in the legs' "
+            "own unit (the front months on hover).",
     "mark": "The official mark on the day (its source and date on hover); a pair's level at the day's marks.",
     "prev": "The mark, or a pair's level, on the Daily's reference close.",
     "move": "Mark less the reference close: green when it moved the position's way, red when against; a pair's $ per "
@@ -2087,7 +2179,7 @@ GRID_TIPS = {
     "gross_usd": "The engine's gross USD notional on the open lots (a pair's on its paired lots); a group sums its rows' "
                  "known figures, 'excl. N' for the rest.",
     "net_usd": "The engine's net USD notional, long positive, likewise; an amber marker when a pair's legs do not "
-               "balance or a leg is left over from its trade's pairs.",
+               "balance (on the Ratio) or a leg is left over from its trade's pairs.",
     "next": "The next event (first notice, last trade, expiry, prompt, value date) and the business days to it; red "
             "within 3 and amber within 10 by the engine's level, grey with ≈ while the date is estimated.",
 }
@@ -2149,8 +2241,8 @@ def _direction(row: dict, data: dict, pair: Optional[dict]) -> Tuple[Optional[fl
         if pair is None:
             return None, None
         sign = -1.0 if str(pair.get("direction") or "long") == "short" else 1.0
-        size = _num(pair.get("size"))
-        return sign, (sign * size if size is not None else None)
+        lots_a = (row.get("side_lots") or [None])[0]     # the size in lots: side A's (2026-09-29, never USD)
+        return sign, lots_a
     if row["kind"] == "spread":
         position = _engine_position(data, row["id"])
         size = _num((position or {}).get("size"))
@@ -2165,14 +2257,11 @@ def _broken(row: dict, pair: Optional[dict]) -> Optional[Tuple[str, str]]:
     """The amber marker of a pair whose legs do not balance, or of a leg left over from a trade's
     pairs, with its sentence in plain words; None otherwise."""
     if row["kind"] == "pair" and pair is not None:
-        residual = _num(pair.get("residual_units")) or 0.0
-        if abs(residual) > 1e-9:
-            unit = str(pair.get("residual_unit") or pair.get("size_unit") or "")
-            return (f"unbalanced {signed_number(residual, 1)} {unit}".strip(),
-                    f"The two legs do not balance: the pair holds {signed_number(residual, 2)} {unit} more on one "
-                    f"side than an exact match (the larger leg pairs the whole lots nearest to the smaller one). "
-                    f"Net is the two legs' USD notional netted, so it carries that difference and the price gap "
-                    f"between the legs.")
+        # the engine's balance flag (2026-09-29: value at the fill within 10 %, else weight); shown on the Ratio
+        if pair.get("balanced") is False:
+            info = row.get("ratio_info") or {}
+            return ("unbalanced", f"The two sides do not balance within {(_num(pair.get('balance_tolerance')) or 0.1):.0%} "
+                                  f"by {pair.get('balance_basis') or 'value'}: {info.get('hover') or ''}".rstrip(": "))
     if row["kind"] == "leg" and row.get("part") == PART_OUTRIGHT:
         who = row.get("group") or ""
         return ("left over", f"A leg of trade {who} left over after its pairs: lots with no opposite leg to pair "
@@ -2342,6 +2431,8 @@ def trade_info(data: dict) -> Dict[str, dict]:
                 "contract": (inst, settle if product in ("LME_FWD", *FX_PRODUCTS) else ""), "root_id": base,
                 "name": name, "commodity": commodity, "sector": sector or OTHER_GROUP,
                 "strategy": str(((data.get("labels") or {}).get(tid) or {}).get("strategy") or ""),
+                "pb_root": str(((data.get("labels") or {}).get(tid) or {}).get("pb_root") or ""),
+                "symbol": str(((data.get("labels") or {}).get(tid) or {}).get("broker_symbol") or ""),
             }
     data["_trade_info"] = out
     return out
@@ -2502,7 +2593,7 @@ def _position_node(data: dict, row: dict, parent: str, depth: int) -> dict:
     if kind == "trade":
         return _node(nid, "position", depth, row["name"], row=row, tids=row["trade_ids"],
                      leaf=row["trade_ids"][0] if row["trade_ids"] else None, detail=True, hover=row["name_hover"],
-                     sub=row.get("trade_name") or "")
+                     sub="")          # the trade name is its own column since 2026-09-29
     if kind == "pair":
         legs = []
         for leg in row.get("leg_rows") or []:
@@ -2516,7 +2607,7 @@ def _position_node(data: dict, row: dict, parent: str, depth: int) -> dict:
     else:
         children = _trade_nodes(data, row["trade_ids"], nid, depth + 1)
     return _node(nid, "position", depth, row["name"], row=row, tids=row["trade_ids"], children=children, detail=True,
-                 hover=row["name_hover"], sub=row.get("trade_name") or "")
+                 hover=row["name_hover"], sub=row.get("months") or "")   # a spread across months: its months
 
 
 def _instrument_node(data: dict, row: dict, parent: str, depth: int) -> dict:
@@ -2663,6 +2754,73 @@ def _local(data: dict, ids: Sequence[str]) -> Tuple[Optional[float], str, str]:
 _ONE_CONTRACT = ("outright", "contract", "leg", "trade")
 
 
+NO_SYMBOL_REASON = "not recorded: the fill was loaded before the Symbol column existed; re-upload the file to fill it"
+
+
+def _contract_order(data: dict, node: dict, ids: Sequence[str]) -> List[Tuple[str, str]]:
+    """The contracts under a node in the legs' order (a spread's side A first), else as the fills come."""
+    info = trade_info(data)
+    order: List[Tuple[str, str]] = []
+    for leg in ((node.get("row") or {}).get("leg_rows") or []):
+        for t in leg.get("detail_trade_ids") or leg.get("trade_ids") or []:
+            k = (info.get(str(t)) or {}).get("contract")
+            if k and k not in order:
+                order.append(k)
+                break
+    for t in ids:
+        k = (info.get(str(t)) or {}).get("contract")
+        if k and k not in order:
+            order.append(k)
+    return order
+
+
+def identity_values(data: dict, node: dict, ids: Sequence[str]) -> dict:
+    """The Trade and Symbol cells of a node (2026-09-29): the fills' trade name when they share one
+    ('mixed' with the names on hover otherwise), the PBRoot cells on hover; the broker's symbol as
+    written for a fill or a one-contract row (its most common), the legs' symbols without the suffix
+    for a spread; nothing on a group line. Display: the labels as the file wrote them."""
+    info = trade_info(data)
+    got = [info[str(t)] for t in (ids or node["tids"]) if str(t) in info]
+    names = sorted({g["strategy"] for g in got if g.get("strategy")})
+    pb = sorted({g["pb_root"] for g in got if g.get("pb_root")})
+    unnamed = any(not g.get("strategy") for g in got)
+    if len(names) == 1 and not unnamed:
+        trade, trade_hover = names[0], ("PBRoot " + ", ".join(pb[:LINES_ON_HOVER])) if pb else "no PBRoot cell on file"
+    elif names:
+        trade = "mixed"
+        trade_hover = "the fills carry several trade names: " + ", ".join(names) + ("; and fills with none" if unnamed else "")
+    else:
+        trade, trade_hover = "", ""
+    out = {"trade": trade, "trade_hover": trade_hover, "symbol": "", "symbol_hover": "", "symbol_missing": False}
+    if node["level"] in ("group", "book") or not got:
+        return out
+    by_contract: Dict[Tuple[str, str], List[str]] = {}
+    for g in got:
+        by_contract.setdefault(g["contract"], []).append(g.get("symbol") or "")
+    order = [k for k in _contract_order(data, node, [g["trade_id"] for g in got]) if k in by_contract]
+
+    def common(k: Tuple[str, str]) -> str:
+        syms = [x for x in by_contract[k] if x]
+        return max(dict.fromkeys(syms), key=syms.count) if syms else ""
+
+    if len(order) == 1:
+        sym = common(order[0])
+        if sym:
+            others = sorted({x for x in by_contract[order[0]] if x and x != sym})
+            out.update(symbol=sym, symbol_hover=f"as written in the file{'; also ' + ', '.join(others) if others else ''}")
+        else:
+            out.update(symbol_missing=True, symbol_hover=NO_SYMBOL_REASON)
+        return out
+    parts = [short_symbol(common(k)) or MISSING for k in order]
+    if all(p == MISSING for p in parts):
+        out.update(symbol_missing=True, symbol_hover=NO_SYMBOL_REASON)
+    else:
+        out.update(symbol=" / ".join(parts),
+                   symbol_hover="the legs' symbols as written, without the exchange suffix: "
+                                + ", ".join(common(k) or f"{k[0]} (not recorded)" for k in order))
+    return out
+
+
 def node_values(data: dict, node: dict, shown: Optional[set] = None) -> dict:
     """Every column's value of a node over the fills shown (all when `shown` is None)."""
     ids = node["tids"] if shown is None else [t for t in node["tids"] if t in shown]
@@ -2671,6 +2829,7 @@ def node_values(data: dict, node: dict, shown: Optional[set] = None) -> dict:
     level = node["level"]
     leaf = node.get("leaf")
     v: Dict[str, Any] = {"ids": ids}
+    v.update(identity_values(data, node, ids))
     no_pnl = (row or {}).get("no_pnl") if row else ""
     for key in PERIODS:
         if ids:
@@ -2687,18 +2846,33 @@ def node_values(data: dict, node: dict, shown: Optional[set] = None) -> dict:
         q = ti.get("qty")
         v.update(net=q, net_text=_cap(_size_text(q, ti.get("unit", ""))), gross=None, gross_text="",
                  size_hover="the fill's quantity as booked")
-    elif kind in ("pair", "spread") and shown is None:
-        g = sizes if sizes["net"] is not None else _sizes(data, node["tids"])
-        v.update(net=row.get("size_num"), net_text=_cap(str(row.get("size") or "")),
-                 gross=g["gross"], gross_text=_cap(_size_text(g["gross"], g["unit"]).replace("long ", "")) if g["gross"] is not None else "",
-                 size_hover=f"the spread's size as held (the smaller side paired in full); {row.get('size_hover') or ''}".strip("; "),
-                 gross_hover=g["mixed"] or "the legs' lots added up, each contract netted first")
+    elif kind == "pair" and shown is None:
+        # a spread's size is its legs (2026-09-29): lots per side, the legs' lots added; never USD or tonnes
+        g = row.get("gross_lots")
+        v.update(net=(row.get("side_lots") or [None])[0], net_text=str(row.get("size") or ""),
+                 gross=g, gross_text=f"{_lots_text(g, sign=False)} lots" if g is not None else "",
+                 size_hover=str(row.get("size_hover") or ""),
+                 gross_hover="the legs' lots added up, without their signs (each leg its contract's lots in the spread)")
+    elif kind == "spread" and shown is None:
+        info_ = trade_info(data)
+        nets: Dict[Tuple[str, str], float] = {}
+        for t in node["tids"]:
+            ti = info_.get(t) or {}
+            if ti.get("status") == "OPEN" and ti.get("qty") is not None:
+                nets[ti["contract"]] = nets.get(ti["contract"], 0.0) + ti["qty"]
+        legs_lots = [nets[k] for k in _contract_order(data, node, node["tids"]) if k in nets]
+        v.update(net=legs_lots[0] if legs_lots else None, net_text=" / ".join(_lots_text(x) for x in legs_lots),
+                 gross=sum(abs(x) for x in legs_lots) if legs_lots else None,
+                 gross_text=f"{_lots_text(sum(abs(x) for x in legs_lots), sign=False)} lots" if legs_lots else "",
+                 size_hover="the lots per leg, each contract's fills netted", gross_hover="the legs' lots added up")
     elif kind == "leg" and row.get("part") == PART_PAIR and shown is None:
-        lots = _num(row.get("lots"))
-        unit = "t" if row.get("instrument_group") == LME_GROUP else "lots"
+        # in lots, an LME prompt too (2026-09-29: never tonnes in a lots column; its fills keep their tonnes)
+        lots = _num(row.get("leg_lots")) if row.get("leg_lots") is not None else _num(row.get("lots"))
+        unit = "lots" if row.get("leg_lots") is not None or row.get("instrument_group") != LME_GROUP else "t"
+        side = f"side {row['side']}: " if row.get("side") else ""
         v.update(net=lots, net_text=_cap(_size_text(lots, unit)), gross=abs(lots) if lots is not None else None,
                  gross_text=_size_text(abs(lots), unit).replace("long ", "") if lots else "",
-                 size_hover=row.get("size_hover") or "this pair's lots on the contract")
+                 size_hover=side + (row.get("size_hover") or "this spread's lots on the contract"))
     elif level == "group" and node.get("commodity_sub") and shown is None:
         sub = node["commodity_sub"]
         net_units, unit = _num(sub.get("net_units")), str(sub.get("unit") or "")
@@ -2764,6 +2938,10 @@ def node_values(data: dict, node: dict, shown: Optional[set] = None) -> dict:
         crow = ((data.get("carry") or {}).get("by_id") or {}).get(cid)
         if crow is not None and crow.get("calendar"):
             v["carry"], v["carry_row"] = _num(crow.get("roll_down_usd")), crow
+    # the ratio (a spread's, the engine's figures)
+    ratio_info = (row or {}).get("ratio_info") if kind == "pair" and level == "position" else None
+    v["ratio_info"] = ratio_info
+    v["ratio_n"] = _num(((_engine_pair(data, row.get("pair_id") or "") or {}) if ratio_info else {}).get("lots_ratio"))
     # research
     r = (row or {}).get("research") if kind == "pair" and level == "position" else None
     v.update(z=(r or {}).get("z") if r and not r.get("reason") else None,
@@ -2814,14 +2992,17 @@ def node_values(data: dict, node: dict, shown: Optional[set] = None) -> dict:
 
 # --- filters and sort
 GRID_COLUMNS = (
-    ("name", "Name", "l"), ("type", "Type", "l"), ("sector", "Sector", "l"), ("net", "Net lots", "l"),
-    ("gross", "Gross lots", "l"), ("fill", "Fill / Entry", ""), ("mark", "Mark / Level", ""), ("prev", "Prev close", ""),
+    ("name", "Name", "l"), ("trade", "Trade", "l"), ("symbol", "Symbol", "l"), ("type", "Type", "l"),
+    ("sector", "Sector", "l"), ("net", "Net lots", "l"), ("gross", "Gross lots", "l"), ("ratio", "Ratio", ""),
+    ("fill", "Fill / Entry", ""), ("mark", "Mark / Level", ""), ("prev", "Prev close", ""),
     ("move", "Move", ""), ("carry", "Carry / mo", "book-research"), ("z", "z", "book-research"), ("pctile", "%ile", "book-research"), ("daily", "Daily", ""),
     ("mtd", "MTD", ""), ("ytd", "YTD", ""), ("ltd", "LTD", ""), ("local", "P&L local", ""), ("gross_usd", "Gross USD", ""),
     ("net_usd", "Net USD", ""), ("next", "Next", "l"))
-MULTI_FILTERS = ("type", "sector", "commodity", "local")     # the multi-select dropdowns (local = the currency)
+# the multi-select dropdowns (local = the currency; trade = the PBRoot name, symbol = the broker's, 2026-09-29)
+MULTI_FILTERS = ("trade", "symbol", "type", "sector", "commodity", "local")
 TEXT_FILTERS = ("name",)
-NUMERIC_FILTERS = tuple(k for k, _l, _c in GRID_COLUMNS if k not in ("name", "type", "sector", "local"))
+_TEXT_COLUMNS = ("name", "trade", "symbol", "type", "sector", "local", "ratio")
+NUMERIC_FILTERS = tuple(k for k, _l, _c in GRID_COLUMNS if k not in _TEXT_COLUMNS)
 FILTER_KEYS = TEXT_FILTERS + MULTI_FILTERS + NUMERIC_FILTERS
 _CMP = re.compile(r"^\s*(>=|<=|!=|==|=|>|<)?\s*([-+−]?\s*\d[\d,]*(?:\.\d*)?|[-+−]?\s*\.\d+)\s*([kmb])?\s*$", re.I)
 _SCALE = {"k": 1e3, "m": 1e6, "b": 1e9}
@@ -2892,8 +3073,13 @@ def shown_trades(data: dict, nodes: Sequence[dict], filters: dict) -> Optional[s
             for key, test in filters.items():
                 if key == "name":
                     words = " ".join([c["label"] + " " + c.get("sub", "") for c in chain]
-                                     + [tid, ti.get("instrument_id", ""), ti.get("strategy", "")]).lower()
+                                     + [tid, ti.get("instrument_id", ""), ti.get("strategy", ""),
+                                        ti.get("symbol", ""), ti.get("pb_root", "")]).lower()
                     ok = test in words
+                elif key == "trade":
+                    ok = (ti.get("strategy") or NO_STRATEGY_GROUP) in test
+                elif key == "symbol":
+                    ok = (ti.get("symbol") or NO_SYMBOL_OPTION) in test
                 elif key == "type":
                     ok = (prow.get("type_group") or SETTLED_GROUP) in test
                 elif key == "sector":
@@ -2925,16 +3111,27 @@ def shown_trades(data: dict, nodes: Sequence[dict], filters: dict) -> Optional[s
     return keep
 
 
+NO_SYMBOL_OPTION = "(not recorded)"      # the Symbol filter's choice for fills loaded before the column
+
+
 def filter_options(data: dict) -> Dict[str, List[dict]]:
-    """The choices of the four dropdowns, from the book on file."""
+    """The choices of the dropdowns, from the book on file (the trade names and the broker's symbols
+    as written, 2026-09-29)."""
     rows, _settled = open_rows(data)
     info = trade_info(data)
+    trades = sorted({t["strategy"] for t in info.values() if t.get("strategy")})
+    if any(not t.get("strategy") for t in info.values()):
+        trades.append(NO_STRATEGY_GROUP)
+    symbols = sorted({t["symbol"] for t in info.values() if t.get("symbol")})
+    if any(not t.get("symbol") for t in info.values()):
+        symbols.append(NO_SYMBOL_OPTION)
     types = [g for g in TYPE_GROUP_ORDER if any(r["type_group"] == g for r in rows)] + [SETTLED_GROUP]
     sectors = sorted({r["sector_key"] for r in rows} | {t["sector"] for t in info.values()})
     commodities = sorted({t["commodity"] for t in info.values()})
     ccys = sorted({t["currency"] for t in info.values() if t["currency"]})
     return {k: [{"label": x, "value": x} for x in vals]
-            for k, vals in (("type", types), ("sector", sectors), ("commodity", commodities), ("local", ccys))}
+            for k, vals in (("trade", trades), ("symbol", symbols), ("type", types), ("sector", sectors),
+                            ("commodity", commodities), ("local", ccys))}
 
 
 def _sort_key(v: dict, key: str, node: dict) -> Any:
@@ -2948,6 +3145,10 @@ def _sort_key(v: dict, key: str, node: dict) -> Any:
         return str(row.get("sector_key") or "")
     if key == "local":
         return v.get("local")
+    if key in ("trade", "symbol"):
+        return str(v.get(key) or "").lower() or None
+    if key == "ratio":
+        return v.get("ratio_n")
     return _numeric(v, key)
 
 
@@ -3014,6 +3215,8 @@ def _name_td(node: dict, v: dict, has_children: bool, opened: bool, detail_open:
     coverage = coverage_words(entry)
     if coverage:
         children.append(html.Span(coverage, className="book-coverage"))
+    if node["level"] == "position" and row.get("leftover"):
+        children.append(html.Span(row["leftover"], className="book-leftover", title=plain_words(row.get("leftover_hover") or "")))
     return html.Td(children, className=f"l book-name book-d{node['depth']}")
 
 
@@ -3049,12 +3252,39 @@ def _carry_td(crow: Optional[dict]) -> html.Td:
                    className="book-research")
 
 
+def identity_tds(v: dict) -> List[html.Td]:
+    """The Trade and Symbol cells (`identity_values`)."""
+    trade = html.Td(v.get("trade") or "", className="l book-ident" + (" cell-unit" if v.get("trade") == "mixed" else ""),
+                    title=plain_words(v.get("trade_hover") or "") or None)
+    if v.get("symbol_missing"):
+        symbol = html.Td(missing_cell(v.get("symbol_hover") or NO_SYMBOL_REASON), className="l book-ident")
+    else:
+        symbol = html.Td(v.get("symbol") or "", className="l book-ident book-symbol",
+                         title=plain_words(v.get("symbol_hover") or "") or None)
+    return [trade, symbol]
+
+
+def ratio_td(info: Optional[dict], broken: Optional[Tuple[str, str]] = None) -> html.Td:
+    """A spread's Ratio cell: '1 : 1.84' (`pair_ratio`), its values and balance on hover; the kit's
+    amber 'unbalanced' marker when the engine says the sides do not balance; a dash with the reason
+    after the ratio when the balance is not known; blank off a spread."""
+    if not info:
+        return html.Td("")
+    children: List[Any] = [info.get("short") or missing_cell(info.get("reason") or "no ratio given")]
+    if broken:
+        children.append(html.Span(broken[0], className="marker marker--amber marker--small", title=plain_words(broken[1])))
+    elif info.get("balanced") is None and info.get("short"):
+        children += [" ", missing_cell("balance not known: " + (info.get("reason") or "no value at the fill"))]
+    return html.Td(children, className="book-ratio", title=plain_words(info.get("hover") or "") or None)
+
+
 def grid_tr(data: dict, node: dict, v: dict, marks: bool, opened: bool, detail_open: bool) -> html.Tr:
     """One row of the grid: the same columns at every level, blank where a column does not apply."""
     level, row = node["level"], node.get("row") or {}
     kind = row.get("kind", "")
     trade_level = level == "trade" or (node.get("leaf") and kind == "trade")
     cells: List[Any] = [_name_td(node, v, bool(node["children"]), opened, detail_open)]
+    cells += identity_tds(v)
     # type, sector
     if level == "position":
         if kind in ("pair", "spread") and row.get("trade_type"):
@@ -3077,9 +3307,13 @@ def grid_tr(data: dict, node: dict, v: dict, marks: bool, opened: bool, detail_o
         cells.append(_blank())
     cells.append(html.Td(v.get("gross_text") or "", className="l",
                          title=plain_words(hover + "\n" + str(v.get("gross_hover") or "")) if v.get("gross_text") else None))
+    cells.append(ratio_td(v.get("ratio_info"), row.get("broken") if kind == "pair" else None))
     # fill, mark, prev, move
     if "fill_text" in v:
-        cells.append(html.Td(v["fill_text"], title=plain_words(v.get("fill_hover") or "") or None))
+        fill_cell: List[Any] = [v["fill_text"]]
+        if kind in ("pair", "spread") and v.get("mark") is None and v.get("fill") is not None and (v.get("unit") or v.get("ratio")):
+            fill_cell.append(unit_suffix(v.get("unit") or "ratio"))   # the unit once per row: on Now, else on the entry
+        cells.append(html.Td(fill_cell, title=plain_words(v.get("fill_hover") or "") or None))
         mark: List[Any] = [v["mark_text"]]
         if v.get("mark") is not None and v.get("unit") and level != "trade":
             mark.append(unit_suffix(v["unit"]))
@@ -3148,7 +3382,7 @@ def grid_tr(data: dict, node: dict, v: dict, marks: bool, opened: bool, detail_o
             cells[-1] = html.Td(missing_cell(why if marks else NO_MARKS_REASON))
     else:
         cells += [_blank(), _blank()]
-    if row.get("broken") and level == "position":
+    if row.get("broken") and level == "position" and kind != "pair":    # a spread's is on its Ratio
         text, why = row["broken"]
         net_td = cells[-1]
         net_td.children = list(net_td.children or []) + [
@@ -3185,7 +3419,7 @@ def book_tr(data: dict, nodes: Sequence[dict], shown: Optional[set], marks: bool
     if n_open is not None:
         title += f"\n{n_open:,} open {what} shown, the settled ones apart."
     cells: List[Any] = [html.Td([label, html.Span(note, className="book-note")], className="l book-name", title=title)]
-    cells += [_blank() for _ in range(11)]
+    cells += [_blank() for _ in range([k for k, _l, _c in GRID_COLUMNS].index("daily") - 1)]
     for key in PERIODS:
         value, excluded, reasons, _note = v[key] if v.get(key) else (None, 0, [], "")
         cells.append(_money_td(value, excluded, reasons, bold=True, markers=marks))
@@ -3249,7 +3483,8 @@ def grid_head(sort: Optional[dict] = None) -> html.Thead:
     return html.Thead([html.Tr(titles)])
 
 
-FILTER_LABELS = {"name": "Search", "commodity": "Commodity", "type": "Type", "sector": "Sector", "local": "Currency"}
+FILTER_LABELS = {"name": "Search", "trade": "Trade", "symbol": "Symbol", "commodity": "Commodity", "type": "Type",
+                 "sector": "Sector", "local": "Currency"}
 NUMERIC_FILTERS_ABOUT = ("A comparison on the column's figure: > 0, < -10k, >= 1.5m, = 3 (Next: business days). "
                          "A fill is tested on its own figure, else on the nearest row above it that has one.")
 FIGURES_TOGGLE_ID = "book-figures-toggle"   # "+ figures": shows / hides the comparison boxes
@@ -3287,7 +3522,8 @@ def grid_strip() -> html.Div:
     line2 = html.Div(className="book-strip-line", children=[
         *[_strip_field(k, FILTER_LABELS[k], dcc.Dropdown(
             id=filter_id(k), multi=True, options=[], placeholder="All", className="blotter-filter-dropdown",
-            persistence=True, persistence_type="session")) for k in ("commodity", "type", "sector", "local")],
+            persistence=True, persistence_type="session"))
+          for k in ("trade", "symbol", "commodity", "type", "sector", "local")],
         html.Button("+ figures", id=FIGURES_TOGGLE_ID, n_clicks=0, className="book-download book-tool",
                     title=NUMERIC_FILTERS_ABOUT),
         html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="book-download book-tool"),
@@ -3318,86 +3554,7 @@ def filter_id(key: str) -> str:
     return f"book-f-{key}"
 
 
-# --------------------------------------------------------------------------- Needs you, last load
-_LIQ_LEVELS = ("RED", "AMBER")
-
-
-def _event_hover(r: dict) -> str:
-    return "; ".join(x for x in (
-        f"{contract_label(r.get('contract_id'))}: {r.get('next_event') or 'event'} {r.get('next_event_date') or 'date unknown'}, "
-        f"{r.get('level')}",
-        f"counted to the alert date {r.get('alert_date')} ({r.get('alert_basis') or ''})".strip()
-        if r.get("alert_date") and r.get("alert_date") != r.get("next_event_date") else "",
-        str(r.get("reason") or "")) if x)
-
-
-def needs(data: dict) -> List[dict]:
-    """The Needs you card's rows, most urgent first: every first notice, last trade, expiry or
-    prompt at EXPIRED / RED / AMBER with a real date (the roll calendar, `engine.expiry`), then
-    every position RED / AMBER on liquidity (`engine.limits.liquidity`, research data with
-    placeholder thresholds, → Risk). Each is {level, what, iso, bd, estimated, alert, hover, tab,
-    idx}. The marks missing and the legs that could not be paired are Data issues lines
-    (`need_notes`)."""
-    out: List[dict] = []
-    sched = (data.get("schedule") or {}).get("rows") or []
-    urgent = [r for r in sched if r.get("level") in ("EXPIRED", "RED", "AMBER") and not r.get("estimated")]
-    urgent.sort(key=lambda r: (_LEVEL_RANK.get(str(r.get("level")), 9),
-                               r.get("business_days") if r.get("business_days") is not None else 10 ** 6))
-    for r in urgent:
-        inst = str(r.get("contract_id") or "")
-        root_id = str(r.get("root_id") or "")
-        root = data["roots"].get(root_id)
-        name = (lme_name(root, root_id, str(inst.split(" ")[-1]) if " " in inst else None)
-                if str(r.get("product")) == "LME_FWD" else contract_name(inst, root, root_id))
-        event = _NEXT_EVENT_WORDS.get(str(r.get("next_event") or ""), str(r.get("next_event") or "event"))
-        out.append({"level": str(r.get("level")), "what": f"{name} {event}", "iso": r.get("next_event_date"),
-                    "bd": r.get("business_days"), "estimated": bool(r.get("estimated")), "alert": r.get("alert_date"),
-                    "hover": _event_hover(r), "tab": "", "idx": ""})
-    liq = data.get("liquidity") or {}
-    note = str(liq.get("placeholder_note") or "")
-    flagged = [p for p in liq.get("positions") or [] if str(p.get("level")) in _LIQ_LEVELS]
-    for i, p in enumerate(flagged):
-        days, oi = _num(p.get("days_to_exit")), _num(p.get("pct_of_oi"))
-        bits = [b for b in (f"{days:.1f} days to exit" if days is not None else "",
-                            f"{oi:.1%} of open interest" if oi is not None else "") if b]
-        hover = "\n".join(t for t in (plain_words(p.get("reason")),
-                                      f"weakest leg {p.get('weakest')}" if p.get("weakest") else "",
-                                      "Research data (the research app's open interest and volume), read-only; the "
-                                      "thresholds are placeholders.", note) if t)
-        out.append({"level": str(p.get("level")),
-                    "what": f"{p.get('name') or p.get('position_id')}: liquidity" + (f", {', '.join(bits)}" if bits else ""),
-                    "iso": None, "bd": None, "estimated": False, "alert": None, "hover": hover,
-                    "tab": "Risk", "idx": f"book-need-liquidity-{i}"})
-    out.sort(key=lambda n: _LEVEL_RANK.get(n["level"], 9))
-    return out
-
-
-def needs_card(data: dict) -> Optional[html.Div]:
-    """The Needs you card: a small table, Level | What | When | Go; None when nothing needs Jason."""
-    items = needs(data)
-    if not items:
-        return None
-    head = html.Tr([html.Th("Level", className="l"), html.Th("What", className="l"), html.Th("When", className="l"),
-                    html.Th("Go", className="l")])
-    body = []
-    for n in items:
-        lvl = n["level"]
-        chip = html.Span(lvl, className=f"level-chip level-chip--{lvl.lower()}", title=plain_words(n["hover"]) or None)
-        if n["iso"]:
-            when: Any = date_cell(n["iso"], None if lvl == "EXPIRED" else n["bd"], n["estimated"], lvl, n["hover"],
-                                  prefix="expired" if lvl == "EXPIRED" else "", alert_date=n["alert"])
-        else:
-            when = html.Span("now", className="cell-unit", title="today's position against the research app's latest "
-                                                                  "open interest and volume")
-        body.append(html.Tr([html.Td(chip, className="l"),
-                             html.Td(n["what"], className="l book-needs-what", title=plain_words(n["hover"]) or None),
-                             html.Td(when, className="l"),
-                             html.Td(pointer(n["tab"], n["idx"], f"→ {n['tab']}") if n["tab"] else "", className="l")]))
-    return html.Div(id=ALERTS_ID, className="book-card book-needs-card", children=[
-        about("Needs you", NEEDS_ABOUT, level="div", className="book-section-title book-needs-title"),
-        html.Table([html.Thead(head), html.Tbody(body)], className="book-table book-needs-table")])
-
-
+# --------------------------------------------------------------------------- the Data issues notes, last load
 def need_notes(data: dict, rows: Sequence[dict]) -> List[Any]:
     """The marks missing (→ Data) and the legs that could not be paired (→ Blotter): the first
     lines of the Data issues drawer, each with its link (the Needs you strip's until 2026-09-29).
@@ -3562,8 +3719,11 @@ def level_chart(hist: dict) -> Any:
 
 
 def _pair_payload(data: dict, row: dict) -> Optional[dict]:
-    """A pair's legs for `detail_legs_table`, read off the engine's pair: its level formula's legs
-    with the prices it read at entry, on the previous close and now, and the pair's lots."""
+    """A pair's legs for `detail_legs_table`: every leg of the engine's pair with its side (side A
+    first, 2026-09-29: a spread across months holds more than two), its lots and currency; a leg of
+    the level (the front months) with the prices the level read at entry, on the previous close and
+    now and its conversion to the spread's unit, any other leg with its own lots-weighted fill and
+    its marks."""
     p = _engine_pair(data, row.get("pair_id") or "")
     if p is None:
         return None
@@ -3571,20 +3731,36 @@ def _pair_payload(data: dict, row: dict) -> Optional[dict]:
     prices = p.get("level_prices") or {}
     if isinstance(prices, dict) and "alt" in prices:
         prices = prices.get("alt") or {}
-    held = {str(leg.get("instrument_id")): leg for leg in p.get("legs") or []}
+    in_level: Dict[Tuple[str, str], Tuple[int, dict]] = {}
+    for n, leg in enumerate(spec.get("legs") or []):
+        in_level.setdefault((str(leg.get("instrument_id")), str(leg.get("month_key") or "")), (n, leg))
+        in_level.setdefault((str(leg.get("instrument_id")), ""), (n, leg))
     legs = []
-    for n, leg in enumerate(spec.get("legs") or p.get("legs") or []):
-        mine = held.get(str(leg.get("instrument_id"))) or {}
-        px = {}
-        for key in ("entry", "prev", "now"):
-            seq = prices.get(key) if isinstance(prices, dict) else None
-            px[key] = _num(seq[n]) if isinstance(seq, (list, tuple)) and len(seq) > n else None
-        legs.append({"instrument_id": leg.get("instrument_id"), "root_id": leg.get("root_id"),
-                     "weight": leg.get("weight", mine.get("weight")), "qty_factor": leg.get("qty_factor"),
-                     "conversion": leg.get("qty_conv"), "currency": leg.get("currency") or mine.get("currency"),
-                     "price_scale": leg.get("price_scale"), "entry_price": px["entry"], "prev_price": px["prev"],
-                     "now_price": px["now"], "lots": mine.get("lots"), "open_lots": mine.get("lots"),
-                     "reason": "" if spec else str(p.get("level_now_reason") or "")})
+    for leg in p.get("legs") or spec.get("legs") or []:
+        inst = str(leg.get("instrument_id") or "")
+        hit = in_level.get((inst, str(leg.get("contract_month") or ""))) or (
+            in_level.get((inst, "")) if str(leg.get("product") or "") != "LME_FWD" else None)
+        ids = [str(t) for t in leg.get("contract_trade_ids") or leg.get("trade_ids") or []]
+        base = {"instrument_id": leg.get("contract_id") or inst, "root_id": leg.get("root_id"),
+                "side": str(leg.get("side") or ""), "weight": leg.get("weight"), "currency": leg.get("currency"),
+                "lots": leg.get("lots"), "open_lots": leg.get("lots")}
+        if hit is not None:
+            n, sleg = hit
+            px = {}
+            for key in ("entry", "prev", "now"):
+                seq = prices.get(key) if isinstance(prices, dict) else None
+                px[key] = _num(seq[n]) if isinstance(seq, (list, tuple)) and len(seq) > n else None
+            base.update(qty_factor=sleg.get("qty_factor"), conversion=sleg.get("qty_conv"),
+                        currency=sleg.get("currency") or base["currency"], price_scale=sleg.get("price_scale"),
+                        entry_price=px["entry"], prev_price=px["prev"], now_price=px["now"],
+                        weight=sleg.get("weight", base["weight"]), reason="")
+        else:
+            fill, mark, why, _source, _raw = _fill_and_mark(data, ids)
+            base.update(qty_factor=None, conversion=None, price_scale=None, entry_price=fill,
+                        prev_price=_prev_mark(data, ids), now_price=mark,
+                        reason=("not a leg of the level (the level is the front months): its own fill and marks"
+                                + (f"; {why}" if mark is None and why else "")))
+        legs.append(base)
     return {"legs": legs, "level_prev_date": p.get("level_prev_date"),
             **{k: p.get(k) for k in ("level_entry_reason", "level_prev_reason", "level_now_reason")}}
 
@@ -3635,7 +3811,7 @@ def parts(data: dict, view: str = DEFAULT_VIEW, state: Optional[dict] = None, so
           filters: Optional[dict] = None, detail: Optional[str] = None, conn: Optional[sqlite3.Connection] = None,
           what: str = "all") -> dict:
     """The tab's pieces from `gather`'s output, each for its own placeholder of the static layout:
-    `top` (the Needs you card, or nothing), `prepull` (the line before the first pull), `options`
+    `top` (a problem message, or nothing), `prepull` (the line before the first pull), `options`
     (the dropdowns' choices), `under` (the book card's footer: the last load and the Data issues
     drawer) when `what` is "all" or "top"; `rows` (the grid's rows, the Book line first) and
     `meta` when it is "all" or "grid"; `shown` (False for the empty state)."""
@@ -3650,9 +3826,6 @@ def parts(data: dict, view: str = DEFAULT_VIEW, state: Optional[dict] = None, so
         top: List[Any] = []
         if data.get("spreads_error"):
             top.append(message_box(data["spreads_error"]))
-        card = needs_card(data)
-        if card is not None:
-            top.append(card)
         drawer = issues_drawer(need_notes(data, rows) + issue_items(data, rows + settled), id=ISSUES_ID)
         out.update(top=html.Div(top), options=filter_options(data),
                    prepull=None if marks else html.Div(PREPULL_TEXT, className="book-prepull", title=NO_MARKS_REASON),
@@ -3687,7 +3860,10 @@ def csv_frame(data: dict, view: str, sort: Optional[dict] = None, filters: Optio
         for n in _sorted(visible, values, sort):
             v, row = values[n["id"]], n.get("row") or {}
             nxt = v.get("next") or {}
+            ratio = v.get("ratio_info") or {}
             rec = {"level": n["level"], "path": " > ".join(path), "name": n["label"], "note": n.get("sub") or "",
+                   "trade": v.get("trade", ""), "symbol": v.get("symbol", ""), "left_over": row.get("leftover", ""),
+                   "ratio": ratio.get("short", ""), "lots_ratio": v.get("ratio_n"), "ratio_detail": ratio.get("hover", ""),
                    "type": row.get("type_text", "") if n["level"] == "position" else "",
                    "sector": row.get("sector_key", "") if n["level"] in ("position", "instrument") else "",
                    "net_lots": v.get("net"), "net_lots_words": v.get("net_text", ""), "gross_lots": v.get("gross"),
@@ -3798,7 +3974,7 @@ def render_csv(as_of: Optional[str], db_path, view: str, sort: Optional[dict] = 
 
 
 def layout(default_date: Optional[str] = None) -> html.Div:
-    """The static shell (2026-09-29, one card): the title, the top placeholder (the Needs you card
+    """The static shell (2026-09-29, one card): the title, the top placeholder (a message
     or the empty state), the book card (`book_card`: its strip with the view switch and the
     filters, static so a box keeps its focus; the grid, its head static and its body a
     placeholder; the footer with the line before the first pull, the last load and the drawer),
@@ -3831,7 +4007,7 @@ def _filters_of(values: Sequence[Any]) -> dict:
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """The top (Needs you, the last load, the drawer, the dropdowns' choices) on the as-of,
+    """The top (a message, the last load, the drawer, the dropdowns' choices) on the as-of,
     the data revision and the safety interval; the grid on those and the view, the open rows, the
     sort, the detail and the filters; the stores from the chevrons, the buttons, the column heads
     and the names; Clear filters; the CSV; the empty state's Upload button."""

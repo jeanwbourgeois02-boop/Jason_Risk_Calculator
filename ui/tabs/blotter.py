@@ -152,8 +152,8 @@ from ui.tabs import ranking as rk
 from ui.tabs.formatting import compact
 from ui.tabs.formatting import (
     HAND_KINDS, MISSING, about, contract_name, format_cell, fx_name, is_fx_pair, issues_drawer, lme_name, marker,
-    missing_cell, plain_words, price_text, quoted_unit, short_money, short_root_name, spread_name, trade_type_words,
-    type_cell, type_disagrees,
+    missing_cell, pair_name, plain_words, price_text, quoted_unit, short_money, short_root_name, spread_name,
+    trade_type_words, type_cell, type_disagrees,
 )
 
 # The tab's own date picker and title row left on 2026-09-28 (the screens tidy): the header's
@@ -1922,13 +1922,6 @@ def _read_trades(conn: sqlite3.Connection) -> list:
     return out
 
 
-def _leg_label(leg: dict, roots: dict) -> str:
-    inst, rid = str(leg.get("instrument_id") or ""), str(leg.get("root_id") or "")
-    if str(leg.get("product") or "") == "LME_FWD":
-        return lme_name(roots.get(rid), rid, str(leg.get("prompt") or ""))
-    return contract_name(inst, roots.get(rid), rid)
-
-
 def _ids_of(entry: dict) -> list:
     ids = entry.get("trade_ids") or ([entry.get("trade_id")] if entry.get("trade_id") else [])
     return [str(t) for t in ids]
@@ -1936,7 +1929,8 @@ def _ids_of(entry: dict) -> list:
 
 def spread_of_trades(spreads: Optional[dict], roots: dict) -> dict:
     """{trade_id: (spread name, hover)}: the Book position each trade landed in, as spreads-engine
-    gave it: a strategy's pair (named by its legs, "WTI Dec26 / WTI Jan27", as the Book names it),
+    gave it: a strategy's pair (`formatting.pair_name`, as the Book names it: "WTI Dec26/Jan27",
+    "Feeder / Live cattle" for one spread across months),
     an FX hedge of a strategy, an unmatched leg of one ("outright"), a spread found by the rule
     (`spread_name`). A trade in none is not in the dict (the caller reads "outright")."""
     out: Dict[str, tuple] = {}
@@ -1944,10 +1938,11 @@ def spread_of_trades(spreads: Optional[dict], roots: dict) -> dict:
     for entry in result.get("strategies") or []:
         who = str(entry.get("name") or "") or "the unlabelled trades"
         for p in entry.get("pairs") or []:
-            name = " / ".join(_leg_label(leg, roots) for leg in p.get("legs") or []) or "pair"
+            name, months = pair_name(p, roots)       # one spread across months: its two sides (2026-09-29)
             words = trade_type_words(p.get("type")) or "pair"
+            ratio = f" {p['ratio_text']} lots." if p.get("ratio_text") else ""
             for tid in _ids_of(p):
-                out.setdefault(tid, (name, f"A {words} pair of {who}."))
+                out.setdefault(tid, (name, f"A {words} spread of {who}" + (f" ({months})" if months else "") + f".{ratio}"))
         for h in entry.get("hedges") or []:
             for tid in _ids_of(h):
                 out.setdefault(tid, ("FX hedge", f"An FX hedge of {who}."))

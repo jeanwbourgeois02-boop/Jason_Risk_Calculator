@@ -800,6 +800,60 @@ def lme_name(root, root_id: str, prompt: Optional[str]) -> str:
     return f"{short_root_name(root, root_id)} {short_date(prompt)}".strip()
 
 
+def pair_leg_name(leg: dict, roots: Optional[dict] = None) -> str:
+    """A spreads-engine leg in plain words: 'Feeder cattle Oct26', 'LME copper 16 Dec'."""
+    roots = roots or {}
+    inst, rid = str(leg.get("instrument_id") or ""), str(leg.get("root_id") or "")
+    if str(leg.get("product") or "") == "LME_FWD":
+        return lme_name(roots.get(rid), rid, str(leg.get("prompt") or ""))
+    return contract_name(inst, roots.get(rid), rid)
+
+
+def _month_of(contract_month: str) -> str:
+    try:
+        return month_label(int(str(contract_month)[5:7]), int(str(contract_month)[:4]))
+    except (TypeError, ValueError):
+        return str(contract_month or "")
+
+
+def pair_name(pair: dict, roots: Optional[dict] = None) -> Tuple[str, str]:
+    """(name, months) of a spreads-engine pair in plain words, never a list of contract ids.
+    Two legs: a calendar 'WTI Dec26/Jan27', any other pair its legs' names 'COMEX copper Dec26 /
+    LME copper 16 Dec'; months ''. More legs (one spread across months, 2026-09-29): its two
+    sides' commodities with a shared last word said once, 'Feeder / Live cattle', 'COMEX / LME
+    copper', and the months per side, 'Oct26, Nov26 / Oct26, Dec26'."""
+    roots = roots or {}
+    legs = [leg for leg in pair.get("legs") or [] if leg.get("instrument_id")]
+    sides = [s for s in pair.get("sides") or [] if s][:2]
+    if len(legs) <= 2 or len(sides) != 2:
+        parsed = [parse_contract_id(str(leg.get("instrument_id") or "")) for leg in legs]
+        same_root = len({str(leg.get("root_id") or "") for leg in legs}) == 1
+        if (len(legs) == 2 and same_root and all(parsed)
+                and not any(str(leg.get("product") or "") == "LME_FWD" for leg in legs)):
+            rid = str(legs[0].get("root_id") or "")
+            return (f"{short_root_name(roots.get(rid), rid)} "
+                    + "/".join(month_label(p["month"], p["year"]) for p in parsed)), ""
+        return " / ".join(pair_leg_name(leg, roots) for leg in legs) or str(pair.get("pair_id") or "pair"), ""
+    names, months = [], []
+    for side in sides:
+        rids = [str(r) for r in side.get("root_ids") or [side.get("key")] if r]
+        names.append(" + ".join(dict.fromkeys(short_root_name(roots.get(r), r) for r in rids)) or str(side.get("key") or ""))
+        months.append(", ".join(dict.fromkeys(_month_of(c.get("contract_month")) for c in side.get("contracts") or []
+                                              if c.get("contract_month"))))
+    a, b = names
+    wa, wb = a.rsplit(" ", 1), b.rsplit(" ", 1)
+    if len(wa) == 2 and len(wb) == 2 and wa[1].lower() == wb[1].lower() and wa[0].lower() != wb[0].lower():
+        name = f"{wa[0]} / {wb[0]} {wa[1]}"
+    else:
+        name = f"{a} / {b}"
+    return name, " / ".join(months)
+
+
+def short_symbol(symbol) -> str:
+    """The broker's symbol without its exchange-country suffix: 'FCV6-USAA' -> 'FCV6'."""
+    return str(symbol or "").split("-")[0].strip()
+
+
 # --- trade types and strategies (2026-09-28: Jason's broker labels each trade with a strategy
 # name, COPAR3, and a trade type, cross exchange / cross product / term structure; spreads-engine
 # carries the codes, the words are the screens')

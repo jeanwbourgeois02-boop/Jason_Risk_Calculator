@@ -803,13 +803,11 @@ p { margin: 8px 0; }
 .book-foot .issues-drawer > summary { font-size: 12px; padding: 0; text-align: right; }
 .book-foot .issues-drawer[open] { flex: 1 0 100%; margin: 0; padding: 0; border: none; background: transparent; }
 .book-foot .issues-drawer[open] .issues-list { color: var(--text); }
-/* the Needs you card: its title, then a small table in the kit */
-.book-needs-card { margin: 0 0 16px; }
-.book-needs-title { padding: 10px 14px 8px; }
-.book-needs-card .book-table thead tr th, .book-needs-card .book-table tbody tr td { border-radius: 0; }
-.book-needs-card .book-table tbody tr:last-child td:first-child { border-bottom-left-radius: 7px; }
-.book-needs-card .book-table tbody tr:last-child td:last-child { border-bottom-right-radius: 7px; }
-.book-needs-table td.book-needs-what { white-space: normal; width: 60%; }
+/* the Trade and Symbol columns (2026-09-29): short, left, never wrapped; a spread's ratio and the lots left over */
+.book-table.book-grid td.book-ident { white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.book-table.book-grid td.book-symbol { font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+.book-table.book-grid td.book-ratio { white-space: nowrap; cursor: help; }
+.book-leftover { margin-left: 10px; font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; cursor: help; }
 .book-prepull { font-size: 12.5px; color: var(--muted); margin: 0 0 8px; }
 .book-quiet { font-size: 12px; color: var(--muted); }
 .book-last-load { font-size: 12.5px; color: var(--muted); }

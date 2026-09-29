@@ -26,3 +26,4 @@
 - [Look pass 2026-09-29](look-pass-2026-09-29.md) — reference kit (navy heads, :where zebra, ghost buttons); Book = Needs you card + one book card, Book line first
 - [P&L scorecard, carry, rolls 2026-09-29](pnl-scorecard-carry-rolls-2026-09-29.md) — three P&L blocks, carry dedupe rule, precious pairs = Book outrights, CNY hedge_cny_usd, risk.py placeholder edit refused
 - [Performance pass 2026-09-29](performance-pass-2026-09-29.md) — one tab mounted, one 15 s poll, screen_memo per db revision (shared, never mutate), compact static rows, perf recipe
+- [Book spread rows 2026-09-29](book-spread-rows-2026-09-29.md) — pairs with >2 legs sized by value: pair_name/ratio/leftover, Trade + Symbol columns and filters, Needs you gone
