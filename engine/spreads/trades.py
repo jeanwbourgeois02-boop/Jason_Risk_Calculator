@@ -264,8 +264,72 @@ def _traded_roots(book, tids: Sequence[str]) -> Dict[str, set]:
     return out
 
 
+def _tonnes_per_lot(a: st.PLeg, b: st.PLeg) -> Tuple[Optional[float], Optional[float], str]:
+    """(one lot of ``a``, of ``b``, the unit) in the first physical unit both convert to
+    (contract-master's unit table: t, bbl, mmbtu); (None, None, '') when none."""
+    for unit in st.COMMON_UNITS:
+        try:
+            return a.physical(1.0, unit), b.physical(1.0, unit), unit
+        except ValueError:
+            continue
+    return None, None, ""
+
+
+def _month_pairs(legs: List[st.PLeg], rem: Dict[str, float]) -> List[_Part]:
+    """Rule 0 of the type (user decision 2026-09-29, pair by tonnage per month): one commodity
+    held on two exchanges across months pairs its SAME-MONTH legs of the two exchanges first,
+    opposite ways, when their tonnage balances within 10 % (``UNBALANCED``): the smaller side in
+    full, the larger side the same tonnage (whole lots on a future, exact tonnes on an LME
+    ticket). ZNA1: Oct LME +3,150 t against SHFE -3,135 t, Nov LME -5,050 t against SHFE
+    +5,015 t, two cross-exchange pairs. What is left goes to the calendar and cross rules.
+    ``rem`` (open lots per contract) is reduced in place."""
+    parts: List[_Part] = []
+    by_sub: Dict[str, List[st.PLeg]] = defaultdict(list)
+    for leg in legs:
+        by_sub[leg.root.subsector].append(leg)
+    for _sub, group in sorted(by_sub.items()):
+        if len({leg.root.exchange for leg in group}) < 2:
+            continue
+        for month in sorted({leg.month for leg in group if leg.month}):
+            cands = []
+            for i, a in enumerate(group):
+                for b in group[i + 1:]:
+                    if a.month != month or b.month != month or a.root.exchange == b.root.exchange:
+                        continue
+                    ta, tb, unit = _tonnes_per_lot(a, b)
+                    if unit:
+                        cands.append((a, b, ta, tb, unit))
+            while True:
+                live = []
+                for a, b, ta, tb, unit in cands:
+                    ra, rb = rem[a.contract_id], rem[b.contract_id]
+                    if abs(ra) <= LEFTOVER_FLOOR or abs(rb) <= LEFTOVER_FLOOR or _sign(ra) == _sign(rb):
+                        continue
+                    wa, wb = abs(ra) * ta, abs(rb) * tb
+                    gap = abs(wa - wb) / max(wa, wb)
+                    if gap <= UNBALANCED + 1e-12:
+                        live.append((gap, a.contract_id, b.contract_id, a, b, ta, tb, unit))
+                if not live:
+                    break
+                _gap, _ca, _cb, a, b, ta, tb, unit = min(live, key=lambda x: x[:3])
+                ra, rb = rem[a.contract_id], rem[b.contract_id]
+                w = min(abs(ra) * ta, abs(rb) * tb)
+                la = w / ta if not a.whole_lots or abs(ra) * ta <= w + 1e-9 else float(round(w / ta))
+                lb = w / tb if not b.whole_lots or abs(rb) * tb <= w + 1e-9 else float(round(w / tb))
+                la, lb = min(la, abs(ra)), min(lb, abs(rb))
+                rem[a.contract_id] -= _sign(ra) * la
+                rem[b.contract_id] -= _sign(rb) * lb
+                parts.append(_Part(TYPE_CROSS_EXCHANGE, [a.root_id, b.root_id],
+                                   {a.contract_id: _sign(ra) * la, b.contract_id: _sign(rb) * lb},
+                                   f"same month on two exchanges, {la * ta:,.0f} against {lb * tb:,.0f} {unit} "
+                                   f"(pair by tonnage per month, within {UNBALANCED:.0%})"))
+    return parts
+
+
 def _decompose(book, tids: Sequence[str], legs: List[st.PLeg], roll_ids: set) -> Tuple[List[_Part], Dict[str, float], str]:
     """(parts, the directional lots no part holds per contract, note) of the open legs."""
+    rem = {leg.contract_id: leg.lots for leg in legs}
+    month_parts = _month_pairs(legs, rem)
     by_root: Dict[str, List[st.PLeg]] = defaultdict(list)
     for leg in legs:
         by_root[leg.root_id].append(leg)
@@ -275,11 +339,14 @@ def _decompose(book, tids: Sequence[str], legs: List[st.PLeg], roll_ids: set) ->
         per_lot[leg.contract_id] = 1.0 if leg.whole_lots else leg.root.contract_size
         for t in leg.trade_ids:
             cid_of[t] = leg.contract_id
-    parts: List[_Part] = []
+    parts: List[_Part] = list(month_parts)
     residual: Dict[str, Dict[str, float]] = {}
     for root_id, rlegs in sorted(by_root.items()):
-        lots = {leg.contract_id: leg.lots for leg in rlegs}
-        if (len(rlegs) >= 2 and abs(sum(lots.values())) < LEFTOVER_FLOOR
+        lots = {leg.contract_id: rem[leg.contract_id] for leg in rlegs
+                if abs(rem[leg.contract_id]) > LEFTOVER_FLOOR}
+        if not lots:
+            continue
+        if (len(lots) >= 2 and abs(sum(lots.values())) < LEFTOVER_FLOOR
                 and len({_sign(v) for v in lots.values()}) == 2):
             parts.append(_Part(TYPE_CALENDAR, [root_id], lots, "its open months net to zero"))
             continue
@@ -291,8 +358,8 @@ def _decompose(book, tids: Sequence[str], legs: List[st.PLeg], roll_ids: set) ->
             avail_n = n if abs(n) > _EPS and _sign(n) == near_sign else 0.0
             avail_f = f if abs(f) > _EPS and _sign(f) == -near_sign else 0.0
             take = min(size, abs(avail_n), abs(avail_f))
-            if take <= LEFTOVER_FLOOR:
-                continue
+            if take < 1.0 - 1e-9:
+                continue            # under one lot is leftover, never a spread
             lots[near] -= near_sign * take
             lots[far] += near_sign * take
             cal[near] += near_sign * take
@@ -306,6 +373,8 @@ def _decompose(book, tids: Sequence[str], legs: List[st.PLeg], roll_ids: set) ->
     note = ""
     # a root traded in the trade and flat now is the other side when one root alone is left
     flat_roots = sorted(set(_traded_roots(book, tids)) - set(by_root))
+    if month_parts:
+        flat_roots = []             # the month pairs are the spread: what is left is leftover
     participants = sorted(residual)
     if len(participants) >= 2 or (len(participants) == 1 and flat_roots and not parts):
         extra = flat_roots if len(participants) == 1 else []
@@ -417,6 +486,49 @@ def product_word(root) -> str:
     return root.root_id.partition(":")[2] or root.root_id
 
 
+_FX_WORDS = {"FX_SPOT": "spot", "FX_FWD": "forward", "FX_SWAP": "swap"}
+
+
+def _day_words(iso: str) -> str:
+    """'20 Jan 27' for '2027-01-20'; the text itself when it is not a date."""
+    try:
+        d = dt.date.fromisoformat(str(iso)[:10])
+    except ValueError:
+        return str(iso or "")
+    return f"{d.day} {_MONTHS[d.month - 1]} {d.year % 100:02d}"
+
+
+def _option_terms(book) -> Dict[str, tuple]:
+    """{instrument_id: (strike, option_type, payoff)} of ``instrument_options``, read once per book."""
+    terms = getattr(book, "_trade_book_option_terms", None)
+    if terms is None:
+        try:
+            terms = {str(r[0]): (_num(r[1]), str(r[2] or ""), str(r[3] or ""))
+                     for r in book.conn.execute("SELECT instrument_id, strike, option_type, payoff FROM instrument_options")}
+        except Exception:  # noqa: BLE001 -- an old database without the table: no terms, the plain name says 'option'
+            terms = {}
+        book._trade_book_option_terms = terms
+    return terms
+
+
+def fx_name(book, t: dict, prompt: str) -> str:
+    """A currency leg in plain words: 'USDCNH 20 Jan 27 forward', 'EURUSD 18 Nov 26 call 1.0500'
+    (strike and type from ``instrument_options`` when known, else 'option'; a payoff other than
+    vanilla named after it)."""
+    from engine.spreads.hedges import pair_currencies
+    base, quote = pair_currencies(t["base_ccy"], t["quote_ccy"], t["instrument_id"])
+    pair = f"{base}{quote}"
+    if t["product"] != "FX_OPTION":
+        return f"{pair} {_day_words(prompt)} {_FX_WORDS.get(t['product'], 'trade')}".strip()
+    expiry = str(t["expiry_date"] or "")
+    strike, kind, payoff = _option_terms(book).get(str(t["instrument_id"]), (None, "", ""))
+    if not strike or kind not in ("CALL", "PUT"):
+        return f"{pair} {_day_words(expiry)} option".strip()
+    places = 3 if "JPY" in pair else 2 if {base, quote} & {"XAU", "XAG"} else 4
+    tail = "" if payoff in ("", "VANILLA", "AMERICAN") else f" {payoff.lower().replace('_', ' ')}"
+    return f"{pair} {_day_words(expiry)} {kind.lower()} {strike:.{places}f}{tail}"
+
+
 def _twins(book, tids: Sequence[str]) -> set:
     """The roots of the trade that share their exchange and commodity words with another of its
     roots (ICE TTF and NBP, both 'natural gas'): named by product."""
@@ -521,8 +633,8 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str], p
         per_lot = root.contract_size if (t["product"] == "LME_FWD" and root is not None) else 1.0
         status = "open" if abs(qty) > _EPS else ("flat" if open_ids else "closed")
         lots = qty / per_lot if status == "open" else 0.0
-        if t["product"] in st.FX_PRODUCTS:
-            name = f"{t['instrument_id']} {prompt}"
+        if t["product"] in st.FX_PRODUCTS or t["product"] == "FX_OPTION":
+            name = fx_name(book, t, prompt)
         elif t["product"] in st.OPTION_PRODUCTS and root is not None:
             # an option names its own contract ('NYMEX Crude oil CLZ26C 75'): two strikes never read alike
             name = f"{root.exchange} {_title(commodity_words(root))} {str(t['instrument_id']).replace(' Comdty', '')}"
@@ -683,6 +795,24 @@ def _pair_level(book, pair: dict) -> dict:
         out["note"] = _closes_apart([book.roots[leg.root_id] for leg in spec.legs if leg.root_id in book.roots],
                                     book.as_of)
     return out
+
+
+def _month_pair_level(book, part: _Part, pleg_by_cid: Dict[str, st.PLeg], prev_day: str,
+                      prev_rows: Dict[str, dict]) -> dict:
+    """The level of one same-month cross-exchange pair (``strategies``' level rule on its two
+    legs: a China-against-the-West pair the converted ratio, else the template's or common unit)."""
+    (ca, la), (cb, lb) = sorted(part.legs.items())
+    a, b = pleg_by_cid[ca], pleg_by_cid[cb]
+    level_unit, lupl_a, lupl_b, template, _also, level_why = st._level_basis(book, a, b)
+    first, second = st._order(CROSS_EXCHANGE, a, b, template)
+    if first is b:
+        la, lb, lupl_a, lupl_b = lb, la, lupl_b, lupl_a
+    p = {"rule": CROSS_EXCHANGE, "a": first, "b": second, "lots_a": la, "lots_b": lb, "template": template,
+         "level_unit": level_unit, "lupl_a": lupl_a, "lupl_b": lupl_b, "level_why": level_why}
+    lv = st._levels(book, p, prev_day, prev_rows)
+    label = (f"{first.contract_id} / {second.contract_id}" if lv.get("unit") == st.RATIO_UNIT
+             else f"{first.contract_id} - {second.contract_id}")
+    return _pair_level(book, {**lv, "level_label": label})
 
 
 def _calendar_level(book, part: _Part, pleg_by_cid: Dict[str, st.PLeg], prev_day: str,
@@ -1066,9 +1196,13 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
     # the levels: one per part; the trade's is its one spread's
     cross_pairs = [p for p in entry.get("pairs") or [] if p.get("type") in (CROSS_EXCHANGE, CROSS_PRODUCT)]
     part_levels: List[dict] = []
+    n_cross = sum(1 for p in parts if p.kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT))
     for part in parts:
         if part.kind == TYPE_CALENDAR:
             part_levels.append(_calendar_level(book, part, pleg_by_cid, prev_day, prev_rows))
+        elif part.kind == TYPE_CROSS_EXCHANGE and n_cross > 1 and len(part.legs) == 2:
+            # one of several month pairs: its own level, by the pairs' one level rule
+            part_levels.append(_month_pair_level(book, part, pleg_by_cid, prev_day, prev_rows))
         elif part.kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT):
             fit = [p for p in cross_pairs if {x["root_id"] for x in p["legs"]} <= set(part.roots)]
             if len(fit) == 1:
@@ -1092,6 +1226,11 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         level = part_levels[cross_idx[0]]
     elif not cross_idx and len(cal_idx) == 1:
         level = part_levels[cal_idx[0]]
+    elif not cal_idx and len(cross_idx) == len(parts) and len({tuple(sorted(p.roots)) for p in parts}) == 1:
+        # month pairs of one commodity on two exchanges (ZNA1): the largest pair's level
+        big = max(cross_idx, key=lambda n: (max(abs(v) for v in parts[n].legs.values()), -n))
+        level = {**part_levels[big], "note": _join([part_levels[big].get("note", ""),
+                                                    f"the largest of {len(parts)} month pairs"])}
     elif not parts:
         level = _blank_level("nothing open: no level")
     else:
@@ -1134,6 +1273,13 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         flags.append({"code": FLAG_NO_PRICE, "severity": "amber",
                       "label": f"{len(no_price)} leg{'s' if len(no_price) > 1 else ''} without price",
                       "sentence": "; ".join(f"{r['name']}: {r['mark_reason']}" for r in no_price)})
+    if rows and all(r["hedge"] or r["unrecognised"] for r in rows) and any(r["hedge"] for r in rows):
+        # nothing but currency trades: they are the trade's position, not a hedge of it
+        for r in rows:
+            if r["hedge"]:
+                r.update(hedge=False, roll_down_reason="a currency trade: no roll-down")
+        if nxt is not None:
+            nxt = {**nxt, "hedge": False}
     pnl = entry.get("pnl_usd") or {}
     return {
         "trade": name, "trade_ids": sorted(tids), "position_id": f"POSITION-{entry['spread_id']}",
@@ -1240,7 +1386,7 @@ def _closed_block(conn: sqlite3.Connection, book, name: str, entry: dict, read: 
 
 
 def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = None,
-               value_fn: ValueFn = value_book, history=None, rows=None) -> dict:
+               value_fn: Optional[ValueFn] = value_book, history=None, rows=None) -> dict:
     """Every trade of the book on ``as_of`` (the module docstring), for the Book row and its panel.
 
     ``spreads``: the ``book_spreads(conn, as_of, value_fn=...)`` result the caller already holds
@@ -1318,6 +1464,7 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
 
     Every figure that cannot be given is None with its reason, never 0 (hard rule 2)."""
     from engine.spreads.book import _Book, book_spreads
+    value_fn = value_fn if value_fn is not None else value_book
     read = _cached(value_fn)
     if rows is not None:
         read = _cached(_with_rows(value_fn, as_of, rows))

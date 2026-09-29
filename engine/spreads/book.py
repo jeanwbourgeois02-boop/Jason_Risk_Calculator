@@ -992,7 +992,7 @@ def positions_from(spreads: Sequence[dict], roots: Optional[Dict[str, object]] =
     return [_position(members, roots or {}) for members in groups.values()]
 
 
-def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value_book,
+def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: Optional[ValueFn] = value_book,
                  templates_dir=None) -> dict:
     """The book's futures grouped into spreads by the rule of ``engine/spreads/__init__.py``.
 
@@ -1116,10 +1116,12 @@ def book_spreads(conn: sqlite3.Connection, as_of: str, value_fn: ValueFn = value
     - ``reasons``: book-level sentences (a template that could not be read or sized, an override
       that could not be applied).
 
-    ``value_fn(conn, day)``: the valuation read, ``value_book`` by default (unfilled, as the
-    engine's own figures are); a screen may pass its filled reader for its own view.
+    ``value_fn(conn, day)``: the valuation read, ``value_book`` by default or when None (unfilled,
+    as the engine's own figures are); a screen may pass its filled reader for its own view, or the
+    app's one shared valuation per date (every date this function values goes through it, and
+    each date is asked of it once: ``_Frames`` keeps what it returned).
     """
-    book = _Book(conn, as_of, value_fn, templates_dir)
+    book = _Book(conn, as_of, value_fn if value_fn is not None else value_book, templates_dir)
     out = book.group()
     try:
         strategies = strategies_from(book, out["spreads"])
