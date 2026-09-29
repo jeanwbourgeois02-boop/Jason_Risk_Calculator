@@ -1207,7 +1207,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     uc = sub.add_parser("ui-check", help="display-text check of the screens on the sample book: lowercase labels, "
                                          "n/a, engine words, loose text, stray spaces (tools/ui_check.py; exit 1 "
-                                         "on a visible-text finding)")
+                                         "on a visible finding or a hover lowercase / banned one)")
     uc.add_argument("--tab", help="one screen: top, header, book, pnl, risk, blotter, data")
     uc.add_argument("--json", action="store_true", help="also write the findings to reports/ui_check.json")
     uc.set_defaults(func=cmd_ui_check)

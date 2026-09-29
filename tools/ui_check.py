@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Display-text checker for the Dash screens: the basic mistakes on the screens caught mechanically.
 
-    py 2_launcher.py ui-check               every tab; exit 1 on any visible-text finding
+    py 2_launcher.py ui-check               every tab; exit 1 on any visible finding or a hover LOWERCASE / BANNED one
     py 2_launcher.py ui-check --tab book    one tab (top, header, book, pnl, risk, blotter, data)
     py 2_launcher.py ui-check --json        also write the findings to reports/ui_check.json
 
@@ -14,8 +14,9 @@ browser, no Bloomberg, no network; nothing is written outside the temp dir and `
 Every piece of visible text is gathered per block element (the inline children of a cell, a
 paragraph or a heading are read as one run, as the browser draws them), with the text that is
 drawn from a static block (`ui.tabs.formatting.static_block`, a `dcc.Markdown` of html) parsed
-back out of its markup. Hover text (`title=`) is its own, lower-severity category: it is
-reported but never fails the run.
+back out of its markup. Hover text (`title=`) is reported apart from the visible text; its
+LOWERCASE and BANNED findings fail the run too (`FAILING_HOVER_RULES`), its other findings are
+report-only, and ENGINE_WORD is not applied to it (instrument ids on hover are by design).
 
 Rules (visible text unless said):
   LOWERCASE            the first letter is lowercase (units, numbers, dates, text opening with a
@@ -60,10 +61,8 @@ TAB_ALIASES = {"market-data": "data", "p&l": "pnl", "top-bar": "top"}
 UNIT_WORDS = {"lots", "lot", "t", "oz", "bbl", "bu", "lb", "lbs", "mt", "k", "m", "bn", "bp", "bps", "x",
               "vs", "of", "per", "est", "c", "p"}
 # The whitelist: lowercase first words the rulebook itself prescribes. Keep it small.
+# The markers read "Excl. 3", "Filled 2", "Ref 16 Sep" and sizes "Long 15 lots": none is exempt.
 WHITELIST = {
-    "excl",      # CLAUDE.md "Tabs as views": a subtotal carries the marker `excl. N`
-    "filled",    # CLAUDE.md "Header": the fill's marker `filled N`
-    "ref",       # CLAUDE.md "Header": a stepped-back reference close's marker `ref <date>`
     "z",         # the z-score column, CLAUDE.md "Screens redesign plan" Phase G's column list: a symbol
 }
 # Leading glyphs that decorate a text (row chevrons, bullets, ticks) and are skipped before the
@@ -808,6 +807,14 @@ def grouped(findings: List[Finding]) -> List[Tuple[Finding, int]]:
     return sorted(((first[k], n) for k, n in counts.items()), key=order)
 
 
+FAILING_HOVER_RULES = {"LOWERCASE", "BANNED"}
+
+
+def failing(f: Finding) -> bool:
+    """Whether `f` fails the run: every visible finding, and hover LOWERCASE / BANNED."""
+    return not f.hover or f.rule in FAILING_HOVER_RULES
+
+
 def rule_name(f: Finding) -> str:
     return f"hover:{f.rule}" if f.hover else f.rule
 
@@ -833,8 +840,9 @@ def print_report(findings: List[Finding], timings: Dict[str, float], out=sys.std
         out.write(f"  {t:<8} {parts}\n")
     visible = sum(1 for f, _n in items if not f.hover)
     hover = sum(1 for f, _n in items if f.hover)
+    hover_failing = sum(1 for f, _n in items if f.hover and failing(f))
     took = ", ".join(f"{k} {v:.1f}s" for k, v in timings.items())
-    out.write(f"  {visible} visible, {hover} hover-only distinct findings ({took})\n")
+    out.write(f"  {visible} visible, {hover} hover distinct findings ({hover_failing} of them failing) ({took})\n")
 
 
 def write_json(findings: List[Finding], timings: Dict[str, float], path: Path = REPORT_PATH) -> Path:
@@ -865,7 +873,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print_report(findings, timings)
     if args.json:
         print(f"written {write_json(findings, timings)}")
-    return 1 if any(not f.hover for f in findings) else 0
+    return 1 if any(failing(f) for f in findings) else 0
 
 
 if __name__ == "__main__":
