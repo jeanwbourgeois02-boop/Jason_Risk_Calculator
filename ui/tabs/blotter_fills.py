@@ -185,11 +185,12 @@ def _read_trades(conn: sqlite3.Connection) -> List[dict]:
             "t.account, {labels}, COALESCE(i.base_ccy, ''), COALESCE(i.quote_ccy, ''), COALESCE(i.expiry_date, ''), "
             "COALESCE(i.bbg_ticker, '') FROM trades t LEFT JOIN instruments i ON i.instrument_id = t.instrument_id")
     keys = ("trade_id", "trade_date", "quantity", "price", "product", "instrument_id", "description", "account",
-            "strategy", "pb_root", "broker_symbol", "broker_price", "base_ccy", "quote_ccy", "expiry_date",
-            "bbg_ticker")
+            "strategy", "pb_root", "broker_symbol", "broker_price", "fin_type", "base_ccy", "quote_ccy",
+            "expiry_date", "bbg_ticker")
     rows: list = []
-    for labels in ("t.strategy, t.pb_root, t.broker_symbol, t.broker_price", "t.strategy, t.pb_root, '', ''",
-                   "t.strategy, '', '', ''"):
+    for labels in ("t.strategy, t.pb_root, t.broker_symbol, t.broker_price, t.fin_type",
+                   "t.strategy, t.pb_root, t.broker_symbol, t.broker_price, ''", "t.strategy, t.pb_root, '', '', ''",
+                   "t.strategy, '', '', '', ''"):
         try:
             rows = conn.execute(base.format(labels=labels)).fetchall()
             break
@@ -269,9 +270,22 @@ def _lots(r: dict, root) -> Tuple[Optional[float], str, str, str]:
             return lots, lots_words(lots), f"{tonnes_text} ({per:g} t a lot)", "t"
         return n, tonnes_text, "the lot size of this metal is not known: shown in tonnes", "t"
     if product in _FX_PRODUCTS:
-        return n, amount_words(n, str(r["base_ccy"] or "")), f"{n:,.2f} {r['base_ccy']}".strip(), str(r["base_ccy"] or "")
-    return n, f"{n:,g}", ("the unit is not known: the contract is not recognised" if product == UNRECOGNISED
-                          else ""), ""
+        base = str(r["base_ccy"] or "")
+        if base in _TROY_OUNCE_CODES:
+            return n, f"{amount_words(n)} oz", f"{n:,.2f} {base} (troy ounces)", "oz"
+        return n, amount_words(n, base), f"{n:,.2f} {base}".strip(), base
+    if product == UNRECOGNISED and _came_in_as_future(r):
+        return n, lots_words(n), "The contract is not recognised; the file's row is a future, so the size is lots", "lots"
+    return n, f"{n:,g}", ("Unit unknown: contract not recognised" if product == UNRECOGNISED else ""), ""
+
+
+_TROY_OUNCE_CODES = ("XAU", "XAG", "XPT", "XPD")   # precious metals: the FX base amount is troy ounces
+
+
+def _came_in_as_future(r: dict) -> bool:
+    """The file's own Fin Type / Product cell (trades.fin_type) says future, and not an option on one."""
+    kind = str(r.get("fin_type") or "").upper()
+    return "FUT" in kind and "OPT" not in kind
 
 
 def _build_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, List[tuple], bool]:

@@ -1161,6 +1161,15 @@ p { margin: 8px 0; }
 .market-data .bbg-check-block { margin-top: 12px; }
 /* the Problems' sentences wrap inside the card instead of running past its edge */
 .market-data #market-data-missing-panel .book-table td.l:nth-child(n+3) { white-space: normal; }
+/* fold titles in sentence case, as the Data issues drawer and every other tab's folds */
+.market-data .data-fold > summary .book-section-title { text-transform: none; letter-spacing: 0; font-size: 13px;
+  font-weight: 600; color: var(--navy); }
+.market-data .data-fold > summary:hover .book-section-title { color: var(--gold); }
+/* Reference closes: the table spans its card like Problems and Marks check; Period narrow */
+.market-data .tk-table.tk-small.data-ref-table { width: 100%; max-width: none; table-layout: fixed; }
+.market-data .data-ref-table th:nth-child(1), .market-data .data-ref-table td:nth-child(1) { width: 110px; }
+/* the Contract dates list spans its open fold the same way */
+.market-data #market-data-contract-dates .data-fold > .tk-table.tk-small { width: 100%; max-width: none; }
 /* end wave 2: data */
 
 /* wave 2: pnl */

@@ -1881,7 +1881,7 @@ def reference_closes_panel(rows: List[dict], issues: Optional[list] = None) -> h
             kit.td(complete, left=True), kit.td(used, left=True),
             kit.td(f"{r['left_out']:,}", title=r["left_names"] or None),
         ]))
-    return kit.card([head, kit.table(kit.head(cols, None, "data-ref-none"), body, className="tk-small")])
+    return kit.card([head, kit.table(kit.head(cols, None, "data-ref-none"), body, className="tk-small data-ref-table")])
 
 
 # ---- 5. Contract dates

@@ -42,3 +42,4 @@
 - [Phase G fix pass 2026-09-29](phase-g-fix-pass-2026-09-29.md) — price-to-check on Book (gathered/with_checks), value_fn wiring, warm-up adds, Data rows server-side, narrow CSS, See-fills mount trap
 - [Layout wave 2: P&L 2026-09-29](layout-wave2-pnl-2026-09-29.md) — % of total cut, blank split parts, total/group badge vs row_info, lean headline, chart empty frame, kv track record
 - [Layout wave 2 Blotter 2026-09-29](layout-wave2-blotter-2026-09-29.md) — upload line + rejects card fold, Size column, Options cut to 3 cards + 14-col grid, no strip; stale tests
+- [Last screens pass 2026-09-29](last-screens-pass-2026-09-29.md) — Data fold titles sentence case, tables span cards, Blotter Size (fin_type lots, oz), leg_name strikes

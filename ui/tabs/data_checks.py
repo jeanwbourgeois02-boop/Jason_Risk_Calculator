@@ -93,10 +93,9 @@ def price_name(instrument_id: str, mark_type: str, settle_date: str, root_id: st
     parsed = parse_contract_id(iid)
     if parsed is None:
         return f"{root.exchange} {iid}"
-    name = leg_name(root, f"{parsed['year']:04d}-{parsed['month']:02d}", "", iid)
-    if parsed["option_type"]:
-        name += f" {parsed['strike']} {parsed['option_type']}"
-    return name
+    # an option on a future: the strike and call / put written by leg_name itself, once ('80,000 call')
+    return leg_name(root, f"{parsed['year']:04d}-{parsed['month']:02d}", "", iid,
+                    strike=parsed["strike"] if parsed["option_type"] else None, option_type=parsed["option_type"] or "")
 
 
 def _signed(value: Optional[float], unit: str) -> str:

@@ -54,6 +54,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from data.contracts.tickers import format_strike, month_from_code, parse_option_ticker
+
 from engine.pnl.valuation import value_book
 from engine.spreads import strategies as st
 from engine.spreads.book import ValueFn, level_on
@@ -165,9 +167,23 @@ def family_of(root) -> str:
     return str(getattr(root, "family", "") or root.subsector or "").strip().lower().replace("_", " ")
 
 
-def leg_name(root, month: str, prompt: str = "", instrument_id: str = "") -> str:
-    """'COMEX Silver Dec26', 'LME Zinc 18 Nov26', 'SGX USD/CNH Nov26'; the instrument id when the
-    root is not in contract-master."""
+def strike_words(strike) -> str:
+    """A strike at its own quoted precision with thousands separators: '62', '80,000', '3.25'
+    (Bloomberg's ticker form, ``data.contracts.format_strike``, no trailing zeros); the text
+    itself when it is not a number."""
+    try:
+        text = format_strike(strike)
+    except (TypeError, ValueError):
+        return str(strike or "")
+    places = len(text.partition(".")[2])
+    return f"{float(text):,.{places}f}"
+
+
+def leg_name(root, month: str, prompt: str = "", instrument_id: str = "", *,
+             strike=None, option_type: str = "") -> str:
+    """'COMEX Silver Dec26', 'LME Zinc 18 Nov26', 'SGX USD/CNH Nov26', and with ``strike`` and
+    ``option_type`` an option on a future 'NYMEX Crude oil Dec26 62 put' (the same plain form the
+    Blotter and the Data tab write); the instrument id when the root is not in contract-master."""
     if root is None:
         return instrument_id
     words = _title(commodity_words(root))
@@ -177,7 +193,32 @@ def leg_name(root, month: str, prompt: str = "", instrument_id: str = "") -> str
             return f"{root.exchange} {words} {d.day} {_MONTHS[d.month - 1]}{d.year % 100:02d}"
         except ValueError:
             pass
-    return f"{root.exchange} {words} {month_label(month)}".strip()
+    name = f"{root.exchange} {words} {month_label(month)}".strip()
+    kind = {"C": "call", "CALL": "call", "P": "put", "PUT": "put"}.get(str(option_type or "").strip().upper(), "")
+    if kind and strike not in (None, ""):
+        name = f"{name} {strike_words(strike)} {kind}"
+    return name
+
+
+def option_leg_name(root, instrument_id: str, month: str = "") -> str:
+    """An option on a future in plain words from its canonical id ('CLZ26P 62 Comdty' -> 'NYMEX
+    Crude oil Dec26 62 put'): the option's own contract month, the strike, call / put. ``month``
+    ('2026-12') stands in for a one-digit year; '' when the id is not an option ticker."""
+    parts = parse_option_ticker(instrument_id)
+    if root is None or parts is None:
+        return ""
+    _root, code, year, cp, strike, _key = parts
+    try:
+        mm = month_from_code(code)
+    except ValueError:
+        return ""
+    if len(year) == 2:
+        key = f"{2000 + int(year):04d}-{mm:02d}"
+    elif month[:4].isdigit():
+        key = f"{month[:4]}-{mm:02d}"
+    else:
+        return ""
+    return leg_name(root, key, strike=strike, option_type=cp)
 
 
 # ------------------------------------------------------------------ the type rule
@@ -636,8 +677,13 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str], p
         if t["product"] in st.FX_PRODUCTS or t["product"] == "FX_OPTION":
             name = fx_name(book, t, prompt)
         elif t["product"] in st.OPTION_PRODUCTS and root is not None:
-            # an option names its own contract ('NYMEX Crude oil CLZ26C 75'): two strikes never read alike
-            name = f"{root.exchange} {_title(commodity_words(root))} {str(t['instrument_id']).replace(' Comdty', '')}"
+            # an option in plain words with its strike ('NYMEX Crude oil Dec26 75 call'): two strikes
+            # never read alike; the old ticker form only when the id is not an option ticker
+            name = (option_leg_name(root, str(t["instrument_id"]), month)
+                    or f"{root.exchange} {_title(commodity_words(root))} {str(t['instrument_id']).replace(' Comdty', '')}")
+            if root.root_id in twins:
+                name = name.replace(f"{root.exchange} {_title(commodity_words(root))}",
+                                    f"{root.exchange} {_twin_words(root)}", 1)
         else:
             name = leg_name(root, month, prompt if t["product"] == "LME_FWD" else "", str(t["instrument_id"]))
             if root is not None and root.root_id in twins:

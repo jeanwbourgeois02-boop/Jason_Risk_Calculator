@@ -36,3 +36,7 @@ Built 2026-09-29 (Phase G: the trade, the PBRoot name, is the screens' unit). `t
   red flag), never typed / levelled / balanced / hedged; only-unrecognised trade = type '' + flag, counts as open. The
   strategy P&L stays None whole (no partial sum, existing rule): the ui may sum priced legs with excl. N. Test by
   inserting instruments + trades rows by hand (asset_class/product UNRECOGNISED, multiplier 0, no legs).
+- Leg names (2026-09-29): an option on a future reads 'NYMEX Crude oil Dec26 62 put' (`option_leg_name`, strike via
+  `strike_words`: own decimals, thousands commas). `leg_name`'s strike/option_type are keyword-only and default off
+  ON PURPOSE: ui/tabs/data_checks.py, blotter_fills.py, risk_folds.py call leg_name and append the strike themselves,
+  so never make it add the strike from instrument_id alone (the ui would print it twice).
