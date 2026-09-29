@@ -3,31 +3,23 @@ layout approved by the user against the research app's Book, `../Commodity Dashb
 tiles, one summary table with a break-down switch, a flat Open trades list). Vocabulary (user,
 2026-09-28): a **spread type** is cross exchange / cross product / term structure; Jason's PBRoot
 name (COPAR3, CATTLE, `trades.strategy`) is his **trade**, never called a strategy on screen (the
-code keeps `strategy` as the field name of the PBRoot label). Top to bottom:
+code keeps `strategy` as the field name of the PBRoot label). Since 2026-09-29 (user: "i want
+everything to be in a table"), top to bottom, at most two cards under the title:
 
-  1. Tiles: Open trades (the rows of the list), LTD and P&L today (the header's own figures and
-     markers), Gross and Net (the engine's USD notional over the rows, summed, "excl. N"), and
-     "CNH hedged" when exactly one trade has a coverage figure (spreads-engine's
-     `hedge_coverage_net` is per trade; the book has none).
-  2. Needs you: a slim strip, at most three lines (an expiry or first notice at RED / AMBER with a
-     real date, the marks missing, the legs that could not be paired), hidden when empty.
-  3. "P&L by" (`summary_table`, id `TABLE_ID`): one table, a switch Spread type | Sector | Commodity |
-     Instrument | Trade; columns Trades (open positions), P&L today, MTD, LTD, Gross, Net, % of gross,
-     Next; the settled line; the Book line = the header's Daily, MTD and LTD to the cent. A click on
-     a line filters Open trades to it (a chip above the list clears it; the switch, filter and sort
-     persist for the session).
-  4. Open trades (`open_rows`): the Strategy rows of `book_rows` flattened, one row per pair (its two
-     legs' trades on it), per leg left over, per spread of the unlabelled trades, per outright, option,
-     LME prompt and FX trade. Columns Spread (the trade name small), Type, Sector, Size, Entry, Level,
-     Move (coloured by its effect on the position), z and %ile (the research app's context,
-     read-only), P&L today (the engine's per-trade Daily split on hover), LTD, Gross, Net (an amber
-     marker on an unbalanced pair or a leg left over), Next. Every column sorts on a click. Before the
-     first pull one line says levels and P&L come with it.
-  5. The row detail on a click: the level (or mark) since the first trade date with the entry dashed
-     (`engine.spreads.history.position_history` through the shared filled reader, at most 60 closes,
-     memoised), the fills, the legs.
-  6. Closed and settled: a closed fold, "(N) · realised ±x", the settled lines.
-  7. Last load: one quiet line from the persisted `upload_report`; then the one Data issues drawer.
+  1. Needs you (`needs_card`, only when non-empty): a small table, Level | What | When | Go, one row
+     per first notice, last trade, expiry or prompt at EXPIRED / RED / AMBER with a real date and
+     per position RED / AMBER on liquidity (research data, → Risk).
+  2. The book card (`book_card`): the strip (`grid_strip`: Group by Spread type | Commodity |
+     Instrument | Sector | Trade, the search, Download CSV; the four multi-selects, "+ figures" for
+     the comparison boxes, Expand all / Collapse all, Clear filters, the meta), then one grouped
+     table (group -> position -> legs -> fills), its first body row the Book line ("Book · N open",
+     = the header's Daily, MTD, YTD and LTD to the cent, sticky under the heads), the settled group
+     last; a click on a name opens its chart, fills and legs under it. The footer: the line before
+     the first pull, the last load (`upload_report`) and the Data issues drawer, whose first lines
+     are the marks missing (→ Data) and the legs that could not be paired (→ Blotter).
+
+The tiles row left on 2026-09-29: its figures are on the Book line and in the header; a trade's CNH
+hedge coverage sits on its own row ("CNH 92 % hedged").
 
 Every row's period figure is the P&L tab's own per-trade figure (`ui.tabs.pnl.period_rows`, the
 header's split), the known ones summed (display); nothing is priced or recomputed here. The empty
@@ -69,7 +61,6 @@ log = logging.getLogger(__name__)
 BODY_ID = "book-body"
 REFRESH_ID = "book-refresh"
 TOOLBAR_ID = "book-toolbar"
-TILES_ID = "book-tiles"
 CSV_BUTTON_ID = "book-csv"
 DOWNLOAD_ID = "book-download"
 TABLE_ID = "book-table"
@@ -1848,25 +1839,6 @@ def _trade_lines(data: dict, trade_ids: Sequence[str]) -> html.Table:
     return html.Table([html.Thead(head), html.Tbody(body)], className="book-table")
 
 
-def _need(chip: str, kind: str, text: str, hover: str, tab: str, rank: int) -> dict:
-    return {"chip": chip, "kind": kind, "text": text, "hover": hover, "tab": tab, "rank": rank}
-
-
-def _event_words(data: dict, r: dict) -> str:
-    inst = str(r.get("contract_id") or "")
-    root_id = str(r.get("root_id") or "")
-    root = data["roots"].get(root_id)
-    if str(r.get("product")) == "LME_FWD":
-        name = lme_name(root, root_id, str(inst.split(" ")[-1]) if " " in inst else None)
-    else:
-        name = contract_name(inst, root, root_id)
-    event = _NEXT_EVENT_WORDS.get(str(r.get("next_event") or ""), str(r.get("next_event") or "event"))
-    bd = r.get("business_days")
-    when = ("expired" if r.get("level") == "EXPIRED" else "today" if bd == 0 else
-            f"in {bd} bd" if bd is not None else "date unknown")
-    return f"{name} {event} {when}"
-
-
 _REPORT_KINDS = (("futures", "future", "futures"), ("options_on_futures", "option", "options"),
                  ("lme_forwards", "LME forward", "LME forwards"), ("fx_forwards", "FX forward", "FX forwards"),
                  ("fx_spot", "FX spot", "FX spot"), ("fx_options", "FX option", "FX options"))
@@ -2614,6 +2586,9 @@ def grid_tree(data: dict, view: str) -> List[dict]:
             children = [_position_node(data, r, gid, 1) for r in members]
             nodes.append(_node(gid, "group", 0, label, tids=[t for c in children for t in c["tids"]], children=children,
                                default_open=True))
+            if view == GROUP_TRADE:
+                # the trade's CNH hedge coverage on its own line (the tile's figure until 2026-09-29)
+                nodes[-1]["coverage"] = _strategy_entry(data, label)
         left = [t for r in settled for t in r["trade_ids"]]
     else:
         crows = book_rows(data, GROUP_COMMODITY)
@@ -3043,11 +3018,22 @@ def _name_td(node: dict, v: dict, has_children: bool, opened: bool, detail_open:
     if node.get("sub"):
         children.append(html.Span(node["sub"], className="name-sub"))
     row = node.get("row") or {}
-    if node["level"] == "position":
-        coverage = hedge_coverage_children(row.get("coverage"), words="CNH hedged")
-        if coverage:
-            children.append(html.Div(coverage, className="book-coverage"))
+    entry = row.get("coverage") if node["level"] == "position" else node.get("coverage")
+    coverage = coverage_words(entry)
+    if coverage:
+        children.append(html.Span(coverage, className="book-coverage"))
     return html.Td(children, className=f"l book-name book-d{node['depth']}")
+
+
+def coverage_words(entry: Optional[dict]) -> List[Any]:
+    """'CNH 92 % hedged', small and muted after a name (the engine's `hedge_coverage_net`, its
+    hover as `hedge_coverage_children` gives it); [] when the entry has no CNY legs."""
+    parts = hedge_coverage_children(entry, words="")
+    if not parts:
+        return []
+    if isinstance(parts[0], str):                  # no figure: the dash with the engine's reason
+        return ["CNH hedged ", *parts[1:]]
+    return ["CNH ", *parts[:1], " hedged", *parts[1:]]
 
 
 def _carry_td(crow: Optional[dict]) -> html.Td:
@@ -3189,19 +3175,24 @@ def grid_tr(data: dict, node: dict, v: dict, marks: bool, opened: bool, detail_o
     return html.Tr(cells, className=cls, **row_link_attrs(data, node))
 
 
-def book_tr(data: dict, nodes: Sequence[dict], shown: Optional[set], marks: bool) -> html.Tr:
-    """The Book line: every fill shown, the groups' notionals summed; '= header' when nothing is
+def book_tr(data: dict, nodes: Sequence[dict], shown: Optional[set], marks: bool, n_open: Optional[int] = None,
+            what: str = "positions") -> html.Tr:
+    """The Book line, the grid's first body row since 2026-09-29 (it sticks under the heads):
+    "Book · N open", every fill shown, the groups' notionals summed; '= header' when nothing is
     filtered, 'filtered' (and why it no longer equals the header) otherwise."""
     every = _node("book", "book", 0, BOOK_LABEL, tids=[t for n in nodes for t in n["tids"]], children=nodes)
     v = node_values(data, every, shown)
     if shown is None:
         note = "= header" if marks else "no marks on file"
-        title = ("Every trade of the as-of book is in one row above, so this line is the header's Daily, MTD, YTD and "
+        title = ("Every trade of the as-of book is in one row below, so this line is the header's Daily, MTD, YTD and "
                  "LTD: the known figures summed, what is left out named.")
     else:
         note = "filtered"
         title = "The fills the filters leave, summed: this is not the header's figure while a filter is set."
-    cells: List[Any] = [html.Td([BOOK_LABEL, html.Span(note, className="book-note")], className="l book-name", title=title)]
+    label = f"{BOOK_LABEL} · {n_open:,} open" if n_open is not None else BOOK_LABEL
+    if n_open is not None:
+        title += f"\n{n_open:,} open {what} shown, the settled ones apart."
+    cells: List[Any] = [html.Td([label, html.Span(note, className="book-note")], className="l book-name", title=title)]
     cells += [_blank() for _ in range(11)]
     for key in PERIODS:
         value, excluded, reasons, _note = v[key] if v.get(key) else (None, 0, [], "")
@@ -3216,8 +3207,8 @@ def book_tr(data: dict, nodes: Sequence[dict], shown: Optional[set], marks: bool
 def grid_body(data: dict, view: str, state: Optional[dict] = None, sort: Optional[dict] = None,
               filters: Optional[dict] = None, detail: Optional[str] = None,
               conn: Optional[sqlite3.Connection] = None) -> Tuple[List[Any], str]:
-    """(the grid's rows, its meta line): the visible nodes of the view in the open state asked,
-    siblings sorted, the fills filtered, the clicked row's detail under it, the Book line last."""
+    """(the grid's rows, its meta line): the Book line first, then the visible nodes of the view in
+    the open state asked, siblings sorted, the fills filtered, the clicked row's detail under it."""
     marks = bool(data.get("marks_on_file"))
     nodes = grid_tree(data, view)
     flt = active_filters(filters)
@@ -3245,14 +3236,14 @@ def grid_body(data: dict, view: str, state: Optional[dict] = None, sort: Optiona
         if n["level"] == "instrument" and (shown is None or any(t in shown for t in n["tids"])):
             counts["position"] += 1
     n_fills = len(shown) if shown is not None else len(trade_info(data))
-    out.append(book_tr(data, nodes, shown, marks))
-    meta = (f"· {counts['position']:,} {'positions' if view in (GROUP_TYPE, GROUP_SECTOR, GROUP_TRADE) else 'contracts'}"
-            f" · {n_fills:,} fills" + (" shown (filtered)" if shown is not None else ""))
+    what = "positions" if view in (GROUP_TYPE, GROUP_SECTOR, GROUP_TRADE) else "contracts"
+    out.insert(0, book_tr(data, nodes, shown, marks, counts["position"], what))
+    meta = f"{counts['position']:,} {what} · {n_fills:,} fills" + (" shown (filtered)" if shown is not None else "")
     return out, meta
 
 
 def grid_head(sort: Optional[dict] = None) -> html.Thead:
-    """The head row: the column titles (a click sorts). The filters sit in `filter_bar` above the
+    """The head row: the column titles (a click sorts). The filters sit in the book card's strip above the
     table since the look pass of 2026-09-29."""
     titles = []
     for key, label, cls in GRID_COLUMNS:
@@ -3269,99 +3260,162 @@ def grid_head(sort: Optional[dict] = None) -> html.Thead:
 FILTER_LABELS = {"name": "Search", "commodity": "Commodity", "type": "Type", "sector": "Sector", "local": "Currency"}
 NUMERIC_FILTERS_ABOUT = ("A comparison on the column's figure: > 0, < -10k, >= 1.5m, = 3 (Next: business days). "
                          "A fill is tested on its own figure, else on the nearest row above it that has one.")
+FIGURES_TOGGLE_ID = "book-figures-toggle"   # "+ figures": shows / hides the comparison boxes
+FIGURES_ROW_ID = "book-filter-nums"         # the comparison boxes' line, hidden unless asked for or one is set
+_FIGURES_JS = (
+    "function(n) {\n"
+    "    var vals = Array.prototype.slice.call(arguments, 1);\n"
+    "    var set = vals.filter(function(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }).length;\n"
+    "    var open = set > 0 || ((n || 0) % 2 === 1);\n"
+    "    return [open ? {} : {display: 'none'}, (open ? '− figures' : '+ figures') + (set ? ' (' + set + ')' : '')];\n"
+    "}"
+)
 
 
-def filter_bar() -> html.Div:
-    """The filter bar above the table (look pass 2026-09-29, the reference app's bar): the search,
-    one multi-select per category (placeholder "All", the choices from the book on file), Clear
-    filters, then a small comparison box per figure column. The same ids the filter row under the
-    heads had; static in the layout, so a box keeps its focus while the rows re-render."""
+def _strip_field(key: str, label: str, control: Any, cls: str = "", tip: Optional[str] = None) -> html.Div:
+    return html.Div(className=" ".join(c for c in ("book-strip-field", cls) if c), title=tip,
+                    children=[html.Label(label, htmlFor=filter_id(key)), control])
+
+
+def grid_strip() -> html.Div:
+    """The book card's top strip (2026-09-29, the look of the reference app's filter bar folded into
+    the card): line 1 the view switch, the search and Download CSV; line 2 the four multi-selects
+    ("All"), "+ figures", Expand all / Collapse all, Clear filters and the grid's meta; then the
+    comparison boxes, hidden until "+ figures" or a value in one of them. The ids of the filter row
+    this replaces; static, so a box keeps its focus while the rows re-render."""
     labels = {k: label for k, label, _cls in GRID_COLUMNS}
+    line1 = html.Div(className="book-strip-line", children=[
+        html.Span("Group by", className="book-strip-label"),
+        _switch(VIEW_ID, VIEW_OPTIONS, DEFAULT_VIEW),
+        dcc.Input(id=filter_id("name"), type="text", debounce=True, placeholder="Search name, contract, trade id",
+                  className="blotter-filter-search book-strip-search", persistence=True, persistence_type="session"),
+        html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
+                    title="The grid as shown (filters and sort applied, every level), at full figures"),
+        dcc.Download(id=DOWNLOAD_ID)])
+    line2 = html.Div(className="book-strip-line", children=[
+        *[_strip_field(k, FILTER_LABELS[k], dcc.Dropdown(
+            id=filter_id(k), multi=True, options=[], placeholder="All", className="blotter-filter-dropdown",
+            persistence=True, persistence_type="session")) for k in ("commodity", "type", "sector", "local")],
+        html.Button("+ figures", id=FIGURES_TOGGLE_ID, n_clicks=0, className="book-download book-tool",
+                    title=NUMERIC_FILTERS_ABOUT),
+        html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="book-download book-tool"),
+        html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="book-download book-tool"),
+        html.Button("Clear filters", id=CLEAR_FILTERS_ID, n_clicks=0, className="book-download book-tool"),
+        html.Span(id=GRID_META_ID, className="book-section-meta book-strip-meta")])
+    nums = [_strip_field(k, labels[k], dcc.Input(
+        id=filter_id(k), type="text", debounce=True, placeholder="any", className="book-filter-box book-filter-num",
+        persistence=True, persistence_type="session"), "book-strip-field--num",
+        "A comparison: > 0, < -10k, >= 1.5m, = 3" + (" (business days)" if k == "next" else ""))
+        for k in NUMERIC_FILTERS]
+    return html.Div(className="book-strip", children=[
+        line1, line2, html.Div(nums, id=FIGURES_ROW_ID, className="book-strip-line book-filter-nums", style=HIDDEN)])
 
-    def field(key: str, label: str, control: Any, cls: str = "", tip: Optional[str] = None) -> html.Div:
-        return html.Div(className=" ".join(c for c in ("blotter-filter", cls) if c), title=tip,
-                        children=[html.Label(label, htmlFor=filter_id(key)), control])
 
-    children: List[Any] = [field("name", FILTER_LABELS["name"], dcc.Input(
-        id=filter_id("name"), type="text", debounce=True, placeholder="name, contract, trade id",
-        className="blotter-filter-search", persistence=True, persistence_type="session"), "blotter-filter--search")]
-    for key in ("commodity", "type", "sector", "local"):
-        children.append(field(key, FILTER_LABELS[key], dcc.Dropdown(
-            id=filter_id(key), multi=True, options=[], placeholder="All", className="blotter-filter-dropdown",
-            persistence=True, persistence_type="session")))
-    children.append(html.Button("Clear filters", id=CLEAR_FILTERS_ID, n_clicks=0, className="btn btn--ghost"))
-    nums: List[Any] = [html.Span("Figures", className="book-filter-nums-label", title=NUMERIC_FILTERS_ABOUT)]
-    for key in NUMERIC_FILTERS:
-        tip = "A comparison: > 0, < -10k, >= 1.5m, = 3" + (" (business days)" if key == "next" else "")
-        nums.append(field(key, labels[key], dcc.Input(
-            id=filter_id(key), type="text", debounce=True, placeholder="any",
-            className="book-filter-box book-filter-num", persistence=True, persistence_type="session"),
-            "blotter-filter--num", tip))
-    children.append(html.Div(nums, className="book-filter-nums"))
-    return html.Div(className="blotter-filter-bar book-filter-bar", children=children)
+def book_card(table: html.Table, prepull: Any = None, under: Any = None, style: Optional[dict] = None) -> html.Div:
+    """The one book card: the strip, the grid, and the footer (the line before the first pull, the
+    last load on the left, "Data issues (N)" on the right, the drawer opening below it)."""
+    return html.Div(id=GRID_SECTION_ID, className="book-card book-main", style=style, children=[
+        grid_strip(),
+        table,
+        html.Div(className="book-foot", children=[
+            html.Div(prepull, id=PREPULL_ID, className="book-foot-prepull"),
+            html.Div(under, id=UNDER_ID, className="book-foot-under")])])
 
 
 def filter_id(key: str) -> str:
     return f"book-f-{key}"
 
 
-# --------------------------------------------------------------------------- tiles, Needs you, last load
-def tiles_row(rows: Sequence[dict], data: dict, marks: bool) -> html.Div:
-    """Open trades (the rows of Open trades), LTD and P&L today (the header's own figures and
-    markers), Gross and Net (the rows' engine notionals summed, "excl. N" for the rest), and CNH
-    hedged when exactly one trade has a coverage figure (the engine gives none for the book)."""
-    df = data.get("df")
-    n_fills = int(len(df)) if df is not None else 0
-    n_open = int((df["status"] == "OPEN").sum()) if df is not None and not df.empty else 0
-    gross, net, excluded, reasons = notional_total(rows)
-    why = ("; ".join(reasons[:LINES_ON_HOVER]) or "no notional") if marks else NO_MARKS_REASON
-
-    def tile(label: str, value: Any, hover: str) -> html.Div:
-        return html.Div(className="book-tile", children=[
-            html.Div(label, className="k"), html.Div(value, className="v", title=plain_words(hover) or None)])
-
-    daily, daily_hover = _header_figure(data, "daily", marks)
-    ltd, ltd_hover = _header_figure(data, "ltd", marks)
-    kinds = [(g, sum(1 for r in rows if r["type_group"] == g)) for g in TYPE_GROUP_ORDER]
-    tiles = [
-        tile("Open trades", f"{len(rows):,}", " · ".join(f"{n} {g.lower()}" for g, n in kinds if n)
-             + f"\n{_plural(n_fills, 'fill')} on file, {n_open} open"),
-        tile("LTD", ltd, f"{COLUMN_TIPS['LTD']}\n{ltd_hover}"),
-        tile("P&L today", daily, f"{COLUMN_TIPS['P&L today']}\n{daily_hover}"),
-        tile("Gross", _notional_cell(gross, why, "the engine's gross USD notional over the open trades, summed",
-                                     excluded=excluded, reasons=reasons, markers=marks, marks_on_file=marks),
-             COLUMN_TIPS["Gross"] if gross is not None else why),
-        tile("Net", _notional_cell(net, why, "the engine's net USD notional over the open trades, summed, long positive",
-                                   signed=True, excluded=excluded, reasons=reasons, markers=marks, marks_on_file=marks),
-             COLUMN_TIPS["Net"] if net is not None else why),
-    ]
-    covered = [s for s in ((data.get("spreads") or {}).get("strategies") or [])
-               if s.get("name") and _num(s.get("hedge_coverage_net")) is not None]
-    if len(covered) == 1:
-        s = covered[0]
-        tiles.append(tile(f"CNH hedged · {s['name']}", hedge_coverage_children(s, words=""),
-                          f"trade {s['name']}: the engine's hedge coverage of its CNY legs (the only trade with China "
-                          "legs and a coverage figure)"))
-    return html.Div(tiles, id=TILES_ID, className="book-tiles")
+# --------------------------------------------------------------------------- Needs you, last load
+_LIQ_LEVELS = ("RED", "AMBER")
 
 
-def needs(data: dict, rows: Sequence[dict] = ()) -> List[dict]:
-    """At most four lines, only what Jason acts on: a first notice or expiry at RED / AMBER (or
-    past) with a real date, the marks missing (→ Data), the legs that could not be paired
-    (→ Blotter), and positions RED / AMBER on liquidity (`engine.limits.liquidity`, research data
-    with placeholder thresholds, → Risk). An error in any of them is a line of the Data issues
-    drawer instead; a liquidity failure hides its line."""
+def _event_hover(r: dict) -> str:
+    return "; ".join(x for x in (
+        f"{contract_label(r.get('contract_id'))}: {r.get('next_event') or 'event'} {r.get('next_event_date') or 'date unknown'}, "
+        f"{r.get('level')}",
+        f"counted to the alert date {r.get('alert_date')} ({r.get('alert_basis') or ''})".strip()
+        if r.get("alert_date") and r.get("alert_date") != r.get("next_event_date") else "",
+        str(r.get("reason") or "")) if x)
+
+
+def needs(data: dict) -> List[dict]:
+    """The Needs you card's rows, most urgent first: every first notice, last trade, expiry or
+    prompt at EXPIRED / RED / AMBER with a real date (the roll calendar, `engine.expiry`), then
+    every position RED / AMBER on liquidity (`engine.limits.liquidity`, research data with
+    placeholder thresholds, → Risk). Each is {level, what, iso, bd, estimated, alert, hover, tab,
+    idx}. The marks missing and the legs that could not be paired are Data issues lines
+    (`need_notes`)."""
     out: List[dict] = []
     sched = (data.get("schedule") or {}).get("rows") or []
     urgent = [r for r in sched if r.get("level") in ("EXPIRED", "RED", "AMBER") and not r.get("estimated")]
     urgent.sort(key=lambda r: (_LEVEL_RANK.get(str(r.get("level")), 9),
                                r.get("business_days") if r.get("business_days") is not None else 10 ** 6))
-    if urgent:
-        first = urgent[0]
-        more = f" (+{len(urgent) - 1} more)" if len(urgent) > 1 else ""
-        out.append(_need(str(first.get("level")), "red" if first.get("level") != "AMBER" else "warn",
-                         _event_words(data, first) + more,
-                         "\n".join(_event_words(data, r) for r in urgent[:LINES_ON_HOVER]), "", 0))
+    for r in urgent:
+        inst = str(r.get("contract_id") or "")
+        root_id = str(r.get("root_id") or "")
+        root = data["roots"].get(root_id)
+        name = (lme_name(root, root_id, str(inst.split(" ")[-1]) if " " in inst else None)
+                if str(r.get("product")) == "LME_FWD" else contract_name(inst, root, root_id))
+        event = _NEXT_EVENT_WORDS.get(str(r.get("next_event") or ""), str(r.get("next_event") or "event"))
+        out.append({"level": str(r.get("level")), "what": f"{name} {event}", "iso": r.get("next_event_date"),
+                    "bd": r.get("business_days"), "estimated": bool(r.get("estimated")), "alert": r.get("alert_date"),
+                    "hover": _event_hover(r), "tab": "", "idx": ""})
+    liq = data.get("liquidity") or {}
+    note = str(liq.get("placeholder_note") or "")
+    flagged = [p for p in liq.get("positions") or [] if str(p.get("level")) in _LIQ_LEVELS]
+    for i, p in enumerate(flagged):
+        days, oi = _num(p.get("days_to_exit")), _num(p.get("pct_of_oi"))
+        bits = [b for b in (f"{days:.1f} days to exit" if days is not None else "",
+                            f"{oi:.1%} of open interest" if oi is not None else "") if b]
+        hover = "\n".join(t for t in (plain_words(p.get("reason")),
+                                      f"weakest leg {p.get('weakest')}" if p.get("weakest") else "",
+                                      "Research data (the research app's open interest and volume), read-only; the "
+                                      "thresholds are placeholders.", note) if t)
+        out.append({"level": str(p.get("level")),
+                    "what": f"{p.get('name') or p.get('position_id')}: liquidity" + (f", {', '.join(bits)}" if bits else ""),
+                    "iso": None, "bd": None, "estimated": False, "alert": None, "hover": hover,
+                    "tab": "Risk", "idx": f"book-need-liquidity-{i}"})
+    out.sort(key=lambda n: _LEVEL_RANK.get(n["level"], 9))
+    return out
+
+
+def needs_card(data: dict) -> Optional[html.Div]:
+    """The Needs you card: a small table, Level | What | When | Go; None when nothing needs Jason."""
+    items = needs(data)
+    if not items:
+        return None
+    head = html.Tr([html.Th("Level", className="l"), html.Th("What", className="l"), html.Th("When", className="l"),
+                    html.Th("Go", className="l")])
+    body = []
+    for n in items:
+        lvl = n["level"]
+        chip = html.Span(lvl, className=f"level-chip level-chip--{lvl.lower()}", title=plain_words(n["hover"]) or None)
+        if n["iso"]:
+            when: Any = date_cell(n["iso"], None if lvl == "EXPIRED" else n["bd"], n["estimated"], lvl, n["hover"],
+                                  prefix="expired" if lvl == "EXPIRED" else "", alert_date=n["alert"])
+        else:
+            when = html.Span("now", className="cell-unit", title="today's position against the research app's latest "
+                                                                  "open interest and volume")
+        body.append(html.Tr([html.Td(chip, className="l"),
+                             html.Td(n["what"], className="l book-needs-what", title=plain_words(n["hover"]) or None),
+                             html.Td(when, className="l"),
+                             html.Td(pointer(n["tab"], n["idx"], f"→ {n['tab']}") if n["tab"] else "", className="l")]))
+    return html.Div(id=ALERTS_ID, className="book-card book-needs-card", children=[
+        about("Needs you", NEEDS_ABOUT, level="div", className="book-section-title book-needs-title"),
+        html.Table([html.Thead(head), html.Tbody(body)], className="book-table book-needs-table")])
+
+
+def need_notes(data: dict, rows: Sequence[dict]) -> List[Any]:
+    """The marks missing (→ Data) and the legs that could not be paired (→ Blotter): the first
+    lines of the Data issues drawer, each with its link (the Needs you strip's until 2026-09-29).
+    A marks error is its own drawer line (`issue_items`)."""
+    out: List[Any] = []
+
+    def line(label: str, text: str, hover: str, tab: str, idx: str) -> html.Span:
+        return html.Span([html.Span(label, className="issue-label"), " ",
+                          html.Span(text, title=plain_words(hover) or None), " ", pointer(tab, idx, f"→ {tab}")])
+
     needed, missing = data.get("needs") or (0, [])
     if missing and not data.get("needs_error"):
         names: List[str] = []
@@ -3374,10 +3428,10 @@ def needs(data: dict, rows: Sequence[dict] = ()) -> List[dict]:
                      if root_id in data["roots"] else inst)
             if label not in names:
                 names.append(label)
-        out.append(_need("MARKS", "warn", f"{len(missing)} of {needed} marks missing: {', '.join(names[:3])}"
-                                          + (f" +{len(names) - 3}" if len(names) > 3 else ""),
-                         "\n".join(f"{m['instrument_id']} {plain_words(m['mark_type']).lower()} {m['settle_date']}"
-                                   for m in missing[:LINES_ON_HOVER]), "Data", 1))
+        out.append(line("Marks", f"{len(missing)} of {needed} marks missing: {', '.join(names[:3])}"
+                                 + (f" +{len(names) - 3}" if len(names) > 3 else ""),
+                        "\n".join(f"{m['instrument_id']} {plain_words(m['mark_type']).lower()} {m['settle_date']}"
+                                  for m in missing[:LINES_ON_HOVER]), "Data", "book-need-1"))
     left = [r for r in rows if r["kind"] == "leg" and r.get("part") == PART_OUTRIGHT]
     review = (data.get("spreads") or {}).get("review") or []
     if left or review:
@@ -3389,35 +3443,8 @@ def needs(data: dict, rows: Sequence[dict] = ()) -> List[dict]:
             bits.append(f"{_plural(len(review), 'set')} of trades could not be grouped")
         hover = "\n".join([f"{r['name']} (trade {r.get('group')})" for r in left[:LINES_ON_HOVER]]
                           + [plain_words(str(x.get("reason") or x.get("review_id") or "")) for x in review[:LINES_ON_HOVER]])
-        out.append(_need("PAIRS", "info", " · ".join(bits), hover, "Blotter", 2))
-    summary = (data.get("liquidity") or {}).get("summary") or {}
-    counts = summary.get("counts") or {}
-    red, amber = int(counts.get("RED") or 0), int(counts.get("AMBER") or 0)
-    if red or amber:
-        sentence = str(summary.get("sentence") or "")
-        first = sentence.split(";")[0].split(". ")[0].rstrip(".")
-        note = str((data.get("liquidity") or {}).get("placeholder_note") or "")
-        out.append(_need("LIQUIDITY", "red" if red else "warn",
-                         first or f"{_plural(red + amber, 'position')} large against the market's open interest or volume",
-                         "\n".join(t for t in (sentence, "Research data (the research app's open interest and "
-                                                                     "volume), read-only; the thresholds are placeholders.",
-                                                            note) if t),
-                         "Risk", 3))
-    out.sort(key=lambda n: n["rank"])
-    return out[:4]
-
-
-def needs_strip(data: dict, rows: Sequence[dict]) -> Optional[html.Div]:
-    """The slim Needs you strip under the tiles; None when nothing needs Jason."""
-    lines = []
-    for n, need in enumerate(needs(data, rows), start=1):
-        lines.append(html.Div(className="book-need", children=[
-            html.Span(need["chip"], className=f"book-need-chip book-need-chip--{need['kind']}"),
-            html.Span(need["text"], title=plain_words(need["hover"]) or None),
-            pointer(need["tab"], f"book-need-{n}", f"→ {need['tab']}") if need["tab"] else html.Span()]))
-    if not lines:
-        return None
-    return html.Div(lines, id=ALERTS_ID, className="book-needs-strip", title=plain_words(NEEDS_ABOUT))
+        out.append(line("Pairs", " · ".join(bits), hover, "Blotter", "book-need-2"))
+    return out
 
 
 def last_load_line(data: dict) -> html.Div:
@@ -3616,10 +3643,10 @@ def parts(data: dict, view: str = DEFAULT_VIEW, state: Optional[dict] = None, so
           filters: Optional[dict] = None, detail: Optional[str] = None, conn: Optional[sqlite3.Connection] = None,
           what: str = "all") -> dict:
     """The tab's pieces from `gather`'s output, each for its own placeholder of the static layout:
-    `top` (tiles, Needs you), `prepull` (the line before the first pull), `options` (the dropdowns'
-    choices), `under` (the last load and the drawer) when `what` is "all" or "top"; `rows` (the
-    grid's rows, the Book line last) and `meta` when it is "all" or "grid"; `shown` (False for the
-    empty state)."""
+    `top` (the Needs you card, or nothing), `prepull` (the line before the first pull), `options`
+    (the dropdowns' choices), `under` (the book card's footer: the last load and the Data issues
+    drawer) when `what` is "all" or "top"; `rows` (the grid's rows, the Book line first) and
+    `meta` when it is "all" or "grid"; `shown` (False for the empty state)."""
     view = view if view in dict(VIEW_OPTIONS) else DEFAULT_VIEW
     out = dict(_EMPTY_PARTS)
     if not data.get("n_total"):
@@ -3631,13 +3658,13 @@ def parts(data: dict, view: str = DEFAULT_VIEW, state: Optional[dict] = None, so
         top: List[Any] = []
         if data.get("spreads_error"):
             top.append(message_box(data["spreads_error"]))
-        top.append(tiles_row(rows, data, marks))
-        strip = needs_strip(data, rows)
-        if strip is not None:
-            top.append(strip)
+        card = needs_card(data)
+        if card is not None:
+            top.append(card)
+        drawer = issues_drawer(need_notes(data, rows) + issue_items(data, rows + settled), id=ISSUES_ID)
         out.update(top=html.Div(top), options=filter_options(data),
                    prepull=None if marks else html.Div(PREPULL_TEXT, className="book-prepull", title=NO_MARKS_REASON),
-                   under=[last_load_line(data), issues_drawer(issue_items(data, rows + settled), id=ISSUES_ID) or html.Div()])
+                   under=[last_load_line(data), drawer or html.Div()])
     if what in ("all", "grid"):
         out["rows"], out["meta"] = grid_body(data, view, state, sort, filters, detail, conn)
     return out
@@ -3651,9 +3678,7 @@ def body(data: dict, view: str = DEFAULT_VIEW, state: Optional[dict] = None, sor
     if not p["shown"]:
         return html.Div([p["top"]]), "", HIDDEN
     table = html.Table([grid_head(sort), html.Tbody(p["rows"], id=TBODY_ID)], id=TABLE_ID, className="book-table book-grid")
-    return html.Div([p["top"], p["prepull"] or html.Div(), filter_bar(),
-                     html.Div(className="book-card book-grid-wrap", children=[table]),
-                     html.Div(className="book-under book-under--stack", children=p["under"])]), p["meta"], {}
+    return html.Div([p["top"], book_card(table, p["prepull"], p["under"])]), p["meta"], {}
 
 
 # --------------------------------------------------------------------------- CSV
@@ -3781,30 +3806,17 @@ def render_csv(as_of: Optional[str], db_path, view: str, sort: Optional[dict] = 
 
 
 def layout(default_date: Optional[str] = None) -> html.Div:
-    """The static shell (2026-09-29): the title, the top placeholder (tiles, Needs you), the grid's
-    toolbar (the view switch, Expand all / Collapse all, its meta, Download CSV), the line before
-    the first pull, the filter bar (static, so a filter box keeps its focus; Clear filters in it),
-    the grid (its head static, its body a placeholder), the under-section, the session stores (open rows, sort, the
-    row whose detail is open) and the safety interval. No date picker."""
+    """The static shell (2026-09-29, one card): the title, the top placeholder (the Needs you card
+    or the empty state), the book card (`book_card`: its strip with the view switch and the
+    filters, static so a box keeps its focus; the grid, its head static and its body a
+    placeholder; the footer with the line before the first pull, the last load and the drawer),
+    the session stores (open rows, sort, the row whose detail is open) and the safety interval.
+    No date picker."""
     return html.Div(className="book-tab", children=[
         html.Div(id=TOOLBAR_ID, className="book-title-row", children=[about("Book", TITLE_ABOUT, level="h3")]),
         html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
-        html.Div(id=GRID_SECTION_ID, className="book-section", style=HIDDEN, children=[
-            html.Div(className="book-section-head book-grid-toolbar", children=[
-                html.Span("Group by", className="book-section-title"),
-                _switch(VIEW_ID, VIEW_OPTIONS, DEFAULT_VIEW),
-                html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="book-download book-tool"),
-                html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="book-download book-tool"),
-                html.Span(id=GRID_META_ID, className="book-section-meta"),
-                html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
-                            title="The grid as shown (filters and sort applied, every level), at full figures"),
-                dcc.Download(id=DOWNLOAD_ID)]),
-            html.Div(id=PREPULL_ID),
-            filter_bar(),
-            html.Div(className="book-card book-grid-wrap", children=[
-                html.Table([grid_head(), html.Tbody(id=TBODY_ID)], id=TABLE_ID, className="book-table book-grid")]),
-        ]),
-        html.Div(id=UNDER_ID, className="book-under book-under--stack", style=HIDDEN),
+        book_card(html.Table([grid_head(), html.Tbody(id=TBODY_ID)], id=TABLE_ID, className="book-table book-grid"),
+                  style=HIDDEN),
         dcc.Store(id=EXPAND_STORE_ID, storage_type="session"),
         dcc.Store(id=SORT_STORE_ID, storage_type="session"),
         dcc.Store(id=DETAIL_STORE_ID, storage_type="session"),
@@ -3828,7 +3840,7 @@ def _filters_of(values: Sequence[Any]) -> dict:
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
-    """The top (tiles, Needs you, the last load, the drawer, the dropdowns' choices) on the as-of,
+    """The top (Needs you, the last load, the drawer, the dropdowns' choices) on the as-of,
     the data revision and the safety interval; the grid on those and the view, the open rows, the
     sort, the detail and the filters; the stores from the chevrons, the buttons, the column heads
     and the names; Clear filters; the CSV; the empty state's Upload button."""
@@ -3907,6 +3919,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             return dash.no_update
         nid = str(trig.get("idx") or "")
         return None if current == nid else nid
+
+    app.clientside_callback(_FIGURES_JS, Output(FIGURES_ROW_ID, "style"), Output(FIGURES_TOGGLE_ID, "children"),
+                            Input(FIGURES_TOGGLE_ID, "n_clicks"), *[Input(filter_id(k), "value") for k in NUMERIC_FILTERS])
 
     @app.callback(*[Output(filter_id(k), "value") for k in FILTER_KEYS], Input(CLEAR_FILTERS_ID, "n_clicks"),
                   prevent_initial_call=True)

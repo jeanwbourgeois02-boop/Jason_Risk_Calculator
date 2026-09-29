@@ -251,7 +251,8 @@ def test_the_book_tables_total_line_equals_the_headers_daily_mtd_and_ltd_to_the_
             assert total is None and value_div.children == header.MISSING, key
     # the rendered Book tab carries the table with its Book line
     table = next(n for n in _components(bodies["book"]) if getattr(n, "id", None) == book.TABLE_ID)
-    assert "= header" in _text(table.children[1].children[-1])
+    book_line = next(r for r in table.children[1].children if getattr(r, "className", "") == "book-total")
+    assert "= header" in _text(book_line)
 
 
 # --------------------------------------------------------------------------- (e) never a stale page

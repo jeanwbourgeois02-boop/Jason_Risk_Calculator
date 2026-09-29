@@ -651,18 +651,8 @@ p { margin: 8px 0; }
 .book-tile .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); line-height: 1.25; }
 .book-tile .v .marker { font-size: 10px; vertical-align: middle; }
 .book-table td.book-name { max-width: 330px; overflow: hidden; text-overflow: ellipsis; }
-.book-under { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
-.book-needs { flex: 0 0 640px; padding: 8px 14px 4px; }
 .book-side { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .book-h { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
-.book-need { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid #eef1f4; font-size: 12.5px; }
-.book-need:last-child { border-bottom: none; }
-.book-need-chip { font-size: 10px; font-weight: 700; letter-spacing: .04em; min-width: 64px; padding: 1px 6px; border-radius: 4px; text-align: center; flex: 0 0 auto; }
-.book-need-chip--warn { background: var(--warn-bg); color: var(--warn); }
-.book-need-chip--info { background: var(--ndf-bg); color: var(--ndf); }
-.book-need-chip--quiet { background: #eef1f6; color: #4b5563; }
-.book-need-chip--red { background: #fdecea; color: var(--neg); }
-.book-need .tab-link { margin-left: auto; font-size: 11px; color: var(--muted); }
 .book-load { padding: 8px 14px; font-size: 12.5px; }
 .book-loaded-line { font-size: 12.5px; color: var(--muted); margin: -2px 0 12px; }
 .book-loaded-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--gold); margin-right: 8px; }
@@ -739,28 +729,25 @@ p { margin: 8px 0; }
 .book-table tr.book-strategy td { background: #eef1f6; font-weight: 700; color: var(--navy); border-top: 1px solid var(--line); padding-top: 6px; padding-bottom: 6px; }
 .book-table.book-summary tr.book-summary-row td.book-name { font-weight: 600; color: var(--navy); }
 .book-table.book-summary td .marker--amber { padding: 0 4px; border-radius: 3px; font-size: 11px; }
-/* the Book's one grouped table (ui/tabs/book.py, 2026-09-29): the toolbar, the filter bar above the table
-   (look pass 2026-09-29: the reference's bar replaces the filter row under the heads), the tree rows with
-   their chevrons, the inline detail, the Needs you strip, the quiet lines */
-.book-grid-toolbar { align-items: center; }
-.book-grid-toolbar .book-tool { margin-left: 4px; }
-.book-grid-toolbar .book-section-meta { margin-left: 6px; }
-/* no clipping box, so the heads stick under the top bar while the page scrolls */
-.book-card.book-grid-wrap { overflow: visible; }
-.book-table.book-grid thead th { position: sticky; top: var(--top-bar-h); z-index: 2; }
-.book-table.book-grid td, .book-table.book-grid th { padding-left: 8px; padding-right: 8px; }
-.book-table.book-grid th.book-sortable { cursor: pointer; user-select: none; }
-.book-table.book-grid th.book-sortable:hover { background: var(--navy-2); color: var(--gold); }
-.book-sort-arrow { font-size: 9px; margin-left: 3px; color: var(--gold); }
-/* the filter bar: the reference's .blotter-filter-bar, then a second line of small figure boxes */
-.book-filter-bar { margin: 0 0 12px; }
-.book-filter-bar .blotter-filter { min-width: 150px; }
-.book-filter-bar .blotter-filter--search { min-width: 240px; }
-.book-filter-nums { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px;
-  padding-top: 10px; border-top: 1px dashed var(--line); }
-.book-filter-nums-label { align-self: center; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
-  color: var(--muted); cursor: help; margin-right: 4px; }
-.book-filter-bar .blotter-filter--num { min-width: 0; width: 84px; }
+/* the Book (ui/tabs/book.py, 2026-09-29): the title, then at most two cards. The Needs you card (a small
+   table); the book card: its strip (the view switch, the search, the filters, the tools), the grouped table
+   with the Book line first and sticky under the heads, the footer (the pre-pull line, the last load, the
+   Data issues drawer opening below it). No clipping box on the book card, so the heads stick under the
+   top bar while the page scrolls. */
+.book-main { overflow: visible; margin: 0 0 16px; --book-head-h: 32px; }
+.book-strip { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line);
+  border-radius: 8px 8px 0 0; background: var(--card); }
+.book-strip-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.book-strip-label, .book-strip-field label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); margin: 0; white-space: nowrap; }
+.book-strip .book-switch { margin-left: 0; }
+.book-strip-search { min-width: 280px; height: 30px; }
+.book-strip-field { display: flex; align-items: center; gap: 6px; }
+.book-strip-field .blotter-filter-dropdown { min-width: 150px; }
+.book-strip .book-tool { margin-left: 0; }
+.book-strip-meta { margin-left: auto; font-size: 12px; white-space: nowrap; }
+.book-filter-nums { gap: 8px 14px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.book-strip-field--num .book-filter-box { width: 76px; }
 .book-filter-box { width: 100%; min-width: 48px; box-sizing: border-box; font: inherit; font-size: 12px; height: 30px; padding: 0 8px;
   border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); font-variant-numeric: tabular-nums; }
 .book-filter-box:hover { border-color: var(--navy); }
@@ -768,6 +755,18 @@ p { margin: 8px 0; }
 .book-filter-num { text-align: right; }
 .blotter-filter-search { height: 32px; font-size: 12.5px; }
 .blotter-filter-search:hover { border-color: var(--navy); }
+/* the grid inside the card: square corners (the strip and the footer hold the card's), the heads and then
+   the Book line sticky under the top bar */
+.book-main .book-table.book-grid { border: none; border-radius: 0; }
+.book-main .book-table.book-grid thead tr th, .book-main .book-table.book-grid tbody tr td { border-radius: 0; }
+.book-table.book-grid thead th { position: sticky; top: var(--top-bar-h); z-index: 3; line-height: 17px; height: var(--book-head-h, 32px); }
+.book-table.book-grid tr.book-total td { position: sticky; top: calc(var(--top-bar-h) + var(--book-head-h, 32px)); z-index: 2;
+  border-top: none; border-bottom: 2px solid var(--navy); }
+.book-table.book-grid tr.book-total:hover td { background: var(--total-bg); }
+.book-table.book-grid td, .book-table.book-grid th { padding-left: 8px; padding-right: 8px; }
+.book-table.book-grid th.book-sortable { cursor: pointer; user-select: none; }
+.book-table.book-grid th.book-sortable:hover { background: var(--navy-2); color: var(--gold); }
+.book-sort-arrow { font-size: 9px; margin-left: 3px; color: var(--gold); }
 .book-chevron { display: inline-block; width: 14px; color: var(--muted); cursor: pointer; user-select: none; font-size: 11px; }
 .book-chevron:hover { color: var(--gold); }
 .book-chevron--none { cursor: default; }
@@ -789,16 +788,32 @@ p { margin: 8px 0; }
 .book-table.book-grid tr.book-grid-muted td { color: #9ca3af; }
 .book-table.book-grid tr.book-grid-row:hover td { background: var(--hover); }
 .book-table.book-grid tr.book-grid-group:hover td { background: #e6eaf3; }
-.book-coverage { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 30px; }
+/* "CNH 92 % hedged" after a trade's or a position's name, small and muted */
+.book-coverage { margin-left: 10px; font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; }
 .book-table.book-grid tr.book-detail-row td { background: #fbfbfd; white-space: normal; height: auto; padding: 8px 14px 12px; text-align: left; }
 .book-detail-head { display: flex; align-items: baseline; gap: 10px; }
-.book-needs-strip { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--gold); border-radius: 8px;
-  padding: 4px 16px; margin: 0 0 16px; }
+/* the footer inside the book card: small and muted; the drawer's summary at the right, its list below */
+.book-foot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; padding: 8px 14px; border-top: 1px solid var(--line);
+  border-radius: 0 0 8px 8px; background: #fbfbfd; font-size: 12px; color: var(--muted); }
+.book-foot-prepull { flex: 1 0 100%; }
+.book-foot-prepull:empty { display: none; }
+.book-foot-under { flex: 1 1 auto; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; min-width: 0; }
+.book-foot .book-prepull, .book-foot .book-last-load { margin: 0; font-size: 12px; }
+.book-foot .issues-drawer { margin: 0 0 0 auto; font-size: 12px; }
+.book-foot .issues-drawer > summary { font-size: 12px; padding: 0; text-align: right; }
+.book-foot .issues-drawer[open] { flex: 1 0 100%; margin: 0; padding: 0; border: none; background: transparent; }
+.book-foot .issues-drawer[open] .issues-list { color: var(--text); }
+/* the Needs you card: its title, then a small table in the kit */
+.book-needs-card { margin: 0 0 16px; }
+.book-needs-title { padding: 10px 14px 8px; }
+.book-needs-card .book-table thead tr th, .book-needs-card .book-table tbody tr td { border-radius: 0; }
+.book-needs-card .book-table tbody tr:last-child td:first-child { border-bottom-left-radius: 7px; }
+.book-needs-card .book-table tbody tr:last-child td:last-child { border-bottom-right-radius: 7px; }
+.book-needs-table td.book-needs-what { white-space: normal; width: 60%; }
 .book-prepull { font-size: 12.5px; color: var(--muted); margin: 0 0 8px; }
 .book-quiet { font-size: 12px; color: var(--muted); }
 .book-last-load { font-size: 12.5px; color: var(--muted); }
 .book-last-load-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; margin-right: 8px; }
-.book-under.book-under--stack { flex-direction: column; gap: 8px; }
 
 /* Exposure (2026-09-29) */
 .curve-tilt { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin: 0 0 10px; font-size: 12px; }
