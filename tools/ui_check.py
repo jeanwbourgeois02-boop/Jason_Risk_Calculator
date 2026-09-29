@@ -124,6 +124,9 @@ CONTROL_TYPES = {"Button", "A", "Label", "Option", "Upload", "Dropdown", "RadioI
 INLINE_TYPES = {"Span", "A", "B", "Strong", "Em", "I", "Small", "Abbr", "Code", "Sup", "Sub", "Mark", "U", "S",
                 "Font", "Time", "Kbd", "Q", "Cite", "Var", "Samp", "Data"}
 HEADINGS = {"H1", "H2", "H3", "H4", "H5", "H6"}
+# A lowercase part after " · " or ": " inside a cell: report-only, since most are the prose after a colon
+# ("No strike on file: type it in ...") rather than a label.
+PART_RULE = "LOWERCASE_PART"
 HIDDEN_STYLE = re.compile(r"display\s*:\s*none")
 
 
@@ -447,8 +450,9 @@ def path_of(chain: List[Node]) -> str:
 
 
 def _first_word(text: str) -> Tuple[str, str]:
-    """(the text from its first real character, its first word lowercased without a dot)."""
-    s = text.lstrip(DECORATION)
+    """(the text from its first letter or digit, its first word lowercased without a dot): leading
+    glyphs, bullets, arrows, signs, currency symbols and spaces are skipped ("● not recognised")."""
+    s = re.sub(r"^[\W_]+", "", text.lstrip(DECORATION))
     m = re.match(r"([A-Za-zÀ-ɏ]+)", s)
     return s, (m.group(1).lower() if m else "")
 
@@ -456,12 +460,21 @@ def _first_word(text: str) -> Tuple[str, str]:
 def lowercase_hit(text: str) -> bool:
     s, word = _first_word(text.splitlines()[0] if text.strip() else text)
     if not s or not s[0].isalpha():
-        return False                     # a digit, a sign, a currency symbol, a glyph
+        return False                     # nothing but glyphs, or a number
     if not s[0].islower():
         return False
     if word in UNIT_WORDS or word in WHITELIST:
         return False
     return True
+
+
+_PART_SPLIT = re.compile(r" · |: ")
+
+
+def lowercase_parts(text: str) -> List[str]:
+    """The parts of a cell after " · " or ": " that start with a lowercase label (units exempt)."""
+    return [part.strip() for part in _PART_SPLIT.split(text.splitlines()[0] if text.strip() else text)[1:]
+            if lowercase_hit(part)]
 
 
 def _banned(text: str, control: bool = False) -> List[str]:
@@ -518,6 +531,9 @@ def check_runs(tab: str, runs: List[Run]) -> List[Finding]:
         if lowercase_hit(text) and not (banned and _first_word(text)[1] in {"n", "nan", "none", "null", "undefined",
                                                                              "inf"}):
             add("LOWERCASE")
+        if run.kind == "visible" and any(n.type in ("Td", "Th") for n in run.chain):
+            for part in lowercase_parts(text):
+                add(PART_RULE, f"after the separator: {part[:40]}")
         for name in banned:
             add("BANNED", name)
         if not hover and not _engine_exempt(run.chain):
@@ -1150,7 +1166,7 @@ def take_shots(app, tabs: List[str]) -> str:
 
 # ----------------------------------------------------------------------------- output
 RULE_ORDER = ["RENDER_ERROR", "BANNED", "ENGINE_WORD", "LOWERCASE", "LOOSE_TEXT", "DOUBLE_SPACE",
-              "TRAILING_PUNCT_SPACE", "LOOSE_BLOCK", "DESIGNED_LINE"]
+              "TRAILING_PUNCT_SPACE", PART_RULE, "LOOSE_BLOCK", "DESIGNED_LINE"]
 PAGE_ORDER_RULES = {"LOOSE_BLOCK", "DESIGNED_LINE"}  # listed in page order, not by path
 INFORMATIONAL_TABS = {"data": "Data: after the other session's push"}   # another session is changing it
 
@@ -1177,7 +1193,7 @@ FAILING_HOVER_RULES = {"LOWERCASE", "BANNED"}
 def failing(f: Finding, strict: bool = False) -> bool:
     """Whether `f` fails the run: every visible finding and hover LOWERCASE / BANNED; LOOSE_BLOCK only
     with `strict` (and not on an informational tab); DESIGNED_LINE never."""
-    if f.rule == "DESIGNED_LINE":
+    if f.rule in ("DESIGNED_LINE", PART_RULE):
         return False
     if f.rule == "LOOSE_BLOCK":
         return strict and f.tab not in INFORMATIONAL_TABS
@@ -1218,7 +1234,7 @@ def print_report(findings: List[Finding], timings: Dict[str, float], out=sys.std
     for t in [t for t in TAB_ORDER if t in per]:
         parts = ", ".join(f"{r} {v[0]} ({v[1]})" for r, v in sorted(per[t].items()))
         out.write(f"  {t:<8} {parts}{_note(t)}\n")
-    visible = sum(1 for f, _n in items if not f.hover and f.rule not in PAGE_ORDER_RULES)
+    visible = sum(1 for f, _n in items if not f.hover and f.rule not in PAGE_ORDER_RULES and f.rule != PART_RULE)
     hover = sum(1 for f, _n in items if f.hover)
     hover_failing = sum(1 for f, _n in items if f.hover and failing(f, strict))
     loose = sum(1 for f, _n in items if f.rule == "LOOSE_BLOCK")
