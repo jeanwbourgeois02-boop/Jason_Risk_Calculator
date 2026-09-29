@@ -23,9 +23,12 @@ it, and the trade each fill landed in as `engine.spreads.trade_book` gives it (t
 `blotter_pricing.shared_trade_book`). Nothing is priced or recomputed here.
 
 State: the filter lives in a session store (`FILTER_STORE_ID`), so it survives a data refresh
-and a tab switch; the bar is drawn from it (on mount, a new as-of, new data, and when "See fills",
-Clear or the chip changes it) and a change to a control writes it back, so typing in the search
-never loses its focus. The sort lives in its own session store.
+and a tab switch. The filters are in the column headings, spreadsheet-style (user, 2026-09-29):
+Date (from / to), Trade, Contract, Side, Size (a comparison) and Landed in each filter from the
+funnel in their heading (`ui.tabs.trade_filter.funnel`), drawn with the table from the store; the
+card's strip keeps only the search, "Clear filters" and, after a Book trade's "See fills", its
+chip, drawn from the store on mount, a new as-of, new data, and when "See fills", Clear or the chip
+changes it, so typing in the search never loses its focus. The sort lives in its own session store.
 """
 from __future__ import annotations
 
@@ -40,6 +43,10 @@ from dash import ALL, MATCH, Input, Output, State, dcc, html
 
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import data_kit as kit
+from ui.tabs.trade_filter import (
+    NUMBER_HINT, arrow_of, funnel, head_th, option_words, parse_compare, passes, pop_list, pop_number, pop_text,
+    triggered_values,
+)
 from ui.tabs.formatting import (
     cap, cap_parts, tidy,
     MISSING, amount_words, compact, day_text, fx_name, is_fx_pair, missing_cell, parse_contract_id, plain_ids,
@@ -78,8 +85,10 @@ HIST_IDS_TYPE = "blotter-hist-ids"
 NONE_VALUE = "__none__"                       # the filter value of "no trade name" / "not in a trade"
 NO_HISTORY = "No upload recorded on this database"
 FILLS_MAX_ROWS = 500                          # rows drawn at once; the CSV holds every row the filters keep
-DEFAULT_FILTER = {"trade": [], "landed": [], "side": [], "search": "", "start": None, "end": None,
-                  "from_book": ""}
+DEFAULT_FILTER = {"trade": [], "landed": [], "side": [], "contract": [], "search": "", "start": None, "end": None,
+                  "lots": "", "from_book": ""}
+COL_TYPE = "bf-col"                           # a heading funnel's control: {"type", "part": trade|landed|side|...}
+LIST_PARTS = ("trade", "landed", "side", "contract")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION")
@@ -443,9 +452,9 @@ def fills_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, Lis
 def normal_filter(state: Optional[dict]) -> dict:
     s = dict(DEFAULT_FILTER)
     for k, v in (state or {}).items():
-        if k in ("trade", "landed", "side"):
+        if k in LIST_PARTS:
             s[k] = [str(x) for x in (v or []) if x is not None]
-        elif k in ("search", "from_book"):
+        elif k in ("search", "from_book", "lots"):
             s[k] = str(v or "")
         elif k in ("start", "end"):
             s[k] = str(v)[:10] if v else None
@@ -456,7 +465,8 @@ def normal_filter(state: Optional[dict]) -> dict:
 
 def is_filtered(state: Optional[dict]) -> bool:
     s = normal_filter(state)
-    return bool(s["trade"] or s["landed"] or s["side"] or s["search"].strip() or s["start"] or s["end"])
+    return bool(s["trade"] or s["landed"] or s["side"] or s["contract"] or s["search"].strip() or s["start"]
+                or s["end"] or s["lots"].strip())
 
 
 def filter_fills(df: pd.DataFrame, state: Optional[dict]) -> pd.DataFrame:
@@ -475,6 +485,11 @@ def filter_fills(df: pd.DataFrame, state: Optional[dict]) -> pd.DataFrame:
         out = out[names.isin(s["landed"])]
     if s["side"]:
         out = out[out["side"].isin(s["side"])]
+    if s["contract"]:
+        out = out[out["contract"].astype(str).isin(s["contract"])]
+    test = parse_compare(s["lots"])
+    if test is not None and not out.empty:
+        out = out[[passes(_num(v), test) for v in out["lots"].tolist()]]
     if s["start"]:
         out = out[out["trade_date"] >= s["start"]]
     if s["end"]:
@@ -498,7 +513,7 @@ def _landed_name(r: dict) -> str:
 def filter_options(df: pd.DataFrame) -> Dict[str, List[dict]]:
     """Each multi-select's choices, only the values present, each with its fill count."""
     if df.empty:
-        return {"trade": [], "landed": [], "side": []}
+        return {"trade": [], "landed": [], "side": [], "contract": []}
 
     def counted(values: List[str], none_label: str) -> List[dict]:
         counts: Dict[str, int] = {}
@@ -511,7 +526,8 @@ def filter_options(df: pd.DataFrame) -> Dict[str, List[dict]]:
     recs = df.to_dict("records")
     return {"trade": counted([r["strategy"] or NONE_VALUE for r in recs], "no trade name"),
             "landed": counted([_landed_name(r) for r in recs], "not in a trade"),
-            "side": counted([r["side"] for r in recs if r["side"]], "")}
+            "side": counted([r["side"] for r in recs if r["side"]], ""),
+            "contract": counted([str(r["contract"]) for r in recs if r["contract"]], "")}
 
 
 _SORT_KEYS: Dict[str, Callable[[dict], object]] = {
@@ -568,11 +584,77 @@ def _row(r: dict, as_of: str) -> html.Tr:
     ])
 
 
-def fills_table(df: pd.DataFrame, total: int, sort: Optional[dict], state: Optional[dict], as_of: str) -> html.Div:
+def parse_day(text) -> Optional[str]:
+    """A typed date ('2026-09-01', '1 Sep 2026', '1/9/2026', day first) as ISO; None when it does
+    not read."""
+    t = str(text or "").strip()
+    if not t:
+        return None
+    try:
+        return dt.date.fromisoformat(t[:10]).isoformat()
+    except ValueError:
+        pass
+    got = pd.to_datetime(t, dayfirst=True, errors="coerce")
+    return None if pd.isna(got) else got.date().isoformat()
+
+
+LIST_TITLES = {"trade": "Trade", "landed": "Landed in", "side": "Side", "contract": "Contract"}
+
+
+def _col_id(part: str) -> dict:
+    return {"type": COL_TYPE, "part": part}
+
+
+def _list_funnel(part: str, s: dict, options: Dict[str, List[dict]]):
+    ticked = s[part]
+    body = pop_list(_col_id(part), LIST_TITLES[part], options.get(part), ticked,
+                    search=True if part in ("trade", "contract", "landed") else None)
+    return funnel(f"blotter:{part}", body, bool(ticked),
+                  f"{LIST_TITLES[part]}: {option_words(options.get(part), ticked)}" if ticked else "")
+
+
+def _date_funnel(s: dict, dates: Tuple[Optional[str], Optional[str]]):
+    first, last = dates
+    span = f"The file's trade dates run from {_long_date(first)} to {_long_date(last)}. " if first and last else ""
+    body = (pop_text(_col_id("start"), s["start"] or "", "From", "1 Sep 2026")
+            + pop_text(_col_id("end"), s["end"] or "", "To", "30 Sep 2026",
+                       f"{span}A date as 2026-09-01 or 1 Sep 2026; Enter to apply, empty for all."))
+    bits = " ".join(x for x in (f"from {_long_date(s['start'])}" if s["start"] else "",
+                                f"to {_long_date(s['end'])}" if s["end"] else "") if x)
+    return funnel("blotter:date", body, bool(bits), f"Trade date {bits}" if bits else "")
+
+
+def fills_head(sort: Optional[dict], state: Optional[dict], options: Dict[str, List[dict]],
+               dates: Tuple[Optional[str], Optional[str]] = (None, None)) -> html.Thead:
+    """The heads: each title sorts (the arrow on the column sorted), each filterable column has its
+    funnel: Date a from / to, Trade, Contract, Side and Landed in the values present, Size a
+    comparison. Trade Id and the price as written are found with the search."""
+    s = normal_filter(state)
+    half = len(COLUMNS) // 2
+    cells = []
+    for i, (key, title, cls, tip, sortable) in enumerate(COLUMNS):
+        pop = None
+        if key == "date":
+            pop = _date_funnel(s, dates)
+        elif key in LIST_PARTS:
+            pop = _list_funnel(key, s, options)
+        elif key == "lots":
+            pop = funnel("blotter:lots", pop_number(_col_id("lots"), s["lots"],
+                                                    hint=f"The size as shown (lots, or the FX amount). {NUMBER_HINT}"),
+                         bool(s["lots"].strip()), s["lots"].strip())
+        cells.append(head_th(title, cls, tip, sort_id={"type": SORT_TYPE, "idx": key} if sortable else None,
+                             arrow=arrow_of(sort, key), pop=pop, right=i > half))
+    return html.Thead(html.Tr(cells))
+
+
+def fills_table(df: pd.DataFrame, total: int, sort: Optional[dict], state: Optional[dict], as_of: str,
+                options: Optional[Dict[str, List[dict]]] = None,
+                dates: Tuple[Optional[str], Optional[str]] = (None, None)) -> html.Div:
     """The table of the fills the filter keeps: the total row first ("All fills · 89" or
     "Filtered · 12 of 89"), the fills in no trade under an amber line, then the rest; at most
-    `FILLS_MAX_ROWS` drawn (the CSV holds them all)."""
-    thead = kit.head(COLUMNS, sort, SORT_TYPE)
+    `FILLS_MAX_ROWS` drawn (the CSV holds them all). `options` and `dates`: the funnels' choices
+    over every fill on file (the fills showing when not given)."""
+    thead = fills_head(sort, state, options if options is not None else filter_options(df), dates)
     n = len(df)
     names = {r for r in df["strategy"].tolist() if r} if not df.empty else set()
     label = (f"All fills · {total:,}" if not is_filtered(state) and n == total
@@ -595,8 +677,8 @@ def fills_table(df: pd.DataFrame, total: int, sort: Optional[dict], state: Optio
         drawn += 1
     children = [kit.table(thead, rows)]
     if n > drawn:
-        children.append(html.P(f"The first {drawn:,} of {n:,} are drawn; narrow them with the filters, or Download "
-                               "CSV for every one.", className="book-section-meta"))
+        children.append(html.P(f"The first {drawn:,} of {n:,} are drawn; narrow them with the column filters, or "
+                               "Download CSV for every one.", className="book-section-meta"))
     return tidy(html.Div(children))
 
 
@@ -623,45 +705,29 @@ def fills_csv(df: pd.DataFrame, sort: Optional[dict]):
     return dcc.send_data_frame(frame.to_csv, "blotter-fills.csv", index=False)
 
 
-def bar(state: Optional[dict], options: Dict[str, List[dict]], dates: Tuple[Optional[str], Optional[str]]) -> list:
-    """The fills' own filter bar, its controls set from the stored filter: Trade, Landed in, Side
-    (multi-selects of the values present with their counts), the trade-date range, the search,
-    Clear (only when something is set) and, after a Book trade's "See fills", the chip that
-    clears it."""
+def bar(state: Optional[dict], options: Optional[Dict[str, List[dict]]] = None,
+        dates: Tuple[Optional[str], Optional[str]] = (None, None)) -> list:
+    """The fills card's strip controls, set from the stored filter: the search, "Clear filters"
+    (only when something is set) and, after a Book trade's "See fills", the chip that clears it.
+    Every other filter is a column's funnel (`fills_head`); `options` and `dates` are not read
+    (kept for the callers of the filter bar this replaced)."""
     s = normal_filter(state)
-
-    def pick(cid: str, key: str, label: str, width: int) -> html.Div:
-        known = {str(o["value"]) for o in options.get(key) or []}
-        extra = [{"label": f"{v} (none now)", "value": v} for v in s[key] if v not in known]
-        return html.Div(className="blotter-filter", style={"minWidth": f"{width}px"}, children=[
-            html.Label(label),
-            dcc.Dropdown(id=cid, options=list(options.get(key) or []) + extra, value=list(s[key]), multi=True,
-                         placeholder="All", clearable=True, className="blotter-filter-dropdown")])
-
     children = [
-        html.Div(className="blotter-filter", children=[
-            html.Label("Search"),
-            dcc.Input(id=F_SEARCH_ID, type="text", value=s["search"], debounce=True,
-                      placeholder="Contract, symbol or Trade Id", className="blotter-filter-search")]),
-        pick(F_TRADE_ID, "trade", "Trade", 170),
-        pick(F_LANDED_ID, "landed", "Landed in", 170),
-        pick(F_SIDE_ID, "side", "Side", 110),
-        html.Div(className="blotter-filter", children=[
-            html.Label("Trade date"),
-            dcc.DatePickerRange(id=F_DATES_ID, start_date=s["start"], end_date=s["end"],
-                                min_date_allowed=dates[0], max_date_allowed=dates[1], display_format="D MMM YYYY",
-                                first_day_of_week=1, clearable=True, start_date_placeholder_text="From",
-                                end_date_placeholder_text="To", className="blotter-date-range")]),
-        html.Button("Clear", id=CLEAR_ID, n_clicks=0, className="btn btn--ghost",
+        html.Div(className="tf-search-wrap",
+                 title="Free text over the contract, the symbol as written, the Trade Id, the description and the "
+                       "trade name; each column filters from the funnel in its heading", children=[
+            dcc.Input(id=F_SEARCH_ID, type="text", value=s["search"], debounce=True, autoComplete="off",
+                      placeholder="Search contract, symbol or Trade Id", className="blotter-filter-search tf-search")]),
+        html.Button("Clear filters", id=CLEAR_ID, n_clicks=0, className="book-link-button tf-clear",
                     style={} if is_filtered(s) else {"display": "none"},
-                    title="Clear every filter of the fills"),
+                    title="Every column's filter and the search back to All"),
     ]
     if s["from_book"]:
         children.append(html.Button([f"From the Book: {s['from_book']} ", html.Span("×", className="tk-chev")],
                                     id=CHIP_CLEAR_ID, n_clicks=0, className="btn btn--ghost blotter-from-book",
                                     title=f"Showing the fills of {s['from_book']}, opened from its Book row; click to "
                                           f"show every fill"))
-    return [html.Div(children, className="blotter-filter-bar")]
+    return [html.Div(children, className="tf-tools")]
 
 
 def section() -> html.Div:
@@ -670,12 +736,13 @@ def section() -> html.Div:
     return kit.card(id=SECTION_ID, children=[
         kit.strip([kit.strip_title("Every fill", "One row per fill on file, open, settled or closed out, as the file "
                                                  "gave it and as the app read it. No P&L here: the Book is the one "
-                                                 "place for it. A correction is a re-upload."),
+                                                 "place for it. A correction is a re-upload. Each column filters "
+                                                 "from the funnel in its heading."),
                    html.Span(id=META_ID, className="book-section-meta"),
+                   html.Div(id=BAR_SLOT_ID, className="tf-bar-slot"),
                    html.Button("Download CSV", id=CSV_ID, n_clicks=0, className="btn btn--ghost",
                                title="The fills showing, every column, at full figures"),
                    dcc.Download(id=DOWNLOAD_ID)]),
-        html.Div(id=BAR_SLOT_ID, style={"padding": "8px 12px 0"}),
         html.Div(id=FILLS_BODY_ID, className=kit.SLOT_CLASS),
         dcc.Store(id=FILTER_STORE_ID, storage_type="session"),
         dcc.Store(id=SORT_STORE_ID, storage_type="session"),
@@ -1000,29 +1067,32 @@ def register(app, get_db_path: Callable[[], object]) -> None:
     @app.callback(Output(BAR_SLOT_ID, "children"),
                   Input(AS_OF_STORE_ID, "data"), Input(DATA_REVISION_ID, "data"), Input(BOOK_REVISION_ID, "data"),
                   Input(BAR_REV_ID, "data"), State(FILTER_STORE_ID, "data"))
-    def _bar(as_of, _data_rev, _book_rev, _bar_rev, state):
-        """The bar from the stored filter: on mount, a new as-of or new data, and when the filter was
-        set from outside the bar; never on a control's own change, so the search keeps its focus."""
-        options: Dict[str, List[dict]] = {}
-        dates: Tuple[Optional[str], Optional[str]] = (None, None)
-        if as_of:
-            try:
-                df, _issues, _with = _frame(as_of)
-                options = filter_options(df)
-                days = sorted(d for d in df["trade_date"].tolist() if d) if not df.empty else []
-                dates = (days[0], days[-1]) if days else (None, None)
-            except Exception:  # noqa: BLE001 -- the bar still filters on the values set
-                log.exception("Blotter: the filter choices could not be read for %s", as_of)
-        return bar(state, options, dates)
+    def _bar(_as_of, _data_rev, _book_rev, _bar_rev, state):
+        """The strip's controls from the stored filter: on mount, a new as-of or new data, and when the
+        filter was set from outside them; never on a control's own change, so the search keeps its
+        focus."""
+        return bar(state)
 
     @app.callback(Output(FILTER_STORE_ID, "data"),
-                  Input(F_TRADE_ID, "value"), Input(F_LANDED_ID, "value"), Input(F_SIDE_ID, "value"),
-                  Input(F_DATES_ID, "start_date"), Input(F_DATES_ID, "end_date"), Input(F_SEARCH_ID, "value"),
+                  Input(F_SEARCH_ID, "value"), Input({"type": COL_TYPE, "part": ALL}, "value"),
                   State(FILTER_STORE_ID, "data"), prevent_initial_call=True)
-    def _write_filter(trade, landed, side, start, end, search, current):
+    def _write_filter(_search, _cols, current):
+        """The search or one heading's control into the store: only the control touched, never the
+        whole set a table's re-render inserts."""
         cur = normal_filter(current)
-        new = normal_filter({"trade": trade, "landed": landed, "side": side, "start": start, "end": end,
-                             "search": search, "from_book": cur["from_book"]})
+        new = dict(cur)
+        for ident, value in triggered_values():
+            if ident == F_SEARCH_ID:
+                new["search"] = str(value or "")
+            elif isinstance(ident, dict) and ident.get("type") == COL_TYPE:
+                part = str(ident.get("part") or "")
+                if part in LIST_PARTS:
+                    new[part] = [str(x) for x in value or []]
+                elif part in ("start", "end"):
+                    new[part] = parse_day(value)
+                elif part == "lots":
+                    new["lots"] = str(value or "").strip() if parse_compare(value) is not None else ""
+        new = normal_filter(new)
         return dash.no_update if new == cur else new
 
     # Clear and the chip are two callbacks: the chip is in the bar only after "See fills", and a
@@ -1089,7 +1159,9 @@ def register(app, get_db_path: Callable[[], object]) -> None:
             return html.P("No trades on file: upload a blotter.", className="book-section-meta"), ""
         kept = filter_fills(df, state)
         meta = f"{len(kept):,} of {len(df):,}" if len(kept) != len(df) else f"{len(df):,} fills"
-        return compact(fills_table(kept, len(df), sort, state, as_of)), meta
+        days = sorted(d for d in df["trade_date"].tolist() if d)
+        return compact(fills_table(kept, len(df), sort, state, as_of, filter_options(df),
+                                   (days[0], days[-1]) if days else (None, None))), meta
 
     @app.callback(Output(SORT_STORE_ID, "data"), Input({"type": SORT_TYPE, "idx": ALL}, "n_clicks"),
                   State(SORT_STORE_ID, "data"), prevent_initial_call=True)

@@ -456,17 +456,61 @@ MARK_SORT: Dict[str, Callable[[dict], Any]] = {
 }
 
 
+# The marks check's column filters (spreadsheet-style, the funnel in each heading; user, 2026-09-29):
+# Status, Price (its commodity / sector) and Source tick lists; Mark, Prev close and Change (in
+# percent) one comparison each. {"status", "group", "source": [...], "mark", "prev", "change": text}.
+MARK_LIST_PARTS = ("status", "group", "source")
+MARK_NUMBER_PARTS = ("mark", "prev", "change")
+MARK_FILTER_DEFAULT: Dict[str, Any] = {"status": [], "group": [], "source": [], "mark": "", "prev": "", "change": ""}
+MARK_COL_TYPE = "md-col"            # a heading funnel's control: {"type", "part"}
+STATUS_OPTIONS = [{"label": "Missing", "value": "MISSING"}, {"label": "Check", "value": "CHECK"},
+                  {"label": "OK", "value": "OK"}]
+
+
+def normal_marks_filter(state: Optional[dict]) -> Dict[str, Any]:
+    out = {k: (list(v) if isinstance(v, list) else v) for k, v in MARK_FILTER_DEFAULT.items()}
+    for k, v in (state or {}).items():
+        if k in MARK_LIST_PARTS:
+            out[k] = [str(x) for x in (v or []) if x is not None]
+        elif k in MARK_NUMBER_PARTS:
+            out[k] = str(v or "").strip()
+    return out
+
+
+def marks_filtered(state: Optional[dict]) -> bool:
+    s = normal_marks_filter(state)
+    return any(s[k] for k in MARK_LIST_PARTS + MARK_NUMBER_PARTS)
+
+
+def _mark_figure(r: dict, part: str) -> Optional[float]:
+    if part == "mark":
+        return r.get("value_raw")
+    if part == "prev":
+        return r.get("prev_raw")
+    pct = r.get("pct_raw")
+    return None if pct is None else pct * 100.0
+
+
 def filter_marks(rows: Optional[List[dict]], statuses: Optional[list], groups: Optional[list],
-                 search: Optional[str]) -> List[dict]:
-    """The marks the status picks, the sector / commodity picks and the search keep."""
+                 search: Optional[str], columns: Optional[dict] = None) -> List[dict]:
+    """The marks the status picks, the sector / commodity picks, the search and (`columns`, the
+    headings' other filters) the sources ticked and the comparisons keep."""
+    from ui.tabs.trade_filter import parse_compare, passes
     picks = [str(g) for g in groups or []]
     stat = {str(s) for s in statuses or []}
     needle = str(search or "").strip().lower()
+    cols = normal_marks_filter(columns)
+    sources = set(cols["source"])
+    tests = {k: parse_compare(cols[k]) for k in MARK_NUMBER_PARTS if cols[k]}
     out = []
     for r in rows or []:
         if stat and r["status"] not in stat:
             continue
         if picks and not any(p in (f"sector:{r['sector']}", f"commodity:{r['sector']}:{r['commodity']}") for p in picks):
+            continue
+        if sources and str(r.get("source") or "") not in sources:
+            continue
+        if any(not passes(_mark_figure(r, k), t) for k, t in tests.items() if t is not None):
             continue
         if needle:
             hay = " ".join(str(r.get(k) or "") for k in ("name", "instrument_id", "source", "source_code", "group",
@@ -486,9 +530,52 @@ def _tip(value) -> Optional[str]:
     return text if text and text.lower() not in ("nan", "none", "nat") else None
 
 
-def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: int) -> html.Table:
+def marks_head(columns, sort: Optional[dict], sort_type: str, state: Optional[dict],
+               options: Optional[Dict[str, List[dict]]]) -> html.Thead:
+    """The heads: each title sorts, Status, Price and Source filter from a tick list in their funnel,
+    Mark, Prev close and Change from one comparison."""
+    from ui.tabs.trade_filter import (NUMBER_HINT, arrow_of, funnel, head_th, option_words, pop_list, pop_number)
+    s = normal_marks_filter(state)
+    opts = {"status": STATUS_OPTIONS, **(options or {})}
+    lists = {"status": ("status", "Status"), "name": ("group", "Commodity / sector"), "source": ("source", "Source")}
+    hints = {"mark": "The price as on file, in its own unit.", "prev": "The previous close, in its own unit.",
+             "change": "The change in percent: > 5 or < -5."}
+    half = len(columns) // 2
+    cells = []
+    for i, (key, title, cls, tip, sortable) in enumerate(columns):
+        pop = None
+        if key in lists:
+            part, words = lists[key]
+            ticked = s[part]
+            pop = funnel(f"data:{part}", pop_list({"type": MARK_COL_TYPE, "part": part}, words, opts.get(part), ticked),
+                         bool(ticked), f"{words}: {option_words(opts.get(part), ticked)}" if ticked else "")
+        elif key in hints:
+            text = s[key]
+            pop = funnel(f"data:{key}", pop_number({"type": MARK_COL_TYPE, "part": key}, text,
+                                                   hint=f"{hints[key]} {NUMBER_HINT}"), bool(text), text)
+        cells.append(head_th(title, cls, tip, sort_id={"type": sort_type, "idx": key} if sortable else None,
+                             arrow=arrow_of(sort, key), pop=pop, right=i > half))
+    return html.Thead(html.Tr(cells))
+
+
+def source_options(rows: Optional[List[dict]]) -> List[dict]:
+    """The Source funnel's choices: the sources present, each with its count."""
+    counts: Dict[str, int] = {}
+    for r in rows or []:
+        src = str(r.get("source") or "")
+        if src:
+            counts[src] = counts.get(src, 0) + 1
+    return [{"label": f"{k} ({n})", "value": k} for k, n in sorted(counts.items())]
+
+
+def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: int,
+                state: Optional[dict] = None, options: Optional[Dict[str, List[dict]]] = None) -> html.Table:
     """The marks check: the total row first (the count showing and the checks failed), then one
-    row per price."""
+    row per price. `options`: the funnels' choices over every price ({"group", "source"}; from the
+    rows showing when not given); `state`: the headings' filters set."""
+    if options is None:
+        from ui.tabs.market_data import marks_filter_options
+        options = {"group": marks_filter_options(rows), "source": source_options(rows)}
     shown = kit.sort_records(rows, sort, MARK_SORT)
     n_missing = sum(1 for r in rows if r["status"] == "MISSING")
     n_check = sum(1 for r in rows if r["status"] == "CHECK")
@@ -528,7 +615,7 @@ def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: i
             kit.td(r["trades"] or missing_cell("no trade reads it today"), left=True,
                    title=("; ".join(filter(None, [r["blocks_what"], ", ".join(r["blocks"])]))) or None),
         ]))
-    return tidy(kit.table(kit.head(columns, sort, sort_type), body))
+    return tidy(kit.table(marks_head(columns, sort, sort_type, state, options), body))
 
 
 MARK_CSV_COLUMNS = ["status", "name", "instrument_id", "exchange", "mark_type", "settle_date", "value_raw", "mark_date",

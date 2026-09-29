@@ -813,7 +813,11 @@ p { margin: 8px 0; }
 .book-th-pop-right .book-pop-panel { left: auto; right: -10px; }
 .book-pop-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 5px; }
 .book-pop-hint + .book-pop-label { margin-top: 12px; }
-.book-pop-text, .book-pop-search { width: 100%; }
+.book-pop-text, .book-pop-search, .book-pop-box { width: 100%; }
+.book-pop-box { box-sizing: border-box; font: inherit; font-size: 12px; height: 28px; padding: 0 8px; margin: 0;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); }
+.book-pop-box:focus { outline: none; border-color: var(--navy); }
+.book-pop-hint + .book-pop-label, .book-pop-box + .book-pop-label { margin-top: 10px; }
 .book-pop-search { box-sizing: border-box; font: inherit; font-size: 12px; height: 28px; padding: 0 8px; margin: 0 0 6px;
   border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); }
 .book-pop-search:focus { outline: none; border-color: var(--navy); }
@@ -1224,3 +1228,19 @@ p { margin: 8px 0; }
 .options-status:empty { display: none; }
 .options-terms-bar.toolbar { background: none; border: none; box-shadow: none; padding: 10px 0 12px; margin: 0; gap: 16px; }
 /* end wave 2: blotter */
+
+/* The table strip's own controls (2026-09-29, user: "the table columns - and above theres filters with the
+   same names"): every filter is its column's funnel (.book-pop above); the strip keeps only the search, the
+   Group / Slice switch, Clear filters (while a filter is set), Expand / Collapse and Download CSV. */
+.tk-strip .tf-bar-slot { display: flex; align-items: center; }
+.tf-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.tf-tools .tf-search { width: 240px; min-width: 0; height: 30px; box-sizing: border-box; padding: 0 10px; font-size: 12.5px; }
+.tf-tools .tf-group { display: inline-flex; align-items: center; gap: 6px; }
+.tf-tools .tf-group .book-switch { margin-left: 0; }
+.tk-strip .tf-clear, .tf-tools .tf-clear { color: var(--navy); font-weight: 600; white-space: nowrap; }
+.tk-strip .tf-search-wrap { display: inline-flex; }
+/* a heading's title and its funnel sit on one line; the definition is on the title's hover */
+.tk-table thead th .book-th { gap: 4px; white-space: nowrap; }
+.tk-table thead th.tk-sortable { cursor: default; }
+.tk-table thead th .tk-sort { cursor: pointer; }
+.tk-table thead th .tk-sort:hover { color: var(--gold); }

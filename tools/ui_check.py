@@ -33,6 +33,13 @@ Rules (visible text unless said):
   TRAILING_PUNCT_SPACE a space before punctuation ("word ."), or leading / trailing whitespace
                        in a placeholder or a tab label, where the browser draws it
   RENDER_ERROR         a screen that raised or logged an error while rendering
+  DUPLICATE_FILTER     a filter control outside a table (Dropdown, Checklist, RadioItems, a date
+                       picker, Input) whose label, or a Dropdown's placeholder, repeats a column
+                       heading of a table in the same card or of the next table on the tab (case
+                       and a trailing "only" ignored; "Trade date" matches "Date"): filters live in
+                       the column headings (the user, five rounds running). Allowed above a table:
+                       the free-text search, the Group-by / Slice and Period / Table switches,
+                       buttons. Fails the default run; Book, P&L, Risk, Blotter and Data
 """
 from __future__ import annotations
 
@@ -834,6 +841,189 @@ def layout_inventory(tree: Any, max_depth: int = 3) -> List[str]:
     return [f"{line}  x{n}" if n > 1 else line for line, n in out]
 
 
+# ----------------------------------------------------------------------------- duplicate filters
+# DUPLICATE_FILTER (the user, five rounds running: filters live in the column headings, never in a bar
+# above the table repeating the column names). A filter control outside a table (Dropdown, Checklist,
+# RadioItems, a date picker, Input, Select) is named by the text beside it (a Label or a short text
+# sibling, in its parent or else its grandparent) and, for a Dropdown, its placeholder; a name equal to a
+# column heading of a table in the same card, or of the next table on the tab, is a finding. Names are
+# compared lowercased and trimmed, a count "(3)" and a trailing "only" dropped, and a name ending in
+# "date" also matches a plain "Date" ("Trade date" ~ "Date"). A control inside a table (a heading's own
+# filter, an in-row editor) is never looked at. Allowed above a table: the free-text search, the
+# Group-by / Slice switch and the P&L Period / Table switch (`ALLOWED_FILTER_LABELS`), and buttons.
+FILTER_CONTROL_TYPES = {"Dropdown", "Checklist", "RadioItems", "DatePickerRange", "DatePickerSingle", "Input",
+                        "Select"}
+ALLOWED_FILTER_LABELS = {"search", "group", "group by", "slice", "period", "table"}
+IN_TABLE_TYPES = {"Table", "Thead", "Tbody", "Tfoot", "Tr", "Th", "Td", "DataTable"}
+_HEAD_GLYPHS = re.compile(r"[▲▼△▽↑↓⇅⏷⌄▾▴▸▹ⓘ…]")
+
+
+def _node_of(obj: Any) -> Optional[Node]:
+    return obj if isinstance(obj, Node) else as_node(obj)
+
+
+def _norm_label(text: Any) -> str:
+    """A label or a heading as compared: lowercased, glyphs and a count dropped, a trailing "only" dropped."""
+    s = _HEAD_GLYPHS.sub(" ", str(text or "")).lower()
+    s = re.sub(r"\(\d[\d,]*\)", " ", s)
+    s = re.sub(r"[^\w&%/ ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:-len(" only")].strip() if s.endswith(" only") else s
+
+
+def _label_variants(text: Any) -> set:
+    n = _norm_label(text)
+    out = {n} if n else set()
+    if n.endswith(" date"):
+        out.add("date")
+    return out
+
+
+def _has_control(node: Node) -> bool:
+    for c in _flatten(node.children):
+        n = _node_of(c)
+        if n is not None and not _is_hidden(n) and (n.type in FILTER_CONTROL_TYPES or _has_control(n)):
+            return True
+    return False
+
+
+def _heading_text(th: Node) -> str:
+    """The words a column heading draws: its title, never its own filter panel, control or button."""
+    parts: List[str] = []
+
+    def visit(o: Any) -> None:
+        if o is None or isinstance(o, bool):
+            return
+        if isinstance(o, (str, int, float)):
+            parts.append(str(o))
+            return
+        if isinstance(o, (list, tuple)):
+            for c in _flatten(o):
+                visit(c)
+            return
+        n = _node_of(o)
+        if (n is None or _is_hidden(n) or n.type in FILTER_CONTROL_TYPES or n.type in LAYOUT_SKIP_TYPES
+                or n.type == "Button" or any(p in c for c in n.classes for p in ("panel", "menu", "popover"))):
+            return
+        parts.append(" ")
+        for c in _flatten(n.children):
+            visit(c)
+        parts.append(" ")
+    for c in _flatten(th.children):
+        visit(c)
+    return re.sub(r"\s+", " ", _HEAD_GLYPHS.sub(" ", "".join(parts))).strip()
+
+
+def _table_headings(node: Node) -> List[str]:
+    if node.type == "DataTable":
+        out = []
+        for col in node.props.get("columns") or []:
+            name = col.get("name") if isinstance(col, dict) else None
+            name = name[-1] if isinstance(name, (list, tuple)) and name else name
+            if isinstance(name, str) and name.strip():
+                out.append(name.strip())
+        return out
+    out: List[str] = []
+
+    def visit(o: Any) -> None:
+        n = _node_of(o)
+        if n is None or _is_hidden(n):
+            return
+        if n.type == "Th":
+            t = _heading_text(n)
+            if t:
+                out.append(t)
+            return
+        for c in _flatten(n.children):
+            visit(c)
+    visit(node)
+    return out
+
+
+def _control_labels(control: Node, parents: List[Node]) -> List[str]:
+    """The names a filter control carries: the text beside it and a Dropdown's placeholder."""
+    names: List[str] = []
+    for depth in (1, 2):
+        if len(parents) < depth:
+            break
+        parent, own = parents[-depth], (control if depth == 1 else parents[-1])
+        for sib in _flatten(parent.children):
+            if isinstance(sib, str):
+                if sib.strip():
+                    names.append(sib.strip())
+                continue
+            s = _node_of(sib)
+            if s is None or s is own or _is_hidden(s) or s.type in FILTER_CONTROL_TYPES or s.type == "Button":
+                continue
+            if _has_control(s):
+                continue
+            t = text_of(s)
+            if t and len(t) <= 40:
+                names.append(t)
+        if names:
+            break
+    placeholder = control.props.get("placeholder") if control.type == "Dropdown" else None
+    if isinstance(placeholder, str) and placeholder.strip():
+        names.append(placeholder.strip())
+    return names
+
+
+def duplicate_filters(tab: str, tree: Any) -> List[Finding]:
+    """DUPLICATE_FILTER findings of one tab's tree (a list of trees: one per sub-tab)."""
+    out: List[Finding] = []
+    seen: set = set()
+    for root in (tree if isinstance(tree, list) else [tree]):
+        events: List[tuple] = []          # ("control", node, parents) | ("table", headings, parents), page order
+
+        def visit(o: Any, parents: List[Node]) -> None:
+            if o is None or isinstance(o, (bool, str, int, float)):
+                return
+            if isinstance(o, (list, tuple)):
+                for c in _flatten(o):
+                    visit(c, parents)
+                return
+            n = _node_of(o)
+            if n is None or _is_hidden(n) or n.type in LAYOUT_SKIP_TYPES:
+                return
+            if n.type in ("Table", "DataTable"):
+                events.append(("table", _table_headings(n), list(parents)))
+                return
+            if n.type in FILTER_CONTROL_TYPES:
+                if not any(p.type in IN_TABLE_TYPES for p in parents):
+                    events.append(("control", n, list(parents)))
+                return
+            for c in _flatten(n.children):
+                visit(c, parents + [n])
+        visit(root, [])
+
+        for i, (kind, control, parents) in enumerate(events):
+            if kind != "control":
+                continue
+            section = next((p for p in reversed(parents) if _is_section(p)), None)
+            headings: List[str] = []
+            for kind2, heads, tparents in events:
+                if kind2 == "table" and section is not None and any(p is section for p in tparents):
+                    headings.extend(heads)
+            nxt = next((e for e in events[i + 1:] if e[0] == "table"), None)
+            if nxt:
+                headings.extend(nxt[1])
+            if not headings:
+                continue
+            for name in _control_labels(control, parents):
+                variants = _label_variants(name)
+                if not variants or variants & ALLOWED_FILTER_LABELS or _norm_label(name).startswith("search"):
+                    continue
+                exact = [h for h in headings if _norm_label(h) == _norm_label(name)]
+                loose = [h for h in headings if _label_variants(h) & variants]
+                column = (exact or loose or [None])[0]
+                if column is None or (name.lower(), column.lower()) in seen:
+                    continue
+                seen.add((name.lower(), column.lower()))
+                out.append(Finding(tab, "DUPLICATE_FILTER", name, path_of(parents + [control]), False,
+                                   f"repeats the column heading \"{column}\""))
+    return out
+
+
 # ----------------------------------------------------------------------------- rendering
 def _fill(tree: Any, slots: Dict[str, Any], styles: Optional[Dict[str, Any]] = None) -> Any:
     """`tree` with each component whose id is in `slots` given those children (and `styles`)."""
@@ -1081,6 +1271,8 @@ def run_checks(tabs: List[str], layout: bool = False, shots: bool = False,
                 try:
                     tree = RENDERERS[tab](app, db)
                     findings.extend(check_runs(tab, walk(tree)))
+                    if tab in LAYOUT_TABS:
+                        findings.extend(duplicate_filters(tab, tree))
                     if layout:
                         trees = tree if isinstance(tree, list) else [tree]
                         lines: List[str] = []
@@ -1344,7 +1536,7 @@ def take_shots(app, tabs: List[str], opened: bool = False) -> str:
 
 
 # ----------------------------------------------------------------------------- output
-RULE_ORDER = ["RENDER_ERROR", "BANNED", "ENGINE_WORD", "LOWERCASE", "LOOSE_TEXT", "DOUBLE_SPACE",
+RULE_ORDER = ["RENDER_ERROR", "DUPLICATE_FILTER", "BANNED", "ENGINE_WORD", "LOWERCASE", "LOOSE_TEXT", "DOUBLE_SPACE",
               "TRAILING_PUNCT_SPACE", PART_RULE, "LOOSE_BLOCK", "DESIGNED_LINE"]
 PAGE_ORDER_RULES = {"LOOSE_BLOCK", "DESIGNED_LINE"}  # listed in page order, not by path
 # A tab whose LOOSE_BLOCK findings never fail the run, with the note printed beside it: none since the

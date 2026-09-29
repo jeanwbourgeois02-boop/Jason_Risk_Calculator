@@ -1,18 +1,26 @@
-"""The one filter bar, Group switch and headline of the trade tabs (Phase G, 2026-09-29).
+"""The trade tabs' shared filters, column funnels, Group switch and headline (Phase G, 2026-09-29).
 
 User, 2026-09-29: "a way to split the rows in the table any which way - with the headline updating
-to only being calculated numbers for rows showing". One bar, identical on Book, P&L and (round 2)
-Risk, directly above each tab's headline: Search (free text over the trade name, what it is, every
-leg's name and broker symbol), Type, Commodity and Trade (multi-selects of the values present, each
-with its trade count, "All" by default), Flags only, the Group switch (None | Type | Commodity; the
-P&L tab reads None as "by trade") and Clear (only when something is set; it keeps the group).
+to only being calculated numbers for rows showing", then, after five rounds: "the table columns -
+and above theres filters with the same names". The filters live in the column headings,
+spreadsheet-style (CLAUDE.md "Screens redesign plan", Phase G): each navy heading's title sorts
+and its funnel opens a panel under it, a tick list of the values present on a text column (with a
+search box that narrows the list) and one comparison (`> 0`, `< -10k`) on a number column; the
+funnel is gold while it filters and one panel is open at a time (`ui/assets/book_filters.js`).
+Above a table, in its own title strip, only the free-text search, the Group switch (a view, not a
+filter; the P&L tab calls it Slice) and a "Clear filters" link while a filter is set (`bar`).
 
-A filter keeps or drops WHOLE trades (`keeps`): a leg is never filtered out of its trade. What is
-set on one tab is set on all three: the state lives in one session `dcc.Store` (`STORE_ID`, in the
-app's layout, outside every tab), each tab's bar is rendered from it when the tab mounts
-(`register_bar`), and a change to a control writes it back (`register`: one callback for every
-tab's controls, by pattern). Every tab's table and headline render from the store, never from the
-controls, so a tab opened later shows the same slice. The top bar is never filtered.
+The funnels and their panels (`funnel`, `pop_list`, `pop_number`, `pop_text`, `head_th`) are the
+one component every tab's table uses, Blotter and Data included (each with its own store there).
+On Book, P&L and Risk, Type, Trade and Commodity (the commodity family: the Book's "What it is"
+funnel, the Trade funnel on P&L and Risk) carry across the three tabs; a number column's
+comparison is the tab's own (`tab_filters`).
+
+A filter keeps or drops WHOLE trades (`keeps`): a leg is never filtered out of its trade. The state
+lives in one session `dcc.Store` (`STORE_ID`, in the app's layout, outside every tab); each tab's
+strip is rendered from it when the tab mounts (`register_bar`), its table (heads and funnels
+included) renders from the store, and a change to a funnel, the search or the switch writes it
+back (`register`: one callback for every tab's controls, by pattern). The top bar is never filtered.
 
 The trades are `engine.spreads.trade_book`'s (`ui.tabs.blotter_pricing.shared_trade_book`), plus
 the Book's pseudo-trade of the fills that carry no trade name. Nothing here prices or sums:
@@ -20,32 +28,31 @@ the Book's pseudo-trade of the fills that carry no trade name. Nothing here pric
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+import re
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import dash
 from dash import ALL, Input, Output, State, dcc, html
 
 from ui.revision import DATA_REVISION_ID
-from ui.tabs.formatting import about, plain_words
+from ui.tabs.formatting import plain_words
 from ui.tabs.header import AS_OF_STORE_ID
 
-STORE_ID = "trade-filter-store"             # the shared state, session: {search, type, commodity, trade, flags, group}
+STORE_ID = "trade-filter-store"             # the shared state, session: {search, type, commodity, trade, group, cols}
 FILLS_STORE_ID = "trade-filter-see-fills"   # "See fills" on a Book trade: {trade, n} for the Blotter (round 2 reads it)
-SEARCH_TYPE = "tf-search"                   # the controls' pattern ids: {"type": ..., "tab": <tab key>}
-TYPE_TYPE = "tf-type"
-COMMODITY_TYPE = "tf-commodity"
-TRADE_TYPE = "tf-trade"
-FLAGS_TYPE = "tf-flags"
+SEARCH_TYPE = "tf-search"                   # the strip's controls' pattern ids: {"type": ..., "tab": <tab key>}
 GROUP_TYPE = "tf-group"
 CLEAR_TYPE = "tf-clear"
+COL_TYPE = "tf-col"                         # a funnel's control: {"type", "tab", "part": type|commodity|trade|<column>}
 LINK_TYPE = "tf-link"                       # a link that filters to one trade and opens a tab: {"type", "to", "trade"}
+SHARED_PARTS = ("type", "commodity", "trade")   # the funnel parts carried across Book, P&L and Risk
 
 GROUP_NONE = "none"
 GROUP_BY_TYPE = "type"
 GROUP_BY_COMMODITY = "commodity"
 GROUPS = (GROUP_NONE, GROUP_BY_TYPE, GROUP_BY_COMMODITY)
-DEFAULT_STATE: Dict[str, Any] = {"search": "", "type": [], "commodity": [], "trade": [], "flags": False,
-                                 "group": GROUP_NONE}
+DEFAULT_STATE: Dict[str, Any] = {"search": "", "type": [], "commodity": [], "trade": [], "group": GROUP_NONE,
+                                 "cols": {}}
 FLAGS_ON = "on"
 
 # The trade's type as engine.spreads.trades gives it, in words (long, short) and in the fixed order
@@ -58,42 +65,98 @@ TYPE_ORDER = ("CALENDAR", "CROSS_EXCHANGE", "CROSS_PRODUCT", "MIXED", "OUTRIGHT"
 UNASSIGNED = "No trade name"                # the Book's pseudo-trade of the fills with no PBRoot name
 _LAST_FAMILIES = ("Cross-product", "FX", "Other")
 
-FILTER_ABOUT = ("Filters keep or drop whole trades, never a leg of one. What is set here is set on Book, P&L and "
-                "Risk alike; the top bar always shows the whole book.")
+FILTER_ABOUT = ("Free text over the trade name, what it is, every leg's contract and broker symbol. Each column's "
+                "own filter is the funnel in its heading. Filters keep or drop whole trades, never a leg of one; "
+                "Type, Trade and Commodity carry across Book, P&L and Risk; the top bar always shows the whole book.")
 GROUP_ABOUT = ("Group the rows by the trade's type or its commodity family, each group with its subtotals. A trade "
                "is never split across groups: a trade mixing families is under Cross-product.")
 
 
 # --------------------------------------------------------------------------- the state
 def normal(state: Optional[dict]) -> Dict[str, Any]:
-    """The store's value, every key present and of its type."""
+    """The store's value, every key present and of its type. `cols` holds each tab's own column
+    filters, keyed '<tab>:<column>': a comparison's text, or a list of ticked values."""
     s = dict(DEFAULT_STATE)
+    s["cols"] = {}
     for k, v in (state or {}).items():
-        if k in ("type", "commodity", "trade"):
+        if k in SHARED_PARTS:
             s[k] = [str(x) for x in (v or []) if x is not None]
         elif k == "search":
             s[k] = str(v or "")
-        elif k == "flags":
-            s[k] = bool(v)
         elif k == "group":
             s[k] = v if v in GROUPS else GROUP_NONE
+        elif k == "cols" and isinstance(v, dict):
+            for ck, cv in v.items():
+                if isinstance(cv, (list, tuple)):
+                    vals = [str(x) for x in cv if x is not None]
+                    if vals:
+                        s["cols"][str(ck)] = vals
+                elif str(cv or "").strip():
+                    s["cols"][str(ck)] = str(cv).strip()
     return s
 
 
-def is_filtered(state: Optional[dict]) -> bool:
-    """True when anything but the group is set: the rows showing may be fewer than the book."""
+def tab_filters(state: Optional[dict], tab: str) -> Dict[str, Any]:
+    """The column filters `tab` itself set: {column: comparison text | [ticked values]}."""
+    pre = f"{tab}:"
+    return {k[len(pre):]: v for k, v in normal(state)["cols"].items() if k.startswith(pre)}
+
+
+def is_filtered(state: Optional[dict], tab: Optional[str] = None) -> bool:
+    """True when anything but the group is set: the rows showing may be fewer than the book. With
+    `tab`, that tab's own column filters count too."""
     s = normal(state)
-    return bool(s["search"].strip() or s["type"] or s["commodity"] or s["trade"] or s["flags"])
-
-
-def state_from_controls(search, types, commodities, trades, flags, group) -> Dict[str, Any]:
-    return normal({"search": search, "type": types, "commodity": commodities, "trade": trades,
-                   "flags": bool(flags) and FLAGS_ON in (flags or []), "group": group})
+    if s["search"].strip() or s["type"] or s["commodity"] or s["trade"]:
+        return True
+    return bool(tab_filters(s, tab)) if tab else False
 
 
 def one_trade(name: str, group: str = GROUP_NONE) -> Dict[str, Any]:
     """The state of a link to one trade ("P&L history", "Risk" on a Book trade): that trade alone."""
     return normal({"trade": [name], "group": group})
+
+
+# --------------------------------------------------------------------------- a column's comparison
+_CMP = re.compile(r"^\s*(>=|<=|!=|==|=|>|<)?\s*([-+−]?\s*\d[\d,]*(?:\.\d*)?|[-+−]?\s*\.\d+)\s*([kmb%])?\s*$", re.I)
+_SCALE = {"k": 1e3, "m": 1e6, "b": 1e9, "%": 1.0}
+NUMBER_HINT = "For example > 0, < -10k, >= 1.5m or = 3; Enter to apply, empty for all"
+
+
+def parse_compare(text: Optional[str]) -> Optional[Tuple[str, float]]:
+    """'> 0', '< -10000', '>= 1.5m', '= 3', '10k' (equal) -> (op, value); None for an empty or
+    unreadable box (then it filters nothing)."""
+    m = _CMP.match(str(text or "")) if text else None
+    if not m:
+        return None
+    op = {"==": "=", None: "="}.get(m.group(1), m.group(1))
+    num = float(m.group(2).replace(",", "").replace("−", "-").replace(" ", ""))
+    return op, num * _SCALE.get((m.group(3) or "").lower(), 1.0)
+
+
+def passes(value: Optional[float], test: Optional[Tuple[str, float]]) -> bool:
+    """Whether `value` meets the comparison; a row with no figure never does."""
+    if test is None:
+        return True
+    if value is None or value != value:
+        return False
+    op, x = test
+    return {"=": value == x, "!=": value != x, ">": value > x, "<": value < x, ">=": value >= x,
+            "<=": value <= x}[op]
+
+
+def keeps_cols(item: Any, filters: Dict[str, Any], value_of: Callable[[Any, str], Optional[float]],
+               lists_of: Optional[Callable[[Any, str], Iterable[str]]] = None) -> bool:
+    """Whether a row passes every column filter of its tab: a comparison on `value_of(item, col)`,
+    a tick list on `lists_of(item, col)` (any value ticked)."""
+    for col, want in filters.items():
+        if isinstance(want, list):
+            if lists_of is None:
+                continue
+            if not {str(x) for x in lists_of(item, col) or []} & set(want):
+                return False
+        elif not passes(value_of(item, col), parse_compare(want)):
+            return False
+    return True
 
 
 # --------------------------------------------------------------------------- reading a trade
@@ -171,8 +234,6 @@ def keeps(trade: dict, state: Optional[dict]) -> bool:
         return False
     if s["trade"] and str(trade.get("trade") or "") not in s["trade"]:
         return False
-    if s["flags"] and not has_flags(trade):
-        return False
     return True
 
 
@@ -240,46 +301,150 @@ def _group_options(tab: str) -> List[dict]:
             {"label": "Commodity", "value": GROUP_BY_COMMODITY}]
 
 
+HIDDEN_STYLE = {"display": "none"}
+CLEAR_WORDS = "Clear filters"
+CLEAR_TIP = "Every column's filter and the search back to All (the grouping stays)"
+
+
 def bar(tab: str, state: Optional[dict], options: Optional[Dict[str, List[dict]]] = None) -> html.Div:
-    """The filter bar of `tab` ('book', 'pnl', 'risk'), its controls set from the shared state."""
+    """The table strip's own controls on `tab` ('book', 'pnl', 'risk'), set from the shared state:
+    the free-text search, the Group switch (Slice on P&L) and "Clear filters" (only while a filter
+    is set). Every other filter is a column's funnel (`funnel`). `options` is not read any more
+    (kept for the callers of the filter bar this replaced)."""
     s = normal(state)
-    opts = options or {}
-
-    def pick(key: str, label: str, width: int) -> html.Div:
-        chosen = [str(v) for v in s[key]]      # kept even when absent today, so a filter is never lost
-        known = {str(o["value"]) for o in opts.get(key) or []}
-        extra = [{"label": f"{v} (none today)", "value": v} for v in chosen if v not in known]
-        return html.Div(className="blotter-filter tf-filter", style={"minWidth": f"{width}px"}, children=[
-            html.Label(label),
-            dcc.Dropdown(id=_cid({"type": TYPE_TYPE, "commodity": COMMODITY_TYPE, "trade": TRADE_TYPE}[key], tab),
-                         options=list(opts.get(key) or []) + extra, value=chosen, multi=True, placeholder="All",
-                         clearable=True, className="blotter-filter-dropdown")])
-
-    return html.Div(className="blotter-filter-bar tf-bar", children=[
-        html.Div(className="blotter-filter tf-filter", children=[
-            html.Label(about("Search", FILTER_ABOUT, level="span")),
+    return html.Div(className="tf-tools", children=[
+        html.Div(className="tf-search-wrap", title=plain_words(FILTER_ABOUT), children=[
             dcc.Input(id=_cid(SEARCH_TYPE, tab), type="text", value=s["search"], debounce=True,
-                      placeholder="Trade, contract or symbol", className="blotter-filter-search tf-search")]),
-        pick("type", "Type", 170),
-        pick("commodity", "Commodity", 170),
-        pick("trade", "Trade", 180),
-        html.Div(className="blotter-filter tf-filter tf-flags", children=[
-            html.Label("Flags"),
-            dcc.Checklist(id=_cid(FLAGS_TYPE, tab), options=[{"label": " Flags only", "value": FLAGS_ON}],
-                          value=[FLAGS_ON] if s["flags"] else [], className="tf-check")]),
-        html.Div(className="blotter-filter tf-filter", children=[
-            html.Label(about("Group" if tab != "pnl" else "Slice", GROUP_ABOUT, level="span")),
+                      placeholder="Search trade, contract or symbol", className="blotter-filter-search tf-search",
+                      autoComplete="off")]),
+        html.Span(className="tf-group", children=[
+            html.Label("Group" if tab != "pnl" else "Slice", className="tk-k", title=plain_words(GROUP_ABOUT)),
             dcc.RadioItems(id=_cid(GROUP_TYPE, tab), className="book-switch", options=_group_options(tab),
                            value=s["group"], inline=True)]),
-        html.Button("Clear", id=_cid(CLEAR_TYPE, tab), n_clicks=0, className="btn btn--ghost tf-clear",
-                    title="Clear every filter (the grouping stays)",
-                    style={} if is_filtered(s) else {"display": "none"}),
+        html.Button(CLEAR_WORDS, id=_cid(CLEAR_TYPE, tab), n_clicks=0, className="book-link-button tf-clear",
+                    title=CLEAR_TIP, style={} if is_filtered(s, tab) else HIDDEN_STYLE),
     ])
 
 
 def bar_slot(tab: str) -> html.Div:
-    """Where the tab's bar is rendered (`register_bar`)."""
+    """Where the tab's strip controls are rendered (`register_bar`), inside the table's title strip."""
     return html.Div(id=bar_id(tab), className="tf-bar-slot")
+
+
+# --------------------------------------------------------------------------- the column funnels
+# Spreadsheet-style (user, 2026-09-29): each heading's title sorts, its funnel opens a panel under
+# it. The panel is a <details> the browser opens and closes itself (`ui/assets/book_filters.js`
+# keeps one open at a time, closes it on a click outside or Escape, narrows a long tick list by
+# its search box, and re-opens it when the table re-renders under it), so opening one asks the
+# server nothing. The controls inside carry pattern ids and write their tab's store.
+LIST_HINT = "Nothing ticked = All"
+FUNNEL_TIP = "Filter this column"
+NUMBER_TITLE = "Show rows where the figure is"
+
+
+def col_id(tab: str, part: str) -> dict:
+    """The id of a trade tab's funnel control (`register` writes the shared store from it)."""
+    return {"type": COL_TYPE, "tab": tab, "part": part}
+
+
+def with_missing(options: Optional[Sequence[dict]], chosen: Sequence[str], note: str = "none today") -> List[dict]:
+    """The options, plus a value ticked earlier that is absent now (so a filter is never lost)."""
+    known = {str(o["value"]) for o in options or []}
+    return list(options or []) + [{"label": f"{v} ({note})", "value": v} for v in chosen if str(v) not in known]
+
+
+def pop_list(cid: dict, title: str, options: Optional[Sequence[dict]], value: Optional[Sequence[str]],
+             search: Optional[bool] = None) -> List[Any]:
+    """A tick list in a funnel's panel: its title, a box that narrows the list (browser-side) when
+    the list is long, the values present with their counts; nothing ticked = All."""
+    chosen = [str(v) for v in value or []]
+    opts = with_missing(options, chosen)
+    kids: List[Any] = [html.Div(title, className="book-pop-label")]
+    if search if search is not None else len(opts) > 6:
+        kids.append(dcc.Input(type="text", placeholder="Search the list", className="book-pop-search",
+                              autoComplete="off"))
+    kids.append(dcc.Checklist(id=cid, options=opts, value=chosen, className="book-pop-list"))
+    kids.append(html.Div(LIST_HINT, className="book-pop-hint"))
+    return kids
+
+
+def pop_number(cid: dict, value: Optional[str], title: str = NUMBER_TITLE, hint: str = NUMBER_HINT,
+               placeholder: str = "> 0") -> List[Any]:
+    """One comparison in a funnel's panel ('> 0', '< -10k'), applied on Enter."""
+    return pop_text(cid, value, title, placeholder, hint)
+
+
+def pop_text(cid: dict, value: Optional[str], title: str, placeholder: str, hint: str = "") -> List[Any]:
+    """A text box in a funnel's panel (a comparison, a date), applied on Enter or when it loses focus."""
+    kids: List[Any] = [html.Div(title, className="book-pop-label"),
+                       dcc.Input(id=cid, type="text", value=str(value or ""), debounce=True, placeholder=placeholder,
+                                 autoComplete="off", className="book-pop-box")]
+    if hint:
+        kids.append(html.Div(hint, className="book-pop-hint"))
+    return kids
+
+
+def option_words(options: Optional[Sequence[dict]], values: Sequence[str]) -> str:
+    """The ticked values in words, as their labels without the counts: 'Calendar, Cross-exch'."""
+    labels = {str(o["value"]): re.sub(r"\s*\(\d[\d,]*\)$", "", str(o.get("label") or o["value"]))
+              for o in options or []}
+    return ", ".join(labels.get(str(v), str(v)) for v in values)
+
+
+def funnel(key: str, body: Sequence[Any], active: bool, summary: str = "") -> html.Details:
+    """A column's funnel and its panel. `key` names it for the browser ('book:type', unique on the
+    page); gold with what it filters on hover while `active`."""
+    return html.Details(className="book-pop", **{"data-tf-key": key}, children=[
+        html.Summary(html.Span(className="book-funnel-icon"),
+                     className="book-funnel" + (" book-funnel--on" if active else ""),
+                     title=(f"Filtered: {summary}" if active and summary else ("Filtered" if active else FUNNEL_TIP))),
+        html.Div(list(body), className="book-pop-panel")])
+
+
+def head_th(title: Any, cls: str = "", tip: str = "", sort_id: Optional[dict] = None, arrow: str = "",
+            pop: Optional[html.Details] = None, right: bool = False, note: Any = None) -> html.Th:
+    """A column heading: its title (a click sorts when `sort_id` is given; the arrow only on the
+    column sorted), a note (the research "i"), then its funnel. `right`: the panel opens leftwards
+    (a column in the right half of the table)."""
+    hover = plain_words(tip) or None
+    if sort_id is not None:
+        label: Any = html.Span([title, html.Span(arrow, className="book-sort-arrow")], id=sort_id, n_clicks=0,
+                               className="tk-sort", title=hover)
+    else:
+        label = html.Span(title, title=hover)
+    kids = [x for x in (label, note, pop) if x is not None]
+    classes = [cls, "tk-sortable" if sort_id is not None else "", "book-th-pop-right" if right else ""]
+    return html.Th(html.Div(kids, className="book-th"), className=" ".join(c for c in classes if c) or None)
+
+
+def arrow_of(sort: Optional[dict], key: str) -> str:
+    """The sort arrow of column `key` ('' when another column, or none, is sorted)."""
+    if (sort or {}).get("key") != key:
+        return ""
+    return " ▼" if (sort or {}).get("dir") != "asc" else " ▲"
+
+
+def trade_funnel(tab: str, state: Optional[dict], options: Dict[str, List[dict]], parts: Sequence[str],
+                 key: str) -> html.Details:
+    """The funnel of a trade tab's text column holding the shared lists `parts` ('type', 'trade',
+    'commodity': carried across Book, P&L and Risk), in that order."""
+    s = normal(state)
+    titles = {"type": "Type", "trade": "Trade", "commodity": "Commodity"}
+    body: List[Any] = []
+    bits = []
+    for part in parts:
+        body += pop_list(col_id(tab, part), titles[part], options.get(part), s[part],
+                         search=True if part == "trade" else None)
+        if s[part]:
+            bits.append(f"{titles[part]}: {option_words(options.get(part), s[part])}")
+    return funnel(f"{tab}:{key}", body, bool(bits), "; ".join(bits))
+
+
+def number_funnel(tab: str, state: Optional[dict], col: str, hint: str = NUMBER_HINT) -> html.Details:
+    """The funnel of a trade tab's number column: one comparison, the tab's own."""
+    value = tab_filters(state, tab).get(col)
+    text = value if isinstance(value, str) else ""
+    return funnel(f"{tab}:{col}", pop_number(col_id(tab, col), text, hint=hint), bool(text), text)
 
 
 # --------------------------------------------------------------------------- research figures
@@ -352,38 +517,80 @@ def link(label: str, to: str, trade: str, idx: str, title: str = "") -> html.But
 
 
 # --------------------------------------------------------------------------- callbacks
-def register(app, main_tabs_id: str) -> None:
-    """The controls -> the store (every tab's, by pattern); Clear -> the controls; the Clear
-    button's visibility; the links that filter to one trade and open a tab."""
-    ctl = [Input(_cid(k, ALL), p) for k, p in ((SEARCH_TYPE, "value"), (TYPE_TYPE, "value"),
-                                                (COMMODITY_TYPE, "value"), (TRADE_TYPE, "value"),
-                                                (FLAGS_TYPE, "value"), (GROUP_TYPE, "value"))]
+def triggered_values() -> List[Tuple[Any, Any]]:
+    """[(id, value)] of the inputs that really changed in this callback: never the whole set a
+    table's re-render inserts (Dash fires then with "." as the trigger), so a store is written only
+    from the control the user touched, never from a stale copy of another."""
+    trig = dash.ctx.triggered_prop_ids or {}
+    wanted = [(str(prop).rsplit(".", 1)[-1], ident) for prop, ident in trig.items() if str(prop) != "."]
+    out: List[Tuple[Any, Any]] = []
+    for group in dash.ctx.inputs_list or []:
+        for item in (group if isinstance(group, list) else [group]):
+            if not isinstance(item, dict):
+                continue
+            if any(item.get("id") == ident and item.get("property") == prop for prop, ident in wanted):
+                out.append((item.get("id"), item.get("value")))
+    return out
 
-    @app.callback(Output(STORE_ID, "data"), *ctl, State(STORE_ID, "data"), prevent_initial_call=True)
-    def _sync(searches, types, commodities, trades, flags, groups, current):
-        if not searches:                       # no bar mounted
+
+def apply_part(state: Dict[str, Any], tab: str, part: str, value: Any) -> None:
+    """One funnel control's value into the state (in place): a shared list, a tick list of the
+    tab's own, or a comparison kept only when it reads (an unreadable one is dropped, so its box
+    empties and says so)."""
+    if part in SHARED_PARTS:
+        state[part] = [str(x) for x in (value or [])]
+        return
+    key = f"{tab}:{part}"
+    cols = dict(state.get("cols") or {})
+    if isinstance(value, (list, tuple)):
+        if value:
+            cols[key] = [str(x) for x in value]
+        else:
+            cols.pop(key, None)
+    elif parse_compare(value) is not None:
+        cols[key] = str(value).strip()
+    else:
+        cols.pop(key, None)
+    state["cols"] = cols
+
+
+def register(app, main_tabs_id: str) -> None:
+    """The strip's search and switch and every funnel's control -> the store (every tab's, by
+    pattern, only the control touched); Clear filters -> the store and the search box; its
+    visibility; the links that filter to one trade and open a tab."""
+    @app.callback(Output(STORE_ID, "data"),
+                  Input(_cid(SEARCH_TYPE, ALL), "value"), Input(_cid(GROUP_TYPE, ALL), "value"),
+                  Input({"type": COL_TYPE, "tab": ALL, "part": ALL}, "value"),
+                  State(STORE_ID, "data"), prevent_initial_call=True)
+    def _sync(_searches, _groups, _cols, current):
+        changed = triggered_values()
+        if not changed:
             return dash.no_update
-        new = state_from_controls(searches[0], types[0] if types else [], commodities[0] if commodities else [],
-                                  trades[0] if trades else [], flags[0] if flags else [],
-                                  groups[0] if groups else GROUP_NONE)
+        new = normal(current)
+        for ident, value in changed:
+            kind = ident.get("type") if isinstance(ident, dict) else None
+            if kind == SEARCH_TYPE:
+                new["search"] = str(value or "")
+            elif kind == GROUP_TYPE:
+                new["group"] = value if value in GROUPS else GROUP_NONE
+            elif kind == COL_TYPE:
+                apply_part(new, str(ident.get("tab") or ""), str(ident.get("part") or ""), value)
+        new = normal(new)
         return dash.no_update if new == normal(current) else new
 
-    @app.callback(Output(_cid(SEARCH_TYPE, ALL), "value", allow_duplicate=True),
-                  Output(_cid(TYPE_TYPE, ALL), "value", allow_duplicate=True),
-                  Output(_cid(COMMODITY_TYPE, ALL), "value", allow_duplicate=True),
-                  Output(_cid(TRADE_TYPE, ALL), "value", allow_duplicate=True),
-                  Output(_cid(FLAGS_TYPE, ALL), "value", allow_duplicate=True),
-                  Input(_cid(CLEAR_TYPE, ALL), "n_clicks"), prevent_initial_call=True)
-    def _clear(clicks):
-        n = len(clicks or [])
+    @app.callback(Output(STORE_ID, "data", allow_duplicate=True),
+                  Output(_cid(SEARCH_TYPE, ALL), "value", allow_duplicate=True),
+                  Input(_cid(CLEAR_TYPE, ALL), "n_clicks"), State(STORE_ID, "data"),
+                  State(_cid(SEARCH_TYPE, ALL), "id"), prevent_initial_call=True)
+    def _clear(clicks, current, search_ids):
         if not any(clicks or []):
-            return [dash.no_update] * 5
-        return [""] * n, [[]] * n, [[]] * n, [[]] * n, [[]] * n
+            return dash.no_update, [dash.no_update] * len(search_ids or [])
+        return normal({"group": normal(current)["group"]}), [""] * len(search_ids or [])
 
     @app.callback(Output(_cid(CLEAR_TYPE, ALL), "style"), Input(STORE_ID, "data"),
                   State(_cid(CLEAR_TYPE, ALL), "id"))
     def _clear_shown(state, ids):
-        return [{} if is_filtered(state) else {"display": "none"} for _ in ids or []]
+        return [{} if is_filtered(state, (i or {}).get("tab")) else HIDDEN_STYLE for i in ids or []]
 
     @app.callback(Output(STORE_ID, "data", allow_duplicate=True),
                   Output(main_tabs_id, "value", allow_duplicate=True),
@@ -403,14 +610,10 @@ def register(app, main_tabs_id: str) -> None:
 
 def register_bar(app, tab: str, get_db_path: Callable[[], object],
                  options_of: Callable[[str, object], Dict[str, List[dict]]]) -> None:
-    """Render `tab`'s bar from the shared state when the tab mounts and on every as-of or data
-    change (`options_of(as_of, db_path)`: the choices present in the book); never on a filter
-    change, so the search box keeps its focus."""
+    """Render `tab`'s strip controls (search, switch, Clear filters) from the shared state when the
+    tab mounts and on every as-of or data change; never on a filter change, so the search box keeps
+    its focus. The funnels' choices are drawn with the table (`options_of` is no longer called)."""
     @app.callback(Output(bar_id(tab), "children"), Input(AS_OF_STORE_ID, "data"), Input(DATA_REVISION_ID, "data"),
                   State(STORE_ID, "data"))
-    def _bar(as_of, _rev, state):
-        try:
-            opts = options_of(as_of, get_db_path()) if as_of else {}
-        except Exception:  # noqa: BLE001 -- the bar still filters on the values set
-            opts = {}
-        return bar(tab, state, opts)
+    def _bar(_as_of, _rev, state):
+        return bar(tab, state)

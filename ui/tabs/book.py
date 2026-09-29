@@ -921,7 +921,7 @@ def _total_label(shown: Sequence[dict], all_trades: Sequence[dict], filtered: bo
     hover = _lines(f"{len(named)} trades: {n_open} open, {len(named) - n_open} closed",
                    f"with {_plural(loose, 'fill')} on no trade" if loose else "")
     if filtered:
-        return f"Filtered · {len(shown_named)} of {len(named)}", hover
+        return f"Filtered · {len(shown_named)} of {_plural(len(named), 'trade')}", hover
     return f"Book · {_plural(len(named), 'trade')}", hover
 
 
@@ -1045,23 +1045,63 @@ def next_sort(current: Optional[dict], key: str) -> Optional[dict]:
     return None
 
 
-def head(sort: Optional[dict], research: Optional[dict] = None) -> html.Thead:
-    """The column heads; z (every value research) carries the one research "i" while the research
-    history is not real (`trade_filter.research_head`)."""
+# The column filters (spreadsheet-style, the funnel in each heading; user, 2026-09-29): Trade, Type
+# and What it is (the commodity family) carry across Book, P&L and Risk; a number column holds one
+# comparison, the Book's own; Flags a tick list. Nothing above the table repeats a column's name.
+LIST_FUNNELS = {"trade": ("trade",), "type": ("type",), "what": ("commodity",)}
+NUMBER_FUNNELS = {"entry": "The level at entry, in the level's own unit.",
+                  "now": "The level now, in the level's own unit.",
+                  "z": "The z-score (research history); a trade whose z is still being computed does not show.",
+                  "today": "The level's move since the previous close, in the level's own unit.",
+                  "daily": "Today's P&L in USD.", "ltd": "The P&L since the trade opened, in USD."}
+FLAG_ANY, FLAG_RED = "any", "red"
+FLAG_OPTIONS = [{"label": "Has flags", "value": FLAG_ANY}, {"label": "Red flags", "value": FLAG_RED}]
+
+
+def _flags_funnel(state: Optional[dict]) -> html.Details:
+    value = tf.tab_filters(state, TAB).get("flags")
+    ticked = value if isinstance(value, list) else []
+    return tf.funnel(f"{TAB}:flags", tf.pop_list(tf.col_id(TAB, "flags"), "Flags", FLAG_OPTIONS, ticked, search=False),
+                     bool(ticked), tf.option_words(FLAG_OPTIONS, ticked))
+
+
+def head(sort: Optional[dict], research: Optional[dict] = None, state: Optional[dict] = None,
+         options: Optional[Dict[str, List[dict]]] = None) -> html.Thead:
+    """The column heads: each title sorts, each filterable column carries its funnel (`trade_filter.
+    funnel`); z (every value research) carries the one research "i" while the research history is
+    not real (`trade_filter.research_head`)."""
     ths = []
-    for key, title, cls, tip in COLUMNS:
-        arrow = ""
-        if (sort or {}).get("key") == key:
-            arrow = " ▼" if (sort or {}).get("dir") != "asc" else " ▲"
+    half = len(COLUMNS) // 2
+    for i, (key, title, cls, tip) in enumerate(COLUMNS):
         note = tf.research_head(research) if key == "z" and research is not None else None
-        if key in SORTABLE:
-            inner = [html.Span([title, html.Span(arrow, className="book-sort-arrow")],
-                               id={"type": SORT_TYPE, "idx": key}, n_clicks=0, className="tk-sort"), note]
-        else:
-            inner = [title, note]
-        ths.append(html.Th(inner, className=" ".join(c for c in (cls, "tk-sortable" if key in SORTABLE else "") if c)
-                           or None, title=tip))
+        pop = None
+        if key in LIST_FUNNELS:
+            pop = tf.trade_funnel(TAB, state, options or {}, LIST_FUNNELS[key], key)
+        elif key in NUMBER_FUNNELS:
+            pop = tf.number_funnel(TAB, state, key, hint=f"{NUMBER_FUNNELS[key]} {tf.NUMBER_HINT}")
+        elif key == "flags":
+            pop = _flags_funnel(state)
+        ths.append(tf.head_th(title, cls, tip, sort_id={"type": SORT_TYPE, "idx": key} if key in SORTABLE else None,
+                              arrow=tf.arrow_of(sort, key), pop=pop, right=i > half, note=note))
     return html.Thead(html.Tr(ths))
+
+
+def filter_value(data: dict, t: dict, col: str, rrows: Dict[str, dict]) -> Optional[float]:
+    """A trade's figure for a number column's filter, as the row shows it (never recomputed)."""
+    if col in ("daily", "ltd"):
+        return fill_sum(data, col, [str(i) for i in t.get("trade_ids") or []])[0]
+    if col == "z":
+        return _num((rrows.get(str(t.get("trade"))) or {}).get("z"))
+    level = display_level(data, t)
+    return _num(level.get({"entry": "entry", "now": "now", "today": "change"}.get(col, col)))
+
+
+def filter_lists(t: dict, col: str) -> List[str]:
+    """A trade's values for a tick-list filter of its own column (Flags)."""
+    if col == "flags":
+        flags = t.get("flags") or []
+        return ([FLAG_ANY] if flags else []) + ([FLAG_RED] if any(is_red(f) for f in flags) else [])
+    return []
 
 
 # --------------------------------------------------------------------------- the panel
@@ -1509,20 +1549,27 @@ def pseudo_fills(data: dict, t: dict) -> html.Table:
 
 
 # --------------------------------------------------------------------------- the table
-def visible(data: dict, state: Optional[dict]) -> List[dict]:
-    return tf.apply(data.get("trades") or [], state)
+def visible(data: dict, state: Optional[dict], risk: Optional[dict] = None) -> List[dict]:
+    """The trades the search and every column's filter keep (whole trades, never a leg)."""
+    cols = tf.tab_filters(state, TAB)
+    shown = tf.apply(data.get("trades") or [], state)
+    if not cols:
+        return shown
+    rrows = risk_rows(risk)
+    return [t for t in shown
+            if tf.keeps_cols(t, cols, lambda t, col: filter_value(data, t, col, rrows), filter_lists)]
 
 
 def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Optional[dict], opened: Sequence[str],
           folds: Optional[dict], risk: Optional[dict]) -> Tuple[html.Table, List[str]]:
     s = tf.normal(state)
-    shown = visible(data, s)
+    shown = visible(data, s, risk)
     ready = risk is not None
     rrows = risk_rows(risk)
     opened_set = set(opened or [])
     folds = folds or {}
     folded = set(folds.get("groups") or [])
-    body: List[Any] = [total_tr(data, shown, tf.is_filtered(s))]
+    body: List[Any] = [total_tr(data, shown, tf.is_filtered(s, TAB))]
     open_rows = [t for t in shown if t.get("status") == "open" or (t.get("pseudo") and t.get("status") != "closed")]
     closed_rows = [t for t in shown if t not in open_rows]
 
@@ -1567,21 +1614,22 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
         if is_open:
             for t in sorted(closed_rows, key=lambda t: closed_on(data, t), reverse=True):
                 add(t)
-    return (html.Table([head(sort, data.get("research") or {}), html.Tbody(body)], id=TABLE_ID,
+    return (html.Table([head(sort, data.get("research") or {}, s, tf.options_for(data.get("trades") or [])),
+                        html.Tbody(body)], id=TABLE_ID,
                        className="book-table book-grid tk-table"),
             [str(t.get("trade")) for t in shown])
 
 
-def headline(data: dict, state: Optional[dict]) -> html.Div:
+def headline(data: dict, state: Optional[dict], risk: Optional[dict] = None) -> html.Div:
     """One light line over the table with only what neither the header nor the table's own total row
     shows (layout wave 2026-09-29, one place per number): the header has the whole book's Daily, MTD,
     YTD, LTD and trade count; the total row, sticky under the heads, has the rows' count, Gross,
     Daily, LTD and the next date. So: Net USD and the flags always; with a filter set, the rows'
     MTD and YTD too (the header's are the whole book's)."""
     s = tf.normal(state)
-    shown = visible(data, s)
+    shown = visible(data, s, risk)
     tot = totals(data, shown)
-    filtered = tf.is_filtered(s)
+    filtered = tf.is_filtered(s, TAB)
 
     def money(k):
         v, n, r = tot[k]
@@ -1638,7 +1686,7 @@ def issue_items(data: dict, risk: Optional[dict]) -> List[Any]:
 def csv_frame(data: dict, state: Optional[dict], sort: Optional[dict], risk: Optional[dict]) -> pd.DataFrame:
     rrows = risk_rows(risk)
     rows = []
-    for t in sort_rows(data, visible(data, state), sort, rrows):
+    for t in sort_rows(data, visible(data, state, risk), sort, rrows):
         ids = [str(i) for i in t.get("trade_ids") or []]
         level = display_level(data, t)
         r = rrows.get(str(t.get("trade"))) or {}
@@ -1698,7 +1746,8 @@ def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, so
             log.exception("Book: trade risk failed for %s", as_of)
             risk = {"available": False, "reason": f"{type(exc).__name__}: {exc}", "trades": []}
         tbl, names = table(conn, data, state, sort, opened, folds, risk)
-        out.update(shown=True, headline=headline(data, state), table=tbl, names=names, risk_ready=risk is not None)
+        out.update(shown=True, headline=headline(data, state, risk), table=tbl, names=names,
+                   risk_ready=risk is not None)
         prepull = None if data.get("has_marks") else html.Div(PREPULL_TEXT, className="book-prepull")
         out["foot"] = html.Div([prepull, issues_drawer(issue_items(data, risk))], className="tk-foot")
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
@@ -1746,13 +1795,14 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     return html.Div(className="book-tab", children=[
         html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
-            tf.bar_slot(TAB),
             html.Div(id=HEADLINE_ID),
             html.Div(className="book-card book-main tk-card", children=[
                 html.Div(className="tk-strip", children=[
                     about("Trades", "One row per trade (a PBRoot name). Click a row for its legs, its level since entry "
-                                    "and its links; the first row is the total of the rows showing.",
+                                    "and its links; the first row is the total of the rows showing. Each column "
+                                    "filters from the funnel in its heading.",
                           level="span", className="tk-title"),
+                    tf.bar_slot(TAB),
                     html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="btn btn--ghost"),
                     html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="btn btn--ghost"),
                     html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",

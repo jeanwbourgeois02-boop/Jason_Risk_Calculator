@@ -1548,7 +1548,8 @@ MISSING_ABOUT = (
 MARKS_ABOUT = ("Every official mark the book uses on the date, futures, options, LME and FX together, against the "
                f"previous business day's close. Flagged: a move above {BAD_TICK_PCT:g} %, a value exactly unchanged "
                "(stale or copied), or on today's date a snap older than the stale limit. Filter by commodity or "
-               "sector, search by name, instrument or source; Download CSV gives the rows shown at full figures.")
+               "sector from the Price column's funnel, search by name, instrument or source; Download CSV gives "
+               "the rows shown at full figures.")
 REFERENCE_ABOUT = (
     "The closes the header's Daily, 5d, MTD and YTD figures difference against. A close is complete when every mark "
     "the book needed that day is on file as official; the Bloomberg backfill fills them after each pull. Trades "
@@ -1562,8 +1563,9 @@ DIAG_ABOUT = ("The Bloomberg library (everything a pull asks for), the last pull
               "the Bloomberg connection check.")
 
 MARKS_SECTION_ID = "market-data-marks"
-MARKS_TOOLS_ID = "market-data-marks-tools"
-MARKS_FILTER_ID = "market-data-marks-filter"
+MARKS_TOOLS_ID = "market-data-marks-tools"      # the strip's search (hidden with no price)
+MARKS_FILTER_ID = "market-data-marks-filter"    # no longer a control: the commodity / sector list is the Price funnel
+MARKS_FSTORE_ID = "market-data-marks-fstore"    # session: the headings' filters (`data_checks.normal_marks_filter`)
 MARKS_SEARCH_ID = "market-data-marks-search"
 MARKS_META_ID = "market-data-marks-meta"
 MARKS_EMPTY_ID = "market-data-marks-empty"
@@ -1732,7 +1734,8 @@ PROBLEMS_META_ID = "market-data-problems-meta"
 PROBLEMS_CSV_ID = "market-data-problems-csv"
 PROBLEMS_DOWNLOAD_ID = "market-data-problems-download"
 PROBLEM_SORT_TYPE = "data-problem-sort"
-MARKS_STATUS_ID = "market-data-marks-status"
+MARKS_STATUS_ID = "market-data-marks-status"   # retired with the filter bar (2026-09-29): Status is a funnel
+MARKS_CLEAR_ID = "market-data-marks-clear"
 MARKS_SORT_ID = "market-data-marks-sort"
 MARK_SORT_TYPE = "data-mark-sort"
 
@@ -2125,25 +2128,15 @@ def marks_filter_options(rows: List[dict]) -> List[dict]:
     return out
 
 
-def _marks_controls() -> list:
-    """The marks check's bar: search, status, sector / commodity; each kept for the session."""
-    return [
-        html.Div(className="blotter-filter", children=[
-            html.Label("Search"),
-            dcc.Input(id=MARKS_SEARCH_ID, type="text", value="", debounce=True, persistence=True,
-                      persistence_type="session", placeholder="Search price, trade or source",
-                      className="blotter-filter-search")]),
-        html.Div(className="blotter-filter", style={"minWidth": "170px"}, children=[
-            html.Label("Status"),
-            dcc.Dropdown(id=MARKS_STATUS_ID, value=[], multi=True, placeholder="All", persistence=True,
-                         persistence_type="session", className="blotter-filter-dropdown",
-                         options=[{"label": "Missing", "value": "MISSING"}, {"label": "Check", "value": "CHECK"},
-                                  {"label": "OK", "value": "OK"}])]),
-        html.Div(className="blotter-filter", style={"minWidth": "200px"}, children=[
-            html.Label("Commodity / sector"),
-            dcc.Dropdown(id=MARKS_FILTER_ID, options=[], value=[], multi=True, placeholder="All", persistence=True,
-                         persistence_type="session", className="blotter-filter-dropdown")]),
-    ]
+def _marks_search() -> html.Div:
+    """The marks check's search, in its strip (kept for the session); every other filter is a
+    column's funnel (`data_checks.marks_head`)."""
+    return html.Div(className="tf-search-wrap",
+                    title="Free text over the price's name, instrument, source, commodity and trades; each column "
+                          "filters from the funnel in its heading", children=[
+        dcc.Input(id=MARKS_SEARCH_ID, type="text", value="", debounce=True, persistence=True,
+                  persistence_type="session", placeholder="Search price, trade or source",
+                  className="blotter-filter-search tf-search", autoComplete="off")])
 
 
 def build_layout(default_date: Optional[str] = None) -> html.Div:
@@ -2167,14 +2160,17 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         ]),
         kit.card(id=MARKS_SECTION_ID, children=[
             kit.strip([kit.strip_title(SUSPECT_TITLE, MARKS_ABOUT),
+                       html.Div(id=MARKS_TOOLS_ID, className="tf-bar-slot", style=_HIDDEN, children=_marks_search()),
+                       html.Button("Clear filters", id=MARKS_CLEAR_ID, n_clicks=0, className="book-link-button tf-clear",
+                                   style=_HIDDEN, title="Every column's filter back to All"),
                        html.Span(id=MARKS_META_ID, className="book-section-meta"),
                        html.Button("Download CSV", id=MARKS_CSV_ID, n_clicks=0, className="btn btn--ghost",
                                    title="The prices showing, every column, at full figures"),
                        dcc.Download(id=MARKS_DOWNLOAD_ID)]),
             html.Div(id=MARKS_EMPTY_ID),
-            html.Div(id=MARKS_TOOLS_ID, className="blotter-filter-bar", style=_HIDDEN, children=_marks_controls()),
             html.Div(id=MARKS_TABLE_WRAP_ID, className=kit.SLOT_CLASS),
             dcc.Store(id=MARKS_STORE_ID, data=[]),
+            dcc.Store(id=MARKS_FSTORE_ID, storage_type="session"),
             dcc.Store(id=MARKS_SORT_ID, storage_type="session"),
         ]),
         html.Div(id=PAST_CLOSES_PANEL_ID, className="data-block"),
@@ -2207,7 +2203,6 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(PROBLEMS_STORE_ID, "data"),
         Output(MISSING_PANEL_ID, "style"),
         Output(MARKS_STORE_ID, "data"),
-        Output(MARKS_FILTER_ID, "options"),
         Output(MARKS_EMPTY_ID, "children"),
         Output(MARKS_TOOLS_ID, "style"),
         Output(PAST_CLOSES_PANEL_ID, "children"),
@@ -2222,8 +2217,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         # marks check's rows stay on the server (`marks_token`): 2026-09-29, performance.
         out = list(render(as_of_date, get_db_path(), diag=False))
         out[3] = marks_token(as_of_date, len(out[3] or []))
-        del out[9]
-        return tuple(x if isinstance(x, (list, dict)) and i in (1, 2, 3, 4, 6) else compact(x)
+        del out[9]          # the Diagnostics body: its own callback
+        del out[4]          # the commodity / sector choices: the Price funnel, drawn with the table
+        return tuple(x if isinstance(x, (list, dict)) and i in (1, 2, 3, 5) else compact(x)
                      for i, x in enumerate(out))
 
     @app.callback(Output(DIAG_BODY_ID, "children"), Input(DIAG_SUMMARY_ID, "n_clicks"),
@@ -2257,15 +2253,44 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         return compact(data_checks.problems_table(rows, sort, PROBLEM_SORT_TYPE)), meta
 
     @app.callback(Output(MARKS_TABLE_WRAP_ID, "children"), Output(MARKS_META_ID, "children"),
-                  Input(MARKS_STORE_ID, "data"), Input(MARKS_STATUS_ID, "value"), Input(MARKS_FILTER_ID, "value"),
+                  Input(MARKS_STORE_ID, "data"), Input(MARKS_FSTORE_ID, "data"),
                   Input(MARKS_SEARCH_ID, "value"), Input(MARKS_SORT_ID, "data"))
-    def _marks(token, statuses, groups, search, sort):
+    def _marks(token, fstate, search, sort):
         rows = _token_rows(token, get_db_path())
         if not rows:
             return html.Div(), ""
-        shown = data_checks.filter_marks(rows, statuses, groups, search)
+        f = data_checks.normal_marks_filter(fstate)
+        shown = data_checks.filter_marks(rows, f["status"], f["group"], search, f)
+        options = {"group": marks_filter_options(rows), "source": data_checks.source_options(rows)}
         # the counts are the table's own total row ("All prices · 45 · 2 missing"): said once
-        return compact(data_checks.marks_table(shown, sort, MARK_SORT_TYPE, len(rows))), ""
+        return compact(data_checks.marks_table(shown, sort, MARK_SORT_TYPE, len(rows), f, options)), ""
+
+    @app.callback(Output(MARKS_FSTORE_ID, "data"),
+                  Input({"type": data_checks.MARK_COL_TYPE, "part": ALL}, "value"),
+                  State(MARKS_FSTORE_ID, "data"), prevent_initial_call=True)
+    def _marks_filter(_values, current):
+        """One heading's control into the store: only the control touched (a table's re-render
+        inserts the whole set, which writes nothing)."""
+        from ui.tabs.trade_filter import parse_compare, triggered_values
+        cur = data_checks.normal_marks_filter(current)
+        new = dict(cur)
+        for ident, value in triggered_values():
+            part = str((ident or {}).get("part") or "") if isinstance(ident, dict) else ""
+            if part in data_checks.MARK_LIST_PARTS:
+                new[part] = [str(x) for x in value or []]
+            elif part in data_checks.MARK_NUMBER_PARTS:
+                new[part] = str(value or "").strip() if parse_compare(value) is not None else ""
+        new = data_checks.normal_marks_filter(new)
+        return dash.no_update if new == cur else new
+
+    @app.callback(Output(MARKS_FSTORE_ID, "data", allow_duplicate=True), Input(MARKS_CLEAR_ID, "n_clicks"),
+                  prevent_initial_call=True)
+    def _marks_clear(clicks):
+        return dict(data_checks.MARK_FILTER_DEFAULT) if clicks else dash.no_update
+
+    @app.callback(Output(MARKS_CLEAR_ID, "style"), Input(MARKS_FSTORE_ID, "data"))
+    def _marks_clear_shown(fstate):
+        return {} if data_checks.marks_filtered(fstate) else _HIDDEN
 
     def _sorter(store_id: str, sort_type: str) -> None:
         @app.callback(Output(store_id, "data"), Input({"type": sort_type, "idx": ALL}, "n_clicks"),
@@ -2280,14 +2305,16 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     _sorter(MARKS_SORT_ID, MARK_SORT_TYPE)
 
     @app.callback(Output(MARKS_DOWNLOAD_ID, "data"), Input(MARKS_CSV_ID, "n_clicks"),
-                  State(MARKS_STORE_ID, "data"), State(MARKS_STATUS_ID, "value"), State(MARKS_FILTER_ID, "value"),
+                  State(MARKS_STORE_ID, "data"), State(MARKS_FSTORE_ID, "data"),
                   State(MARKS_SEARCH_ID, "value"), State(MARKS_SORT_ID, "data"), State(HEADER_AS_OF_STORE_ID, "data"),
                   prevent_initial_call=True)
-    def _marks_csv(n_clicks, token, statuses, groups, search, sort, as_of_date):
+    def _marks_csv(n_clicks, token, fstate, search, sort, as_of_date):
         if not n_clicks:
             return None
         rows = _token_rows(token, get_db_path())
-        shown = kit.sort_records(data_checks.filter_marks(rows, statuses, groups, search), sort, data_checks.MARK_SORT)
+        f = data_checks.normal_marks_filter(fstate)
+        shown = kit.sort_records(data_checks.filter_marks(rows, f["status"], f["group"], search, f), sort,
+                                 data_checks.MARK_SORT)
         cols = data_checks.MARK_CSV_COLUMNS
         frame = pd.DataFrame([{k: r.get(k) for k in cols} for r in shown], columns=cols)
         return dcc.send_data_frame(frame.to_csv, f"marks-check-{as_of_date or 'today'}.csv", index=False)

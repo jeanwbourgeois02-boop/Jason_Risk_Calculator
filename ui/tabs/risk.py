@@ -263,7 +263,9 @@ def view(data: dict, risk: Optional[dict], state: Optional[dict]) -> dict:
     """The rows and the folds' context under the filter."""
     rows = rows_of(data, risk)
     s = tf.normal(state)
-    shown = [(t, r) for t, r in rows if tf.keeps(t, s)]
+    cols = tf.tab_filters(s, TAB)
+    shown = [(t, r) for t, r in rows if tf.keeps(t, s)
+             and (not cols or tf.keeps_cols((t, r), cols, lambda item, col: filter_value(data, item[0], item[1], col)))]
     name_of_fill: Dict[str, str] = {}
     for t in (data.get("trade_book") or {}).get("trades") or []:
         for tid in t.get("trade_ids") or []:
@@ -273,7 +275,7 @@ def view(data: dict, risk: Optional[dict], state: Optional[dict]) -> dict:
             name_of_fill.setdefault(str(tid), str(t.get("trade")))
     return {"as_of": data["as_of"], "roots": data.get("roots") or {}, "curve": data.get("curve") or {},
             "rows": rows, "shown_rows": shown, "shown": [t for t, _r in shown],
-            "shown_names": {str(t.get("trade")) for t, _r in shown}, "filtered": tf.is_filtered(s),
+            "shown_names": {str(t.get("trade")) for t, _r in shown}, "filtered": tf.is_filtered(s, TAB),
             "name_of_fill": name_of_fill, "state": s}
 
 
@@ -575,7 +577,8 @@ def _var_td(sub: Optional[dict], ready: bool, key: str = "daily_risk_usd") -> ht
 def total_tr(rows: Sequence[tuple], all_rows: Sequence[tuple], sub: Optional[dict], ready: bool, filtered: bool) -> html.Tr:
     named = [t for t, _r in all_rows if not t.get("pseudo")]
     shown_named = [t for t, _r in rows if not t.get("pseudo")]
-    label = (f"Filtered · {len(shown_named)} of {len(named)} open" if filtered
+    label = (f"Filtered · {len(shown_named)} of {len(named)} open {'trade' if len(named) == 1 else 'trades'}"
+             if filtered
              else f"Book · {len(named)} open {'trade' if len(named) == 1 else 'trades'}")
     s = _sums(rows)
     return html.Tr([html.Td(label, className="l"), html.Td(""), _var_td(sub, ready),
@@ -592,20 +595,47 @@ def group_tr(label: str, rows: Sequence[tuple], sub: Optional[dict], ready: bool
                     _sum_td(s["leftover"]), _sum_td(s["fx"]), html.Td("")], className="tk-group")
 
 
-def head(sort: Optional[dict], research: dict) -> html.Thead:
+# The column filters (the funnel in each heading, user 2026-09-29): Trade holds the trade names and
+# the commodity families, Type the types (both carried across Book, P&L and Risk); each figure one
+# comparison, this tab's own. Share and Hedge % compare in percent ("> 10" = above 10 %).
+LIST_FUNNELS = {"trade": ("trade", "commodity"), "type": ("type",)}
+NUMBER_FUNNELS = {"risk": "The trade's daily risk in USD.", "share": "The share of the book's VaR, in percent.",
+                  "hedge": "The hedge %, in percent.", "leftover": "USD per 1 % move.",
+                  "fx": "The China legs' unhedged USD.", "exit": "Days to exit."}
+
+
+def filter_value(data: dict, t: dict, r: Optional[dict], col: str) -> Optional[float]:
+    """A trade's figure for a number column's filter, as its cell shows it (never recomputed)."""
+    if col == "risk":
+        return _num((r or {}).get("daily_risk_usd"))
+    if col == "share":
+        v = _num((r or {}).get("share_of_book"))
+        return None if v is None else v * 100.0
+    if col == "hedge":
+        return _num((r or {}).get("hedge_pct"))
+    if col == "leftover":
+        return leftover_of(t)[0]
+    if col == "fx":
+        return fx_unhedged_of(t)[0]
+    if col == "exit":
+        return _num((liq_of(data, r) or {}).get("days_to_exit"))
+    return None
+
+
+def head(sort: Optional[dict], research: dict, state: Optional[dict] = None,
+         options: Optional[Dict[str, List[dict]]] = None) -> html.Thead:
     ths = []
-    for key, title, cls, tip, sortable, from_history in COLUMNS:
+    half = len(COLUMNS) // 2
+    for i, (key, title, cls, tip, sortable, from_history) in enumerate(COLUMNS):
         # one "i" per research column, never a badge per heading or cell (layout wave 2)
         mark = tf.research_head(research) if from_history else None
-        arrow = ""
-        if (sort or {}).get("key") == key:
-            arrow = " ▼" if (sort or {}).get("dir") != "asc" else " ▲"
-        inner: Any = [title, html.Span(arrow, className="book-sort-arrow")]
-        if sortable:
-            inner = html.Span(inner, id={"type": SORT_TYPE, "idx": key}, n_clicks=0, className="tk-sort")
-        kids = [inner, mark] if mark is not None else [inner]
-        ths.append(html.Th(kids, className=" ".join(c for c in (cls, "tk-sortable" if sortable else "") if c) or None,
-                           title=plain_words(tip)))
+        pop = None
+        if key in LIST_FUNNELS:
+            pop = tf.trade_funnel(TAB, state, options or {}, LIST_FUNNELS[key], key)
+        elif key in NUMBER_FUNNELS:
+            pop = tf.number_funnel(TAB, state, key, hint=f"{NUMBER_FUNNELS[key]} {tf.NUMBER_HINT}")
+        ths.append(tf.head_th(title, cls, tip, sort_id={"type": SORT_TYPE, "idx": key} if sortable else None,
+                              arrow=tf.arrow_of(sort, key), pop=pop, right=i > half, note=mark))
     return html.Thead(html.Tr(ths))
 
 
@@ -769,7 +799,8 @@ def table(conn: sqlite3.Connection, data: dict, v: dict, risk: Optional[dict], s
             body.append(group_tr(label, rows, gsub, ready))
             for t, r in sort_rows(data, rows, sort):
                 add(t, r)
-    return (html.Table([head(sort, data.get("research") or {}), html.Tbody(body)], id=TABLE_ID,
+    options = tf.options_for((data.get("trade_book") or {}).get("trades") or [])
+    return (html.Table([head(sort, data.get("research") or {}, v["state"], options), html.Tbody(body)], id=TABLE_ID,
                        className="book-table book-grid tk-table risk-trade-table"),
             [str(t.get("trade")) for t, _r in shown])
 
@@ -1070,7 +1101,6 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     return html.Div(className="risk-tab", children=[
         html.Div(id=BODY_ID, children=[message_box("Loading the risk figures...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
-            tf.bar_slot(TAB),
             html.Div(id=HEADLINE_ID),
             html.Div(className="book-card book-main tk-card", children=[
                 html.Div(className="tk-strip", children=[
@@ -1079,6 +1109,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
                                            "\"i\". Click a row for its legs. The first row is the rows showing "
                                            "together: their daily risk recomputed, never added.", level="span",
                           className="tk-title"),
+                    tf.bar_slot(TAB),
                     html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="btn btn--ghost"),
                     html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="btn btn--ghost"),
                     html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",

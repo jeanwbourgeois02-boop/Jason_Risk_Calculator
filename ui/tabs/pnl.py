@@ -397,11 +397,30 @@ def month_total(b: dict, ids: Sequence[str]) -> Optional[float]:
     return float(sub["pnl_usd"].sum()) if not sub.empty else None
 
 
+def _filter_value(b: dict, p: dict, t: dict, col: str) -> Optional[float]:
+    """A trade's figure for a number column's filter: the period's part as the row shows it."""
+    ids = fills_of([t])
+    if col == "mtotal":
+        return month_total(b, ids)
+    return part_sum(p, ids, col)[0]
+
+
+def shown_trades(b: dict, p: dict, state: Optional[dict]) -> List[dict]:
+    """The trades the search and every column's filter keep (whole trades; a number column tests
+    each trade's own figure for the period, whatever the slice)."""
+    s = tf.normal(state)
+    shown = tf.apply(b.get("trades") or [], s)
+    cols = tf.tab_filters(s, TAB)
+    if cols:
+        shown = [t for t in shown if tf.keeps_cols(t, cols, lambda t, col: _filter_value(b, p, t, col))]
+    return shown
+
+
 def slices(b: dict, p: dict, state: Optional[dict], mode: str = MODE_TOTAL) -> List[Tuple[str, List[dict]]]:
     """[(slice value, its trades)] of the rows showing, sorted by the size of the period's P&L (By
     month: of the months' total)."""
     s = tf.normal(state)
-    shown = tf.apply(b.get("trades") or [], s)
+    shown = shown_trades(b, p, s)
     by: Dict[str, List[dict]] = {}
     for t in shown:
         by.setdefault(_slice_of(t, s["group"]), []).append(t)
@@ -485,10 +504,33 @@ COLUMN_TIPS = {"total": "The period's P&L in USD: each fill's change by the head
                "mtotal": "The row's months added up.", "type": "The trade's type by rule, as on the Book."}
 
 
-def head(cols: Sequence[Tuple[str, str, str]]) -> html.Thead:
+# The first column's funnel holds the lists carried across Book, P&L and Risk, its own first: by
+# trade, the trade names and the commodity families (the Type column holds the types); sliced by
+# type or commodity, that list then the other two, so every carried filter stays in reach.
+NAME_PARTS = {"Trade": ("trade", "commodity"), "Type": ("type", "trade", "commodity"),
+              "Commodity": ("commodity", "trade", "type")}
+NUMBER_KEYS = {"total", "open", "mtotal", *(k for k, _t, _h in COMPONENTS)}
+NUMBER_HINT = "Each trade's own figure for the period, in USD."
+
+
+def head(cols: Sequence[Tuple[str, str, str]], state: Optional[dict] = None,
+         options: Optional[Dict[str, List[dict]]] = None) -> html.Thead:
+    """The column heads, each with its funnel: the text columns the lists carried across the trade
+    tabs, the figures one comparison (this tab's own)."""
     tips = {**COLUMN_TIPS, **{k: f"{h} {BLANK_WORDS}" for k, _t, h in COMPONENTS},
             **{k: f"{h} {BLANK_WORDS}" for k, _t, h in LTD_PARTS}}
-    return html.Thead(html.Tr([html.Th(title, className=cls or None, title=tips.get(key)) for key, title, cls in cols]))
+    ths = []
+    half = len(cols) // 2
+    for i, (key, title, cls) in enumerate(cols):
+        pop = None
+        if key == "name":
+            pop = tf.trade_funnel(TAB, state, options or {}, NAME_PARTS.get(title, ("trade",)), "name")
+        elif key == "type":
+            pop = tf.trade_funnel(TAB, state, options or {}, ("type",), "type")
+        elif key in NUMBER_KEYS:
+            pop = tf.number_funnel(TAB, state, key, hint=f"{NUMBER_HINT} {tf.NUMBER_HINT}")
+        ths.append(tf.head_th(title, cls, tips.get(key) or "", pop=pop, right=i > half and i > 0))
+    return html.Thead(html.Tr(ths))
 
 
 def _month_cells(b: dict, ids: Sequence[str], months: Sequence[str], full: bool = False,
@@ -562,9 +604,10 @@ def table(b: dict, p: dict, state: Optional[dict], mode: str, opened: Sequence[s
     shown = [t for _v, ts in items for t in ts]
     ids_all = fills_of(shown)
     opened = set(opened or [])
-    filtered = tf.is_filtered(s)
+    filtered = tf.is_filtered(s, TAB)
     named = [t for t in b.get("trades") or [] if not t.get("pseudo")]
-    label = (f"Filtered · {len([t for t in shown if not t.get('pseudo')])} of {len(named)}" if filtered
+    label = (f"Filtered · {len([t for t in shown if not t.get('pseudo')])} of {_plural(len(named), 'trade')}"
+             if filtered
              else f"Book · {_plural(len(named), 'trade')}")
     total_first = [html.Td(html.Span(label, title=("equals the top bar's figure for the period" if not filtered
                                                    and p.get("choice") in ("today", "mtd", "all") else None)),
@@ -607,7 +650,8 @@ def table(b: dict, p: dict, state: Optional[dict], mode: str, opened: Sequence[s
                                 n_clicks=0, className="tk-row tk-row--sub" + (" tk-row--open" if t_open else "")))
             if t_open:
                 body.extend(leg_rows(p, b, t, cols, mode, months))
-    return html.Table([head(cols), html.Tbody(body)], id=TABLE_ID, className="book-table book-grid tk-table")
+    return html.Table([head(cols, s, tf.options_for(b.get("trades") or [])), html.Tbody(body)], id=TABLE_ID,
+                      className="book-table book-grid tk-table")
 
 
 # --------------------------------------------------------------------------- the headline
@@ -616,7 +660,7 @@ def headline(b: dict, p: dict, state: Optional[dict]) -> Optional[html.Div]:
     close the period is measured from, and the rows' single best and worst trade. The count, the
     period's P&L and its split are the total row's; None when there is nothing to say."""
     s = tf.normal(state)
-    shown = tf.apply(b.get("trades") or [], s)
+    shown = shown_trades(b, p, s)
     as_of = b.get("as_of")
     ref = p.get("ref_used") or p.get("start_ref")
     items: List[Any] = []
@@ -999,7 +1043,6 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     return html.Div(className="pnl-tab", children=[
         html.Div(id=BODY_ID, children=[message_box("Loading the P&L...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
-            tf.bar_slot(TAB),
             html.Div(className="tk-strip tk-strip--controls", children=[
                 html.Span("Period", className="tk-k"),
                 _switch(PERIOD_ID, PERIOD_CHOICES, DEFAULT_PERIOD),
@@ -1008,6 +1051,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
                                         persistence_type="session", clearable=True, className="tk-range")]),
                 html.Span("Table", className="tk-k"),
                 _switch(MODE_ID, ((MODE_TOTAL, "Total"), (MODE_MONTH, "By month")), MODE_TOTAL),
+                tf.bar_slot(TAB),
                 html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
                             title="Every leg of the rows showing with its split (and months), at full figures"),
                 dcc.Download(id=DOWNLOAD_ID)]),

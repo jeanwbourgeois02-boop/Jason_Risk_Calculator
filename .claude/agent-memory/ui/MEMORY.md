@@ -43,3 +43,4 @@
 - [Layout wave 2: P&L 2026-09-29](layout-wave2-pnl-2026-09-29.md) — % of total cut, blank split parts, total/group badge vs row_info, lean headline, chart empty frame, kv track record
 - [Layout wave 2 Blotter 2026-09-29](layout-wave2-blotter-2026-09-29.md) — upload line + rejects card fold, Size column, Options cut to 3 cards + 14-col grid, no strip; stale tests
 - [Last screens pass 2026-09-29](last-screens-pass-2026-09-29.md) — Data fold titles sentence case, tables span cards, Blotter Size (fin_type lots, oz), leg_name strikes
+- [Column funnels 2026-09-29](column-funnels-2026-09-29.md) — filters only as heading funnels (trade_filter kit), no bar above tables; triggered-only sync; JS re-open; ui_check names kept
