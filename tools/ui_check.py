@@ -1195,6 +1195,35 @@ def _settle(page, poll_ids: List[str], budget: float = SETTLE_SECONDS) -> bool:
     return False
 
 
+# The store a prop lives in, read from the Dash layout by id (None when the id is not on the page).
+_PROP_JS = """([id, prop]) => {
+  const st = window.store && window.store.getState();
+  const path = st && st.paths && st.paths.strs && st.paths.strs[id];
+  if (!path) return null;
+  let node = st.layout;
+  for (const k of path) { node = node == null ? node : node[k]; }
+  return node && node.props ? node.props[prop] : null;
+}"""
+
+
+def _pick_as_of(page, poll_ids: List[str]) -> bool:
+    """Set the header's picker to AS_OF the way a user pick does (Dash's own `set_props` on
+    `header.DATE_PICKER_ID`, which `_follow_pickers` turns into the as-of store and a pick the day
+    roll keeps), so the shots show the figures the text check reads; True once the store holds it."""
+    from ui.tabs import header
+    page.wait_for_function("() => window.dash_clientside && window.dash_clientside.set_props",
+                           timeout=SETTLE_SECONDS * 1000)
+    page.evaluate("([id, day]) => window.dash_clientside.set_props(id, {date: day})",
+                  [header.DATE_PICKER_ID, AS_OF])
+    try:
+        page.wait_for_function(f"() => ({_PROP_JS})([{header.AS_OF_STORE_ID!r}, 'data']) === {AS_OF!r}",
+                               timeout=SETTLE_SECONDS * 1000)
+    except Exception:  # noqa: BLE001 -- playwright's TimeoutError: the run says so
+        return False
+    _settle(page, poll_ids)
+    return True
+
+
 def _save(page, name: str) -> str:
     """A full-page PNG written whole (a temp file renamed over the old one), so a run beside this one
     never reads half a file."""
@@ -1257,7 +1286,7 @@ def _open_shot(page, tab: str, poll_ids: List[str]) -> str:
 
 def take_shots(app, tabs: List[str], opened: bool = False) -> str:
     """Per tab under reports/ui_shots/, 1680 px wide, through playwright's own headless Chromium: the
-    page as a trader sees it (`<tab>.png`, taken once Dash is idle and the late figures have landed);
+    page as a trader sees it at the check's AS_OF, picked in the header (`<tab>.png`, taken once Dash is idle and the late figures have landed);
     with `opened` also the first row's panel opened (`<tab>_panel.png`) and every fold opened
     (`<tab>_open.png`), which adds minutes. The app
     is served in this process on a port of its own (never 8050) and stopped after. Nothing is
@@ -1276,6 +1305,7 @@ def take_shots(app, tabs: List[str], opened: bool = False) -> str:
     written: List[str] = []
     unsettled: List[str] = []
     poll_ids = _late_poll_ids()
+    picked = False
     try:
         with sync_playwright() as pw:
             try:
@@ -1286,6 +1316,7 @@ def take_shots(app, tabs: List[str], opened: bool = False) -> str:
             try:
                 page = browser.new_page(viewport={"width": SHOT_WIDTH, "height": 1000})
                 page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+                picked = _pick_as_of(page, poll_ids)
                 SHOT_DIR.mkdir(parents=True, exist_ok=True)
                 for tab in tabs:
                     page.locator(f"#main-tabs >> text={SHOT_LABELS[tab]}").first.click()
@@ -1304,7 +1335,8 @@ def take_shots(app, tabs: List[str], opened: bool = False) -> str:
         server.shutdown()
         server.server_close()
         thread.join(timeout=10)
-    note = (f"; still changing after {SETTLE_SECONDS:.0f} s, taken anyway: {', '.join(unsettled)}"
+    note = "" if picked else f"; the as-of picker did not take {AS_OF}: shots are at today"
+    note += (f"; still changing after {SETTLE_SECONDS:.0f} s, taken anyway: {', '.join(unsettled)}"
             if unsettled else "")
     return f"screenshots written to {SHOT_DIR.relative_to(ROOT)}: {', '.join(written)}{note}"
 
