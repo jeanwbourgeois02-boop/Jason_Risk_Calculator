@@ -259,7 +259,7 @@ def bar(tab: str, state: Optional[dict], options: Optional[Dict[str, List[dict]]
         html.Div(className="blotter-filter tf-filter", children=[
             html.Label(about("Search", FILTER_ABOUT, level="span")),
             dcc.Input(id=_cid(SEARCH_TYPE, tab), type="text", value=s["search"], debounce=True,
-                      placeholder="Search trade, contract, symbol", className="blotter-filter-search")]),
+                      placeholder="Trade, contract or symbol", className="blotter-filter-search tf-search")]),
         pick("type", "Type", 170),
         pick("commodity", "Commodity", 170),
         pick("trade", "Trade", 180),
@@ -310,6 +310,18 @@ def research_mark(source: Optional[Dict[str, str]] = None):
                   src.get("note") or "the research history's provider is not known", "marker--small")
 
 
+def research_head(source: Optional[Dict[str, str]] = None):
+    """The one small "i" for the heading of a column whose every value is research (z, percentile,
+    carry, hedge %, roll-down) while the research history is not real, its sentence on hover, or
+    None when it is real (layout wave, 2026-09-29: one mark per column, never a badge per cell)."""
+    from ui.tabs.formatting import head_info
+    src = source if source is not None else research_source()
+    if src.get("kind") == "real":
+        return None
+    head = "Research history: mock data" if src.get("kind") == "mock" else "Research history: not verified as real"
+    return head_info([head, src.get("note") or "the research history's provider is not known"])
+
+
 def research_words(source: Optional[Dict[str, str]] = None) -> str:
     """The same as a hover line ('' when real)."""
     src = source if source is not None else research_source()
@@ -318,8 +330,10 @@ def research_words(source: Optional[Dict[str, str]] = None) -> str:
 
 # --------------------------------------------------------------------------- the headline
 def headline(items: Sequence[Any]) -> html.Div:
-    """The headline between the bar and the table: (label, value, hover) items, a value being text
-    or a component; None items are left out."""
+    """The headline between the bar and the table: ONE light line of (label, value, hover) items
+    ("Net USD −34.4k · Flags 9 · 2 red"), a value being text or a component; None items are left
+    out. It carries only what neither the header nor the table's own total row shows (one place per
+    number, layout wave 2026-09-29); it is visibly lighter than the header."""
     kids = []
     for item in items:
         if item is None:

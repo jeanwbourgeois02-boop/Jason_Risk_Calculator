@@ -72,13 +72,14 @@ def _drawers(node):
 
 
 def _drawer_items(drawer) -> int:
-    """The items a drawer lists: its `html.Li` rows, each run of plain rows drawn as one static
-    Markdown block (`formatting.static_runs`, the performance pass of 2026-09-29) counted by its
-    `<li>` elements."""
+    """The items a drawer lists: the rows of its table's body (a table since the layout wave of
+    2026-09-29), each run of plain rows drawn as one static Markdown block
+    (`formatting.static_runs`) counted by its `<tr>` elements."""
+    body = next(c for c in drawer.children[1].children if isinstance(c, html.Tbody))
     n = 0
-    for child in drawer.children[1].children:
+    for child in body.children:
         if isinstance(child, dash.dcc.Markdown):
-            n += len(re.findall(r"<li[\s>]", str(child.children)))
+            n += len(re.findall(r"<tr[\s>]", str(child.children)))
         else:
             n += 1
     return n

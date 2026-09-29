@@ -18,7 +18,7 @@ import datetime as dt
 import json
 import math
 import re
-from typing import Iterable, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import pandas as pd
 from dash import html
@@ -60,6 +60,19 @@ def cap_lines(text, sep: str = "\n"):
     if not isinstance(text, str) or sep not in text:
         return cap(text)
     return sep.join(cap(line) for line in text.split(sep))
+
+
+_PART_SEP = re.compile(r"( · |: )")
+
+
+def cap_parts(text):
+    """`cap` on the text and on every part after " · " or ": " ("Contract not recognised: Futures
+    symbol ...", "CORN1 · Fill 910000032"): a label and its sentence, both capitalised. For the
+    drawer's reasons and the flag lines (engine sentences chained with colons); a figure's text is
+    never passed here."""
+    if not isinstance(text, str) or not text:
+        return text
+    return "".join(cap(p) if i % 2 == 0 else p for i, p in enumerate(_PART_SEP.split(text)))
 
 
 def tidy(tree):
@@ -513,34 +526,124 @@ def static_block_of(rows: list, className: Optional[str] = None):
                         className=" ".join(c for c in ("static-block", className) if c))
 
 
+# The kind of figure a reason is about, when a tab's label opens with it ("DAILY 910000032",
+# "LTD COPAR1"): shown in the drawer's small first column, in the header's own words.
+ISSUE_KINDS = {"DAILY": "Daily", "5D": "5d", "MTD": "MTD", "YTD": "YTD", "LTD": "LTD"}
+
+
+def _issue_parts(item) -> Optional[tuple]:
+    """(kind, where, reason) of one drawer item; None for an empty one. `reason` is text or a
+    component shown as it is."""
+    if item is None or (isinstance(item, str) and not item.strip()):
+        return None
+    if isinstance(item, tuple) and len(item) == 3:
+        kind, where, sentence = (("" if x is None else x) for x in item)
+    elif isinstance(item, tuple) and len(item) == 2:
+        label, sentence = ("" if x is None else x for x in item)
+        label = str(label).strip()
+        first, _sp, rest = label.partition(" ")
+        if first.upper() in ISSUE_KINDS and rest.strip():
+            kind, where = ISSUE_KINDS[first.upper()], rest.strip()
+        else:
+            kind, where = "", label
+    elif isinstance(item, str):
+        kind, where, sentence = "", "", item
+    else:
+        return "", "", item
+    if not str(where).strip() and not (str(sentence).strip() if isinstance(sentence, str) else sentence):
+        return None
+    if isinstance(sentence, str):
+        sentence = cap_parts(plain_ids(plain_words(sentence)))
+    return str(kind), str(where), sentence
+
+
 def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issues", open: bool = False,
                   id: Optional[str] = None):
     """The tab's one collapsed drawer of reasons: an `html.Details` whose summary reads
-    "Data issues (N)" and whose body lists the items compactly. An item is a sentence, a
-    (label, sentence) pair (label in bold, e.g. the trade id or contract), or a Dash
-    component shown as it is; empty items are dropped. Returns None when nothing is left,
-    so a tab with no issues shows no drawer."""
-    rows = []
+    "Data issues (N)" and whose body is a compact table, one row per reason (layout wave,
+    2026-09-29: a table, never a bulleted list). An item is:
+      - a sentence: one row, the reason alone;
+      - a (where, sentence) pair: the trade, contract or section it is about, then the reason; a
+        `where` that opens with a period ("DAILY 910000032", "LTD COPAR1") puts the period in the
+        small Kind column ("Daily", "LTD") and the rest under Where;
+      - a (kind, where, sentence) triple: the three columns as given ("Research", "", "...");
+      - a Dash component: one row, shown as it is.
+    The same reason about the same place under two kinds is one row ("Daily, LTD"). Only the
+    columns some row fills are drawn. Plain names on screen (`plain_ids`), the id on hover; every
+    sentence capitalised. Returns None when nothing is left, so a tab with no issues shows no
+    drawer; N counts the rows."""
+    parts: List[list] = []
+    seen: dict = {}
     for item in items or ():
-        if item is None or (isinstance(item, str) and not item.strip()):
+        got = _issue_parts(item)
+        if got is None:
             continue
-        if isinstance(item, tuple) and len(item) == 2:
-            label, sentence = item
-            if not label and not sentence:
-                continue
-            rows.append(html.Li([html.Span(cap(plain_ids(str(label))), className="issue-label", title=str(label)
-                                           if plain_ids(str(label)) != str(label) else None),
-                                 " ", plain_ids(plain_words(sentence))]
-                                if label else cap(plain_ids(plain_words(sentence)))))
-        elif isinstance(item, str):
-            rows.append(html.Li(cap(plain_ids(plain_words(item)))))
-        else:
-            rows.append(html.Li(item))
-    if not rows:
+        kind, where, reason = got
+        key = (where, reason) if isinstance(reason, str) else None
+        if key is not None and key in seen:
+            row = parts[seen[key]]
+            if kind and kind not in row[0].split(", "):
+                row[0] = ", ".join(x for x in (row[0], kind) if x)
+            continue
+        if key is not None:
+            seen[key] = len(parts)
+        parts.append([kind, where, reason])
+    if not parts:
         return None
+    has_kind = any(p[0] for p in parts)
+    has_where = any(p[1] for p in parts)
+    width = 1 + has_kind + has_where
+    rows = []
+    for kind, where, reason in parts:
+        if not isinstance(reason, str):
+            rows.append(html.Tr(html.Td(reason, colSpan=width, className="issues-reason")))
+            continue
+        cells = []
+        if has_kind:
+            cells.append(html.Td(cap(kind), className="issues-kind"))
+        if has_where:
+            shown = plain_ids(where)
+            cells.append(html.Td(cap_parts(shown), className="issue-label",
+                                 title=where if shown != where else None))
+        cells.append(html.Td(reason, className="issues-reason"))
+        rows.append(html.Tr(cells))
+    heads = ([html.Th("Kind")] if has_kind else []) + ([html.Th("Where")] if has_where else []) + [html.Th("Reason")]
     extra = {"id": id} if id else {}
-    return html.Details([html.Summary(f"{title} ({len(rows)})"), html.Ul(static_runs(rows), className="issues-list")],
+    return html.Details([html.Summary(f"{title} ({len(parts)})"),
+                         html.Table([html.Thead(html.Tr(heads)), html.Tbody(static_runs(rows))],
+                                    className="issues-table")],
                         className="issues-drawer", open=open, **extra)
+
+
+# ----------------------------------------------------------------------------- the row "i" marker
+# Layout wave (2026-09-29, user yes): a badge that repeats on most cells of a row ("Excl. 2" on each
+# figure, "Mock history" on the z cell) becomes ONE small, quiet "i" per row with every reason on
+# hover; a column whose every value carries the same caveat (research history) carries one "i" in
+# its heading instead. Totals rows keep their single "Excl. N". The reason never disappears: it moves
+# to the hover.
+def row_info(reasons, className: str = ""):
+    """One small "i" with every reason on hover (capitalised, one per line, duplicates dropped), or
+    None when there is none: `row_info(["Daily excludes 1 fill with no figure", ...])`. Put it at the
+    end of the row's name cell (or in a narrow column of its own)."""
+    if isinstance(reasons, str):
+        reasons = [reasons]
+    lines: List[str] = []
+    for r in reasons or ():
+        for line in str(r or "").split("\n"):
+            line = cap(plain_words(line.strip()))
+            if line and line not in lines:
+                lines.append(line)
+    if not lines:
+        return None
+    classes = " ".join(c for c in ("row-info", className) if c)
+    # the "i" itself is drawn by the stylesheet (.row-info::before), so it is never read as a word
+    return html.Span(className=classes, title="\n".join(lines))
+
+
+def head_info(reasons):
+    """`row_info` for a column heading (white on the navy head): the one caveat every value of the
+    column carries ("Research history: mock data ..."), instead of a badge on every cell."""
+    return row_info(reasons, "row-info--head")
 
 
 # ----------------------------------------------------------------------------- tab links
