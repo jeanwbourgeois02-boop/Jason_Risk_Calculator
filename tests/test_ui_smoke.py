@@ -1,18 +1,21 @@
-"""Smoke tests for the six-tab app after the UI redesign of 2026-09-28 (Book, Exposure, P&L,
-Risk, Trades, Data; Timing & cash deleted the same day), on the golden sample book (`tests/golden_book.py::build_book`,
-as of 2026-09-18) written to a file in tmp and read as the app reads it.
+"""Smoke tests for the five-tab app of Phase G (2026-09-29: Book, P&L, Risk, Blotter, Data;
+Exposure merged into Risk, its key "curve" hidden), on the golden sample book
+(`tests/golden_book.py::build_book`, as of 2026-09-18) written to a file in tmp and read as the
+app reads it.
 
 What is pinned here is the shell and the identities that must hold whatever the screens look
 like: the app builds and wires without a duplicate id or output, every tab renders on the sample
 without raising, each tab gathers its reasons in one "Data issues" drawer, the P&L tab's per-trade
-figures add up to the header's figure per period, the Book table's total line equals the header's
-Daily, MTD and LTD to the cent, and no page or layout response is ever cacheable.
-Nothing about a column list, a label or a card list is pinned: that is the screens' own business.
+figures add up to the header's figure per period, the Book line (the whole book, one row per
+trade) equals the header's Daily, MTD, YTD and LTD to the cent, and no page or layout response is
+ever cacheable. Nothing about a column list, a label or a card list is pinned: that is the
+screens' own business.
 """
 from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 
 import pytest
@@ -24,11 +27,12 @@ from dash.development.base_component import Component  # noqa: E402
 
 from data.ingest import schema  # noqa: E402
 from ui import app as uiapp  # noqa: E402
-from ui.tabs import blotter, book, curve, header, market_data, pnl, risk  # noqa: E402
+from ui.tabs import blotter, blotter_fills, book, header, market_data, pnl, risk  # noqa: E402
+from ui.tabs.formatting import issues_drawer  # noqa: E402
 
 AS_OF = "2026-09-18"
-SIX_TABS = ["Book", "Exposure", "P&L", "Risk", "Trades", "Data"]
-SIX_KEYS = ["book", "curve", "pnl", "risk", "blotter", "market-data"]
+TABS = ["Book", "P&L", "Risk", "Blotter", "Data"]
+KEYS = ["book", "pnl", "risk", "blotter", "market-data"]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -67,6 +71,19 @@ def _drawers(node):
     return found
 
 
+def _drawer_items(drawer) -> int:
+    """The items a drawer lists: its `html.Li` rows, each run of plain rows drawn as one static
+    Markdown block (`formatting.static_runs`, the performance pass of 2026-09-29) counted by its
+    `<li>` elements."""
+    n = 0
+    for child in drawer.children[1].children:
+        if isinstance(child, dash.dcc.Markdown):
+            n += len(re.findall(r"<li[\s>]", str(child.children)))
+        else:
+            n += 1
+    return n
+
+
 def _ro(path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
@@ -94,32 +111,34 @@ def app(golden_path):
 
 @pytest.fixture(scope="module")
 def bodies(app, golden_path):
-    """Every tab's rendered body on the as-of, keyed by tab key. Trades and Data render through
-    their own callbacks (their bodies are built inside them, not by a module-level `render`)."""
+    """Every tab's rendered body on the as-of, keyed by tab key. Blotter and Data render through
+    their own body callbacks (their blocks are that callback's outputs, not one module-level
+    `render`); only the outputs that are components are kept (the others are stores and styles)."""
     out = {}
-    out["book"], _counts, _style = book.render(AS_OF, golden_path)
-    out["curve"] = curve.render(AS_OF, golden_path)
+    out["book"] = book.render(AS_OF, golden_path)
     out["pnl"] = pnl.render(AS_OF, golden_path)
     out["risk"] = risk.render(AS_OF, golden_path)
-    out["blotter"] = _callback(app, f"..{blotter.CONTENT_ID}.children")(AS_OF, blotter.SCOPE_ORDER[0])[0]
-    data_outputs = _callback(app, f"..{market_data.BODY_ID}.children")(AS_OF, "USDCNH", 0, None, None, None, None)
-    out["market-data"] = html.Div(list(data_outputs))
+    # Blotter: (last upload, trade-set signature, sub-tab style, fills card style, upload history, drawer)
+    blotter_outputs = _callback(app, f"..{blotter.CONTENT_ID}.children")(AS_OF, blotter.SCOPE_ORDER[0])
+    out["blotter"] = html.Div([o for o in blotter_outputs if isinstance(o, Component)])
+    data_outputs = _callback(app, f"..{market_data.BODY_ID}.children")(AS_OF)
+    out["market-data"] = html.Div([o for o in data_outputs if isinstance(o, Component)])
     return out
 
 
 # --------------------------------------------------------------------------- (a) the shell
-def test_the_app_builds_with_six_tabs_no_duplicate_ids_and_no_duplicate_outputs(app):
-    assert uiapp.VISIBLE_TABS == SIX_TABS
-    assert [uiapp.TAB_KEYS[label] for label in SIX_TABS] == SIX_KEYS
+def test_the_app_builds_with_five_tabs_no_duplicate_ids_and_no_duplicate_outputs(app):
+    assert uiapp.VISIBLE_TABS == TABS
+    assert [uiapp.TAB_KEYS[label] for label in TABS] == KEYS
     assert callable(app.layout)                       # built on every page load, so today is fresh
     layout = app.layout()
     tabs = layout.children[0].children[0]
     assert isinstance(tabs, dash.dcc.Tabs)
-    assert [t.label for t in tabs.children] == SIX_TABS
-    assert [t.value for t in tabs.children] == SIX_KEYS
+    assert [t.label for t in tabs.children] == TABS
+    assert [t.value for t in tabs.children] == KEYS
     assert tabs.value == "book"                       # the app opens on Book
     body_ids = [getattr(b, "id", None) for b in next(c for c in layout.children if getattr(c, "id", None) == "tab-bodies").children]
-    assert body_ids == [uiapp.tab_body_id(label) for label in SIX_TABS]
+    assert body_ids == [uiapp.tab_body_id(label) for label in TABS]
     # no id appears twice in the assembled layout (a pattern-matching id compares by its JSON)
     ids = [getattr(n, "id", None) for n in _components(layout)]
     keys = [json.dumps(i, sort_keys=True) if isinstance(i, dict) else i for i in ids if i is not None]
@@ -129,14 +148,15 @@ def test_the_app_builds_with_six_tabs_no_duplicate_ids_and_no_duplicate_outputs(
     assert app.callback_map, "create_app registered no callback"
     outputs = [o for k in app.callback_map for o in k.strip(".").split("...") if "@" not in o]
     assert len(outputs) == len(set(outputs)), sorted({o for o in outputs if outputs.count(o) > 1})
-    # every tab body is toggled by the one show/hide callback
-    style_key = next(k for k in app.callback_map if k.startswith("..tab-body-book.style"))
-    for label in SIX_TABS:
-        assert f"{uiapp.tab_body_id(label)}.style" in style_key
+    # every tab body is built and shown / hidden by the one callback (`build_tab_bodies`: one tab mounted)
+    body_key = next(k for k in app.callback_map if k.startswith("..tab-body-book.children"))
+    for label in TABS:
+        assert f"{uiapp.tab_body_id(label)}.children" in body_key
+        assert f"{uiapp.tab_body_id(label)}.style" in body_key
 
 
 # --------------------------------------------------------------------------- (b) every tab renders
-@pytest.mark.parametrize("key", SIX_KEYS)
+@pytest.mark.parametrize("key", KEYS)
 def test_every_tab_renders_a_layout_on_the_as_of(bodies, key):
     body = bodies[key]
     assert isinstance(body, Component), f"{key}: {type(body).__name__}"
@@ -145,31 +165,27 @@ def test_every_tab_renders_a_layout_on_the_as_of(bodies, key):
     assert "could not be built" not in text and "Traceback" not in text, f"{key}: {text[:300]}"
 
 
-@pytest.mark.parametrize("key", SIX_KEYS)
+@pytest.mark.parametrize("key", KEYS)
 def test_every_tab_gathers_its_reasons_in_one_data_issues_drawer(bodies, golden_path, key):
-    """One drawer per tab, present whenever the tab has something to say. On the sample the
-    Trades tab has nothing (every trade is priced on the as-of, none is filled): its drawer is
-    then absent by design (`formatting.issues_drawer` returns None for no items), which is
-    checked against the tab's own issue builder rather than assumed."""
+    """One drawer per tab, present whenever the tab has something to say. The Blotter may have
+    nothing to say on the sample (every fill landed in a trade): its drawer is then absent by
+    design (`formatting.issues_drawer` returns None for no items), which is checked against the
+    tab's own issue list (`blotter_fills.fills_frame`) rather than assumed."""
     drawers = _drawers(bodies[key])
     assert len(drawers) <= (2 if key == "risk" else 1), f"{key}: {len(drawers)} drawers"
     if key == "blotter":
-        from ui.tabs.blotter_pricing import priced_value_book
         conn = _ro(golden_path)
         try:
-            df = priced_value_book(conn, AS_OF)[0]
-            # the tab's drawer also names an option with no strike on file (`add_price_units_and_flags`)
-            expected = blotter.total_book_issues(blotter.add_price_units_and_flags(conn, df), AS_OF) is not None
+            _df, issues, _with = blotter_fills.fills_frame(conn, AS_OF)
         finally:
             conn.close()
-        assert bool(drawers) == expected
+        assert bool(drawers) == (issues_drawer(issues) is not None)
         return
     assert drawers, f"{key}: no Data issues drawer"
     for drawer in drawers:
         summary = str(drawer.children[0].children)
         n = int(summary[summary.index("(") + 1:-1])
-        items = drawer.children[1].children
-        assert n == len(items) > 0
+        assert n == _drawer_items(drawer) > 0
 
 
 # --------------------------------------------------------------------------- (c) P&L tab = header
@@ -225,34 +241,37 @@ def test_the_pnl_tabs_per_trade_figures_add_up_to_the_headers_figure_per_period(
 
 
 # --------------------------------------------------------------------------- (d) the Book table = header
-def test_the_book_tables_total_line_equals_the_headers_daily_mtd_and_ltd_to_the_cent(golden_path, bodies):
-    """The identity the Book is built on (2026-09-28): every trade of the as-of book is in exactly
-    one row (a spread position, an outright contract, a trade row, or the settled line), and each
-    row's period figure is `pnl.period_rows`' per-trade figure, the header's own split; so the Book
-    line's Daily, MTD and LTD are the header's, built through the same functions the app uses."""
+def test_the_book_line_equals_the_headers_daily_mtd_ytd_and_ltd_to_the_cent(golden_path, bodies):
+    """The identity the Book is built on (Phase G, 2026-09-29: one row per trade): every fill of
+    the as-of book sits on exactly one trade row (a PBRoot name, or the row of fills on no trade),
+    and each fill's period figure is `pnl.period_rows`' per-trade figure, the header's own split;
+    so the Book line (`book.totals` over every trade) has the header's Daily, MTD, YTD and LTD,
+    built through the same functions the app uses."""
     conn = _ro(golden_path)
     try:
         data = book.gather(conn, AS_OF)
         cards = _header_cards(conn)
     finally:
         conn.close()
-    rows = book.book_rows(data)
-    assert rows, "the sample book has no position"
-    ids = [t for r in rows for t in r["trade_ids"]]
-    assert len(ids) == len(set(ids)) == len(data["df"])          # every trade once
-    for key, title in (("daily", "Daily"), ("mtd", "MTD"), ("ltd", "LTD")):
-        total, excluded, _reasons = book.group_total(rows, key)
-        entry = data["periods"][key].entry
+    trades = data["trades"]
+    assert trades, "the sample book has no trade"
+    ids = [str(t) for tr in trades for t in tr.get("trade_ids") or []]
+    assert len(ids) == len(set(ids)) == len(data["df"])          # every fill once
+    tot = book.totals(data, trades)
+    for key, title in (("daily", "Daily"), ("mtd", "MTD"), ("ytd", "YTD"), ("ltd", "LTD")):
+        total, _excluded, _reasons = tot[key]
+        entry = data["views"][key].entry
         value_div = cards[title].children[1]
         if entry.get("available"):
             assert total == pytest.approx(entry["value"], abs=0.005), key
             assert value_div.title.splitlines()[0] == header._fmt_usd(total), key
         else:
             assert total is None and value_div.children == header.MISSING, key
-    # the rendered Book tab carries the table with its Book line
+    # the rendered Book tab carries the table with its Book line first, unfiltered
     table = next(n for n in _components(bodies["book"]) if getattr(n, "id", None) == book.TABLE_ID)
-    book_line = next(r for r in table.children[1].children if getattr(r, "className", "") == "book-total")
-    assert "= header" in _text(book_line)
+    first = table.children[1].children[0]
+    assert "book-total" in (getattr(first, "className", "") or "").split()
+    assert _text(first).startswith("Book ·")
 
 
 # --------------------------------------------------------------------------- (e) never a stale page
