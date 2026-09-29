@@ -87,6 +87,28 @@ class Trade:
     # `price` above is the fill every calculation reads.
     broker_symbol: str = ""
     broker_price: str = ""
+    # The file's Fin Type cell as written (the Product cell when Fin Type is blank), 2026-09-29:
+    # what the row said it was, so a trade loaded as UNRECOGNISED is re-resolved as the same
+    # kind of row it came from (a commodity swap on 'CLZ6' must never come back as a future).
+    # Written only where `trades` has the column (`blotter.write_parsed`).
+    fin_type: str = ""
+
+
+# A row the parser cannot identify still loads (hard rule 6, "Every row loads", user 2026-09-29):
+# product and asset class UNRECOGNISED, instrument 'UNRECOGNISED:' + the Symbol as written, no
+# legs, multiplier 0, never asked of Bloomberg, blank P&L with its reason.
+UNRECOGNISED = "UNRECOGNISED"
+UNRECOGNISED_PREFIX = "UNRECOGNISED:"
+
+
+@dataclass(frozen=True)
+class Unrecognised:
+    """A row loaded as product UNRECOGNISED: which row, which trade, the Symbol as written and
+    the reason in plain words (what the upload's issues and every screen show)."""
+    row_no: int  # 1-based row number (header = line 1)
+    trade_id: str
+    symbol: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -104,6 +126,8 @@ class TradeLeg:
 
 @dataclass(frozen=True)
 class Reject:
+    """Kept for callers that read ``ParseResult.rejects``: since 2026-09-29 (every row loads) the
+    parser produces none; a row it cannot book is an ``Unrecognised`` trade instead."""
     row_no: int  # 1-based row number (header = line 1)
     symbol: str
     reason: str

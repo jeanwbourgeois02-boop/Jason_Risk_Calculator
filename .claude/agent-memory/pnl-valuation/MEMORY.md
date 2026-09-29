@@ -4,4 +4,4 @@
 - [LME forwards](lme-forwards.md) — 2026-09-24: LME_FWD in FX_PRODUCTS (ledger inherits), cash pillar at LME cash date, settlement_price freeze
 - [Phase 2 IRS/NDF removal](phase2-irs-ndf-removal.md) — 2026-09-24: IRS and NDF valuation gone, is_ndf ignored, EQ_OPTION / FX options stay; HEAD pin via git archive
 - [value_book perf](value-book-perf.md) — 2026-09-28: value_book 30-90 ms on the sample; "Book tab" label wraps book_spreads only; unindexed marks = 9.9 s/call at 300k rows (index request to ingest-schema)
-- [UNRECOGNISED trades](unrecognised-trades.md) — 2026-09-29 every row loads: blank row, status UNRECOGNISED, reason from upload_issues by symbol; ledger untouched
+- [UNRECOGNISED trades](unrecognised-trades.md) — 2026-09-29 every row loads: blank row, status UNRECOGNISED, reason by trade id via upload.unrecognised_reasons; ledger untouched

@@ -26,3 +26,7 @@ Performance pass 2026-09-28 (user: the Book tab's 14 s first render; output iden
   and identically; `templates._LOADER` falls back to SafeLoader where the C extension is absent.
 - Measured on the sample at 2026-09-28: cold 0.743 s -> 0.125 s, warm 0.288 s -> 0.057 s; what is
   left is 5 `value_book` calls (pnl-valuation's) and the levels' SQL reads.
+- trade_book speed (2026-09-29): warm per call ~0.11 s on Jason's book; the cold floor is risk-history's one-time research
+  reads (history load ~0.5 s, root prices + contract lookup ~0.45 s, process-cached after). Done here: one
+  prefetch_roots query, a per-call memo in curve_roll_downs, trade_book(rows=). Proof: json.dumps(sort_keys) byte-equal
+  before/after on both scratch books. Timings on this PC are noisy while other agents run: repeat 3x.

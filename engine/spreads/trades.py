@@ -106,6 +106,13 @@ def _join(parts: Iterable[str]) -> str:
     return "; ".join(dict.fromkeys(p for p in parts if p))
 
 
+def _with_rows(value_fn: ValueFn, as_of: str, rows) -> ValueFn:
+    """``value_fn`` with the caller's own valuation of ``as_of`` (``trade_book(rows=...)``)."""
+    def read(conn: sqlite3.Connection, day: str):
+        return rows if day == as_of else value_fn(conn, day)
+    return read
+
+
 def _cached(value_fn: ValueFn) -> ValueFn:
     """``value_fn`` read once per date within one call (``book_spreads``, the trade book's own
     ``_Book`` and ``level_history`` share it). A screen's memoised reader costs nothing more."""
@@ -715,7 +722,8 @@ def _calendar_level(book, part: _Part, pleg_by_cid: Dict[str, st.PLeg], prev_day
 
 
 # ------------------------------------------------------------------ carry
-def _roll_downs(book, rows: List[dict], pleg_by_cid: Dict[str, st.PLeg], history) -> Tuple[Optional[float], str, str]:
+def _roll_downs(book, rows: List[dict], pleg_by_cid: Dict[str, st.PLeg], history,
+                memo: Optional[dict] = None) -> Tuple[Optional[float], str, str]:
     """Each open non-hedge leg's roll-down per month (``carry.curve_roll_downs``, research), written
     on its row; (the trade's carry per month in USD when every such leg is on one curve and read,
     else None, why, the research date)."""
@@ -734,7 +742,7 @@ def _roll_downs(book, rows: List[dict], pleg_by_cid: Dict[str, st.PLeg], history
     for root_id, rs in by_root.items():
         root = book.roots[root_id]
         res = curve_roll_downs(history, root, [(r["contract_id"], r["contract_id"], pleg_by_cid[r["contract_id"]].month)
-                                               for r in rs], book.as_of)
+                                               for r in rs], book.as_of, memo)
         s, s_why = st._spot_on(book, root.currency, book.as_of)
         s_why = s_why.replace(", the trade date", "")
         if res["research_date"]:
@@ -1033,7 +1041,8 @@ def _part_row(book, part: _Part, rows_by_cid: Dict[str, dict], level: dict) -> d
             "level": level, "note": part.note}
 
 
-def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str], history) -> dict:
+def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str], history,
+           memo: Optional[dict] = None) -> dict:
     tids = list(entry["trade_ids"])
     legs, _hedge_ids, _options, _closed = st._build_legs(book, tids)
     pleg_by_cid = {leg.contract_id: leg for leg in legs}
@@ -1088,7 +1097,7 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
     else:
         level = _blank_level(f"{name} holds {len(parts)} spreads ({', '.join(_WORDS[k] for k in kinds)}): "
                              f"each has its level under sub_spreads")
-    carry, carry_why, carry_date = _roll_downs(book, rows, pleg_by_cid, history)
+    carry, carry_why, carry_date = _roll_downs(book, rows, pleg_by_cid, history, memo)
     hedge = _hedge_block(book, entry, legs)
     size = _size_block(book, entry, legs)
     if kind == TYPE_OUTRIGHT:
@@ -1231,7 +1240,7 @@ def _closed_block(conn: sqlite3.Connection, book, name: str, entry: dict, read: 
 
 
 def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = None,
-               value_fn: ValueFn = value_book, history=None) -> dict:
+               value_fn: ValueFn = value_book, history=None, rows=None) -> dict:
     """Every trade of the book on ``as_of`` (the module docstring), for the Book row and its panel.
 
     ``spreads``: the ``book_spreads(conn, as_of, value_fn=...)`` result the caller already holds
@@ -1239,7 +1248,9 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
     screen: its memoised filled reader), so the legs read the rows the trade's P&L was summed
     from. ``history``: a ``commodity_history.CommodityHistory`` for the roll-down (loaded here
     when None; research context). Deterministic: the same database and arguments give the same
-    dict, so a screen may memoise it on its database revision and as-of.
+    dict, so a screen may memoise it on its database revision and as-of. ``rows``: the as-of
+    valuation the caller already holds (``value_fn(conn, as_of)``'s frame, or its tuple), used
+    for ``as_of`` instead of valuing it again; it must be what ``value_fn`` would return.
 
     Returns ``{as_of, trades, unassigned, notes}``: ``unassigned`` the trade ids with no trade
     name (no PBRoot suffix), on no trade; ``notes`` book-level sentences. Each trade:
@@ -1308,6 +1319,8 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
     Every figure that cannot be given is None with its reason, never 0 (hard rule 2)."""
     from engine.spreads.book import _Book, book_spreads
     read = _cached(value_fn)
+    if rows is not None:
+        read = _cached(_with_rows(value_fn, as_of, rows))
     notes: List[str] = []
     if spreads is None:
         spreads = book_spreads(conn, as_of, value_fn=read)
@@ -1328,6 +1341,15 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
         notes.append(f"research history not found ({getattr(history, 'reason', '')}): no roll-down")
     entries = {str(s.get("name") or ""): s for s in spreads.get("strategies") or []}
     symbols = _broker_symbols(conn, [t for s in entries.values() for t in s.get("trade_ids") or []])
+    memo: dict = {}          # the research lookups of the roll-downs, shared by every trade
+    if history is not None and getattr(history, "available", False):
+        # every root a roll-down will read, in one research query (served from memory after)
+        try:
+            history.prefetch_roots(sorted({str(book.by_id[t]["base_ccy"] or "") for s in entries.values()
+                                           if s.get("name") for t in s.get("trade_ids") or []
+                                           if book.by_id.get(t) and str(book.by_id[t]["base_ccy"] or "") in book.roots}))
+        except Exception:  # noqa: BLE001 -- a failed batch read: each root reads on its own and says why
+            pass
     trades = []
     for name in sorted(n for n in entries if n):
         entry = entries[name]
@@ -1335,7 +1357,7 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
             notes.append(f"{name}: its trades are not the ones on file on {as_of} (spreads built on another book?)")
             continue
         try:
-            row = _trade(book, name, entry, roll_data, symbols, history)
+            row = _trade(book, name, entry, roll_data, symbols, history, memo)
             row["closed"] = (_closed_block(conn, book, name, entry, read, roll_data, symbols)
                              if row["status"] == "closed" else None)
             trades.append(row)

@@ -41,3 +41,7 @@ Built 2026-09-24 (Phase 1 step 3). Choices a future change should keep or revisi
   the last day. Not applied to options (the DELTA mark is the pricer's).
 - Adding any key to the output shows as "not in golden" in tests/test_golden_book.py: the pinned
   book.json holds the whole curve_positions output; a re-pin needs the user's yes (infra).
+
+**2026-09-29:** `currency_exposure[ccy]["by_trade"]` {trade_id: pnl_usd or None} = what pnl_usd sums;
+commodity-stress's FX split reads it to skip a second value_book. Cost of a cold curve_positions is
+~85-90 % `book_spreads` (the leftover): callers that hold the spreads should pass `spreads=`.

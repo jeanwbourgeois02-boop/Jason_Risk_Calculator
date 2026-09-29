@@ -14,7 +14,7 @@ about a dozen lanes' tests load that path, so the replacement kept the path.
 
 **How to apply:**
 - Composition (45 rows until Phase 5; 52 rows since, see [[phase5-options-and-lme]]):
-  31 FUTURE rows (29 trades; rejects ZCZ6-USAA ambiguous, QQZ6-USAA unknown), 8 FORWARD
+  31 FUTURE rows (29 trades + 2 UNRECOGNISED since 2026-09-29: bare ZCZ6 ambiguous, QQZ6-USAA unknown), 8 FORWARD
   (USDCNH x3 incl. 910000034 settled 2026-08-19; EURUSD, USDJPY, GBPUSD, EURGBP cross,
   XAUUSD), 1 CURRENCY spot (910000040 EURUSD), 5 OPTION (EURUSD call 500041, USDJPY put
   500042, USDJPY "digital" 500043 with no strike and no payoff word, closed-out EURUSD put

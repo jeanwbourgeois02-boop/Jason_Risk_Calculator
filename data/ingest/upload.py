@@ -44,6 +44,11 @@ forwards; and the upload no longer turns an interest rate swap's priced history 
 (``irs_direction.py``), since rates left the app. The by-hand FX swap
 (``manual.book_fx_swap``) left with the manual booking path on 2026-09-28.
 
+Every row loads (hard rule 6, user decision 2026-09-29): a row the parser cannot identify is
+written like any other trade, as product UNRECOGNISED (its 'UNRECOGNISED:<symbol>' instrument,
+no leg, its reason in ``upload_issues``), and ``reresolve_unrecognised`` rewrites it in place as
+the real product once the contract list knows it: at the end of every upload and at start-up.
+
 ``import_blotter_report`` returns the outcome as data (message, rejects, warnings,
 notes) so the UI decides from counts, not from prose; ``import_blotter`` is its message.
 """
@@ -92,6 +97,118 @@ RETIRED_CHILD_TABLES = ("swap_review",)
 # Rows every upload still removes even though the file does not name them: an old
 # database's manual entries (the manual booking path left on 2026-09-28; hard rule 1).
 _MANUAL_TRADES_SQL = "SELECT trade_id FROM trades WHERE source = 'MANUAL'"
+
+# Every row loads (hard rule 6, user decision 2026-09-29: "all rows need to load thats non
+# negotiable"). A row the parser cannot identify is a trade on file all the same: product
+# UNRECOGNISED, its instrument 'UNRECOGNISED:<symbol as written>' (asset_class UNRECOGNISED,
+# multiplier 0, never marked), no leg, never asked of Bloomberg, blank P&L with its reason. The
+# reason sits in `upload_issues` under kind NEED_FIX_KIND with the trade's id and symbol; a later
+# upload that resolves the row replaces it by Trade Id, and `reresolve_unrecognised` rewrites it in
+# place once the contract list knows it. Nothing is ever guessed.
+UNRECOGNISED = "UNRECOGNISED"
+UNRECOGNISED_PREFIX = "UNRECOGNISED:"
+NEED_FIX_KIND = "UNRECOGNISED"          # upload_issues.kind of a row that is on file but needs a fix
+_INSTRUMENT_COLUMNS = ("instrument_id", "asset_class", "base_ccy", "quote_ccy", "multiplier", "is_ndf",
+                       "bbg_ticker", "expiry_date")
+_OPTION_COLUMNS = ("instrument_id", "strike", "option_type", "barrier_level", "avg_start_date", "payoff")
+_LEG_COLUMNS = ("trade_id", "leg_no", "leg_type", "ccy", "amount", "start_date", "settle_date", "rate",
+                "settles_cash")
+
+
+def _get(item, name, default=None):
+    """`item.name` or `item[name]`, `default` when it has neither (a dataclass, an object or a dict)."""
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def unrecognised_instrument_id(symbol, description="") -> str:
+    """'UNRECOGNISED:' + the Symbol cell as written, upper-cased and stripped
+    ('UNRECOGNISED:XYZ6-USAA'); with no symbol, the Description instead."""
+    text = " ".join(str(symbol or "").split()) or " ".join(str(description or "").split())
+    return UNRECOGNISED_PREFIX + text.upper()
+
+
+def _file_trades(result) -> list:
+    """Every trade the file loaded, UNRECOGNISED ones included: `result.trades`, plus any
+    UNRECOGNISED trade the parser lists only on `result.unrecognised` (one entry per trade id)."""
+    trades = list(getattr(result, "trades", None) or ())
+    seen = {t.trade_id for t in trades}
+    for item in getattr(result, "unrecognised", None) or ():
+        trade = _get(item, "trade")
+        if trade is not None and trade.trade_id not in seen:
+            trades.append(trade)
+            seen.add(trade.trade_id)
+    return trades
+
+
+def unrecognised_rows(result) -> list[dict]:
+    """The file's rows that loaded as UNRECOGNISED, one dict each, in row order:
+    {trade_id, row_no, symbol, reason}. Read from `result.unrecognised` (items with trade_id,
+    row_no, symbol, reason, as attributes or keys; optionally `trade` / `instrument`) and from
+    every UNRECOGNISED trade in `result.trades`; a trade with no reason given takes the parser's
+    reject of the same row, else a sentence naming its symbol (never a blank reason)."""
+    trade_rows = getattr(result, "trade_rows", None) or {}
+    rejects_by_row = {rj.row_no: rj.reason for rj in getattr(result, "rejects", None) or ()}
+    out: dict = {}
+    for item in getattr(result, "unrecognised", None) or ():
+        if isinstance(item, tuple):
+            item = dict(zip(("row_no", "symbol", "trade_id", "reason") if len(item) == 4
+                            else ("row_no", "symbol", "reason"), item))
+        trade = _get(item, "trade")
+        tid = str(_get(item, "trade_id") or (trade.trade_id if trade is not None else "") or "")
+        if not tid:
+            continue
+        out[tid] = {"trade_id": tid, "row_no": int(_get(item, "row_no") or trade_rows.get(tid, 0) or 0),
+                    "symbol": str(_get(item, "symbol") or (getattr(trade, "broker_symbol", "") if trade else "") or ""),
+                    "reason": str(_get(item, "reason") or "")}
+    for t in _file_trades(result):
+        if t.product != UNRECOGNISED:
+            continue
+        row = out.setdefault(t.trade_id, {"trade_id": t.trade_id, "row_no": int(trade_rows.get(t.trade_id, 0) or 0),
+                                          "symbol": "", "reason": ""})
+        # The Symbol cell as written (the trade's broker_symbol) wins: pnl-valuation matches on it.
+        row["symbol"] = (str(t.broker_symbol or "").strip() or row["symbol"]
+                         or t.instrument_id[len(UNRECOGNISED_PREFIX):])
+    for row in out.values():
+        if not row["reason"]:
+            row["reason"] = rejects_by_row.get(row["row_no"]) or (
+                f"contract not recognised: symbol {row['symbol'] or '(blank)'} is not in the contract list")
+    return sorted(out.values(), key=lambda r: (r["row_no"], r["trade_id"]))
+
+
+def _upsert_trade(conn: sqlite3.Connection, trade) -> None:
+    """Upsert one `common.Trade` into `trades` by name, only the fields `trades` has as columns (a
+    Trade field the database lacks, such as `fin_type` before its column exists, is left out)."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+    fields = {k: v for k, v in vars(trade).items() if k in have}
+    cols = list(fields)
+    updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "trade_id")
+    conn.execute(f"INSERT INTO trades ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)}) "
+                 f"ON CONFLICT(trade_id) DO UPDATE SET {updates}", list(fields.values()))
+
+
+def _write_unrecognised(conn: sqlite3.Connection, result) -> None:
+    """Make sure every UNRECOGNISED trade of the file is written on `conn` as the shared definition
+    says, whether or not `blotter.load` wrote it: its instrument row (named columns; a row the parser
+    wrote is kept as it is), its trade row (upsert by name), and no leg. Idempotent."""
+    trades = [t for t in _file_trades(result) if t.product == UNRECOGNISED]
+    if not trades:
+        return
+    instruments = dict(getattr(result, "instruments", None) or {})
+    for item in getattr(result, "unrecognised", None) or ():
+        inst = _get(item, "instrument") if not isinstance(item, tuple) else None
+        if inst is not None:
+            instruments.setdefault(inst.instrument_id, inst)
+    names = ",".join(_INSTRUMENT_COLUMNS)
+    with conn:
+        for t in trades:
+            inst = instruments.get(t.instrument_id)
+            values = ([getattr(inst, c) for c in _INSTRUMENT_COLUMNS] if inst is not None else
+                      [t.instrument_id, UNRECOGNISED, "", "", 0.0, 0, "", "9999-12-31"])
+            conn.execute(f"INSERT OR IGNORE INTO instruments ({names}) VALUES ({','.join('?' * len(values))})", values)
+            _upsert_trade(conn, t)
+            conn.execute("DELETE FROM trade_legs WHERE trade_id = ?", (t.trade_id,))
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -183,7 +300,7 @@ def _stage_and_publish(db_path, load_fn):
                 before = {r[0] for r in staged.execute("SELECT trade_id FROM trades")}
                 manual = {r[0] for r in staged.execute(_MANUAL_TRADES_SQL)}
                 result = load_fn(staged)
-                incoming = list(dict.fromkeys(t.trade_id for t in getattr(result, "trades", ())))
+                incoming = list(dict.fromkeys(t.trade_id for t in _file_trades(result)))
                 incoming_set = set(incoming)
                 cancelled = [str(t) for t in (getattr(result, "cancelled_trade_ids", None) or ())]
                 removed_ids = [t for t in dict.fromkeys(cancelled) if t in before and t not in incoming_set]
@@ -233,7 +350,9 @@ _LOADED_KINDS = (("futures", ("FUTURE",), True),
                  ("FX forwards", ("FX_FWD",), True),
                  ("FX spot", ("FX_SPOT",), True),
                  ("FX swaps", ("FX_SWAP",), False),
-                 ("FX options", ("FX_OPTION",), True))
+                 ("FX options", ("FX_OPTION",), True),
+                 # every row loads (2026-09-29): a row the parser could not identify is on file too
+                 ("needing a fix (contract not recognised)", (UNRECOGNISED,), False))
 
 
 def loaded_counts(trades) -> dict:
@@ -263,13 +382,30 @@ def loaded_breakdown(trades) -> str:
 def merge_sentence(n_in_file: int, change: dict) -> str:
     """The merge by Trade Id in plain words: '89 trades in the file: 12 added, 77 already on
     file (replaced by the file's rows), 0 removed as cancelled; 89 trades on file.' An old
-    database's manual entries removed are named in a second clause; nothing else is."""
+    database's manual entries removed are named in a second clause; nothing else is. The trades
+    on file that need a fix (product UNRECOGNISED, `change['need_fix_on_file']`, every row loads,
+    2026-09-29) are counted among the trades on file: '...; 91 trades on file, 2 of them need a fix.'"""
     text = (f"{n_in_file} trades in the file: {change.get('added', 0)} added, "
             f"{change.get('replaced', 0)} already on file (replaced by the file's rows), "
             f"{change.get('removed', 0)} removed as cancelled")
     if change.get("removed_manual"):
         text += f", {change['removed_manual']} manual entr{'y' if change['removed_manual'] == 1 else 'ies'} removed"
-    return f"{text}; {change.get('on_file_after', 0)} trades on file."
+    fix = int(change.get("need_fix_on_file", 0) or 0)
+    tail = f", {fix} of them need{'s' if fix == 1 else ''} a fix" if fix else ""
+    return f"{text}; {change.get('on_file_after', 0)} trades on file{tail}."
+
+
+def need_fix_sentence(rows) -> str:
+    """'2 rows need a fix (on file as trades, P&L blank until the contract is mapped): row 33 ZCZ6:
+    <reason>; row 34 QQZ6-USAA: <reason>.' from `unrecognised_rows`; '' when there are none."""
+    rows = list(rows or ())
+    if not rows:
+        return ""
+    head = "; ".join(f"row {r['row_no']} {r['symbol']}: {r['reason']}" for r in rows[:5])
+    more = f" (+{len(rows) - 5} more)" if len(rows) > 5 else ""
+    n = len(rows)
+    return (f"{n} row{'s' if n != 1 else ''} need{'s' if n == 1 else ''} a fix (on file as trades, P&L blank "
+            f"until the contract is mapped): {head}{more}.")
 
 
 def _library_update(db_path) -> tuple:
@@ -311,9 +447,10 @@ def import_blotter(payload, filename, db_path):
     """Load a blotter file into `db_path`, merging it into the book by Trade Id (module
     docstring, user decision 2026-09-28): a Trade Id already on file is replaced by the
     file's row, a new one is added, a cancelled one is removed, and a trade the file does
-    not name stays; an old database's MANUAL rows are removed. Rows that cannot be parsed
-    are skipped and listed in the returned message, in a sentence that always carries the
-    words "could not be read" (REJECTS_PHRASE); everything else loads. Only a file with no
+    not name stays; an old database's MANUAL rows are removed. Every row loads (hard rule 6,
+    2026-09-29): a row the parser cannot identify is on file as product UNRECOGNISED and named in
+    an "N rows need a fix" sentence; a row an older parser still rejects is listed in a sentence
+    that carries the words "could not be read" (REJECTS_PHRASE). Only a file with no
     recognisable blotter header at all is refused -- and refusing it never touches the
     existing book (every write happens only after this file has parsed).
 
@@ -324,33 +461,72 @@ def import_blotter(payload, filename, db_path):
 
 
 UPLOAD_ISSUES_DDL = ("CREATE TABLE IF NOT EXISTS upload_issues (row_no INTEGER NOT NULL, symbol TEXT NOT NULL, "
-                     "kind TEXT NOT NULL, reason TEXT NOT NULL, filename TEXT NOT NULL, uploaded_at TEXT NOT NULL)")
+                     "kind TEXT NOT NULL, reason TEXT NOT NULL, filename TEXT NOT NULL, uploaded_at TEXT NOT NULL, "
+                     "trade_id TEXT NOT NULL DEFAULT '')")
+UPLOAD_ISSUES_COLUMNS = ("row_no", "symbol", "kind", "reason", "filename", "uploaded_at", "trade_id")
+
+
+def _migrate_issues_table(conn: sqlite3.Connection) -> None:
+    """Create `upload_issues`, and add `trade_id` (2026-09-29) to an older database's table
+    (`schema._migrate_columns` does not reach this lane's own tables)."""
+    conn.execute(UPLOAD_ISSUES_DDL)
+    present = {r[1] for r in conn.execute("PRAGMA table_info(upload_issues)")}
+    if "trade_id" not in present:
+        conn.execute("ALTER TABLE upload_issues ADD COLUMN trade_id TEXT NOT NULL DEFAULT ''")
+
+
+def _insert_issues(conn: sqlite3.Connection, rows) -> None:
+    """`rows`: tuples in `UPLOAD_ISSUES_COLUMNS` order. Named columns, inside the caller's transaction."""
+    conn.executemany(f"INSERT INTO upload_issues ({','.join(UPLOAD_ISSUES_COLUMNS)}) "
+                     f"VALUES ({','.join('?' for _ in UPLOAD_ISSUES_COLUMNS)})", list(rows))
 
 
 def record_upload_issues(db_path, filename, result) -> int:
-    """Every row of the uploaded file that did NOT become a trade, with why (user, 2026-09-21:
-    "a zar option and spx option that just isnt in the table"): the parser's rejects and the
-    rows of a type the app does not load. Since 2026-09-28 also the parser's file-level
-    warnings (``ParseWarning`` with ``row_no == 0``: a sentence about the file as a whole,
-    such as two strategy labels that look like one strategy), as kind WARNING with symbol
-    '', so the Book tab's "Last load" and the Data tab show them as rows and not only inside
-    the summary; a row-level warning (``row_no >= 2``) stays in the summary sentence only.
-    Replaced by each upload; shown on the Market data tab. Never fails an import: a database
-    error here is swallowed."""
+    """The last upload's rows that need the user, with why, replacing the previous upload's
+    (user, 2026-09-21: "a zar option and spx option that just isnt in the table"):
+
+    - kind UNRECOGNISED (NEED_FIX_KIND, every row loads, 2026-09-29): a row that is on file as a
+      trade of product UNRECOGNISED, its `trade_id` and the Symbol cell as written, and the reason
+      in plain words (pnl-valuation shows it on the trade's row);
+    - kind WARNING: the parser's warnings, a contradiction between two populated fields that loaded
+      on the primary field included, with the row's `trade_id` (a file-level warning: row 0,
+      symbol '' and trade_id '');
+    - kind REJECTED / NOT LOADED: a row the parser still did not make a trade (none under hard
+      rule 6 once the parser is on it; kept so an older parser's output is never lost).
+
+    An UNRECOGNISED row of an EARLIER upload whose trade is still UNRECOGNISED on file and that
+    this file does not name is kept (pnl-valuation's reason for it; `reresolve_unrecognised` keeps
+    that set in step with the trades on file). Never fails an import: a database error here is
+    swallowed and 0 returned; else the number of rows written for this file."""
     import datetime as _dt
-    rows = [(rj.row_no, rj.symbol or "", "REJECTED", rj.reason) for rj in getattr(result, "rejects", [])]
-    rows += [(n, sym or "", "NOT LOADED", why) for n, sym, why in getattr(result, "skipped_other_rows", [])]
-    rows += [(0, "", "WARNING", w.message) for w in getattr(result, "warnings", [])
-             if getattr(w, "row_no", None) == 0]
+    need_fix = unrecognised_rows(result)
+    fix_rows = {r["row_no"] for r in need_fix if r["row_no"]}
+    trade_rows = getattr(result, "trade_rows", None) or {}
+    trade_by_row: dict = {}
+    for tid, n in trade_rows.items():
+        trade_by_row.setdefault(n, tid)
+    rows = [(r["row_no"], r["symbol"], NEED_FIX_KIND, r["reason"], r["trade_id"]) for r in need_fix]
+    rows += [(rj.row_no, rj.symbol or "", "REJECTED", rj.reason, "") for rj in getattr(result, "rejects", None) or ()
+             if rj.row_no not in fix_rows]
+    rows += [(n, sym or "", "NOT LOADED", why, "") for n, sym, why in getattr(result, "skipped_other_rows", None) or ()]
+    for w in getattr(result, "warnings", None) or ():
+        n = int(getattr(w, "row_no", 0) or 0)
+        tid = str(getattr(w, "trade_id", "") or (trade_by_row.get(n, "") if n else ""))
+        rows.append((n, (getattr(w, "symbol", "") or "") if n else "", "WARNING", w.message, tid))
     stamp = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    file_ids = {t.trade_id for t in _file_trades(result)}
     try:
         conn = sqlite3.connect(str(db_path), timeout=60)
         try:
             with conn:
-                conn.execute(UPLOAD_ISSUES_DDL)
+                _migrate_issues_table(conn)
+                carried = [r for r in conn.execute(
+                    f"SELECT {','.join(UPLOAD_ISSUES_COLUMNS)} FROM upload_issues WHERE kind = ? AND trade_id != ''",
+                    (NEED_FIX_KIND,)) if r[-1] not in file_ids]
+                still = {r[0] for r in conn.execute("SELECT trade_id FROM trades WHERE product = ?", (UNRECOGNISED,))}
                 conn.execute("DELETE FROM upload_issues")
-                conn.executemany("INSERT INTO upload_issues VALUES (?,?,?,?,?,?)",
-                                 [(n, sym, kind, why, str(filename), stamp) for n, sym, kind, why in rows])
+                _insert_issues(conn, [r for r in carried if r[-1] in still])
+                _insert_issues(conn, [(n, sym, kind, why, str(filename), stamp, tid) for n, sym, kind, why, tid in rows])
         finally:
             conn.close()
     except sqlite3.Error:
@@ -370,13 +546,17 @@ UPLOAD_REPORT_DDL = ("CREATE TABLE IF NOT EXISTS upload_report ("
                      "underlying_futures_written INTEGER NOT NULL DEFAULT 0, "
                      "library_tickers INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '', "
                      "added INTEGER NOT NULL DEFAULT 0, replaced INTEGER NOT NULL DEFAULT 0, "
-                     "removed INTEGER NOT NULL DEFAULT 0, on_file_after INTEGER NOT NULL DEFAULT 0)")
+                     "removed INTEGER NOT NULL DEFAULT 0, on_file_after INTEGER NOT NULL DEFAULT 0, "
+                     "need_fix INTEGER NOT NULL DEFAULT 0)")
 UPLOAD_REPORT_COLUMNS = ("filename", "uploaded_at", "futures", "options_on_futures", "lme_forwards",
                          "fx_forwards", "fx_spot", "fx_options", "excluded_rows", "excluded_text",
                          "underlying_futures_written", "library_tickers", "summary",
                          # the merge by Trade Id (2026-09-28): trades added, replaced by the file's
                          # rows, removed as cancelled, and the whole book's count after the upload
-                         "added", "replaced", "removed", "on_file_after")
+                         "added", "replaced", "removed", "on_file_after",
+                         # every row loads (2026-09-29): the file's rows on file as UNRECOGNISED
+                         # after the upload's re-resolution (the "N rows need a fix" count)
+                         "need_fix")
 # The default of every column an older `upload_report` may lack (a database made before the
 # column was added): `record_upload_report` adds the column, `last_upload_report` fills it.
 _REPORT_DEFAULTS = {"excluded_text": "", "summary": ""}
@@ -410,7 +590,7 @@ def record_upload_report(db_path, filename, result, n_underlying: int, library_t
     row, with the merge's trade ids, is appended to `upload_history` in the same transaction.
     Never fails an import: a database error is swallowed and False returned."""
     import datetime as _dt
-    counts = loaded_counts(result.trades)
+    counts = loaded_counts(_file_trades(result))
     change = change or {}
     row = {"filename": str(filename),
            "uploaded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
@@ -420,7 +600,8 @@ def record_upload_report(db_path, filename, result, n_underlying: int, library_t
            "underlying_futures_written": int(n_underlying),
            "library_tickers": int(library_tickers),
            "summary": summary,
-           **{col: int(change.get(col, 0) or 0) for col in ("added", "replaced", "removed", "on_file_after")}}
+           **{col: int(change.get(col, 0) or 0) for col in ("added", "replaced", "removed", "on_file_after",
+                                                             "need_fix")}}
     names = ",".join(UPLOAD_REPORT_COLUMNS)
     try:
         conn = sqlite3.connect(str(db_path), timeout=60)
@@ -476,7 +657,7 @@ UPLOAD_HISTORY_DDL = ("CREATE TABLE IF NOT EXISTS upload_history ("
                       "removed INTEGER NOT NULL DEFAULT 0, removed_manual INTEGER NOT NULL DEFAULT 0, "
                       "on_file_after INTEGER NOT NULL DEFAULT 0, "
                       "added_ids TEXT NOT NULL DEFAULT '[]', replaced_ids TEXT NOT NULL DEFAULT '[]', "
-                      "removed_ids TEXT NOT NULL DEFAULT '[]')")
+                      "removed_ids TEXT NOT NULL DEFAULT '[]', need_fix INTEGER NOT NULL DEFAULT 0)")
 _HISTORY_ID_COLUMNS = ("added_ids", "replaced_ids", "removed_ids")
 UPLOAD_HISTORY_COLUMNS = UPLOAD_REPORT_COLUMNS + ("removed_manual",) + _HISTORY_ID_COLUMNS
 # trade_upload_trail's action per id column, in the order an upload applies them.
@@ -485,8 +666,15 @@ _TRAIL_ACTIONS = (("added_ids", "added"), ("replaced_ids", "replaced"), ("remove
 
 def _append_history(conn: sqlite3.Connection, row: dict, change: dict) -> None:
     """Append one `upload_history` row: `row` is the `upload_report` row just written, `change`
-    the merge accounting with its id lists. Runs inside the caller's transaction."""
+    the merge accounting with its id lists. Runs inside the caller's transaction. A column an
+    older database's table lacks (`need_fix`, 2026-09-29) is added first."""
     conn.execute(UPLOAD_HISTORY_DDL)
+    present = {r[1] for r in conn.execute("PRAGMA table_info(upload_history)")}
+    for col in UPLOAD_HISTORY_COLUMNS:
+        if col not in present:
+            kind, default = (("TEXT", "'[]'") if col in _HISTORY_ID_COLUMNS else
+                             ("TEXT", "''") if col in _REPORT_DEFAULTS else ("INTEGER", "0"))
+            conn.execute(f"ALTER TABLE upload_history ADD COLUMN {col} {kind} NOT NULL DEFAULT {default}")
     ids = {"added_ids": list(change.get("added_ids") or ()),
            "replaced_ids": list(change.get("replaced_ids") or ()),
            "removed_ids": list(change.get("removed_ids") or ()) + list(change.get("removed_manual_ids") or ())}
@@ -547,17 +735,209 @@ def trade_upload_trail(conn: sqlite3.Connection, trade_id) -> list[dict]:
 
 
 def last_upload_issues(conn: sqlite3.Connection) -> list[dict]:
-    """The last upload's rows that did not become trades, and its file-level warnings, as
-    `record_upload_issues` stored them: [{row_no, symbol, kind, reason, filename, uploaded_at}]
-    in row order. kind is REJECTED (the parser could not read the row), NOT LOADED (a type the
-    app does not load) or WARNING (a line about the file as a whole: row_no 0, symbol '').
-    [] when no upload has been recorded. Read-only."""
+    """The rows `record_upload_issues` stored: [{row_no, symbol, kind, reason, filename,
+    uploaded_at, trade_id}] in row order. kind is UNRECOGNISED (NEED_FIX_KIND: on file as a
+    trade that needs a fix, `trade_id` set; an earlier upload's such trade still on file keeps
+    its row, with that upload's file name), WARNING (a doubtful cell or a contradiction that
+    loaded on the primary field, with its `trade_id`; row 0 / symbol '' / trade_id '' for a
+    line about the file as a whole), or REJECTED / NOT LOADED (an older parser's rows that did
+    not become trades). `trade_id` is '' on a table made before 2026-09-29. [] when no upload
+    has been recorded. Read-only."""
     if not _table_exists(conn, "upload_issues"):
         return []
-    found = conn.execute("SELECT row_no, symbol, kind, reason, filename, uploaded_at FROM upload_issues "
-                         "ORDER BY row_no, rowid").fetchall()
-    return [{"row_no": n, "symbol": sym, "kind": kind, "reason": why, "filename": name, "uploaded_at": at}
-            for n, sym, kind, why, name, at in found]
+    has_tid = "trade_id" in {r[1] for r in conn.execute("PRAGMA table_info(upload_issues)")}
+    found = conn.execute("SELECT row_no, symbol, kind, reason, filename, uploaded_at, "
+                         f"{'trade_id' if has_tid else chr(39) * 2} FROM upload_issues ORDER BY row_no, rowid").fetchall()
+    return [{"row_no": n, "symbol": sym, "kind": kind, "reason": why, "filename": name, "uploaded_at": at,
+             "trade_id": tid} for n, sym, kind, why, name, at, tid in found]
+
+
+def unrecognised_reasons(conn: sqlite3.Connection) -> dict:
+    """{trade_id: reason} for every trade on file that needs a fix (product UNRECOGNISED), read
+    from `upload_issues` rows of kind UNRECOGNISED; a trade with no such row (none after an upload
+    or `reresolve_unrecognised`) is absent. Read-only; {} with no table."""
+    if not _table_exists(conn, "upload_issues"):
+        return {}
+    if "trade_id" not in {r[1] for r in conn.execute("PRAGMA table_info(upload_issues)")}:
+        return {}
+    out: dict = {}
+    for tid, why in conn.execute("SELECT i.trade_id, i.reason FROM upload_issues i JOIN trades t USING (trade_id) "
+                                 "WHERE i.kind = ? AND t.product = ? ORDER BY i.row_no, i.rowid",
+                                 (NEED_FIX_KIND, UNRECOGNISED)):
+        out.setdefault(tid, why)
+    return out
+
+
+# --------------------------------------------------------------------------- re-resolution
+def _resolved_parts(parsed) -> dict:
+    """What `blotter.resolve_stored` returned for one trade, as lists: trades, legs, instruments,
+    instrument_options, underlying_only. Accepts a ParseResult-like object, a dict carrying any of
+    those keys (or `trade` / `instrument` singly), or a bare Trade."""
+    def many(name, single=None):
+        found = _get(parsed, name)
+        if found is None and single is not None:
+            one = _get(parsed, single)
+            found = [] if one is None else [one]
+        if isinstance(found, dict):
+            found = list(found.values())
+        return list(found or ())
+    if parsed is not None and hasattr(parsed, "product") and hasattr(parsed, "trade_id"):
+        return {"trades": [parsed], "legs": [], "instruments": [], "instrument_options": [], "underlying_only": set()}
+    return {"trades": many("trades", "trade"), "legs": many("legs"), "instruments": many("instruments", "instrument"),
+            "instrument_options": many("instrument_options", "instrument_option"),
+            "underlying_only": set(_get(parsed, "underlying_only") or ())}
+
+
+def _call_resolve_stored(fn, trade: dict, conn: sqlite3.Connection):
+    """(parsed or None, reason) from the parser's `resolve_stored`, whatever of the two shapes it
+    returns ((parsed, reason) or parsed alone); an exception is (None, its message)."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+        out = fn(trade, conn=conn) if "conn" in params else fn(trade)
+    except Exception as exc:  # noqa: BLE001 -- one trade's failure is its reason, never the whole pass's
+        return None, f"could not be re-read ({exc})"
+    if isinstance(out, tuple) and len(out) == 2:
+        return out[0], str(out[1] or "")
+    return out, ""
+
+
+def _replace_resolved(conn: sqlite3.Connection, trade_id: str, old_instrument: str, parts: dict) -> dict:
+    """Rewrite one UNRECOGNISED trade in place as the product it now resolves to, exactly as an
+    upload writes a trade: its instrument (INSERT OR REPLACE, named columns; an option's underlying
+    future INSERT OR IGNORE), its option terms (a typed term never overwritten by a blank), its
+    trade row (upsert by name; a hand-set theme kept), its legs (deleted, then the parser's), its
+    realised_pnl row dropped. The UNRECOGNISED instrument is deleted when nothing else refers to
+    it, and the Bloomberg library is marked dirty (the triggers do so too). One transaction."""
+    trade = next(t for t in parts["trades"] if t.trade_id == trade_id)
+    legs = [leg for leg in parts["legs"] if leg.trade_id == trade_id]
+    inames = ",".join(_INSTRUMENT_COLUMNS)
+    iholes = ",".join("?" for _ in _INSTRUMENT_COLUMNS)
+    with conn:
+        theme = conn.execute("SELECT theme FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
+        for inst in parts["instruments"]:
+            verb = "INSERT OR IGNORE" if inst.instrument_id in parts["underlying_only"] else "INSERT OR REPLACE"
+            conn.execute(f"{verb} INTO instruments ({inames}) VALUES ({iholes})",
+                         [getattr(inst, c) for c in _INSTRUMENT_COLUMNS])
+        conn.executemany(
+            f"INSERT INTO instrument_options ({','.join(_OPTION_COLUMNS)}) VALUES ({','.join('?' for _ in _OPTION_COLUMNS)}) "
+            "ON CONFLICT(instrument_id) DO UPDATE SET "
+            "strike = CASE WHEN excluded.strike != 0 THEN excluded.strike ELSE strike END, "
+            "option_type = CASE WHEN excluded.option_type != '' THEN excluded.option_type ELSE option_type END, "
+            "payoff = CASE WHEN excluded.payoff != 'VANILLA' THEN excluded.payoff ELSE payoff END",
+            [[getattr(o, c) for c in _OPTION_COLUMNS] for o in parts["instrument_options"]])
+        for table in TRADE_KEYED_CHILD_TABLES:
+            conn.execute(f"DELETE FROM {table} WHERE trade_id = ?", (trade_id,))
+        _upsert_trade(conn, trade)
+        if theme and theme[0]:
+            conn.execute("UPDATE trades SET theme = ? WHERE trade_id = ? AND theme = ''", (theme[0], trade_id))
+        conn.executemany(f"INSERT INTO trade_legs ({','.join(_LEG_COLUMNS)}) VALUES ({','.join('?' for _ in _LEG_COLUMNS)})",
+                         [[getattr(leg, c) for c in _LEG_COLUMNS] for leg in legs])
+        dropped = False
+        if old_instrument and old_instrument != trade.instrument_id:
+            refs = sum(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE instrument_id = ?", (old_instrument,)).fetchone()[0]
+                       for table in ("trades", "instrument_theme", "marks") if _table_exists(conn, table))
+            if not refs:
+                conn.execute("DELETE FROM instrument_options WHERE instrument_id = ?", (old_instrument,))
+                conn.execute("DELETE FROM instruments WHERE instrument_id = ? AND asset_class = ?",
+                             (old_instrument, UNRECOGNISED))
+                dropped = True
+        if _table_exists(conn, "bbg_library_state"):
+            conn.execute("UPDATE bbg_library_state SET dirty = 1")
+    return {"trade_id": trade_id, "symbol": trade.broker_symbol, "instrument_id": trade.instrument_id,
+            "product": trade.product, "legs": len(legs), "unrecognised_instrument_dropped": dropped}
+
+
+def _refresh_need_fix_issues(conn: sqlite3.Connection, still: list, resolved_ids) -> None:
+    """Keep `upload_issues`' UNRECOGNISED rows in step with the trades on file: a resolved trade's
+    row goes; a still-unrecognised trade with no row (loaded by an upload made before the table
+    had trade_id, or whose row was lost) gets one, dated by the last upload that added or replaced
+    it (`trade_upload_trail`), with the parser's reason of today. Rows already there keep their
+    reason (the upload's own words)."""
+    with conn:
+        _migrate_issues_table(conn)
+        conn.executemany("DELETE FROM upload_issues WHERE kind = ? AND trade_id = ?",
+                         [(NEED_FIX_KIND, tid) for tid in resolved_ids])
+        have = {r[0] for r in conn.execute("SELECT trade_id FROM upload_issues WHERE kind = ?", (NEED_FIX_KIND,))}
+        rows = []
+        for s in still:
+            if s["trade_id"] in have:
+                continue
+            trail = [t for t in trade_upload_trail(conn, s["trade_id"]) if t["action"] != "removed"]
+            name, at = (trail[0]["filename"], trail[0]["uploaded_at"]) if trail else ("", "")
+            rows.append((0, s["symbol"], NEED_FIX_KIND, s["reason"], name, at, s["trade_id"]))
+        _insert_issues(conn, rows)
+
+
+def reresolve_unrecognised(conn: sqlite3.Connection) -> dict:
+    """Try every trade on file of product UNRECOGNISED again through the parser
+    (`data.ingest.blotter.resolve_stored`), so a fix to config/contracts.csv prices it with no
+    re-upload (hard rule 6, 2026-09-29). Runs at the end of every upload (after the merge, before
+    the contract dates and the Bloomberg library sync) and at app start-up. Asks Bloomberg nothing.
+
+    `resolve_stored` is handed each trade as a dict: every `trades` column, plus `currency` (the
+    UNRECOGNISED instrument's quote_ccy, i.e. the file's Currency cell) and `symbol` (=
+    broker_symbol); `conn` too when it takes one. It returns the parsed trade to write (a
+    ParseResult-like object with trades / legs / instruments / instrument_options /
+    underlying_only, or a dict of those, or a Trade) or None, with the reason: `(parsed, reason)`.
+    A trade that now resolves (same trade_id, a product other than UNRECOGNISED) is rewritten in
+    place (`_replace_resolved`); nothing is ever guessed, and a trade the parser still cannot
+    identify stays exactly as it is.
+
+    Returns {'resolved': [{trade_id, symbol, instrument_id, product, legs,
+    unrecognised_instrument_dropped}], 'still_unrecognised': [{trade_id, symbol, reason}],
+    'contract_dates': apply_contract_dates' result when something resolved (else None),
+    'sentence': one plain sentence ('' when there was nothing to try), 'error': '' or the database
+    error that stopped the pass (never raised: a start-up must not fail on it)}."""
+    out = {"resolved": [], "still_unrecognised": [], "contract_dates": None, "sentence": "", "error": ""}
+    try:
+        rows = conn.execute("SELECT t.*, COALESCE(i.quote_ccy, '') AS _currency FROM trades t "
+                            "LEFT JOIN instruments i USING (instrument_id) WHERE t.product = ? ORDER BY t.trade_id",
+                            (UNRECOGNISED,))
+        names = [d[0] for d in rows.description]
+        stored = [dict(zip(names, r)) for r in rows.fetchall()]
+    except sqlite3.Error as exc:
+        out["error"] = str(exc)
+        return out
+    if not stored:
+        return out
+    fn = getattr(blotter, "resolve_stored", None)
+    for row in stored:
+        tid, old_instrument = str(row["trade_id"]), str(row["instrument_id"] or "")
+        trade = {k: v for k, v in row.items() if k != "_currency"}
+        trade.update(currency=row["_currency"], symbol=row.get("broker_symbol") or "")
+        symbol = str(trade["symbol"] or old_instrument[len(UNRECOGNISED_PREFIX):])
+        if fn is None:
+            out["still_unrecognised"].append({"trade_id": tid, "symbol": symbol,
+                                              "reason": "the parser cannot re-read a stored row yet (no resolve_stored)"})
+            continue
+        parsed, reason = _call_resolve_stored(fn, trade, conn)
+        parts = _resolved_parts(parsed) if parsed is not None else None
+        match = [t for t in (parts or {}).get("trades", ()) if t.trade_id == tid and t.product != UNRECOGNISED]
+        if not match:
+            out["still_unrecognised"].append({"trade_id": tid, "symbol": symbol,
+                                              "reason": reason or "contract not recognised: the parser still cannot "
+                                                                  f"identify {symbol or 'this row'}"})
+            continue
+        try:
+            out["resolved"].append(_replace_resolved(conn, tid, old_instrument, parts))
+        except sqlite3.Error as exc:
+            out["still_unrecognised"].append({"trade_id": tid, "symbol": symbol,
+                                              "reason": f"resolved but could not be rewritten ({exc})"})
+    try:
+        _refresh_need_fix_issues(conn, out["still_unrecognised"], [r["trade_id"] for r in out["resolved"]])
+        if out["resolved"]:
+            from data.ingest import contract_dates
+            out["contract_dates"] = contract_dates.apply_contract_dates(conn)
+    except sqlite3.Error as exc:
+        out["error"] = str(exc)
+    n_ok, n_left = len(out["resolved"]), len(out["still_unrecognised"])
+    if n_ok:
+        shown = ", ".join(f"{r['symbol'] or r['trade_id']} -> {r['instrument_id']}" for r in out["resolved"][:5])
+        more = f" (+{n_ok - 5} more)" if n_ok > 5 else ""
+        out["sentence"] = (f"{n_ok} trade(s) that needed a fix now match a contract and were rewritten in place "
+                           f"({shown}{more}); {n_left} still need a fix.")
+    return out
 
 
 def import_blotter_report(payload, filename, db_path) -> dict:
@@ -579,6 +959,11 @@ def import_blotter_report(payload, filename, db_path) -> dict:
                            already on file replaced by the file's rows, trades removed as
                            cancelled, an old database's manual entries removed, and the
                            book's trade count after the upload
+      need_fix  int        the file's rows on file as UNRECOGNISED after the re-resolution
+                           (every row loads, 2026-09-29): "N rows need a fix"; never in `rejects`
+      need_fix_ids list    their trade ids
+      need_fix_on_file int the whole book's UNRECOGNISED trades after the upload
+      reresolved list      trade ids `reresolve_unrecognised` rewrote as a real product
 
     INFORMATION is in `notes` and `message` but never raises `warnings`: an option with
     no strike in the file, which the Blotter's missing-terms banner shows persistently, so
@@ -591,16 +976,33 @@ def import_blotter_report(payload, filename, db_path) -> dict:
 
     def _load(staged):
         try:
-            return blotter.load(frame, staged, strict=False, filename=filename)
+            res = blotter.load(frame, staged, strict=False, filename=filename)
+            _write_unrecognised(staged, res)      # every row loads (2026-09-29); a no-op when load wrote them
+            return res
         except sqlite3.Error as e:
             raise ValueError(f"Nothing imported. Database error: {e}") from e
 
     result, change = _stage_and_publish(db_path, _load)
     record_upload_issues(db_path, filename, result)
-    n_trades, n_legs = len(result.trades), len(result.legs)
-    parts = [f"Imported {filename}: {n_trades} trades -- {loaded_breakdown(result.trades)}; {n_legs} legs. "
+    # After the merge, before the contract dates and the library sync: a trade on file that needed
+    # a fix and that the contract list now knows is rewritten in place (every row loads, 2026-09-29).
+    with closing(schema.connect(Path(db_path).resolve())) as conn:
+        reresolved = reresolve_unrecognised(conn)
+        change["need_fix_on_file"] = conn.execute("SELECT COUNT(*) FROM trades WHERE product = ?",
+                                                  (UNRECOGNISED,)).fetchone()[0]
+    resolved_now = {r["trade_id"] for r in reresolved["resolved"]}
+    need_fix = [r for r in unrecognised_rows(result) if r["trade_id"] not in resolved_now]
+    change["need_fix"] = len(need_fix)
+    file_trades = _file_trades(result)
+    n_trades, n_legs = len(file_trades), len(result.legs)
+    parts = [f"Imported {filename}: {n_trades} trades -- {loaded_breakdown(file_trades)}; {n_legs} legs. "
              f"{result.n_currency} cash rows seen ({result.n_spot} of them spot fills).",
              merge_sentence(n_trades, change)]
+    fix_sentence = need_fix_sentence(need_fix)
+    if fix_sentence:
+        parts.append(fix_sentence)
+    if reresolved["sentence"]:
+        parts.append(reresolved["sentence"])
     underlying = sorted(getattr(result, "underlying_only", None) or ())
     if underlying:
         # An option on a future whose underlying the file does not trade: the future is written as
@@ -617,10 +1019,13 @@ def import_blotter_report(payload, filename, db_path) -> dict:
     # The book filter (config/book.yaml: funds, traders, desks) and what it excluded, by
     # reason; n_skipped_status_or_fund is only their total, so it no longer gets a sentence.
     parts.append(result.filter_summary())
-    if result.rejects:
-        head = "; ".join(f"row {rj.row_no} {rj.symbol}: {rj.reason}" for rj in result.rejects[:5])
-        more = f" (+{len(result.rejects) - 5} more)" if len(result.rejects) > 5 else ""
-        parts.append(f"{len(result.rejects)} row(s) {REJECTS_PHRASE} and were skipped: {head}{more}.")
+    # A reject the parser also loaded as UNRECOGNISED is a row that needs a fix, said above.
+    fix_rows = {r["row_no"] for r in unrecognised_rows(result) if r["row_no"]}
+    rejects = [rj for rj in result.rejects if rj.row_no not in fix_rows]
+    if rejects:
+        head = "; ".join(f"row {rj.row_no} {rj.symbol}: {rj.reason}" for rj in rejects[:5])
+        more = f" (+{len(rejects) - 5} more)" if len(rejects) > 5 else ""
+        parts.append(f"{len(rejects)} row(s) {REJECTS_PHRASE} and were skipped: {head}{more}.")
     # Before the library sync, so the library lists each future's price at Bloomberg's date.
     dates_sentence = _contract_dates_sentence(db_path)
     if dates_sentence:
@@ -630,7 +1035,10 @@ def import_blotter_report(payload, filename, db_path) -> dict:
     notes = result.notes()
     message = " ".join(parts + notes)
     record_upload_report(db_path, filename, result, len(underlying), library_tickers, message, change)
-    return {"message": message, "rejects": len(result.rejects),
+    return {"message": message, "rejects": len(rejects),
             "warnings": len(result.warnings), "notes": notes,
             "added": change["added"], "replaced": change["replaced"], "removed": change["removed"],
-            "removed_manual": change["removed_manual"], "on_file_after": change["on_file_after"]}
+            "removed_manual": change["removed_manual"], "on_file_after": change["on_file_after"],
+            "need_fix": change["need_fix"], "need_fix_ids": [r["trade_id"] for r in need_fix],
+            "need_fix_on_file": change["need_fix_on_file"],
+            "reresolved": [r["trade_id"] for r in reresolved["resolved"]]}

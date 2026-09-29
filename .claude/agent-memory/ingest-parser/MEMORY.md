@@ -1,7 +1,8 @@
 - [Commodity futures ingest](commodity-futures-ingest.md) — resolve_future path, sample symbol-format guesses, bare-code collisions, price-scale and Notional hazards
 - [Real export conventions](real-export-conventions.md) -- Jason's PB export 2026-09-28: missing columns, PBRoot -> strategy/trade_type, broker price scale, LastModified dedupe, cancelled ids
 - [Synthetic sample book](synthetic-sample-book.md) — blotter_sample.csv: composition, ids, PBRoot trade names (2026-09-29), option C/P-letter hazard
-- [Phase 2 macro removal](phase2-macro-removal.md) — IRS / ES / SPX rows skipped not rejected, NDFs deliverable, retired names kept, heredoc hang
+- [Every row loads](every-row-loads.md) — 2026-09-29: no rejects/skips; UNRECOGNISED trades, contradictions warn, resolve_stored / write_parsed, fin_type
+- [Phase 2 macro removal](phase2-macro-removal.md) — IRS / ES / SPX rows (UNRECOGNISED since 2026-09-29), NDFs deliverable, retired names kept, heredoc hang
 - [Phase 5 options and LME](phase5-options-and-lme.md) — CMDTY_OPTION / LME_FWD routing, guesses, expiry and underlying-instrument choices, sample rows 046-052
 - Older blotter notes (field quirks, IRS direction, NDF tickers) are in `.claude/agent-memory/data-ingest/` (the lane before the 2026-09-24 split)
 - [Broker raw cells](broker-raw-cells.md) — Trade.broker_symbol / broker_price (2026-09-29): Symbol and Price as written, the empty rule

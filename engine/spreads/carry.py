@@ -182,7 +182,8 @@ def _one(history, roots, ident, source, name, kind, spec, upu, upu_why, unit, as
     return out
 
 
-def curve_roll_downs(history, root, legs: Sequence[Tuple[str, str, str]], as_of: str) -> dict:
+def curve_roll_downs(history, root, legs: Sequence[Tuple[str, str, str]], as_of: str,
+                     memo: Optional[dict] = None) -> dict:
     """Each leg's own roll-down on ONE root's research curve (2026-09-29, the trade panel's
     roll-down per leg; the rule of ``carry`` applied leg by leg): a contract in month Mi moves up
     the curve into the place Mi-1 holds today, so ``roll_down = price(Mi-1) - price(Mi)``, in the
@@ -195,8 +196,23 @@ def curve_roll_downs(history, root, legs: Sequence[Tuple[str, str, str]], as_of:
     Returns ``{research_date, reason, note, legs: {key: {contract_id, nearer, horizon_months,
     roll_down, research_contracts, reason}}}``: a leg that cannot be read (no month, already the
     front contract, no research settlement, an LME prompt the research app does not carry) is
-    None with its reason and is left out of the common date. RESEARCH CONTEXT: never a mark,
-    never in P&L, delta or a total."""
+    None with its reason and is left out of the common date. ``memo``: a dict the caller keeps
+    over several calls on the same ``history`` and ``as_of`` (the trade book's), so a contract's
+    research lookup and settlements are read once (2026-09-29, speed; the same figures).
+    RESEARCH CONTEXT: never a mark, never in P&L, delta or a total."""
+    memo = {} if memo is None else memo
+
+    def resolve(cid: str):
+        key = ("resolve", cid, root.root_id)
+        if key not in memo:
+            memo[key] = history.resolve_contract(cid, root.root_id)
+        return memo[key]
+
+    def settles(cid: str):
+        key = ("settles", cid, root.root_id)
+        if key not in memo:
+            memo[key] = _settles(history, cid, root.root_id, ts)
+        return memo[key]
     out = {"research_date": None, "reason": "", "note": "", "legs": {}}
     for key, cid, month in legs:
         out["legs"][key] = {"contract_id": cid, "nearer": "", "horizon_months": None, "roll_down": None,
@@ -216,7 +232,7 @@ def curve_roll_downs(history, root, legs: Sequence[Tuple[str, str, str]], as_of:
             continue
         nearer = _contract_id(root, prev)
         leg.update(nearer=nearer, horizon_months=back)
-        rid, why = history.resolve_contract(nearer, root.root_id)
+        rid, why = resolve(nearer)
         if rid is None:
             leg["reason"] = f"{cid} is the front contract on the research curve: {why}"
             continue
@@ -227,7 +243,7 @@ def curve_roll_downs(history, root, legs: Sequence[Tuple[str, str, str]], as_of:
             continue
         pair, whys = [], []
         for c in (cid, nearer):
-            s, rid, why = _settles(history, c, root.root_id, ts)
+            s, rid, why = settles(c)
             leg["research_contracts"][c] = rid
             if s is None:
                 whys.append(why)

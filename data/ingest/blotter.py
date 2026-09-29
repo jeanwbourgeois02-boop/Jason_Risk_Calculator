@@ -10,18 +10,31 @@ or unrecognised): FORWARD, CURRENCY, FUTURE, OPTION -- matched by keyword after
 normalisation, so 'Futures', 'FX Forward', 'fx option' all resolve. A label with 'swap'
 is FORWARD with an FX word (FX, currency, forward, foreign exchange), because an FX
 swap's rows are forward fills with their own value dates; with a rates word (interest,
-rate, IRS, OIS) it is an interest rate swap, which is no longer loaded; 'Swap' alone is
-counted and skipped, never coerced (reviewer finding 2026-09-22).
+rate, IRS, OIS) it is an interest rate swap, which the app no longer values; 'Swap' alone
+is not a kind the app books, never coerced (reviewer finding 2026-09-22).
+
+EVERY ROW LOADS (hard rule 6, user 2026-09-29: "all rows need to load thats non negotiable").
+A row the parser cannot book as its product -- an unknown or ambiguous contract root, a
+broker suffix no candidate fits, a Fin Type it cannot classify, a product that left the app,
+no size, direction, price or date it can read -- is still written, as a trade of product
+UNRECOGNISED (``_book_unrecognised``): instrument 'UNRECOGNISED:' + the Symbol as written,
+asset_class UNRECOGNISED, no legs, multiplier 0, never asked of Bloomberg, blank P&L. It is
+named with its plain reason on ``ParseResult.unrecognised`` (the "N rows need a fix" count,
+``n_unrecognised``) and re-resolved from its stored fields by ``resolve_stored`` once the
+contract list knows it. A contradiction between two populated fields loads on the primary
+field (Quantity over NetInvoice, the Symbol's contract over the Currency / venue / Description,
+the structured Buy/Sell currency columns over the Description) with a warning naming both
+values. ``ParseResult.rejects`` stays for its readers and is always empty. A row with no
+Trade Id loads under a key made from its own cells ('NOID-...', warned).
 
 Products that left the app with the commodity conversion (Phase 2, user 2026-09-24):
 interest rate swaps, the equity index futures (ES, NQ, RTY, YM) and the listed index
-options ('SPX/E261016P7615-USAA'). A row of one of them is counted under
-``n_skipped_other`` (and ``n_skipped_retired``) and named on ``skipped_other_rows`` with
-a plain reason: never a reject, never coerced into another product (hard rule 6). NDFs
-left too: every FX pair is written deliverable (``is_ndf`` 0, legs ``settles_cash`` 1).
+options ('SPX/E261016P7615-USAA'). A row of one of them loads as UNRECOGNISED with that
+plain reason (counted on ``n_unrecognised_retired``), never coerced into another product.
+NDFs left too: every FX pair is written deliverable (``is_ndf`` 0, legs ``settles_cash`` 1).
 
-Rows whose Status says cancelled/rejected/pending/void are filtered out and
-counted (the Trade Ids of the removals -- cancelled, void, deleted, rejected, failed, never
+Rows whose Status says cancelled/rejected/pending/void are filtered out, counted and
+named on ``excluded_status_rows`` (the Trade Ids of the removals -- cancelled, void, deleted, rejected, failed, never
 pending -- are listed on ``ParseResult.cancelled_trade_ids`` so the upload can delete them
 from the book); so are rows that ``config/book.yaml`` says are not the book's (its ``funds``,
 ``traders`` and ``desks`` lists, read by ``load_book_filter``: a non-empty list keeps only
@@ -46,15 +59,15 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     the ``Currency``, ``Execution Venue`` and ``Description`` cells): instrument id = the
     canonical contract id ('CLZ26 Comdty'), base_ccy = the root id ('NYMEX:CL'), quote_ccy
     / multiplier from ``config/contracts.csv``, the NOTIONAL leg in the contract's own
-    currency. A symbol the universe does not know, or that fits more than one root,
-    rejects that row naming the candidates: a multiplier is never guessed.
+    currency. A symbol the universe does not know, or that fits more than one root, loads
+    as UNRECOGNISED naming the candidates: a multiplier is never guessed.
   - OPTION: product FX_OPTION, 1 NOTIONAL leg in the pair's base currency, quantity
     signed by ``Side``, price = premium fill. Strike from the Description when present
     (genuinely absent from the file for some rows -- 0.0 "not known" sentinel, never
     invented, and listed on ``ParseResult.options_missing_strike`` so the UI can ask).
     Expiry / call-put come from ``Symbol`` when it parses, cross-checked against the
     Description's own date/CALL-PUT word when Description is populated (a disagreement
-    rejects, per the tolerance rule below) rather than trusting the Symbol blindly.
+    loads on the Symbol, warned) rather than trusting the Symbol blindly.
     ``NetInvoice`` is |Quantity x Price| but its sign is unreliable, so it never gives
     direction: it rebuilds a Price / Quantity cell that is unusable, and is otherwise a
     cross-check that warns above 0.5 % and never rejects.
@@ -64,7 +77,7 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
     Comdty'), terms in ``instrument_options``, lots signed by Side, 1 NOTIONAL leg in the
     contract's currency. The underlying future's instrument row is written too, with no
     trade (``ParseResult.underlying_only``; ``load`` never overwrites a row on file with it).
-    An unknown or ambiguous root rejects, naming it.
+    An unknown or ambiguous root loads as UNRECOGNISED, naming it.
   - LME forwards (Phase 5, 2026-09-24): a FUTURE or FORWARD row on the LME (venue, Bloomberg's
     LME ticker, or a symbol resolving to one of ``engine.lme.lme_roots()``) becomes product
     LME_FWD on the metal's root id ('LME:CA'): tonnes signed, two FX_NEAR legs (metal, USD) on
@@ -72,9 +85,9 @@ This file is transaction-level (one row per fill), unlike the BNP snapshot:
 
 Tolerance rule (user instruction 2026-09-17, "as flexible as possible"): a blank,
 missing or oddly formatted field never rejects a row when the value can be recovered
-from another column; only a genuine contradiction between two populated fields does
-(pair vs buy/sell currencies, value date in Symbol vs Description, option pair vs
-Currency Pair). Rejected rows are counted and reported, never coerced or invented.
+from another column; a genuine contradiction between two populated fields (pair vs
+buy/sell currencies, value date in Symbol vs Description, option pair vs Currency Pair)
+loads on the primary field with a warning naming both (2026-09-29). Nothing is invented.
 
 Numbers (2026-09-18, the "could not convert string to float" / "24 Jul" incident): no
 text may ever reach a numeric column. Excel turns a number such as 7.24 into the date
@@ -84,8 +97,8 @@ became 24.0 and '7/24/2026' 7242026.0), a cell that is not a number is rebuilt f
 another column (forward / spot rate and amounts from each other, Quantity and
 NetInvoice; option Price and Quantity from |NetInvoice|; futures price from NetInvoice
 and fees, contracts from NetInvoice / (multiplier x Price)) with a ``ParseWarning``, and
-only when nothing can
-rebuild it is that ONE row rejected, naming the column and the cell. ``_enforce_numeric``
+only when nothing can rebuild it does that ONE row load as UNRECOGNISED, naming the
+column and the cell. ``_enforce_numeric``
 is the last gate: only finite numbers reach a REAL column (NaN binds as NULL and used to
 fail the whole upload). ``non_numeric_cells`` lists text already sitting in a database.
 
@@ -109,6 +122,8 @@ agree with the FUTURE_PX marks; the load report names the roots converted.
 from __future__ import annotations
 
 import csv
+import dataclasses
+import hashlib
 import logging
 import math
 import numbers
@@ -131,16 +146,32 @@ from data.ingest.common import (
     InstrumentOption,
     ParseWarning,
     PERPETUAL,
+    UNRECOGNISED,
+    UNRECOGNISED_PREFIX,
     Reject,
     Trade,
     TradeLeg,
+    Unrecognised,
     parse_pb_root,
     strategy_key,
 )
-from data.contracts import option_request_ticker, request_ticker, resolve_future, resolve_option
+from data.contracts import (
+    AmbiguousContract,
+    option_request_ticker,
+    request_ticker,
+    resolve_future,
+    resolve_option,
+)
 from engine import lme as _lme
 
 log = logging.getLogger(__name__)
+
+
+class _Unrecognised(Exception):
+    """Raised inside a row parser when the row cannot be booked as its product (an unknown or
+    ambiguous contract, no size, no direction, no date ...). ``_parse_row`` catches it and loads
+    the row as an UNRECOGNISED trade with this reason (hard rule 6, "Every row loads",
+    2026-09-29). Never escapes ``parse``."""
 
 SOURCE = "XLSX"  # closest value in CLAUDE.md's trades.source enum ('BNP | XLSX | MANUAL')
 # Which rows are the book's: config/book.yaml (see load_book_filter). With no such file the
@@ -149,10 +180,11 @@ BOOK_YAML = Path(__file__).resolve().parents[2] / "config" / "book.yaml"
 DEFAULT_FUNDS = ("NMMF",)
 IN_SCOPE_TYPES = ("FORWARD", "CURRENCY", "FUTURE", "OPTION")
 # Products that left the app with the commodity conversion (Phase 2, user 2026-09-24). A row
-# of one of them is counted and skipped with a plain reason, never rejected and never coerced
+# of one of them loads as UNRECOGNISED with a plain reason (every row loads), never coerced
 # into another product (hard rule 6). The roots are recognised only to say so: nothing is
 # booked from them, and a multiplier is never read from this list.
-RETIRED_REASON_IRS = "interest rate swap: rates left the app on 2026-09-24 (commodity conversion); not loaded"
+RETIRED_REASON_IRS = ("interest rate swap: rates left the app on 2026-09-24 (commodity conversion); "
+                      "the app does not value it")
 RETIRED_INDEX_FUTURE_ROOTS = frozenset({"ES", "NQ", "RTY", "YM"})
 # listed index options, and options on the equity index futures (Phase 5, 2026-09-24: still skipped)
 RETIRED_INDEX_OPTION_ROOTS = frozenset({"SPX", "SPXW", "NDX", "RUT", "SX5E"}) | RETIRED_INDEX_FUTURE_ROOTS
@@ -345,13 +377,22 @@ class ParseResult:
     # instruments written only as the underlying future of an option on a future (no trade of
     # their own in the file): load() inserts them without ever overwriting a row already on file
     underlying_only: set = field(default_factory=set)
+    # Every row loads (hard rule 6, user 2026-09-29): a row the parser cannot book as its product
+    # is a trade of product UNRECOGNISED (in `trades`, no legs, instrument 'UNRECOGNISED:<SYMBOL>')
+    # and is named here with its reason. These are the rows that "need a fix".
+    unrecognised: List[Unrecognised] = field(default_factory=list)
+    # of `unrecognised`: rows of a product that left the app on 2026-09-24 (interest rate swaps,
+    # equity index futures, listed index options)
+    n_unrecognised_retired: int = 0
+    # Kept for callers that read them; since 2026-09-29 always 0 / empty (a row of a type the app
+    # does not book is an UNRECOGNISED trade, on `unrecognised`).
     n_skipped_other: int = 0
-    # the rows behind n_skipped_other, named: (row_no, symbol, reason) -- a row of a type the
-    # app does not load must never vanish without a trace (user, 2026-09-21)
     skipped_other_rows: list = field(default_factory=list)
-    # of n_skipped_other: rows of a product that left the app on 2026-09-24 (interest rate
-    # swaps, equity index futures, listed index options), each named on skipped_other_rows
     n_skipped_retired: int = 0
+    # the rows the Status excluded, named: (row_no, trade_id, symbol, status as written) --
+    # cancelled / void / deleted / rejected / failed (removals, also on `cancelled_trade_ids`) and
+    # pending / draft / error (not a trade yet), so the upload can show each with its status
+    excluded_status_rows: list = field(default_factory=list)
     n_skipped_status_or_fund: int = 0   # every excluded row: the four counts below summed
     n_excluded_status: int = 0          # Status cancelled / rejected / pending / ...
     n_excluded_fund: int = 0            # config/book.yaml's funds (a row counts under its first filter)
@@ -379,6 +420,22 @@ class ParseResult:
     # known" sentinel, never a real strike of 0), so the UI can ask for them by name.
     options_missing_strike: List[str] = field(default_factory=list)
     trade_rows: Dict[str, int] = field(default_factory=dict)   # trade_id -> file row number
+
+    @property
+    def n_unrecognised(self) -> int:
+        """Rows loaded as UNRECOGNISED trades: the "N rows need a fix" count."""
+        return len(self.unrecognised)
+
+    def unrecognised_notes(self) -> List[str]:
+        """One sentence naming the rows that need a fix (loaded as UNRECOGNISED), the first few
+        with their reason; [] when there are none."""
+        if not self.unrecognised:
+            return []
+        n = len(self.unrecognised)
+        shown = "; ".join(f"row {u.row_no} {u.symbol or u.trade_id}: {u.reason}" for u in self.unrecognised[:3])
+        more = f"; and {n - 3} more" if n > 3 else ""
+        return [f"{n} row{'s' if n != 1 else ''} need{'' if n != 1 else 's'} a fix: loaded as not recognised, "
+                f"with no P&L until {'they are' if n != 1 else 'it is'} mapped ({shown}{more})."]
 
     def information_notes(self) -> List[str]:
         """Things the app also shows persistently elsewhere (the Blotter's missing-terms
@@ -438,7 +495,9 @@ class ParseResult:
         return f"Book filter ({where}): {book.describe()}. Rows excluded: {excluded}. Rows kept by trader: {kept}."
 
     def notes(self) -> List[str]:
-        """Plain sentences for the upload summary: `information_notes` then `warning_notes`."""
+        """Plain sentences for the upload summary: `information_notes` then `warning_notes`. The
+        rows that need a fix are not here: the upload says them in its own sentence (a caller
+        without one can add `unrecognised_notes()`)."""
         return self.information_notes() + self.warning_notes()
 
 
@@ -954,11 +1013,14 @@ def _is_number(x) -> bool:
 
 
 def _enforce_numeric(res: "ParseResult") -> None:
-    """Last gate before anything can be written: drop (as a named, single-row reject)
-    any trade whose own numbers, legs, instrument or option terms hold anything but a
-    finite number. Python's sqlite3 binds NaN as NULL, which fails NOT NULL and used to
-    take the whole upload down with it, and SQLite stores non-numeric text in a REAL
-    column as text, on which the pricing layer later dies in float()."""
+    """Last gate before anything can be written: any trade whose own numbers, legs,
+    instrument or option terms hold anything but a finite number is turned into an
+    UNRECOGNISED trade (no legs, its non-finite numbers stored as 0) with the offending
+    field as its reason: every row loads (2026-09-29), and nothing but a finite number
+    reaches a REAL column. Python's sqlite3 binds NaN as NULL, which fails NOT NULL and
+    used to take the whole upload down with it, and SQLite stores non-numeric text in a
+    REAL column as text, on which the pricing layer later dies in float(). Every parse
+    path already produces finite numbers, so this is a guard, not a path rows take."""
     trade_fields, leg_fields, instrument_fields, option_fields = _NUMERIC_FIELDS
     bad_instruments = {}
     for iid, inst in res.instruments.items():
@@ -982,15 +1044,26 @@ def _enforce_numeric(res: "ParseResult") -> None:
                 bad_trades.setdefault(leg.trade_id, f"trade_legs.{f} (leg {leg.leg_no}) = {getattr(leg, f)!r}")
     if not bad_trades and not bad_instruments:
         return
-    for t in res.trades:
-        if t.trade_id in bad_trades:
-            res.rejects.append(Reject(res.trade_rows.get(t.trade_id, 0), t.instrument_id,
-                                      f"not a finite number: {bad_trades[t.trade_id]}; row not loaded"))
-    res.trades = [t for t in res.trades if t.trade_id not in bad_trades]
-    res.legs = [l for l in res.legs if l.trade_id not in bad_trades]
     for iid in bad_instruments:
         res.instruments.pop(iid, None)
         res.instrument_options.pop(iid, None)
+    res.legs = [leg for leg in res.legs if leg.trade_id not in bad_trades]
+    kept: List[Trade] = []
+    for t in res.trades:
+        if t.trade_id not in bad_trades:
+            kept.append(t)
+            continue
+        reason = f"a number the app cannot store: {bad_trades[t.trade_id]}"
+        key = t.broker_symbol or t.instrument_id
+        instrument_id = _unrecognised_instrument_id(key)
+        res.instruments.setdefault(instrument_id, Instrument(
+            instrument_id=instrument_id, asset_class=UNRECOGNISED, base_ccy="", quote_ccy="", multiplier=0.0,
+            is_ndf=0, bbg_ticker="", expiry_date=PERPETUAL))
+        kept.append(dataclasses.replace(
+            t, instrument_id=instrument_id, product=UNRECOGNISED,
+            quantity=t.quantity if _is_number(t.quantity) else 0.0, price=t.price if _is_number(t.price) else 0.0))
+        res.unrecognised.append(Unrecognised(res.trade_rows.get(t.trade_id, 0), t.trade_id, t.broker_symbol, reason))
+    res.trades = kept
 
 
 def _parse_rows(df: pd.DataFrame, res: "ParseResult") -> None:
@@ -1002,11 +1075,19 @@ def _parse_rows(df: pd.DataFrame, res: "ParseResult") -> None:
             res.trade_rows[t.trade_id] = row_no
 
 
+# the counter each row kind adds to (n_currency counts every cash row seen, booked or not)
+_KIND_COUNTERS = {"LME": "n_lme_forward", "FORWARD": "n_forward", "FUTURE": "n_future",
+                  "CMDTY_OPTION": "n_cmdty_option", "OPTION": "n_option"}
+
+
 def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
+    """One row: excluded by its Status or the book filter (unchanged), else booked as its product,
+    else (every row loads, 2026-09-29) loaded as an UNRECOGNISED trade with the reason."""
     if _status_excluded(row.get("Status")):
         res.n_excluded_status += 1
         res.n_skipped_status_or_fund += 1
         trade_id = _s(row.get("Trade Id"))
+        res.excluded_status_rows.append((row_no, trade_id, _s(row.get("Symbol")), _s(row.get("Status"))))
         if trade_id and _status_removes(row.get("Status")) and trade_id not in res.cancelled_trade_ids:
             res.cancelled_trade_ids.append(trade_id)
         return
@@ -1018,38 +1099,161 @@ def _parse_row(res: "ParseResult", row: pd.Series, row_no: int) -> None:
         return
     trader = _s(row.get("Trader"))
     res.kept_by_trader[trader] = res.kept_by_trader.get(trader, 0) + 1
+    row = _with_trade_id(res, row, row_no)
     kind = _row_kind(row)
-    not_loaded = _not_loaded_reason(kind, row)
-    if not_loaded is not None:
-        reason, retired = not_loaded
-        res.n_skipped_other += 1
-        res.n_skipped_retired += int(retired)
-        res.skipped_other_rows.append((row_no, _s(row.get("Symbol")), reason))
-        return
-    lme_match = _lme_match(row) if kind in ("FORWARD", "FUTURE") and not _is_fx_forward_shape(row) else None
-    if lme_match is not None:
-        res.n_lme_forward += 1
-        _parse_lme_forward(res, row, row_no, *lme_match)
-    elif kind == "FORWARD":
-        res.n_forward += 1
-        _parse_forward(res, row, row_no)
-    elif kind == "CURRENCY":
-        res.n_currency += 1
-        _parse_currency(res, row, row_no)
-    elif kind == "FUTURE":
-        res.n_future += 1
-        _parse_future(res, row, row_no)
-    elif kind == "OPTION" and _is_commodity_option(row):
-        res.n_cmdty_option += 1
-        _parse_cmdty_option(res, row, row_no)
-    elif kind == "OPTION":
-        res.n_option += 1
-        _parse_option(res, row, row_no)
+    counter = None
+    try:
+        not_loaded = _not_loaded_reason(kind, row)
+        if not_loaded is not None:
+            reason, retired = not_loaded
+            res.n_unrecognised_retired += int(retired)
+            raise _Unrecognised(reason)
+        lme_match = _lme_match(row) if kind in ("FORWARD", "FUTURE") and not _is_fx_forward_shape(row) else None
+        if lme_match is not None:
+            counter, parser, extra = "LME", _parse_lme_forward, lme_match
+        elif kind == "FORWARD":
+            counter, parser, extra = "FORWARD", _parse_forward, ()
+        elif kind == "CURRENCY":
+            res.n_currency += 1
+            parser, extra = _parse_currency, ()
+        elif kind == "FUTURE":
+            counter, parser, extra = "FUTURE", _parse_future, ()
+        elif kind == "OPTION" and _is_commodity_option(row):
+            counter, parser, extra = "CMDTY_OPTION", _parse_cmdty_option, ()
+        elif kind == "OPTION":
+            counter, parser, extra = "OPTION", _parse_option, ()
+        else:
+            raise _Unrecognised(
+                f"row type not recognised: Fin Type {_s(row.get('Fin Type'))!r}, Product {_s(row.get('Product'))!r} "
+                "(the app books futures, options, LME forwards and FX forwards, spot and options)")
+        if counter is not None:
+            attr = _KIND_COUNTERS[counter]
+            setattr(res, attr, getattr(res, attr) + 1)
+        parser(res, row, row_no, *extra)
+    except _Unrecognised as e:
+        if counter is not None:
+            attr = _KIND_COUNTERS[counter]
+            setattr(res, attr, getattr(res, attr) - 1)
+        _book_unrecognised(res, row, row_no, kind, str(e))
+
+
+def _with_trade_id(res: "ParseResult", row: pd.Series, row_no: int) -> pd.Series:
+    """The row itself when it has a Trade Id. A row with none still loads (every row loads,
+    2026-09-29) under a key made from its own cells, 'NOID-' + 10 hex digits of a SHA-1 of the
+    populated cells ('-2', '-3' ... on a repeat within the file), so the same row uploaded again
+    replaces itself; the row is warned about."""
+    if _s(row.get("Trade Id")):
+        return row
+    cells = "\x1f".join(f"{k}={_s(v)}" for k, v in sorted(row.items(), key=lambda kv: str(kv[0])) if _s(v))
+    base = "NOID-" + hashlib.sha1(cells.encode("utf-8")).hexdigest()[:10].upper()
+    trade_id, n = base, 1
+    while trade_id in res.trade_rows or any(t.trade_id == trade_id for t in res.trades):
+        n += 1
+        trade_id = f"{base}-{n}"
+    _warn(res, row_no, _s(row.get("Symbol")), f"no Trade Id in the file: loaded as {trade_id}, a key made from the "
+                                              "row's own cells (the same row uploaded again replaces it; an edited "
+                                              "row loads as a new trade)")
+    row = row.copy()
+    row["Trade Id"] = trade_id
+    return row
+
+
+def _unrecognised_instrument_id(key: str) -> str:
+    """'UNRECOGNISED:' + the key upper-cased, stripped and single-spaced ('UNRECOGNISED:XYZ6-USAA')."""
+    return UNRECOGNISED_PREFIX + re.sub(r"\s+", " ", str(key or "").upper()).strip()
+
+
+def _first_date(row: pd.Series) -> Tuple[str, str]:
+    """(ISO date, column) of the first readable of TradeDate, Settle Date, CreateDate and
+    LastModified; ('', '') when none reads (an UNRECOGNISED trade's trade_date is then '')."""
+    for col in ("TradeDate", "Settle Date", "CreateDate", "LastModified"):
+        d = _date(row.get(col))
+        if d is not None:
+            return d, col
+    return "", ""
+
+
+def _book_unrecognised(res: "ParseResult", row: pd.Series, row_no: int, kind: Optional[str], reason: str) -> None:
+    """Load a row the parser could not book as its product (hard rule 6, "Every row loads",
+    2026-09-29): product UNRECOGNISED, no legs, on the instrument 'UNRECOGNISED:' + the Symbol as
+    written (else the Underlying Symbol, the Description, the Trade Id): asset_class UNRECOGNISED,
+    base_ccy '', quote_ccy the row's Currency cell when it reads as one, multiplier 0, bbg_ticker '',
+    expiry 9999-12-31. Quantity signed by Side in the file's own units (lots / contracts as written;
+    as written when the Side is not readable); price the Price cell as read (a '%' premium on an
+    option row divided by 100, as the option path reads it). A number the row does not give is
+    stored as 0 and said in the reason. Nothing is guessed: no multiplier, size or currency."""
+    trade_id = _s(row.get("Trade Id"))
+    symbol = _s(row.get("Symbol"))
+    key = symbol or _s(row.get("Underlying Symbol")) or _s(row.get("Description")) or trade_id
+    instrument_id = _unrecognised_instrument_id(key)
+    percent = PERCENT_FRACTION if kind == "OPTION" else PERCENT_REFUSE
+    notes: List[str] = []
+    qty = _num(row.get("Quantity"))
+    if math.isnan(qty):
+        qty = 0.0
+        notes.append("size stored as 0" if "Quantity" in reason else f"{_unusable(row, 'Quantity')}: size stored as 0")
     else:
-        res.n_skipped_other += 1
-        res.skipped_other_rows.append((row_no, _s(row.get("Symbol")),
-                                       f"type not loaded by the app: Fin Type {_s(row.get('Fin Type'))!r}, "
-                                       f"Product {_s(row.get('Product'))!r}"))
+        side = _side(row.get("Side"))
+        if side is not None:
+            qty = abs(qty) if side == "Buy" else -abs(qty)
+        elif qty > 0:
+            notes.append(f"Side {_s(row.get('Side'))!r} is not a buy or a sell: size stored as written")
+    price = _num(row.get("Price"), percent)
+    if math.isnan(price):
+        price = 0.0
+        notes.append("price stored as 0" if "Price" in reason else f"{_unusable(row, 'Price', percent)}: price stored as 0")
+    trade_date, date_col = _first_date(row)
+    if not trade_date:
+        notes.append("no readable date in TradeDate, Settle Date, CreateDate or LastModified: trade date left blank")
+    elif date_col != "TradeDate":
+        notes.append(f"trade date taken from {date_col}")
+    full_reason = reason + ("; " + "; ".join(notes) if notes else "")
+    res.instruments.setdefault(instrument_id, Instrument(
+        instrument_id=instrument_id, asset_class=UNRECOGNISED, base_ccy="", quote_ccy=_ccy(row.get("Currency")) or "",
+        multiplier=0.0, is_ndf=0, bbg_ticker="", expiry_date=PERPETUAL))
+    res.trades.append(Trade(
+        trade_id=trade_id, source=SOURCE, instrument_id=instrument_id, product=UNRECOGNISED, package_id=trade_id,
+        trade_date=trade_date, quantity=qty, price=price, **_common(row, percent)))
+    res.unrecognised.append(Unrecognised(row_no, trade_id, symbol, full_reason))
+    log.debug("row %d %s: loaded as UNRECOGNISED: %s", row_no, key, full_reason)
+
+
+def _contract_reason(error: Exception) -> str:
+    """The plain reason an UNRECOGNISED futures / option row carries: the contract master's own
+    refusal (it names the root and the candidates), with what fixes it."""
+    msg = str(error)
+    if "is not in config/contracts.csv" in msg:
+        return f"contract not recognised: {msg}; add it to config/contracts.csv"
+    return f"contract not recognised: {msg}"
+
+
+def _resolve_on_symbol(res: "ParseResult", row_no: int, shown: str, resolver, symbol: str, **kw):
+    """``resolver(symbol, **kw)`` (``resolve_future`` / ``resolve_option``). When it refuses and the
+    row's Currency or Execution Venue was given, the symbol is tried alone: the Symbol's contract is
+    primary (every row loads, 2026-09-29), so a Currency / venue that contradicts it is warned about,
+    naming both, and the row loads on the symbol. A symbol that names no root, fits several, or
+    whose own suffix fits none raises ``_Unrecognised`` with the contract master's reason: a
+    multiplier is never guessed."""
+    try:
+        return resolver(symbol, **kw)
+    except AmbiguousContract as e:
+        raise _Unrecognised(_contract_reason(e)) from None
+    except ValueError as e:
+        first = e
+    given = [(label, k) for label, k in (("Currency", "currency"), ("Execution Venue", "venue")) if kw.get(k)]
+    # leave out the fewest cells that make the symbol resolve: one at a time, then both
+    trials = [[g] for g in given] + ([given] if len(given) > 1 else [])
+    for dropped in trials:
+        try:
+            found = resolver(symbol, **{**kw, **{k: "" for _label, k in dropped}})
+        except ValueError:
+            continue
+        root = found.root
+        named = " and ".join(f"{label} {kw[k]!r}" for label, k in dropped)
+        _warn(res, row_no, shown, f"{named} contradict{'s' if len(dropped) == 1 else ''} the Symbol's contract "
+                                  f"{root.root_id} ({root.currency}, {root.exchange}): loaded on the Symbol ({first})")
+        return found
+    raise _Unrecognised(_contract_reason(first))
 
 
 def _not_loaded_reason(kind: Optional[str], row: pd.Series) -> Optional[Tuple[str, bool]]:
@@ -1067,12 +1271,12 @@ def _not_loaded_reason(kind: Optional[str], row: pd.Series) -> Optional[Tuple[st
             m = _RETIRED_FUTURE_SYMBOL_RE.match(_s(row.get(col)).upper())
             if m and m.group(1) in RETIRED_INDEX_FUTURE_ROOTS:
                 return (f"equity index future ({m.group(1)}): the equity index left the app on 2026-09-24 "
-                        "(commodity conversion); not loaded"), True
+                        "(commodity conversion); the app does not value it"), True
     if kind == "OPTION":
         root = _retired_option_root(row)
         if root is not None:
             return (f"listed index option on {root}: the equity index left the app on 2026-09-24 "
-                    "(commodity conversion); not loaded"), True
+                    "(commodity conversion); the app does not value it"), True
     return None
 
 
@@ -1114,7 +1318,8 @@ def _common(row: pd.Series, price_percent: str = PERCENT_REFUSE) -> dict:
     return dict(account=_s(row.get("ExtAccount")), counterparty=_s(row.get("Counterparty")),
                 strategy=strategy, trader=_s(row.get("Trader")), description=_s(row.get("Description")),
                 pb_root=pb_root, trade_type=trade_type,
-                broker_symbol=_s(row.get("Symbol")), broker_price=broker_price)
+                broker_symbol=_s(row.get("Symbol")), broker_price=broker_price,
+                fin_type=_s(row.get("Fin Type")) or _s(row.get("Product")))
 
 
 def _warn(res: ParseResult, row_no: int, symbol: str, message: str) -> None:
@@ -1224,9 +1429,6 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
     symbol = _s(row.get("Symbol"))
     desc = _s(row.get("Description"))
     trade_id = _s(row.get("Trade Id"))
-    if not trade_id:
-        res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
-        return
 
     sm = FORWARD_SYMBOL_RE.match(symbol)
     dm = DESCRIPTION_RE.match(desc)
@@ -1238,50 +1440,58 @@ def _parse_forward(res: ParseResult, row: pd.Series, row_no: int) -> None:
     trade_date = value_date = None
     if dm:
         td_us, vd_us, verb1, ccy1, verb2, ccy2, rate_s = dm.groups()
-        if verb1 == verb2:
-            res.rejects.append(Reject(row_no, symbol, f"description verbs are both {verb1}: {desc!r}"))
-            return
         d_sold, d_bought = (ccy1, ccy2) if verb1 == "SELL" else (ccy2, ccy1)
-        if buy_ccy and sell_ccy and {buy_ccy, sell_ccy} != {d_sold, d_bought}:
-            res.rejects.append(Reject(row_no, symbol,
-                                      f"Buy/Sell Currency columns {buy_ccy}/{sell_ccy} disagree with "
-                                      f"description currencies {d_bought}/{d_sold}"))
-            return
+        if verb1 == verb2:
+            # Every row loads (2026-09-29): a Description that contradicts itself is set aside and
+            # the structured columns carry the row.
+            _warn(res, row_no, symbol, f"the Description's verbs are both {verb1} ({desc!r}): the Description is "
+                                       "ignored and the row loads on the Buy/Sell Currency, TradeDate, Settle Date "
+                                       "and Price columns")
+            dm = None
+        elif buy_ccy and sell_ccy and {buy_ccy, sell_ccy} != {d_sold, d_bought}:
+            # the structured Buy/Sell currency columns are primary over the Description
+            _warn(res, row_no, symbol, f"Buy/Sell Currency columns {buy_ccy}/{sell_ccy} disagree with the Description's "
+                                       f"currencies {d_bought}/{d_sold}: loaded on the columns, the Description "
+                                       "(its dates and rate too) is ignored")
+            dm = None
+    if dm:
         buy_ccy, sell_ccy = buy_ccy or d_bought, sell_ccy or d_sold
         rate = float(rate_s)
         trade_date, value_date = _us_date(td_us), _us_date(vd_us)
         if sm and datetime.strptime(vd_us, "%m/%d/%Y").strftime("%m%d%y") != sm.group(2):
-            res.rejects.append(Reject(row_no, symbol,
-                                      f"value date {sm.group(2)} in Symbol disagrees with description VD {vd_us}"))
-            return
+            symbol_vd = _mmddyy(sm.group(2))
+            if symbol_vd is not None:
+                # the Symbol is primary over the Description
+                _warn(res, row_no, symbol, f"value date {symbol_vd} in the Symbol disagrees with the Description's VD "
+                                           f"{value_date}: loaded on the Symbol's {symbol_vd}")
+                value_date = symbol_vd
     if not (buy_ccy and sell_ccy):
-        res.rejects.append(Reject(row_no, symbol, "cannot tell the two currencies: Buy/Sell Currency "
-                                                   "blank and Description not in 'TD .. VD .. SELL x VS .BUY y' form"))
-        return
+        raise _Unrecognised("cannot tell the two currencies: Buy/Sell Currency blank and the Description not in "
+                            "'TD .. VD .. SELL x VS .BUY y' form")
     if buy_ccy == sell_ccy:
-        res.rejects.append(Reject(row_no, symbol, f"Buy and Sell Currency are both {buy_ccy}"))
-        return
+        raise _Unrecognised(f"Buy and Sell Currency are both {buy_ccy}")
     if math.isnan(rate):
         rate = _num(row.get("Price"))
     trade_date = trade_date or _date(row.get("TradeDate"))
     value_date = value_date or _date(row.get("Settle Date")) or (_mmddyy(sm.group(2)) if sm else None)
     if trade_date is None or value_date is None:
-        res.rejects.append(Reject(row_no, symbol, "no trade date / value date in Description, TradeDate or Settle Date"))
-        return
+        raise _Unrecognised("no trade date / value date in the Description, TradeDate or Settle Date")
+    if pair is not None and {buy_ccy, sell_ccy} != {pair[:3], pair[3:]}:
+        # the Buy/Sell Currency columns carry the amounts, so they are primary over the pair named
+        # in the Symbol / Currency Pair
+        given = _pair_by_convention(buy_ccy, sell_ccy)
+        _warn(res, row_no, symbol, f"Buy/Sell Currency columns {buy_ccy}/{sell_ccy} disagree with the pair {pair} "
+                                   f"named in the Symbol / Currency Pair: loaded as {given}, the columns' currencies")
+        pair = given
     if pair is None:
         pair = _pair_by_convention(buy_ccy, sell_ccy)
         log.debug("row %d %s: pair not given; assuming %s by market convention", row_no, trade_id, pair)
     base_ccy, quote_ccy = pair[:3], pair[3:]
-    if {buy_ccy, sell_ccy} != {base_ccy, quote_ccy}:
-        res.rejects.append(Reject(row_no, symbol,
-                                  f"Buy/Sell Currency columns {buy_ccy}/{sell_ccy} disagree with pair {pair}"))
-        return
 
     buy_is_base = buy_ccy == base_ccy
     base_amt, quote_amt, rate, repairs, problem = _fx_amounts(row, buy_is_base, rate, rate_from_description=bool(dm))
     if problem:
-        res.rejects.append(Reject(row_no, symbol, problem))
-        return
+        raise _Unrecognised(problem)
     for message in repairs:
         _warn(res, row_no, symbol, message)
     base_amount, quote_amount = (base_amt, -quote_amt) if buy_is_base else (-base_amt, quote_amt)
@@ -1317,18 +1527,17 @@ def _parse_currency(res: ParseResult, row: pd.Series, row_no: int) -> None:
             ccy = _ccy(row.get("Buy Currency"))
         elif side == "Sell":
             ccy = _ccy(row.get("Sell Currency"))
-    if ccy is None:
-        res.rejects.append(Reject(row_no, symbol, f"unrecognised currency code {symbol!r}"))
-        return
-    instrument_id = f"CASH-{ccy}"
-    res.instruments.setdefault(instrument_id, Instrument(
-        instrument_id=instrument_id, asset_class="CASH", base_ccy=ccy, quote_ccy=ccy,
-        multiplier=1.0, is_ndf=0, bbg_ticker=f"{ccy} Curncy", expiry_date=PERPETUAL,
-    ))
-    _parse_spot_from_currency_row(res, row, row_no, symbol)
+    if ccy is not None:
+        instrument_id = f"CASH-{ccy}"
+        res.instruments.setdefault(instrument_id, Instrument(
+            instrument_id=instrument_id, asset_class="CASH", base_ccy=ccy, quote_ccy=ccy,
+            multiplier=1.0, is_ndf=0, bbg_ticker=f"{ccy} Curncy", expiry_date=PERPETUAL,
+        ))
+    _parse_spot_from_currency_row(res, row, row_no, symbol, ccy)
 
 
-def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int, symbol: str) -> None:
+def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int, symbol: str,
+                                  own_ccy: Optional[str] = None) -> None:
     """A CURRENCY row that names two currencies is a SPOT FX trade (user's cash-ladder
     spec, 2026-09-18: "Keep rows whose Fin Type is FORWARD or CURRENCY (spot) and whose
     Buy Currency is non-blank" -- every one of the reference sample's 85 CURRENCY rows
@@ -1339,17 +1548,26 @@ def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int,
     the ladder (a settled ZAR balance stays ZAR until a spot trade in the file converts
     it) and its P&L joins the book. A CURRENCY row with only one currency (a fee, a
     balance, a single-sided movement) stays what it was: the CASH instrument only,
-    never a trade, never a reject. Tolerance rule as for forwards (`_fx_amounts`): the
+    never a trade. Tolerance rule as for forwards (`_fx_amounts`): the
     amounts and the rate rebuild each other (Quantity, NetInvoice, Price), the pair falls
-    back to market convention, the trade date to the settle date and vice versa; a blank
-    Trade Id, two identical currencies or blank amounts stop the trade being written
-    without rejecting the row. The one reject: a populated amount / Price cell that is
-    not a number (a date, say) and cannot be rebuilt -- named, that row only."""
+    back to market convention, the trade date to the settle date and vice versa.
+
+    Every row loads (user, 2026-09-29): a row that cannot be a spot fill (one currency only,
+    two identical currencies, no amounts, no date, a cell that is not a number and cannot be
+    rebuilt) raises ``_Unrecognised`` and is loaded as an UNRECOGNISED trade with the reason
+    (its CASH instrument is still written by the caller)."""
     buy_ccy = _ccy(row.get("Buy Currency"))
     sell_ccy = _ccy(row.get("Sell Currency"))
     trade_id = _s(row.get("Trade Id"))
-    if not (buy_ccy and sell_ccy and trade_id) or buy_ccy == sell_ccy:
-        return
+    if not (buy_ccy and sell_ccy):
+        raise _Unrecognised(
+            f"a cash movement in one currency ({own_ccy or 'currency not readable from ' + repr(symbol)}): "
+            "a fee, a balance or one side of a transfer, which the app values no trade from"
+            if not (buy_ccy or sell_ccy) else
+            f"a currency row naming only one of Buy Currency / Sell Currency ({buy_ccy or sell_ccy}): "
+            "not a spot fill the app can book")
+    if buy_ccy == sell_ccy:
+        raise _Unrecognised(f"Buy and Sell Currency are both {buy_ccy}")
     pair = _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol"))
     if pair is None or {pair[:3], pair[3:]} != {buy_ccy, sell_ccy}:
         pair = _pair_by_convention(buy_ccy, sell_ccy)
@@ -1357,23 +1575,12 @@ def _parse_spot_from_currency_row(res: ParseResult, row: pd.Series, row_no: int,
     buy_is_base = buy_ccy == base_ccy
     base_amt, quote_amt, rate, repairs, problem = _fx_amounts(row, buy_is_base, _num(row.get("Price")))
     if problem:
-        # Blank amounts: a cash movement with nothing to book, as before (instrument
-        # only, not a reject). A populated cell that is not a number and cannot be
-        # rebuilt is different: a real fill would silently leave the book, so that one
-        # row is rejected by name.
-        if "is not a number" in problem:
-            res.rejects.append(Reject(row_no, symbol, problem))
-        else:
-            log.debug("row %d %s: CURRENCY row names %s/%s but has no amounts; cash instrument only",
-                      row_no, trade_id, buy_ccy, sell_ccy)
-        return
+        raise _Unrecognised(f"a {buy_ccy}/{sell_ccy} currency row that is not a bookable spot fill: {problem}")
     trade_date = _date(row.get("TradeDate"))
     value_date = _date(row.get("Settle Date"))
     trade_date, value_date = trade_date or value_date, value_date or trade_date
     if trade_date is None:
-        log.debug("row %d %s: CURRENCY row names %s/%s but has no date; cash instrument only",
-                  row_no, trade_id, buy_ccy, sell_ccy)
-        return
+        raise _Unrecognised(f"a {buy_ccy}/{sell_ccy} currency row with no TradeDate or Settle Date")
     for message in repairs:
         _warn(res, row_no, symbol, message)
     base_amount, quote_amount = (base_amt, -quote_amt) if buy_is_base else (-base_amt, quote_amt)
@@ -1396,36 +1603,33 @@ def _signed_quantity(row: pd.Series, symbol: str, row_no: int, res: ParseResult,
     caller's ``rebuilt`` magnitude (from other columns, NaN if there is none) is used
     instead, ALWAYS with a warning naming the column and the source -- blank or not: the
     position's size, and so its P&L and delta, now rests on another cell. When nothing
-    can rebuild it the row is rejected, naming the cell."""
+    can rebuild it, or the direction cannot be told, ``_Unrecognised`` names the cell (the row
+    loads as an UNRECOGNISED trade: a size or direction is never guessed)."""
     qty = _num(row.get("Quantity"))
     if math.isnan(qty):
         bad = _bad_cell(row, "Quantity")
         if math.isnan(rebuilt) or rebuilt == 0:
-            reason = (f"blank Quantity ({label})" if bad is None else
-                      f"{_not_a_number('Quantity', bad)}; cannot be rebuilt from the other columns ({label})")
-            res.rejects.append(Reject(row_no, symbol, reason))
-            return None
+            raise _Unrecognised(f"Quantity is blank and cannot be rebuilt from the other columns ({label})"
+                                if bad is None else
+                                f"{_not_a_number('Quantity', bad)}; cannot be rebuilt from the other columns ({label})")
         qty = abs(rebuilt)
         _warn(res, row_no, symbol, f"{_unusable(row, 'Quantity')}; rebuilt {qty:.10g} {label} from {rebuilt_from}")
     side = _side(row.get("Side"))
     if side is None:
         if qty < 0:
             return qty
-        res.rejects.append(Reject(row_no, symbol, f"unrecognised Side {_s(row.get('Side'))!r} and Quantity carries no sign"))
-        return None
+        raise _Unrecognised(f"unrecognised Side {_s(row.get('Side'))!r} and the Quantity carries no sign: "
+                            "cannot tell a buy from a sell")
     return abs(qty) if side == "Buy" else -abs(qty)
 
 
 def _parse_future(res: ParseResult, row: pd.Series, row_no: int) -> None:
     symbol = _s(row.get("Symbol")) or _s(row.get("Underlying Symbol"))
     trade_id = _s(row.get("Trade Id"))
-    if not trade_id:
-        res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
-        return
     trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
     if trade_date is None:
-        res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
-        return
+        raise _Unrecognised(f"no readable trade date (TradeDate {_s(row.get('TradeDate'))!r}), which the contract "
+                            "month's year is read against")
     _parse_commodity_future(res, row, row_no, symbol, trade_id, trade_date)
 
 
@@ -1450,20 +1654,13 @@ def _parse_commodity_future(res: ParseResult, row: pd.Series, row_no: int, symbo
     contracts x multiplier x fill, settles_cash 0. The fill is the Price cell x the root's
     ``broker_price_scale`` (``_future_fill``), so it is in Bloomberg's units; the roots so
     converted are counted on ``res.price_scaled`` for the load report."""
-    try:
-        contract = resolve_future(
-            _s(row.get("Symbol")), trade_date=trade_date, underlying=_s(row.get("Underlying Symbol")),
-            description=_s(row.get("Description")), currency=_ccy(row.get("Currency")) or "",
-            venue=_s(row.get("Execution Venue")), conn=_CONTRACT_CONN)
-    except ValueError as e:          # UnknownContract / AmbiguousContract, and any other refusal
-        res.rejects.append(Reject(row_no, symbol, str(e)))
-        return
+    contract = _resolve_on_symbol(
+        res, row_no, symbol, resolve_future, _s(row.get("Symbol")), trade_date=trade_date,
+        underlying=_s(row.get("Underlying Symbol")), description=_s(row.get("Description")),
+        currency=_ccy(row.get("Currency")) or "", venue=_s(row.get("Execution Venue")), conn=_CONTRACT_CONN)
     root = contract.root
-    fill = _future_fill(res, row, row_no, symbol, root.multiplier, quote_unit=root.quote_unit,
-                        broker_scale=root.broker_price_scale)
-    if fill is None:
-        return
-    signed_contracts, price = fill
+    signed_contracts, price = _future_fill(res, row, row_no, symbol, root.multiplier, quote_unit=root.quote_unit,
+                                           broker_scale=root.broker_price_scale)
     _note_price_scale(res, root, row)
     instrument_id = contract.contract_id
     expiry_iso = contract.last_trade_date.isoformat()
@@ -1496,8 +1693,9 @@ def _note_price_scale(res: ParseResult, root, row: pd.Series) -> None:
 
 
 def _future_fill(res: ParseResult, row: pd.Series, row_no: int, symbol: str, multiplier: float,
-                 quote_unit: str = "", broker_scale: float = 1.0) -> Optional[Tuple[float, float]]:
-    """(signed contracts, fill price) of a futures row, or None when the row was rejected.
+                 quote_unit: str = "", broker_scale: float = 1.0) -> Tuple[float, float]:
+    """(signed contracts, fill price) of a futures row; ``_Unrecognised`` when the size, the
+    direction or the price cannot be told (the row then loads as UNRECOGNISED).
 
     The fill is the ``Price`` cell x ``broker_scale`` (the root's ``broker_price_scale``,
     config/contracts.csv, 2026-09-28: 100 where the broker books a cents-quoted contract in
@@ -1524,8 +1722,6 @@ def _future_fill(res: ParseResult, row: pd.Series, row_no: int, symbol: str, mul
             if round(lots) >= 1 and abs(lots - round(lots)) <= 0.01:
                 rebuilt, rebuilt_from = float(round(lots)), f"NetInvoice / ({multiplier:g} x Price)"
     signed_contracts = _signed_quantity(row, symbol, row_no, res, "contracts", rebuilt, rebuilt_from)
-    if signed_contracts is None:
-        return None
     if math.isnan(price):
         # Fill price from the invoice: NetInvoice = contracts x multiplier x price, plus
         # the fees on a buy, less them on a sell (exact on 10 of the 11 reference rows,
@@ -1539,9 +1735,8 @@ def _future_fill(res: ParseResult, row: pd.Series, row_no: int, symbol: str, mul
             sign = 1.0 if signed_contracts > 0 else -1.0
             price = (net - sign * fees) / (abs(signed_contracts) * multiplier)
         if math.isnan(price) or price <= 0:
-            res.rejects.append(Reject(row_no, symbol, "blank Price" if bad is None else
-                                      f"{_not_a_number('Price', bad)}; cannot be rebuilt (needs NetInvoice and Quantity)"))
-            return None
+            raise _Unrecognised("Price is blank and cannot be rebuilt (needs NetInvoice and Quantity)" if bad is None
+                                else f"{_not_a_number('Price', bad)}; cannot be rebuilt (needs NetInvoice and Quantity)")
         _warn(res, row_no, symbol,
               (f"{_not_a_number('Price', bad)}" if bad is not None else "Price is blank")
               + f"; rebuilt {price:.10g} from NetInvoice / (contracts x {multiplier:g}){fee_note}")
@@ -1579,22 +1774,20 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     symbol = _s(row.get("Symbol"))
     desc = _s(row.get("Description"))
     trade_id = _s(row.get("Trade Id"))
-    if not trade_id:
-        res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
-        return
     om = OPTION_SYMBOL_RE.match(symbol)
     col_pair = _pair_of(row.get("Currency Pair"), row.get("Underlying Symbol"))
     desc_expiry, desc_type = _option_terms_from_text(desc, row.get("FxOption Type"))
+    if om and _mmddyy(om.group(2)) is None:
+        _warn(res, row_no, symbol, f"unparseable expiry {om.group(2)!r} in the Symbol: the expiry is read from "
+                                   "Adj. Expiry Date, Termination or the Description instead")
+        om = None
     if om:
         pair, exp_s, cp, _sym_id = om.groups()
         if col_pair and col_pair != pair:
-            res.rejects.append(Reject(row_no, symbol,
-                                      f"Currency Pair {_s(row.get('Currency Pair'))!r} disagrees with Symbol pair {pair}"))
-            return
+            # every row loads (2026-09-29): the Symbol is primary
+            _warn(res, row_no, symbol, f"Currency Pair {_s(row.get('Currency Pair'))!r} disagrees with the Symbol's "
+                                       f"pair {pair}: loaded on the Symbol")
         expiry = _mmddyy(exp_s)
-        if expiry is None:
-            res.rejects.append(Reject(row_no, symbol, f"unparseable expiry {exp_s!r} in Symbol"))
-            return
         option_type = "CALL" if cp == "C" else "PUT"
         # Symbol is the primary source, but a populated Description is a real second
         # source of the same facts (verified on the reference sample's 8 OPTION rows,
@@ -1608,24 +1801,21 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
                                        "taken from the Description")
             expiry = desc_expiry
         if desc_expiry and desc_expiry != expiry:
-            res.rejects.append(Reject(row_no, symbol,
-                                      f"Symbol expiry {expiry} disagrees with Description date {desc_expiry}: {desc!r}"))
-            return
+            _warn(res, row_no, symbol, f"Symbol expiry {expiry} disagrees with the Description's date {desc_expiry} "
+                                       f"({desc!r}): loaded on the Symbol's {expiry}")
         if desc_type and desc_type != option_type:
-            res.rejects.append(Reject(row_no, symbol,
-                                      f"Symbol call/put {option_type} disagrees with Description {desc_type}: {desc!r}"))
-            return
+            _warn(res, row_no, symbol, f"Symbol call/put {option_type} disagrees with the Description's {desc_type} "
+                                       f"({desc!r}): loaded as the Symbol's {option_type}")
     else:
         pair = col_pair
         if pair is None:
-            res.rejects.append(Reject(row_no, symbol, f"cannot tell the pair: Symbol {symbol!r} and Currency Pair blank"))
-            return
+            raise _Unrecognised(f"option with no currency pair: the Symbol {symbol!r} is not in the "
+                                "'<PAIR><mmddyy>[CP]-<id>' form and Currency Pair is blank")
         expiry = _date(row.get("Adj. Expiry Date")) or _date(row.get("Termination")) or desc_expiry
         option_type = desc_type
         if expiry is None:
-            res.rejects.append(Reject(row_no, symbol, "Symbol not <PAIR><mmddyy>[CP]-<id> and no expiry "
-                                                       "in Adj. Expiry Date, Termination or Description"))
-            return
+            raise _Unrecognised("option with no expiry: the Symbol is not <PAIR><mmddyy>[CP]-<id> and Adj. Expiry "
+                                "Date, Termination and the Description give none")
         if option_type is None:
             # A touch or another structure with no call / put in the file (2026-09-21: a ZAR
             # option was missing from the book): loaded with the type unknown, typed in the
@@ -1639,7 +1829,7 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     # A structured strike column wins when the export carries one (2026-09-18: three
     # options in the reference file have no "<n> STRIKE" in their Description and the
     # export has no strike column at all, so a re-export with one is the way to get
-    # them priced without typing). Both populated and different = contradiction.
+    # them priced without typing). Both populated and different: the column wins, warned.
     col_strike = 0.0
     for col in STRIKE_COLUMNS:
         v = _num(row.get(col))
@@ -1651,14 +1841,13 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
             _warn(res, row_no, symbol, f"{_not_a_number(col, bad_strike)}; ignored"
                   + ("" if desc_strike else ": the strike stays unknown until it is entered in the app"))
     if col_strike and desc_strike and abs(col_strike - desc_strike) > 1e-9 * max(col_strike, desc_strike):
-        res.rejects.append(Reject(row_no, symbol, f"strike column {col_strike} disagrees with Description strike {desc_strike}"))
-        return
+        _warn(res, row_no, symbol, f"strike column {col_strike:g} disagrees with the Description's strike "
+                                   f"{desc_strike:g}: loaded on the column's {col_strike:g}")
     strike = col_strike or desc_strike  # 0.0 sentinel when neither is present, never invented
     base_ccy = pair[:3]
     trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
     if trade_date is None:
-        res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
-        return
+        raise _Unrecognised(f"no readable trade date (TradeDate {_s(row.get('TradeDate'))!r})")
     # Premium fill and notional. NetInvoice is |Quantity x Price| on the reference
     # sample (35,000,000 x 0.00579 = 202,650.00) but its SIGN is unreliable: -142,500 on
     # Trade Id 934168029 whose Side is Buy, positive on the one Sell row. Direction
@@ -1683,8 +1872,6 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     if math.isnan(quantity_cell) and net_ok and not math.isnan(premium) and premium > 0:
         rebuilt, rebuilt_from = net / premium, "|NetInvoice| / Price (NetInvoice may include fees: check it)"
     signed_notional = _signed_quantity(row, symbol, row_no, res, "notional", rebuilt, rebuilt_from)
-    if signed_notional is None:
-        return
     if math.isnan(premium):
         bad = [(c, t) for c in ("Price", "Premium") if (t := _bad_cell(row, c, PERCENT_FRACTION)) is not None]
         if net_ok and not math.isnan(quantity_cell) and quantity_cell != 0:
@@ -1693,10 +1880,9 @@ def _parse_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
                   ("; ".join(_not_a_number(c, t) for c, t in bad) if bad else "Price is blank")
                   + f"; rebuilt {premium:.10g} from |NetInvoice| / |Quantity| (NetInvoice may include fees: check it)")
         else:
-            res.rejects.append(Reject(row_no, symbol, "blank Price/Premium" if not bad else
-                                      "; ".join(_not_a_number(c, t) for c, t in bad)
-                                      + "; cannot be rebuilt (needs NetInvoice and Quantity)"))
-            return
+            raise _Unrecognised("Price and Premium are blank and cannot be rebuilt (needs NetInvoice and Quantity)"
+                                if not bad else "; ".join(_not_a_number(c, t) for c, t in bad)
+                                + "; cannot be rebuilt (needs NetInvoice and Quantity)")
     elif net_ok and not math.isnan(quantity_cell):
         expected = abs(quantity_cell * premium)
         if expected > 0 and abs(net - expected) / expected > NET_INVOICE_TOLERANCE:
@@ -1733,8 +1919,8 @@ def _is_commodity_option(row: pd.Series) -> bool:
     in a listed / Bloomberg / Chinese option shape, with an exchange prefix or Bloomberg's Comdty
     key goes the commodity way; otherwise a currency pair in ``Currency Pair`` / ``Underlying
     Symbol`` says FX, and any other symbol is handed to the contract master, whose refusal
-    (naming the root) is the reject. A row with neither symbol nor pair stays on the FX path,
-    which rejects it for want of a pair, as before."""
+    (naming the root) is the UNRECOGNISED reason. A row with neither symbol nor pair stays on the FX path,
+    which loads it as UNRECOGNISED for want of a pair."""
     symbol = _s(row.get("Symbol")).upper()
     if OPTION_SYMBOL_RE.match(symbol):
         return False
@@ -1763,7 +1949,8 @@ def _cmdty_option_type(row: pd.Series) -> str:
 
 def _cmdty_option_strike(row: pd.Series, symbol: str, row_no: int, res: ParseResult) -> Tuple[Optional[float], Optional[str]]:
     """(strike, problem) from a strike column or the Description's '<n> STRIKE'; None when the row
-    gives none. Two populated strikes that disagree are the problem (a reject)."""
+    gives none. Two populated strikes that disagree: the column is primary and the Description's
+    is named in a warning (every row loads, 2026-09-29); ``problem`` is always None now."""
     col_strike = None
     for col in STRIKE_COLUMNS:
         v = _num(row.get(col))
@@ -1779,7 +1966,8 @@ def _cmdty_option_strike(row: pd.Series, symbol: str, row_no: int, res: ParseRes
         v = _num(m.group(1) or m.group(2))
         desc_strike = None if math.isnan(v) or v <= 0 else v
     if col_strike and desc_strike and abs(col_strike - desc_strike) > 1e-9 * max(col_strike, desc_strike):
-        return None, f"strike column {col_strike:g} disagrees with Description strike {desc_strike:g}"
+        _warn(res, row_no, symbol, f"strike column {col_strike:g} disagrees with the Description's strike "
+                                   f"{desc_strike:g}: loaded on the column's {col_strike:g}")
     return col_strike or desc_strike, None
 
 
@@ -1789,8 +1977,9 @@ def _parse_cmdty_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     ``Underlying Symbol``) with the row's ``Underlying Symbol``, ``Currency``, ``Execution Venue``,
     ``Description``, the option type (``_cmdty_option_type``) and strike (``_cmdty_option_strike``).
     The Chinese exchanges' own code ('CU2612C80000') is split into its future and type / strike
-    first. An unknown or ambiguous root, or a type / strike the row contradicts, rejects with the
-    resolver's reason: a multiplier is never guessed.
+    first. An unknown or ambiguous root raises ``_Unrecognised`` with the resolver's reason (the
+    row loads as UNRECOGNISED: a multiplier is never guessed); a type / strike the row contradicts
+    loads on the symbol, warned.
 
     Instrument = the canonical option id ('CLZ26C 70 Comdty'): base_ccy the root id, quote_ccy
     the contract's currency, multiplier the underlying future's, bbg_ticker Bloomberg's form at
@@ -1806,18 +1995,12 @@ def _parse_cmdty_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     underlying = _s(row.get("Underlying Symbol"))
     shown = symbol or underlying
     trade_id = _s(row.get("Trade Id"))
-    if not trade_id:
-        res.rejects.append(Reject(row_no, shown, "blank Trade Id"))
-        return
     trade_date = _date(row.get("TradeDate")) or _date(row.get("Settle Date"))
     if trade_date is None:
-        res.rejects.append(Reject(row_no, shown, f"unparseable TradeDate {_s(row.get('TradeDate'))!r}"))
-        return
+        raise _Unrecognised(f"no readable trade date (TradeDate {_s(row.get('TradeDate'))!r}), which the option "
+                            "month's year is read against")
     option_type = _cmdty_option_type(row)
-    strike, problem = _cmdty_option_strike(row, shown, row_no, res)
-    if problem:
-        res.rejects.append(Reject(row_no, shown, problem))
-        return
+    strike, _problem = _cmdty_option_strike(row, shown, row_no, res)
     sym_arg, und_arg = (symbol, underlying) if symbol else (underlying, "")
     text = re.sub(r"\s+", " ", sym_arg.upper()).strip()
     prefix = ""
@@ -1828,31 +2011,24 @@ def _parse_cmdty_option(res: ParseResult, row: pd.Series, row_no: int) -> None:
     if cn:
         cn_type = "CALL" if cn.group("cp") == "C" else "PUT"
         cn_strike = float(cn.group("strike"))
+        # every row loads (2026-09-29): the symbol is primary over the row's other cells
         if option_type and option_type != cn_type:
-            res.rejects.append(Reject(row_no, shown, f"option symbol {sym_arg!r} says {cn_type} but the row says {option_type}"))
-            return
+            _warn(res, row_no, shown, f"option symbol {sym_arg!r} says {cn_type} but the row says {option_type}: "
+                                      f"loaded as the symbol's {cn_type}")
         if strike and abs(strike - cn_strike) > 1e-9 * max(strike, cn_strike):
-            res.rejects.append(Reject(row_no, shown, f"option symbol {sym_arg!r} says strike {cn_strike:g} but the row "
-                                                     f"says {strike:g}"))
-            return
+            _warn(res, row_no, shown, f"option symbol {sym_arg!r} says strike {cn_strike:g} but the row says "
+                                      f"{strike:g}: loaded on the symbol's {cn_strike:g}")
         sym_arg, option_type, strike = prefix + cn.group("fut"), cn_type, cn_strike
-    try:
-        option = resolve_option(sym_arg, trade_date=trade_date, underlying=und_arg,
-                                description=_s(row.get("Description")), currency=_ccy(row.get("Currency")) or "",
-                                venue=_s(row.get("Execution Venue")), option_type=option_type, strike=strike,
-                                conn=_CONTRACT_CONN)
-    except ValueError as e:          # UnknownContract / AmbiguousContract, and any other refusal
-        res.rejects.append(Reject(row_no, shown, str(e)))
-        return
+    option = _resolve_on_symbol(
+        res, row_no, shown, resolve_option, sym_arg, trade_date=trade_date, underlying=und_arg,
+        description=_s(row.get("Description")), currency=_ccy(row.get("Currency")) or "",
+        venue=_s(row.get("Execution Venue")), option_type=option_type, strike=strike, conn=_CONTRACT_CONN)
     root = option.root
     # The premium is booked in the same units as the future's fill (a guess: no real option row
     # has been seen), so it takes the root's broker_price_scale too; the strike stays as the
     # symbol states it (contract-master reads it).
-    fill = _future_fill(res, row, row_no, shown, root.multiplier, quote_unit=root.quote_unit,
-                        broker_scale=root.broker_price_scale)
-    if fill is None:
-        return
-    lots, premium = fill
+    lots, premium = _future_fill(res, row, row_no, shown, root.multiplier, quote_unit=root.quote_unit,
+                                 broker_scale=root.broker_price_scale)
     _note_price_scale(res, root, row)
     expiry = option.last_trade_date
     if option.dates_source != "BLOOMBERG" and option.symbol_expiry is not None and option.symbol_expiry < expiry:
@@ -1915,11 +2091,18 @@ def _lme_match(row: pd.Series):
         m = _LME_BBG_RE.match(s)
         if m and f"LME:{m.group(1)}" in roots:
             return f"LME:{m.group(1)}", None
-        try:
-            contract = resolve_future(s, trade_date=trade_date, description=desc,
-                                      currency=_ccy(row.get("Currency")) or "", venue=venue, conn=_CONTRACT_CONN)
-        except ValueError:
-            contract = None
+        contract = None
+        for currency, place in ((_ccy(row.get("Currency")) or "", venue), ("", "")):
+            # the second pass leaves out a Currency / venue that contradicts the symbol (the symbol
+            # is primary; the parser warns about the contradiction)
+            try:
+                contract = resolve_future(s, trade_date=trade_date, description=desc, currency=currency,
+                                          venue=place, conn=_CONTRACT_CONN)
+                break
+            except AmbiguousContract:
+                break
+            except ValueError:
+                continue
         if contract is not None:
             return (contract.root_id, contract) if contract.root_id in roots else None
         if hinted:
@@ -1988,32 +2171,26 @@ def _parse_lme_forward(res: ParseResult, row: pd.Series, row_no: int, root_id: s
     tonne as quoted; NetInvoice is cross-checked against lots x tonnes x price like a future's.
     Two FX_NEAR legs on the prompt date (``_lme_prompt``): the metal (ccy = the root id, tonnes,
     settles_cash 0) and the USD (-tonnes x fill, settles_cash 1). A prompt that is not an LME
-    prompt date for the trade date (``engine.lme.is_valid_prompt``) is a warning only, never a
-    reject (hard rule 6); a populated Currency other than USD contradicts the contract and rejects."""
+    prompt date for the trade date (``engine.lme.is_valid_prompt``) is a warning only (hard rule 6);
+    a populated Currency other than USD contradicts the contract and is warned about, the ticket
+    loading in USD on its symbol."""
     symbol = _s(row.get("Symbol")) or _s(row.get("Underlying Symbol"))
     trade_id = _s(row.get("Trade Id"))
-    if not trade_id:
-        res.rejects.append(Reject(row_no, symbol, "blank Trade Id"))
-        return
     trade_date = _date(row.get("TradeDate"))
     if trade_date is None:
-        res.rejects.append(Reject(row_no, symbol, f"unparseable TradeDate {_s(row.get('TradeDate'))!r} "
-                                                  "(an LME ticket's Settle Date is its prompt, never its trade date)"))
-        return
+        raise _Unrecognised(f"LME ticket with no readable TradeDate ({_s(row.get('TradeDate'))!r}; its Settle Date is "
+                            "its prompt, never its trade date)")
     ccy = _ccy(row.get("Currency"))
     if ccy and ccy != "USD":
-        res.rejects.append(Reject(row_no, symbol, f"Currency {ccy} contradicts {root_id}, an LME forward in USD"))
-        return
+        # every row loads (2026-09-29): the symbol's contract is primary
+        _warn(res, row_no, symbol, f"Currency {ccy} contradicts {root_id}, an LME forward in USD: loaded on the "
+                                   "symbol, in USD")
     tonnes_per_lot = _lme.lot_tonnes(root_id)
-    fill = _future_fill(res, row, row_no, symbol, tonnes_per_lot, quote_unit="USD/t")
-    if fill is None:
-        return
-    lots, price = fill
+    lots, price = _future_fill(res, row, row_no, symbol, tonnes_per_lot, quote_unit="USD/t")
     prompt, source = _lme_prompt(res, row, row_no, symbol, trade_date, contract)
     if prompt is None:
-        res.rejects.append(Reject(row_no, symbol, "LME ticket with no prompt date: none in Prompt Date / Maturity / "
-                                                  "Settle Date or the Description, and not a 3M or monthly ticket"))
-        return
+        raise _Unrecognised("LME ticket with no prompt date: none in Prompt Date / Maturity / Settle Date or the "
+                            "Description, and not a 3M or monthly ticket")
     if source == "3M":
         res.lme_prompt_notes.append(f"row {row_no} {trade_id} ({root_id}) is a 3-month ticket and takes the 3-month "
                                     f"date of {trade_date}, {prompt}")
@@ -2049,11 +2226,12 @@ def _rows(objs) -> List[tuple]:
 def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection,
          strict: bool = False, filename: Optional[str] = None,
          book: Optional[Union[BookFilter, str, Path]] = None) -> ParseResult:
-    """Parse and upsert. Re-loading a trade id replaces its trade and legs. With
-    ``strict=True`` any reject raises ValueError before anything is written; otherwise
-    rejected rows are skipped and the rest is loaded. ``book`` is the row filter, as
-    ``parse`` takes it (None = ``config/book.yaml``); ``conn`` is also handed to ``parse`` so
-    a future's stored Bloomberg contract dates replace the estimated expiry.
+    """Parse and upsert (``write_parsed``). Re-loading a trade id replaces its trade and legs.
+    Every row loads (2026-09-29): a row the parser could not book is written as an UNRECOGNISED
+    trade (``ParseResult.unrecognised``). With ``strict=True`` any such row (or a reject, which the
+    parser no longer produces) raises ValueError before anything is written. ``book`` is the
+    row filter, as ``parse`` takes it (None = ``config/book.yaml``); ``conn`` is also handed to
+    ``parse`` so a future's stored Bloomberg contract dates replace the estimated expiry.
 
     Numbers: everything written to a REAL column has passed ``_enforce_numeric`` (finite
     numbers only), so neither text nor NaN can reach ``trades.quantity`` / ``price``,
@@ -2065,11 +2243,29 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
     name = filename or (Path(source).name if isinstance(source, (str, Path)) else "blotter")
     for rj in res.rejects:
         log.debug("%s row %d %s: REJECT %s", name, rj.row_no, rj.symbol, rj.reason)
-    if strict and res.rejects:
+    if strict and (res.rejects or res.unrecognised):
         head = [f"reject row {rj.row_no} {rj.symbol}: {rj.reason}" for rj in res.rejects[:5]]
-        raise ValueError(f"{name}: {len(res.rejects)} reject(s); nothing loaded (strict=True). First: " + " | ".join(head))
+        head += [f"not recognised row {u.row_no} {u.symbol or u.trade_id}: {u.reason}" for u in res.unrecognised[:5]]
+        raise ValueError(f"{name}: {len(res.rejects) + len(res.unrecognised)} row(s) not booked as their product; "
+                         "nothing loaded (strict=True). First: " + " | ".join(head[:5]))
+    write_parsed(res, conn)
+    for note in res.notes():
+        log.debug("%s: %s", name, note)
+    return res
 
+
+def write_parsed(res: ParseResult, conn: sqlite3.Connection) -> None:
+    """Write a parse's instruments, trades, legs and option terms, in one transaction: exactly
+    what ``load`` writes after parsing (also the writer for ``resolve_stored``'s result, so a
+    re-resolved trade is rewritten "exactly as an upload would"). A trade id already on file is
+    replaced (trade row updated in place, its legs deleted and re-inserted); ``res.n_updated`` is
+    set to how many were. Columns are always named: an ``instruments`` table with extra columns
+    takes the eight it has, and a ``Trade`` field the ``trades`` table lacks (``fin_type`` on a
+    database created before it) is left out rather than failing the upload."""
     trade_cols = list(vars(res.trades[0]).keys()) if res.trades else []
+    if trade_cols:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+        trade_cols = [c for c in trade_cols if c in have]
     with conn:
         conn.execute("CREATE TEMP TABLE IF NOT EXISTS _incoming (trade_id TEXT PRIMARY KEY)")
         conn.execute("DELETE FROM _incoming")
@@ -2093,7 +2289,8 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
             updates = ",".join(f"{c}=excluded.{c}" for c in trade_cols if c != "trade_id")
             conn.executemany(
                 f"INSERT INTO trades ({','.join(trade_cols)}) VALUES ({','.join('?' for _ in trade_cols)}) "
-                f"ON CONFLICT(trade_id) DO UPDATE SET {updates}", _rows(res.trades))
+                f"ON CONFLICT(trade_id) DO UPDATE SET {updates}",
+                [tuple(getattr(tr, c) for c in trade_cols) for tr in res.trades])
         conn.executemany(
             "INSERT INTO trade_legs (trade_id, leg_no, leg_type, ccy, amount, start_date, settle_date, rate, "
             "settles_cash) VALUES (?,?,?,?,?,?,?,?,?)", _rows(res.legs))
@@ -2109,9 +2306,73 @@ def load(source: Union[str, Path, bytes, pd.DataFrame], conn: sqlite3.Connection
             "payoff = CASE WHEN excluded.payoff != 'VANILLA' THEN excluded.payoff ELSE payoff END",
             _rows(res.instrument_options.values()))
         conn.execute("DROP TABLE _incoming")
-    for note in res.notes():
-        log.debug("%s: %s", name, note)
-    return res
+
+
+# --------------------------------------------------------------------------- re-resolution
+def _stored_kind_label(trade: dict, symbol: str) -> str:
+    """The Fin Type to re-parse a stored UNRECOGNISED trade as: its stored ``fin_type`` (the
+    file's own Fin Type / Product cell) when the trades table has it; else read off the symbol's
+    shape (an FX forward symbol or Description -> Forward, an option shape -> Option, anything
+    else -> Future), for a database written before ``fin_type`` existed."""
+    label = _s(trade.get("fin_type")) or _s(trade.get("product_words"))
+    if label:
+        return label
+    s = symbol.upper()
+    if FORWARD_SYMBOL_RE.match(symbol) or DESCRIPTION_RE.match(_s(trade.get("description"))):
+        return "Forward"
+    if (OPTION_SYMBOL_RE.match(s) or _LISTED_OPTION_SYMBOL_RE.match(s) or _BBG_OPTION_SHAPE_RE.match(s)
+            or _CN_OPTION_RE.match(s)):
+        return "Option"
+    return "Future"
+
+
+def resolve_stored(trade: dict, conn: Optional[sqlite3.Connection] = None) -> Tuple[Optional[ParseResult], str]:
+    """Run today's resolution again on a stored UNRECOGNISED trade (hard rule 6, 2026-09-29: it is
+    re-resolved automatically once the contract list knows it). ``trade`` holds the ``trades``
+    columns (``trade_id``, ``trade_date``, ``quantity``, ``price``, ``broker_symbol``,
+    ``broker_price``, ``description``, ``account``, ``counterparty``, ``trader``, ``pb_root``,
+    ``fin_type`` when the table has it, ...) plus ``currency`` (the UNRECOGNISED instrument's
+    quote_ccy) and ``symbol``; optional ``venue``, ``underlying``, ``settle_date``.
+
+    Returns ``(parsed, reason)``:
+      - resolved: ``parsed`` is a ``ParseResult`` holding the one trade (same ``trade_id``, the
+        real product), its instrument (and an option's underlying future on
+        ``underlying_only``), its legs and option terms, exactly what an upload of the row would
+        write (``write_parsed(parsed, conn)`` writes it); ``reason`` is ''.
+      - still not bookable: ``(None, reason)``, the reason in the same plain words the upload gave.
+
+    The row is rebuilt from the stored fields: the Symbol (``broker_symbol``, else ``symbol``,
+    else the instrument id after 'UNRECOGNISED:'), Quantity = |quantity| with Side from its sign
+    (0 = the file gave none), Price = the Price cell as written (``broker_price``) so the root's
+    broker price scale is applied exactly as on upload (else the stored price when not 0), the
+    trade date, the Currency, the Description, PBRoot and the rest. No Status and no book filter
+    (the row was already in the book). Nothing is written; nothing is guessed."""
+    symbol = _s(trade.get("broker_symbol")) or _s(trade.get("symbol"))
+    if not symbol:
+        iid = _s(trade.get("instrument_id"))
+        symbol = iid[len(UNRECOGNISED_PREFIX):] if iid.upper().startswith(UNRECOGNISED_PREFIX) else ""
+    qty = trade.get("quantity")
+    qty = float(qty) if _is_number(qty) else 0.0
+    price_cell = _s(trade.get("broker_price"))
+    if not price_cell:
+        stored = trade.get("price")
+        price_cell = repr(float(stored)) if _is_number(stored) and stored != 0 else ""
+    row = {
+        "Trade Id": _s(trade.get("trade_id")), "Symbol": symbol, "Fin Type": _stored_kind_label(trade, symbol),
+        "Quantity": repr(abs(qty)) if qty else "", "Side": "Buy" if qty > 0 else "Sell" if qty < 0 else "",
+        "Price": price_cell, "TradeDate": _s(trade.get("trade_date")), "Settle Date": _s(trade.get("settle_date")),
+        "Currency": _s(trade.get("currency")), "Execution Venue": _s(trade.get("venue")),
+        "Underlying Symbol": _s(trade.get("underlying")), "Description": _s(trade.get("description")),
+        "PBRoot": _s(trade.get("pb_root")), "Trader": _s(trade.get("trader")),
+        "Counterparty": _s(trade.get("counterparty")), "ExtAccount": _s(trade.get("account")),
+    }
+    frame = pd.DataFrame([row], dtype=str)
+    res = parse(frame, book=BookFilter(funds=(), traders=(), desks=()), conn=conn)
+    if res.unrecognised:
+        return None, res.unrecognised[0].reason
+    if not res.trades:
+        return None, "the stored row did not parse to a trade"
+    return res, ""
 
 
 # --------------------------------------------------------------------------- diagnostics

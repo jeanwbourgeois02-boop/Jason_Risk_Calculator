@@ -17,4 +17,4 @@ Win32_Process and stopped.
 use `py -3 -c`. Happened again 2026-09-28 (a `py -3 - <<'EOF'` placeholder): the stray is found
 and stopped with a .ps1 in the scratchpad (Get-CimInstance Win32_Process, CommandLine ending
 in ` -`), run via `powershell -File`; inline PowerShell through the Bash tool loses `$_`. A bash heredoc with apostrophes in its body inside a longer command can break
-the quoting, so appending test code is safer with the Edit tool.
+the quoting, so appending test code is safer with the Edit tool. Happened a third time 2026-09-29 (a no-op heredoc placeholder): check the command for `py -3 -` before sending it.

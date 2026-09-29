@@ -36,7 +36,8 @@ from typing import Dict, List, Optional, Tuple
 
 from data.contracts import load_roots
 from engine.curve.leftover import Leftover, leftover_by_root, row_month
-from engine.curve.rows import FUTURE, LME, OPTION, future_row, lme_row, month_key, number, option_row, root_key
+from engine.curve.rows import (FUTURE, LME, OPTION, future_row, lme_row, month_key, number, option_row, per_pct,
+                               root_key)
 from engine.pnl.valuation import value_book
 
 _OPEN_LISTED_SQL = """
@@ -125,11 +126,26 @@ def _usd_totals(rows: List[dict], field: str) -> Tuple[Optional[float], Optional
     return float(sum(r[field] for r in rows)), float(sum(abs(r[field]) for r in rows)), [], ""
 
 
+def _pct_totals(rows: List[dict]) -> dict:
+    """USD per 1 % move of ``rows``' delta (``usd_per_pct``): ``long_usd_per_pct`` (the positions
+    long, summed), ``short_usd_per_pct`` (the positions short, negative), ``net_usd_per_pct``,
+    ``gross_usd_per_pct`` (|long| + |short|) and ``usd_per_pct_reason``; all None, with the
+    reason, when any row has no USD delta (never a partial sum)."""
+    _net, _gross, missing, why = _usd_totals(rows, "delta_usd")
+    if missing:
+        return {"long_usd_per_pct": None, "short_usd_per_pct": None, "net_usd_per_pct": None,
+                "gross_usd_per_pct": None, "usd_per_pct_reason": why}
+    long_ = float(sum(r["usd_per_pct"] for r in rows if r["usd_per_pct"] > 0))
+    short = float(sum(r["usd_per_pct"] for r in rows if r["usd_per_pct"] < 0))
+    return {"long_usd_per_pct": long_, "short_usd_per_pct": short, "net_usd_per_pct": long_ + short,
+            "gross_usd_per_pct": long_ - short, "usd_per_pct_reason": ""}
+
+
 def _delta_totals(rows: List[dict]) -> dict:
     net_lots = None if any(r["delta_lots"] is None for r in rows) else float(sum(r["delta_lots"] for r in rows))
     net_usd, gross_usd, missing, why = _usd_totals(rows, "delta_usd")
     return {"net_delta_lots": net_lots, "net_delta_usd": net_usd, "gross_delta_usd": gross_usd,
-            "delta_missing": missing, "delta_reason": why}
+            "delta_missing": missing, "delta_reason": why, **_pct_totals(rows)}
 
 
 def _months(rows: List[dict], field: str) -> Dict[str, Optional[float]]:
@@ -163,7 +179,7 @@ def _by_commodity(rows: List[dict]) -> Dict[str, dict]:
             "unit": first["unit"], "net_usd": net_usd, "gross_usd": gross_usd,
             "months": _months(outright, "lots"),
             "missing": missing, "reason": why,
-            "delta_months": _months(mine, "delta_lots"),
+            "delta_months": _months(mine, "delta_lots"), "months_usd_per_pct": _months(mine, "usd_per_pct"),
             "products": [p for p in _PRODUCT_ORDER if any(r["product"] == p for r in mine)],
             **_delta_totals(mine),
         }
@@ -295,6 +311,67 @@ def _leftover_units(root_ids: List[str], months: List[str], left: Optional[Lefto
             "leftover_reason": "; ".join(dict.fromkeys(why))}
 
 
+def _usd_per_lot(rows: List[dict], root_id: str, month: str) -> Tuple[Optional[float], str]:
+    """(USD per delta lot, why when None) of ``root_id`` in ``month``: the curve rows' own
+    ``delta_usd / delta_lots`` (multiplier x price x S), which must agree across the month's rows
+    (two LME prompts of one month at different outrights do not)."""
+    mine = [r for r in rows if r["root_id"] == root_id and row_month(r) == month]
+    per: List[float] = []
+    for r in mine:
+        if r["delta_lots"] is None or abs(r["delta_lots"]) <= _FLAT:
+            continue
+        if r["delta_usd"] is None:
+            return None, f"{r['contract_id']}: {r['reason'] or 'no USD delta'}"
+        per.append(r["delta_usd"] / r["delta_lots"])
+    if not per:
+        return None, f"{root_id} {month}: no priced position in that month to value the leftover at"
+    if max(per) - min(per) > 1e-9 * max(1.0, max(abs(x) for x in per)):
+        return None, (f"{root_id} {month}: its positions are at different prices (LME prompts of one month), "
+                      "so the month's leftover has no one USD figure")
+    return per[0], ""
+
+
+def _leftover_pct(root_ids: List[str], months: List[str], left: Optional[Leftover], rows: List[dict],
+                  fx: bool) -> dict:
+    """``leftover_months_usd_per_pct`` {'YYYY-MM': USD per 1 % move of the leftover, every month
+    of the line, 0.0 where nothing is left}, ``leftover_usd_per_pct`` (their sum) and
+    ``leftover_usd_per_pct_reason``: the leftover delta lots (``Leftover.months``) x the month's
+    USD per delta lot x 1 %. Needs no common physical unit, so it has a figure where the units do
+    not add. None with the reason where a part has none (never a partial sum)."""
+    if fx:
+        return {"leftover_months_usd_per_pct": {}, "leftover_usd_per_pct": None,
+                "leftover_usd_per_pct_reason": "an FX hedge: not commodity leftover"}
+    if left is None or left.failure:
+        return {"leftover_months_usd_per_pct": {m: None for m in months}, "leftover_usd_per_pct": None,
+                "leftover_usd_per_pct_reason": left.failure if left is not None else "the spreads were not read"}
+    cells: Dict[str, Optional[float]] = {m: 0.0 for m in months}
+    why: List[str] = []
+    total_known = True
+    for rid in root_ids:
+        for month, lots in left.months.get(rid, {}).items():
+            if lots is None:
+                cells[month] = None
+                why += left.reasons[rid].get(month, []) or [f"{rid} {month}: its leftover is not known"]
+                continue
+            if abs(lots) <= _FLAT:
+                cells.setdefault(month, 0.0)
+                continue
+            per_lot, reason = _usd_per_lot(rows, rid, month)
+            if per_lot is None:
+                cells[month] = None
+                why.append(reason)
+            elif cells.get(month, 0.0) is not None:
+                cells[month] = cells.get(month, 0.0) + per_pct(lots * per_lot)
+        if left.unplaced.get(rid):
+            total_known = False
+            why += left.unplaced[rid]
+    cells = {m: (None if v is None else (0.0 if abs(v) < 1e-9 else v)) for m, v in sorted(cells.items())}
+    known = total_known and all(v is not None for v in cells.values())
+    return {"leftover_months_usd_per_pct": cells,
+            "leftover_usd_per_pct": float(sum(cells.values())) if known else None,
+            "leftover_usd_per_pct_reason": "; ".join(dict.fromkeys(why))}
+
+
 def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict], roots: dict,
                   left: Optional[Leftover]) -> Dict[str, dict]:
     """One line per commodity across its exchanges (the universe's ``subsector``: 'copper' for
@@ -324,6 +401,7 @@ def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict], roots: dict,
             c["subsector_unit"] = unit
             c.update(_unit_months(theirs, factor, units_note))
             c.update(_leftover_units([c["root_id"]], list(c["months_units"]), left, roots, factor, units_note, fx))
+            c.update(_leftover_pct([c["root_id"]], list(c["months_usd_per_pct"]), left, theirs, fx))
         in_units = _unit_months(mine, factor, units_note)
         out[sub] = {
             "name": subsector_name(sub), "sector": first_of[sub]["sector"],
@@ -332,17 +410,20 @@ def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict], roots: dict,
             "net_units": net_units, "unit": unit, "units_note": units_note,
             "net_usd": net_usd, "gross_usd": gross_usd, "missing": missing, "reason": why,
             "months": _months(outright, "notional_usd"), "delta_months": _months(mine, "delta_usd"),
+            "months_usd_per_pct": _months(mine, "usd_per_pct"),
             "products": [p for p in _PRODUCT_ORDER if any(r["product"] == p for r in mine)],
             **{k: v for k, v in _delta_totals(mine).items() if k != "net_delta_lots"},
             **in_units,
             **_leftover_units(root_ids, list(in_units["months_units"]), left, roots, factor, units_note, fx),
+            **_leftover_pct(root_ids, list(_months(mine, "usd_per_pct")), left, mine, fx),
         }
     return out
 
 
 def _currency_exposure(conn, groups: List[dict], as_of: str) -> Tuple[Dict[str, dict], List[str]]:
-    """{ccy: {pnl_local, pnl_usd, contracts, missing, reason}} over every open non-USD commodity
-    future and option (flat ones included: their P&L is still held in that currency), from value_book."""
+    """{ccy: {pnl_local, pnl_usd, contracts, missing, reason, by_trade}} over every open non-USD
+    commodity future and option (flat ones included: their P&L is still held in that currency),
+    from value_book; ``by_trade`` {trade_id: pnl_usd or None} is the per-trade USD P&L summed."""
     by_ccy: Dict[str, List[dict]] = {}
     for g in groups:
         if g["currency"] and g["currency"] != "USD":
@@ -356,11 +437,13 @@ def _currency_exposure(conn, groups: List[dict], as_of: str) -> Tuple[Dict[str, 
     reasons: List[str] = []
     for ccy in sorted(by_ccy):
         local, usd, missing_local, missing_usd, why = 0.0, 0.0, [], [], []
+        by_trade: Dict[str, Optional[float]] = {}
         for g in by_ccy[ccy]:
             for tid in g["trade_ids"]:
                 r = rows.get(str(tid))
                 pl = number(getattr(r, "pnl_local", None)) if r is not None else None
                 pu = number(getattr(r, "pnl_usd", None)) if r is not None else None
+                by_trade[str(tid)] = pu
                 if pl is None:
                     missing_local.append(tid)
                     why.append(f"{tid} ({g['instrument_id']}): "
@@ -377,7 +460,8 @@ def _currency_exposure(conn, groups: List[dict], as_of: str) -> Tuple[Dict[str, 
         reason = "; ".join(why)
         out[ccy] = {"pnl_local": None if missing_local else local, "pnl_usd": None if missing_usd else usd,
                     "contracts": sorted({g["instrument_id"] for g in by_ccy[ccy]}),
-                    "missing": sorted(set(missing_local) | set(missing_usd)), "reason": reason}
+                    "missing": sorted(set(missing_local) | set(missing_usd)), "reason": reason,
+                    "by_trade": by_trade}
         if reason:
             reasons.append(f"{ccy} exposure: {reason}")
     return out, reasons
@@ -504,13 +588,34 @@ def curve_positions(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict
       ``leftover_units`` None, ``leftover_reason`` 'an FX hedge: not commodity leftover'.
     - ``by_sector``: ``{sector: {net_usd, gross_usd, missing, reason, commodities,
       net_delta_lots, net_delta_usd, gross_delta_usd, delta_missing, delta_reason}}``, same rules.
-    - ``currency_exposure``: ``{ccy: {pnl_local, pnl_usd, contracts, missing, reason}}`` for the
-      open non-USD commodity futures and options, summed from ``value_book``; None where a
-      trade has none.
+    - ``currency_exposure``: ``{ccy: {pnl_local, pnl_usd, contracts, missing, reason, by_trade}}``
+      for the open non-USD commodity futures and options, summed from ``value_book``; None where a
+      trade has none. ``by_trade`` {trade_id: pnl_usd, None where the trade has none} is what
+      ``pnl_usd`` sums (commodity-stress's FX split reads it; 2026-09-29).
     - ``months``: sorted 'YYYY-MM' keys that appear in ``rows``.
     - ``products_present``: the products among ``rows``, in the order FUTURE, LME_FWD, CMDTY_OPTION.
     - ``reasons``: what could not be computed, in plain words (a leftover that could not be read
       from the spreads, or lots the strategies and the curve disagree on, included).
+
+    **USD per 1 % move** (added 2026-09-29 for Risk's Net by commodity, Phase G; the screens
+    never scale a figure): what a 1 % move of the price is worth, ``delta USD x 0.01``, the same
+    sign, beside every delta-USD figure:
+
+    - each row: ``usd_per_pct`` (None where ``delta_usd`` is None) and ``usd_per_pct_reason``
+      ('' or why);
+    - ``by_commodity`` (the exchange rows), each ``by_subsector`` line and each of its ``split``
+      entries, and ``by_sector``: ``long_usd_per_pct`` (the long positions summed),
+      ``short_usd_per_pct`` (the short ones, negative), ``net_usd_per_pct``,
+      ``gross_usd_per_pct`` (|long| + |short|) and ``usd_per_pct_reason``; all None, with the
+      reason, when any position has no USD delta (never a partial sum);
+    - ``by_commodity``, ``by_subsector`` and ``split``: ``months_usd_per_pct`` {'YYYY-MM': the
+      month's delta USD x 0.01}, None where a position of the month has none;
+    - ``by_subsector`` and ``split``: ``leftover_months_usd_per_pct`` (every month of
+      ``months_usd_per_pct``, 0.0 where nothing is left; {} for an FX hedge),
+      ``leftover_usd_per_pct`` (their sum) and ``leftover_usd_per_pct_reason``: the leftover's
+      delta lots at the month's own USD per delta lot (the rows' ``delta_usd / delta_lots``), so
+      it has a figure where the physical units do not add; None with the reason where a part has
+      none, or where one month holds LME prompts at different prices.
 
     ``spreads``: a ``book_spreads(conn, as_of)`` result the caller already holds, to save
     reading it again for the leftover; read here when None.

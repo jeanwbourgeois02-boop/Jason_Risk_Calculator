@@ -10,6 +10,9 @@ The delta, in futures-equivalent lots: ``delta_lots = lots x delta_factor`` and
 ``delta_usd = delta_lots x multiplier x price x S``, with ``price`` the underlying future's for an
 option. ``delta_factor`` is 1 for a future (the averaging share for a monthly-average contract,
 ``engine.curve.averaging``), the official ``DELTA`` mark for an option, 1 for an LME forward.
+
+``usd_per_pct`` is what a 1 % move of the price is worth: ``delta_usd x 0.01``, the same sign
+(Risk's "USD per 1 % move"), None with ``usd_per_pct_reason`` where ``delta_usd`` is None.
 """
 
 from __future__ import annotations
@@ -26,6 +29,12 @@ from engine.pnl.valuation import _mark_at
 FUTURE, OPTION, LME = "FUTURE", "CMDTY_OPTION", "LME_FWD"
 PROMPT = "PROMPT"   # dates_source of an LME forward: its prompt date is the ticket's own, never estimated
 NO_DELTA = "no DELTA mark: the option has not been priced"
+PCT_MOVE = 0.01     # a 1 % move of the price: USD per 1 % move = delta USD x PCT_MOVE
+
+
+def per_pct(delta_usd: Optional[float]) -> Optional[float]:
+    """USD per 1 % move of a delta in USD (None stays None)."""
+    return None if delta_usd is None else delta_usd * PCT_MOVE
 
 
 def month_key(year: int, month: int) -> str:
@@ -68,6 +77,7 @@ def _blank(g: dict, product: str, contract_id: str) -> dict:
         "price": None, "price_source": "", "usd_per_unit": None, "usd_source": "",
         "notional_local": None, "notional_usd": None,
         "delta_factor": None, "delta_lots": None, "delta_units": None, "delta_local": None, "delta_usd": None,
+        "usd_per_pct": None, "usd_per_pct_reason": "",
         "trade_ids": list(g["trade_ids"]), "note": "", "reason": "",
     }
 
@@ -111,6 +121,9 @@ def _delta(row: dict, root, price: Optional[float], s: Optional[float], inputs_o
 def _finish(row: dict, reasons: List[str], notes: List[str]) -> dict:
     row["reason"] = "; ".join(reasons)
     row["note"] = "; ".join(n for n in notes if n)
+    row["usd_per_pct"] = per_pct(row["delta_usd"])
+    if row["usd_per_pct"] is None:
+        row["usd_per_pct_reason"] = row["reason"] or "no USD delta"
     return row
 
 

@@ -594,7 +594,7 @@ def value_book(conn: sqlite3.Connection, as_of: str, trade_ids=None) -> pd.DataF
     retired = pd.read_sql_query(_retired_sql(theme), conn, params={"as_of": as_of})
     trade_columns = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
     unrecognised = pd.read_sql_query(_unrecognised_sql(theme, trade_columns), conn, params={"as_of": as_of})
-    issues = _upload_issue_reasons(conn) if not unrecognised.empty else {}
+    issues = _upload_issue_reasons(conn) if not unrecognised.empty else {"by_trade": {}, "by_symbol": {}}
     conn = _BookConn(conn, as_of)  # one load of the day's marks and realised rows for every row below
     conn.closed_out = closed_out_from_rows(opt)
     if trade_ids is not None:
@@ -709,31 +709,46 @@ def _symbol_key(text) -> str:
 
 
 def _upload_issue_reasons(conn) -> dict:
-    """{symbol as written, upper-cased and stripped: the last upload's reason for it} from
-    `upload_issues` (ingest-booking's table, replaced by each upload); {} when the table is
-    absent or unreadable. Read-only context for an UNRECOGNISED trade's reason."""
+    """The last upload's reasons for the UNRECOGNISED trades, read-only from `upload_issues`
+    (ingest-booking's table, replaced by each upload): {"by_trade": {trade_id: reason},
+    "by_symbol": {symbol key: reason}}.
+      by_trade  -- `data.ingest.upload.unrecognised_reasons(conn)`, the issue rows of kind
+                   UNRECOGNISED keyed on their trade id (never a WARNING row that shares a symbol);
+      by_symbol -- only on an older database whose `upload_issues` has no trade_id column: its
+                   REJECTED / NOT LOADED rows keyed on the symbol as written (WARNING rows left out).
+    Empty maps when the table is absent or unreadable."""
+    out = {"by_trade": {}, "by_symbol": {}}
     try:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(upload_issues)")}
+        if not columns:
+            return out
+        if "trade_id" in columns:
+            from data.ingest.upload import unrecognised_reasons   # lazy: layer 1 read from layer 4
+            out["by_trade"] = {str(t): " ".join(str(w or "").split())
+                               for t, w in unrecognised_reasons(conn).items()}
+            return out
         found = conn.execute("SELECT symbol, reason FROM upload_issues WHERE symbol <> '' "
-                             "ORDER BY row_no, rowid").fetchall()
-    except sqlite3.Error:
-        return {}
-    out = {}
+                             "AND kind <> 'WARNING' ORDER BY row_no, rowid").fetchall()
+    except (sqlite3.Error, ImportError):
+        return out
     for symbol, reason in found:
         key, why = _symbol_key(symbol), " ".join(str(reason or "").split())
         if key and why:
-            out.setdefault(key, why)
+            out["by_symbol"].setdefault(key, why)
     return out
 
 
 def _unrecognised_reason(r, issues: dict) -> str:
     """'contract not recognised: <why>; P&L can't be computed until it is mapped', <why> being
-    the last upload's own reason for the trade's symbol when it is on file, else a sentence naming
-    the symbol (the broker's cell, else the instrument id after 'UNRECOGNISED:')."""
+    the last upload's own reason for the trade (by trade id; by symbol on an older database) when
+    it is on file, else a sentence naming the symbol (the broker's cell, else the instrument id
+    after 'UNRECOGNISED:')."""
     symbol = str(getattr(r, "broker_symbol", "") or "").strip()
     if not symbol:
         inst = str(r.instrument_id or "")
         symbol = inst[len(UNRECOGNISED_PREFIX):] if inst.upper().startswith(UNRECOGNISED_PREFIX) else inst
-    why = issues.get(_symbol_key(symbol), "")
+    why = (issues.get("by_trade", {}).get(str(r.trade_id), "")
+           or issues.get("by_symbol", {}).get(_symbol_key(symbol), ""))
     lead = "contract not recognised:"
     if why.lower().startswith(lead):
         why = why[len(lead):].strip()

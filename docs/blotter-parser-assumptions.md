@@ -187,3 +187,17 @@ The first real export, `data/template PnL tool.csv` (git-ignored, never committe
   the cell is blank or not a number, which means the fill was rebuilt from NetInvoice.
 - Both are for display on the Blotter tab only; nothing calculates from them. Trades loaded
   before 2026-09-29 read '' until the file is uploaded again.
+
+## Every row loads (2026-09-29, CLAUDE.md hard rule 6)
+
+Nothing in the file is dropped. A row the parser cannot identify becomes a trade of product
+`UNRECOGNISED` (instrument `UNRECOGNISED:<SYMBOL>`, no legs, multiplier 0, never asked of
+Bloomberg, blank P&L with its reason, re-resolved at every upload and app start once the contract
+list knows it; `data.ingest.blotter.resolve_stored`, `data.ingest.upload.reresolve_unrecognised`).
+Guesses the parser makes on the way:
+- A blank Trade Id loads as `NOID-<10 hex digits of a hash of the row's cells>`, with a warning; the same row uploaded again replaces itself.
+- A contradiction between two populated fields loads on the primary field, with a warning naming both: the Symbol's contract over the Currency, venue or Description; the Buy/Sell currency columns over the Description and over the pair named in the Symbol or Currency Pair; the Symbol's value date, expiry and call/put over the Description's; a strike column over the Description's strike; a Chinese option code's type and strike over the row's; an LME ticket with a non-USD Currency loads in USD.
+- A one-currency CURRENCY row (a fee or balance) is an UNRECOGNISED trade (it used to write only its CASH instrument).
+- An UNRECOGNISED trade with no readable date (TradeDate, Settle Date, CreateDate, LastModified) has trade_date ''.
+- Without a stored Fin Type, `resolve_stored` infers the kind of a stored row from its symbol's shape.
+- Cancelled / void / deleted / rejected / failed rows still remove the trade they name; pending / draft / error rows are still not trades (listed with their status). A row outside `config/book.yaml`'s filter lists does not load (all three lists are empty).

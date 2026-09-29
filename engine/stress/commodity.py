@@ -26,6 +26,7 @@ import sqlite3
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
+from engine.stress import by_position as _bp
 from engine.stress.scenarios import (
     DEFAULT_CONFIG, SPREAD_LEVELS, ScenarioError, load_scenarios, norm, validate_scenarios,
 )
@@ -387,6 +388,18 @@ def commodity_stress(conn: Optional[sqlite3.Connection], as_of: str,
     root_id, open_lots, pnl_usd, reason}], leftover [{root_id, lots, pnl_usd, reason}],
     reason}]`` for every positional scenario (open spreads only). ``total_usd`` is None (n/a)
     only when nothing the scenario touches has a figure, with ``reason`` saying why.
+
+    Every scenario also carries its P&L per Book position (``by_position.py``, Phase G):
+    ``by_position`` {position_id: pnl_usd} keyed by spreads-engine's position ids
+    (``positions_of``: 'POSITION-STRATEGY-<name>' on Jason's book, 'OUTRIGHT-<instrument_id>',
+    'TRADE-<trade_id>'), a shared contract split by each trade's own quantity; None when the
+    positions are not known (``by_position_detail.reason``). ``worst_position``
+    {position_id, name, pnl_usd}: the position losing most, None when none loses.
+    ``by_position_detail`` {names {position_id: name}, missing [{position_id, contract_id,
+    reason}] (a position with a contract the scenario could not price: its figure is the sum
+    of its known parts), unattributed [{contract_id, pnl_usd, reason}], residual_usd (total_usd
+    - sum(by_position) - sum(unattributed), float noise only), reason}. Always
+    ``sum(by_position) + sum(unattributed pnl_usd) == total_usd``.
     """
     reasons: List[str] = []
     config = ""
@@ -410,7 +423,8 @@ def commodity_stress(conn: Optional[sqlite3.Connection], as_of: str,
                 "scenarios": [_na(s, why) for s in parsed], "reasons": [why]}
 
     spreads_why = ""
-    if spreads is None and any(_selects_spreads(s) for s in parsed):
+    has_rows = bool(positions.get("rows") or positions.get("flat_contracts"))
+    if spreads is None and (has_rows or any(_selects_spreads(s) for s in parsed)):
         if conn is None:
             spreads_why = "the book's spreads are not known (no database given)"
         else:
@@ -421,6 +435,7 @@ def commodity_stress(conn: Optional[sqlite3.Connection], as_of: str,
                 spreads_why = f"the book's spreads could not be read: {exc}"
         if spreads_why:
             reasons.append(spreads_why)
+    pmap = _bp.PositionMap(conn, spreads, positions)
     tags = _spread_tags(spreads)
     rows = [dict(r, _tags=tags.get(str(r.get("instrument_id") or ""), {})) for r in positions.get("rows") or []]
 
@@ -441,6 +456,12 @@ def commodity_stress(conn: Optional[sqlite3.Connection], as_of: str,
         if spreads is not None and s["kind"] != "fx":
             res["by_spread"] = [] if (res["total_usd"] is None and not res["by_contract"]) else \
                 _by_spread(res, spreads)
+        if res["total_usd"] is None and not res["by_contract"] and not res.get("by_currency"):
+            res.update(_bp.empty(res["reason"] or "the scenario has no figure"))
+        elif s["kind"] == "fx":
+            res.update(_bp.fx(pmap, conn, as_of, res, positions))
+        else:
+            res.update(_bp.positional(pmap, res, positions))
         if res["reason"] and res["total_usd"] is None:
             reasons.append(f"{s['name']}: n/a, {res['reason']}")
         results.append(res)

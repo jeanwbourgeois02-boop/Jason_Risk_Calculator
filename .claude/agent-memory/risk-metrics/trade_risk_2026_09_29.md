@@ -26,6 +26,10 @@ Choices made where the brief left room (reported, not yet contradicted by the us
   sd of the level's daily changes over the z window, a change spanning a roll or the CM splice left out
   (contract-per-date tracked in `_leg_prices`). subset_var reads `_BASE` (latest block whatever levels) so
   a trade_book call never forces a rebuild on a filter change.
+- ui round 2b: subset_var's vol target block uses metrics.series_metrics (blended vol, the engine's
+  vol_vs_target_pct) plus var_vs_target_pct = VaR / target; legs_risk per contract (1 sd, corr with the
+  other side as HELD, so an offsetting leg is negative); best_fit_r2 = corr squared (fit has an intercept).
+- The hand-back tool delivers ONE report per run: after it, the coordinator never sees later text.
 - Memo pitfall: the first book_spreads on a db creates tables and moves the file mtime, so the memo is
   stored under the key read AFTER the build too (warm 0.02-0.04 s, subsets 15-30 ms).
 

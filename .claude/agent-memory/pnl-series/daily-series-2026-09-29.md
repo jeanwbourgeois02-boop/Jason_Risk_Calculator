@@ -26,6 +26,9 @@ valuation the ui is to switch its LTD chart (`header._build_chart` / `_cached_lt
   as `ui/tabs/pnl.py::realised_entries`; sample LTD realised -18,843.39.
 - Drawdown starts from LTD 0 on the business day before the first trade.
 - A weekend / holiday as-of (book_today is a Saturday from Fri 17:00 NY) is appended to `days` and valued like any day; reference closes still step on business days; the track record skips it. Reviewer finding 2026-09-29: without it `frame(<weekend>)` raised KeyError.
+- Speed (2026-09-29, "the site is super slow"): cold `daily_series` on Jason's 89-trade book (12 days, no marks)
+  0.31 s -> 0.2 s after trimming `fill_book`; ~75 % left is `value_book` per day (pnl-valuation's; a
+  multi-date read there is the next lever). Prove any speed change by assert_frame_equal of every frame.
 - Consumers: spreads-engine (period explain on `PeriodPnl.frame_end` / `frame_ref`), ui.
 
 Related: [[lane-inheritance]]
