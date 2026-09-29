@@ -1,7 +1,7 @@
 """The book's positions in one table (user, 2026-09-22: "I want to see my total positions
 delta ... in the total tab in blotter"; the Blotter's key table and the Risk tab's inputs).
 
-`book_positions(conn, as_of)` gathers the delta figures the app already computes, each
+`book_positions(conn, as_of, value_fn=None, curve=None, spreads=None)` gathers the delta figures the app already computes, each
 from the module that owns it, and adds nothing of its own except the sums:
 
   * FX: the Net / Gross USD delta of the Ladder and the header (`ui.tabs.cash_ladder.
@@ -27,8 +27,9 @@ and `marks_official` is the only marks source.
 """
 from __future__ import annotations
 
+import inspect
 import sqlite3
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 
 def _missing_spot_reason(ccys: Iterable[str], as_of: str) -> str:
@@ -119,7 +120,21 @@ def _abs_order(value: Optional[float]):
     return (value is None, -abs(value) if value is not None else 0.0)
 
 
-def commodity_positions(conn: sqlite3.Connection, as_of: str) -> dict:
+def _read_curve(conn: sqlite3.Connection, as_of: str, value_fn: Optional[Callable],
+                spreads: Optional[dict]) -> dict:
+    """curve-positions' ``curve_positions`` with ``spreads`` and ``value_fn`` passed on only
+    when given (and, for ``value_fn``, only when that function takes it)."""
+    from engine.curve import curve_positions
+    kwargs: dict = {}
+    if spreads is not None:
+        kwargs["spreads"] = spreads
+    if value_fn is not None and "value_fn" in inspect.signature(curve_positions).parameters:
+        kwargs["value_fn"] = value_fn
+    return curve_positions(conn, as_of, **kwargs)
+
+
+def commodity_positions(conn: sqlite3.Connection, as_of: str, value_fn: Optional[Callable] = None,
+                        curve: Optional[dict] = None, spreads: Optional[dict] = None) -> dict:
     """The commodity futures by sector, then by commodity: curve-positions' own figures,
     nothing recomputed but the sums across them.
 
@@ -135,9 +150,13 @@ def commodity_positions(conn: sqlite3.Connection, as_of: str) -> dict:
     `missing` name it by root id and their `reason` says "excludes N of M commodities ...".
     A sector with every commodity known takes curve-positions' own sector figures; the book's
     figures are the sectors' summed. A figure with nothing known behind it is None, never 0.
+
+    ``curve``: a ``curve_positions(conn, as_of)`` result the caller already holds, used as it is;
+    else it is read, with ``spreads`` (a ``book_spreads(conn, as_of)`` result) and ``value_fn``
+    (the whole-book valuation read, ``value_book(conn, as_of, trade_ids=None)``'s signature)
+    handed on, so a date the caller already valued is not valued again.
     """
-    from engine.curve import curve_positions
-    cp = curve_positions(conn, as_of)
+    cp = curve if curve is not None else _read_curve(conn, as_of, value_fn, spreads)
     by_commodity = cp.get("by_commodity") or {}
     note = cp.get("note") or ""
     ccy_exposure = {ccy: {"pnl_local": e.get("pnl_local"), "pnl_usd": e.get("pnl_usd"), "reason": e.get("reason", "")}
@@ -190,15 +209,25 @@ _EMPTY = {
 }
 
 
-def book_positions(conn: sqlite3.Connection, as_of: str) -> dict:
+def book_positions(conn: sqlite3.Connection, as_of: str, value_fn: Optional[Callable] = None,
+                   curve: Optional[dict] = None, spreads: Optional[dict] = None) -> dict:
     """{'fx': ..., 'fx_options': ..., 'commodities': ...}, the blocks above. One that cannot be
     computed at all (a stored value that is not a number in a trade the Ladder's own path
     reads, say) comes back in its empty shape with the reason, so the others still show and
-    nothing is blank without a reason."""
+    nothing is blank without a reason.
+
+    Optional, to share work with the caller (default: each is read here, as before):
+    ``value_fn`` the whole-book valuation read, ``value_book(conn, as_of, trade_ids=None)``'s
+    signature (the one shared valuation per date); ``curve`` a ``curve_positions(conn, as_of)``
+    result; ``spreads`` a ``book_spreads(conn, as_of)`` result. Only the commodities block values
+    a date, through curve-positions; the FX blocks read legs and marks, never a valuation."""
     out = {}
     for key, fn in _BLOCKS:
         try:
-            out[key] = fn(conn, as_of)
+            if key == "commodities":
+                out[key] = fn(conn, as_of, value_fn=value_fn, curve=curve, spreads=spreads)
+            else:
+                out[key] = fn(conn, as_of)
         except Exception as exc:  # noqa: BLE001 -- another lane's data error, named on the line
             out[key] = {**_EMPTY[key], "reason": f"could not be computed ({type(exc).__name__}: {exc})"}
     return out

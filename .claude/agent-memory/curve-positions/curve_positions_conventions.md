@@ -45,3 +45,9 @@ Built 2026-09-24 (Phase 1 step 3). Choices a future change should keep or revisi
 **2026-09-29:** `currency_exposure[ccy]["by_trade"]` {trade_id: pnl_usd or None} = what pnl_usd sums;
 commodity-stress's FX split reads it to skip a second value_book. Cost of a cold curve_positions is
 ~85-90 % `book_spreads` (the leftover): callers that hold the spreads should pass `spreads=`.
+
+**2026-09-29 (Phase G, one valuation per date):** `curve_positions(..., value_fn=None)`: with a
+value_fn the currency exposure reads the WHOLE book's as_of through it (not value_book's trade_ids
+subset) and picks its trades; one per-call memo (`_once_per_date`, tuple frames unwrapped) is handed
+to `book_spreads(value_fn=...)`. Proven identical to the default on the sample and Jason's book:
+per-trade rows of value_book are the same whole-book or subset for futures / options.

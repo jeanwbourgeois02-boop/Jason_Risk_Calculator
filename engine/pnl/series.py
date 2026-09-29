@@ -27,7 +27,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 import pandas as pd
 
@@ -49,7 +49,7 @@ PERIOD_KEYS = ("daily", "d5", "mtd", "ytd", "ltd")
 _SETTLED = ("SETTLED",)
 
 # ------------------------------------------------------------------ the in-process memo
-_MEMO_MAX = 8192                       # (revision, day) entries per store; a year of days is ~260
+_MEMO_MAX = 8192                       # (revision, reader, day) entries per store; a year of days is ~260
 _GUARD = threading.RLock()             # one series computed at a time; readers of the stores too
 _RAW: "collections.OrderedDict[tuple, pd.DataFrame]" = collections.OrderedDict()
 _FILLED: "collections.OrderedDict[tuple, pd.DataFrame]" = collections.OrderedDict()
@@ -82,9 +82,10 @@ def _put(store, key: tuple, value) -> None:
 
 
 def _drop_old_revisions(revision: tuple) -> None:
-    """A newer revision of the same file makes the older one's days dead weight."""
+    """A newer revision of the same file makes the older one's days dead weight. A memo key is
+    (revision, reader, day): the revision tuple whole, whatever its length."""
     for store in (_RAW, _FILLED):
-        for key in [k for k in store if k[0] == revision[0] and k[:-1] != revision]:
+        for key in [k for k in store if k[0][:1] == revision[:1] and k[0] != revision]:
             del store[key]
 
 
@@ -166,7 +167,8 @@ def _business_days(start: dt.date, end: dt.date, holidays) -> List[str]:
     return out
 
 
-def daily_series(conn: sqlite3.Connection, as_of: str, db_key: Optional[tuple] = None) -> DailySeries:
+def daily_series(conn: sqlite3.Connection, as_of: str, db_key: Optional[tuple] = None,
+                 value_fn: Optional[Callable[..., pd.DataFrame]] = None) -> DailySeries:
     """The filled per-trade valuation of every business day (config/holidays.txt calendar) from
     the book's first trade date to `as_of`, oldest first.
 
@@ -177,7 +179,15 @@ def daily_series(conn: sqlite3.Connection, as_of: str, db_key: Optional[tuple] =
     one view of the file for a whole render passes the key it read once (any hashable tuple whose
     first item is the file path). An in-memory database (key None) is valued without memo.
     Each day is `value_book(conn, day)` then `fill_book` (the look-back reads the series' own
-    unfilled days, so a filled value is never carried further), priced once per key and day."""
+    unfilled days, so a filled value is never carried further), priced once per key and day.
+
+    `value_fn`: the reader of one day's unfilled book, called as `value_fn(conn, day)` (never
+    with `trade_ids`), which must give exactly `value_book(conn, day)`; None = `value_book`.
+    A caller that already values each date once for the whole render (the ui's
+    `raw_value_book`, memoised per revision and date) passes it so no date is valued twice.
+    With a `value_fn` the fill's look-back takes the whole earlier day from the same reader.
+    Its memo entries are kept apart from the default reader's (keyed on the function itself),
+    so the two can never be mixed, even if a reader were to differ."""
     started = time.perf_counter()
     holidays = load_holidays()
     row = conn.execute("SELECT MIN(trade_date) FROM trades_official").fetchone()
@@ -189,6 +199,12 @@ def daily_series(conn: sqlite3.Connection, as_of: str, db_key: Optional[tuple] =
         # valued itself, as the header values it; reference closes still step on business days
         days.append(as_of)
     revision = db_key if db_key is not None else db_revision(conn)
+    reader = value_book if value_fn is None else value_fn
+    tag = None if value_fn is None else ("value_fn", value_fn)   # memo apart per reader
+
+    def mkey(day: str) -> tuple:
+        return (revision, tag, day)
+
     repricings = 0
     frames: Dict[str, pd.DataFrame] = {}
     local_raw: Dict[str, pd.DataFrame] = {}      # the in-memory database's own raw days
@@ -196,15 +212,15 @@ def daily_series(conn: sqlite3.Connection, as_of: str, db_key: Optional[tuple] =
     def raw(day: str) -> pd.DataFrame:
         nonlocal repricings
         if revision is not None:
-            hit = _RAW.get((*revision, day))
+            hit = _RAW.get(mkey(day))
             if hit is not None:
                 return hit
         elif day in local_raw:
             return local_raw[day]
-        df = value_book(conn, day)
+        df = reader(conn, day)
         repricings += 1
         if revision is not None:
-            _put(_RAW, (*revision, day), df)
+            _put(_RAW, mkey(day), df)
         else:
             local_raw[day] = df
         return df
@@ -212,16 +228,18 @@ def daily_series(conn: sqlite3.Connection, as_of: str, db_key: Optional[tuple] =
     def rows_for(iso: str, ids) -> pd.DataFrame:
         if not first or iso < first:
             return _empty_frame()           # nothing dealt yet: no earlier price to take
-        cached = _RAW.get((*revision, iso)) if revision is not None else local_raw.get(iso)
+        cached = _RAW.get(mkey(iso)) if revision is not None else local_raw.get(iso)
         if cached is not None:
             return cached       # whole: fill_book keeps only the ids it asked for (speed, 2026-09-29)
+        if value_fn is not None:
+            return raw(iso)     # the caller's reader values whole days: once per date, then memo
         return value_book(conn, iso, trade_ids=ids)
 
     with _GUARD:
         if revision is not None:
             _drop_old_revisions(revision)
         for day in days:
-            key = (*revision, day) if revision is not None else None
+            key = mkey(day) if revision is not None else None
             hit = _FILLED.get(key) if key is not None else None
             if hit is None:
                 filled, _ = fill_book(raw(day), day, rows_for, holidays)

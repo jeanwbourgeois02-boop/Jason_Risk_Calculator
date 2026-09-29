@@ -32,7 +32,7 @@ Rules (CLAUDE.md hard rules 2 and 3, "P&L conventions -> Futures"):
 from __future__ import annotations
 
 import sqlite3
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from data.contracts import load_roots
 from engine.curve.leftover import Leftover, leftover_by_root, row_month
@@ -62,6 +62,10 @@ ORDER BY t.instrument_id, prompt, t.trade_id
 """
 
 _FLAT = 1e-9   # a position whose net is within this of zero is flat
+
+# ``value_fn(conn, as_of)``: a whole-book valuation read (``value_book``'s shape; a (frame, ...)
+# tuple is accepted, as ``engine.spreads.book_spreads`` does).
+ValueFn = Callable[..., object]
 _PRODUCT_ORDER = (FUTURE, LME, OPTION)
 _OUTRIGHT = (FUTURE, LME)   # lots of the future itself: the net / gross lots and USD notional
 _LABEL = {"notional_usd": "USD notional", "delta_usd": "USD delta"}
@@ -420,10 +424,27 @@ def _by_subsector(rows: List[dict], by_commodity: Dict[str, dict], roots: dict,
     return out
 
 
-def _currency_exposure(conn, groups: List[dict], as_of: str) -> Tuple[Dict[str, dict], List[str]]:
+def _once_per_date(value_fn: ValueFn) -> ValueFn:
+    """``value_fn`` read at most once per date within one ``curve_positions`` call, its frame
+    unwrapped from a (frame, ...) tuple; handed on to ``book_spreads`` so the date the currency
+    exposure valued is not valued again there."""
+    memo: Dict[str, object] = {}
+
+    def read(conn, day: str):
+        if day not in memo:
+            out = value_fn(conn, day)
+            memo[day] = out[0] if isinstance(out, tuple) else out
+        return memo[day]
+    return read
+
+
+def _currency_exposure(conn, groups: List[dict], as_of: str,
+                       value_fn: Optional[ValueFn] = None) -> Tuple[Dict[str, dict], List[str]]:
     """{ccy: {pnl_local, pnl_usd, contracts, missing, reason, by_trade}} over every open non-USD
     commodity future and option (flat ones included: their P&L is still held in that currency),
-    from value_book; ``by_trade`` {trade_id: pnl_usd or None} is the per-trade USD P&L summed."""
+    from value_book; ``by_trade`` {trade_id: pnl_usd or None} is the per-trade USD P&L summed.
+    With ``value_fn`` the whole book's valuation of ``as_of`` is read through it (shared with the
+    caller) and the trades picked from it; else ``value_book`` of those trades alone."""
     by_ccy: Dict[str, List[dict]] = {}
     for g in groups:
         if g["currency"] and g["currency"] != "USD":
@@ -431,7 +452,7 @@ def _currency_exposure(conn, groups: List[dict], as_of: str) -> Tuple[Dict[str, 
     if not by_ccy:
         return {}, []
     trade_ids = [t for gs in by_ccy.values() for g in gs for t in g["trade_ids"]]
-    book = value_book(conn, as_of, trade_ids=trade_ids)
+    book = value_book(conn, as_of, trade_ids=trade_ids) if value_fn is None else value_fn(conn, as_of)
     rows = {str(r.trade_id): r for r in book.itertuples(index=False)}
     out: Dict[str, dict] = {}
     reasons: List[str] = []
@@ -490,14 +511,16 @@ def _lme_groups(conn, as_of: str, reasons: List[str]) -> List[Tuple[dict, object
     return out
 
 
-def _leftover(conn, as_of: str, rows: List[dict], roots: dict, spreads: Optional[dict]) -> Tuple[Leftover, List[str]]:
+def _leftover(conn, as_of: str, rows: List[dict], roots: dict, spreads: Optional[dict],
+              value_fn: Optional[ValueFn] = None) -> Tuple[Leftover, List[str]]:
     """The leftover per root and month from spreads-engine's strategies (``engine.curve.leftover``);
-    ``spreads`` is a ``book_spreads(conn, as_of)`` result the caller already holds, else it is read."""
+    ``spreads`` is a ``book_spreads(conn, as_of)`` result the caller already holds, else it is read
+    (through ``value_fn`` when given)."""
     reasons: List[str] = []
     try:
         if spreads is None:
             from engine.spreads import book_spreads     # layer 4, read here; spreads never reads the curve
-            spreads = book_spreads(conn, as_of)
+            spreads = book_spreads(conn, as_of) if value_fn is None else book_spreads(conn, as_of, value_fn=value_fn)
         strategies = spreads.get("strategies")
         if not strategies and rows:
             failed = [r for r in spreads.get("reasons") or [] if "strategies could not be built" in r]
@@ -512,7 +535,8 @@ def _leftover(conn, as_of: str, rows: List[dict], roots: dict, spreads: Optional
     return left, reasons
 
 
-def curve_positions(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = None) -> dict:
+def curve_positions(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = None,
+                    value_fn: Optional[ValueFn] = None) -> dict:
     """The book's commodity futures, options on them and LME forwards by contract month on `as_of`.
 
     Returns ``{as_of, available, note, rows, flat_contracts, by_commodity, by_subsector,
@@ -619,6 +643,13 @@ def curve_positions(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict
 
     ``spreads``: a ``book_spreads(conn, as_of)`` result the caller already holds, to save
     reading it again for the leftover; read here when None.
+
+    ``value_fn``: the whole-book valuation read, ``value_fn(conn, as_of)`` (``value_book``'s
+    signature; a (frame, ...) tuple is accepted), so a screen shares the valuation it already holds
+    (Phase G, "one shared valuation per date"). Every date this call values goes through it, at
+    most once per date: the currency exposure reads the whole book's ``as_of`` and picks its
+    trades, and ``book_spreads`` (when ``spreads`` is None) is built with the same memoised read.
+    None (the default): ``value_book`` as before.
     """
     try:
         roots = load_roots()
@@ -656,12 +687,13 @@ def curve_positions(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict
     rows.sort(key=lambda r: (r["sector"], r["root_id"], r["expiry"], r["contract_id"]))
     reasons += [f"{r['contract_id']}: {r['reason']}" for r in rows if r["reason"]]
 
-    exposure, exposure_reasons = _currency_exposure(conn, mine, as_of)
+    read = None if value_fn is None else _once_per_date(value_fn)
+    exposure, exposure_reasons = _currency_exposure(conn, mine, as_of, read)
     reasons += exposure_reasons
     months = sorted({month_key(r["year"], r["month"]) for r in rows if r["year"] is not None})
     note = "" if rows else f"every open commodity future is flat on {as_of}"
     by_commodity = _by_commodity(rows)
-    left, left_reasons = _leftover(conn, as_of, rows, roots, spreads)
+    left, left_reasons = _leftover(conn, as_of, rows, roots, spreads, read)
     reasons += left_reasons
     return {"as_of": as_of, "available": True, "note": note, "rows": rows, "flat_contracts": flat,
             "by_commodity": by_commodity, "by_subsector": _by_subsector(rows, by_commodity, roots, left),

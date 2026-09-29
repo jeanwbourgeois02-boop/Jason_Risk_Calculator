@@ -32,3 +32,7 @@ valuation the ui is to switch its LTD chart (`header._build_chart` / `_cached_lt
 - Consumers: spreads-engine (period explain on `PeriodPnl.frame_end` / `frame_ref`), ui.
 
 Related: [[lane-inheritance]]
+- `value_fn` (2026-09-29, Phase G "one shared valuation per date"): `daily_series(..., value_fn=)` is called
+  as `value_fn(conn, day)` only (the ui's `raw_value_book` takes no `trade_ids`); with it the fill's
+  look-back takes whole days from the same reader. Memo key is (revision, reader tag, day), the tag
+  None for value_book, ("value_fn", fn) otherwise: a reader's rows never mix with another's.
