@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 """Display-text checker for the Dash screens: the basic mistakes on the screens caught mechanically.
 
-    py 2_launcher.py ui-check               every tab; exit 1 on any visible finding or a hover LOWERCASE / BANNED one
+    py 2_launcher.py ui-check               every tab; exit 1 on any visible finding, a hover LOWERCASE / BANNED
+                                            one or a LOOSE_BLOCK (text outside a table, title or control)
+    py 2_launcher.py ui-check --lenient     the same, LOOSE_BLOCK report-only (the old default)
     py 2_launcher.py ui-check --tab book    one tab (top, header, book, pnl, risk, blotter, data)
     py 2_launcher.py ui-check --json        also write the findings to reports/ui_check.json
 
@@ -1345,7 +1347,7 @@ def take_shots(app, tabs: List[str], opened: bool = False) -> str:
 RULE_ORDER = ["RENDER_ERROR", "BANNED", "ENGINE_WORD", "LOWERCASE", "LOOSE_TEXT", "DOUBLE_SPACE",
               "TRAILING_PUNCT_SPACE", PART_RULE, "LOOSE_BLOCK", "DESIGNED_LINE"]
 PAGE_ORDER_RULES = {"LOOSE_BLOCK", "DESIGNED_LINE"}  # listed in page order, not by path
-# A tab whose LOOSE_BLOCK findings never fail --strict, with the note printed beside it: none since the
+# A tab whose LOOSE_BLOCK findings never fail the run, with the note printed beside it: none since the
 # Data tab's rebuild landed (2026-09-29); kept for the next tab another session is still changing.
 INFORMATIONAL_TABS: Dict[str, str] = {}
 
@@ -1420,7 +1422,7 @@ def print_report(findings: List[Finding], timings: Dict[str, float], out=sys.std
     designed = sum(1 for f, _n in items if f.rule == "DESIGNED_LINE")
     took = ", ".join(f"{k} {v:.1f}s" for k, v in timings.items())
     out.write(f"  {visible} visible, {hover} hover distinct findings ({hover_failing} of them failing); "
-              f"{loose} LOOSE_BLOCK ({'failing' if strict else 'report-only without --strict'}), "
+              f"{loose} LOOSE_BLOCK ({'failing' if strict else 'report-only under --lenient'}), "
               f"{designed} DESIGNED_LINE (report-only) ({took})\n")
 
 
@@ -1440,8 +1442,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="py 2_launcher.py ui-check", description=__doc__.split("\n")[0])
     parser.add_argument("--tab", help="one screen: " + ", ".join(TAB_ORDER))
     parser.add_argument("--json", action="store_true", help=f"also write the findings to {REPORT_PATH.relative_to(ROOT)}")
-    parser.add_argument("--strict", action="store_true", help="also fail on LOOSE_BLOCK (text outside a table, title, "
-                                                               "headline, control, chart or empty state)")
+    parser.add_argument("--strict", action="store_true", help="the default since 2026-09-29, kept so older "
+                                                               "commands still run")
+    parser.add_argument("--lenient", action="store_true", help="LOOSE_BLOCK report-only (text outside a table, "
+                                                                "title, headline, control, chart or empty state)")
     parser.add_argument("--layout", action="store_true", help="print each tab's blocks in page order")
     parser.add_argument("--shots", action="store_true",
                         help=f"one full-page PNG per tab under {SHOT_DIR.relative_to(ROOT)} once the late "
@@ -1464,12 +1468,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                                           shots_open=args.shots_open)
     if args.layout:
         print_layout(extras["layout"])
-    print_report(findings, timings, strict=args.strict)
+    strict = not args.lenient
+    print_report(findings, timings, strict=strict)
     if args.shots or args.shots_open:
         print(extras.get("shots") or "screenshots: nothing to shoot")
     if args.json:
         print(f"written {write_json(findings, timings, extras)}")
-    return 1 if any(failing(f, args.strict) for f in findings) else 0
+    return 1 if any(failing(f, strict) for f in findings) else 0
 
 
 if __name__ == "__main__":

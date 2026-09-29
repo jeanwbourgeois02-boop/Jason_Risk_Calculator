@@ -1118,7 +1118,7 @@ def cmd_ui_check(args) -> int:
     argv = ["--json"] if args.json else []
     if args.tab:
         argv += ["--tab", args.tab]
-    argv += [f"--{flag.replace('_', '-')}" for flag in ("strict", "layout", "shots", "shots_open")
+    argv += [f"--{flag.replace('_', '-')}" for flag in ("strict", "lenient", "layout", "shots", "shots_open")
              if getattr(args, flag)]
     return ui_check.main(argv)
 
@@ -1208,12 +1208,15 @@ def build_parser() -> argparse.ArgumentParser:
     h.set_defaults(func=cmd_health)
 
     uc = sub.add_parser("ui-check", help="display-text check of the screens on the sample book: lowercase labels, "
-                                         "n/a, engine words, loose text, stray spaces (tools/ui_check.py; exit 1 "
-                                         "on a visible finding or a hover lowercase / banned one)")
+                                         "n/a, engine words, loose text, stray spaces, text outside a table "
+                                         "(tools/ui_check.py; exit 1 on a visible finding, a hover lowercase / "
+                                         "banned one or a LOOSE_BLOCK)")
     uc.add_argument("--tab", help="one screen: top, header, book, pnl, risk, blotter, data")
     uc.add_argument("--json", action="store_true", help="also write the findings to reports/ui_check.json")
-    uc.add_argument("--strict", action="store_true", help="also fail on LOOSE_BLOCK: text outside a table, title, "
-                                                           "headline, control, chart or empty state")
+    uc.add_argument("--strict", action="store_true", help="the default since 2026-09-29, kept so older commands "
+                                                           "still run")
+    uc.add_argument("--lenient", action="store_true", help="LOOSE_BLOCK report-only: text outside a table, "
+                                                            "title, headline, control, chart or empty state")
     uc.add_argument("--layout", action="store_true", help="print each tab's blocks in page order")
     uc.add_argument("--shots", action="store_true",
                     help="one full-page PNG per tab under reports/ui_shots/ once the late figures land "
