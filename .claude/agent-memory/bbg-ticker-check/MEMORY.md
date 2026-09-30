@@ -1,3 +1,3 @@
-- [Bloomberg field assumptions](bloomberg_field_assumptions.md): unverified guesses (OPT_CHAIN, option form, LME, desk checks, pull part: FX CRNCY, staleness, expired chain); check first against a real report
+- [Bloomberg field assumptions](bloomberg_field_assumptions.md): unverified guesses (OPT_CHAIN, option form, LME, desk checks, pull part, app search: YK_FILTER_CURR, UC/XUC); check first against a real report
 - [No research database](no_research_db_2026_09_30.md): 2026-09-30 desk checks 2/3/7 read the book's price_history or our own LME tickers; replays not reached is expected
 - [Worksheet fixable fields](worksheet_fixable_fields.md): option_style / option_lead_months not in apply_fixes yet (requested 2026-09-24); LME findings go to the housekeeper, not the worksheet

@@ -38,6 +38,15 @@ The Risk tab, the Book's z-score, carry and days to exit read Bloomberg's daily 
 only the new days afterwards). Nothing reads the research app any more (2026-09-30). After the first
 pull, desk check 7 and the Data tab's "Price history" line show the days on file per root.
 
+## In the app (Data tab)
+
+The Data tab's Bloomberg card does all of this without a terminal. First press **Run Bloomberg check**:
+every ticker the book and the pull use is asked of Bloomberg, and any root Bloomberg does not
+recognise is searched for. Then tick the suggested fixes, pick a candidate where Bloomberg offers
+several, and press **Apply ticked fixes** and then **Confirm**. That writes `config/contracts.csv`, rebuilds
+the trades on those contracts, and commits and pushes the file (only to Jason's repo). Finally, press
+**Pull Bloomberg now**. **Download report** saves the check's report, which is the file to send to Claude.
+
 ## The report to send (`bbg-report`)
 
 With the Terminal logged in: `git pull`, press **Pull Bloomberg now** once in the app, then

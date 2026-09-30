@@ -940,6 +940,373 @@ def reresolve_unrecognised(conn: sqlite3.Connection) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- rebuild on a contract fix
+# The products whose instrument hangs off a contract root (instruments.base_ccy = the root id): a
+# commodity future, an option on one (its underlying future is written with it), an LME ticket.
+ROOT_PRODUCTS = ("FUTURE", "CMDTY_OPTION", "LME_FWD")
+# The Fin Type a recognised trade is re-read as when its stored fin_type is blank (loaded before the
+# column existed): the parser's own kind words (an LME ticket arrives as a FUTURE row naming a metal).
+_KIND_OF_PRODUCT = {"FUTURE": "Future", "CMDTY_OPTION": "Option", "LME_FWD": "Future"}
+_FIELD_WORDS = {"instrument_id": "contract id", "bbg_ticker": "Bloomberg ticker", "multiplier": "multiplier",
+                "quote_ccy": "currency", "expiry_date": "expiry", "asset_class": "kind", "base_ccy": "root"}
+
+
+def _same(a, b) -> bool:
+    """Equal, numbers within float noise (a price rebuilt from its Price cell round-trips a divide)."""
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        import math
+        return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-9)
+    return a == b
+
+
+def _root_key(root_id) -> str:
+    return "".join(str(root_id or "").split()).upper()
+
+
+def _stored_rows(conn: sqlite3.Connection, sql: str, params=()) -> list[dict]:
+    cur = conn.execute(sql, params)
+    names = [d[0] for d in cur.description]
+    return [dict(zip(names, r)) for r in cur.fetchall()]
+
+
+def _instrument_row(conn: sqlite3.Connection, instrument_id: str) -> dict | None:
+    rows = _stored_rows(conn, f"SELECT {','.join(_INSTRUMENT_COLUMNS)} FROM instruments WHERE instrument_id = ?",
+                        (instrument_id,))
+    return rows[0] if rows else None
+
+
+def _stored_trade_for_rebuild(row: dict, instrument: dict, legs: list[dict], currency: str, before) -> dict:
+    """The stored trade as `blotter.resolve_stored` reads it, for a trade that DID resolve at upload:
+    every trades column, `symbol` = broker_symbol, the Currency cell (`currency`), the Fin Type from
+    the product when none is stored, the Price cell as written (or, when it is not on file, the fill
+    divided back by the root's broker price scale, so the parser's scale gives the stored fill again:
+    trades.price is always in Bloomberg's units), and for an LME ticket its lots (tonnes over the lot
+    size; `before`'s when given, since the fix may have changed it) and its prompt (the metal leg's
+    date)."""
+    from data.contracts import load_roots
+    trade = dict(row)
+    trade.update(currency=currency, symbol=row.get("broker_symbol") or "")
+    if not str(row.get("fin_type") or "").strip():
+        trade["fin_type"] = _KIND_OF_PRODUCT.get(row["product"], "")
+    root_id = instrument.get("base_ccy") or ""
+    root = load_roots().get(root_id)
+    if row["product"] == "LME_FWD":
+        old = (before or {}).get(root_id) or root
+        size = float(getattr(old, "contract_size", 0) or 0)
+        if size:
+            trade["quantity"] = float(row["quantity"] or 0) / size
+        metal = [leg for leg in legs if leg["settles_cash"] == 0] or legs
+        if metal:
+            trade["settle_date"] = metal[0]["settle_date"]
+    elif not str(row.get("broker_price") or "").strip():
+        scale = float(getattr(root, "broker_price_scale", 1.0) or 1.0)
+        price = row.get("price")
+        if isinstance(price, (int, float)) and price != 0:
+            trade["broker_price"] = repr(float(price) / scale)
+    return trade
+
+
+def _rebuild_one(conn: sqlite3.Connection, row: dict, instrument: dict, legs: list[dict], before):
+    """(parts, reason): the trade re-read from its stored broker fields against the contract list as
+    it is now, or (None, why). Tried first with no Currency cell (the broker symbol alone, as Jason's
+    export gives it), then with the currency it was booked in (a code two exchanges share). It must
+    come back as the same trade, the same product, on the same root: a fix changes a root's fields,
+    never which root a trade belongs to."""
+    fn = getattr(blotter, "resolve_stored", None)
+    if fn is None:
+        return None, "the parser cannot re-read a stored row (no resolve_stored)"
+    tid, root_id = str(row["trade_id"]), instrument.get("base_ccy") or ""
+    reason = ""
+    for currency in dict.fromkeys(("", str(instrument.get("quote_ccy") or ""))):
+        parsed, why = _call_resolve_stored(fn, _stored_trade_for_rebuild(row, instrument, legs, currency, before), conn)
+        reason = why or reason
+        parts = _resolved_parts(parsed) if parsed is not None else None
+        match = [t for t in (parts or {}).get("trades", ()) if t.trade_id == tid]
+        if not match:
+            continue
+        trade = match[0]
+        if trade.product != row["product"]:
+            return None, f"it now reads as {trade.product} rather than {row['product']}; left as it was"
+        insts = {i.instrument_id: i for i in parts["instruments"]}
+        new_root = getattr(insts.get(trade.instrument_id), "base_ccy", root_id)
+        if new_root != root_id:
+            return None, f"its symbol {row.get('broker_symbol') or tid} now matches {new_root}, not {root_id}; left as it was"
+        # Only the booking moves: the file's own words stay as stored (a Fin Type or Price cell
+        # filled in above for the re-read is never written back).
+        import dataclasses
+        keep = {name: row[name] for name in ("fin_type", "broker_price", "broker_symbol", "theme")
+                if name in row and hasattr(trade, name)}
+        kept = dataclasses.replace(trade, **keep) if keep else trade
+        parts["trades"] = [kept if t is trade else t for t in parts["trades"]]
+        return parts, ""
+    return None, reason or f"its symbol {row.get('broker_symbol') or tid} no longer matches a contract"
+
+
+def _booking_changed(conn: sqlite3.Connection, row: dict, legs: list[dict], parts: dict) -> bool:
+    """True when the re-read booking differs from what is on file: any instrument row it writes, the
+    trade's columns (its hand-set theme aside), its legs, an option's terms."""
+    tid = str(row["trade_id"])
+    trade = next(t for t in parts["trades"] if t.trade_id == tid)
+    for inst in parts["instruments"]:
+        stored = _instrument_row(conn, inst.instrument_id)
+        if stored is None or any(not _same(stored[c], getattr(inst, c)) for c in _INSTRUMENT_COLUMNS):
+            return True
+    for name, value in vars(trade).items():
+        if name in row and name != "theme" and not _same(row[name], value):
+            return True
+    new_legs = sorted(([getattr(leg, c) for c in _LEG_COLUMNS] for leg in parts["legs"] if leg.trade_id == tid),
+                      key=lambda v: v[1])
+    old_legs = [[leg[c] for c in _LEG_COLUMNS] for leg in legs]
+    if len(new_legs) != len(old_legs) or any(not _same(a, b) for n, o in zip(new_legs, old_legs) for a, b in zip(n, o)):
+        return True
+    for opt in parts["instrument_options"]:
+        got = conn.execute("SELECT 1 FROM instrument_options WHERE instrument_id = ?", (opt.instrument_id,)).fetchone()
+        if got is None:
+            return True
+    return False
+
+
+def _write_rebuilt(conn: sqlite3.Connection, tid: str, old_instrument: str, parts: dict) -> None:
+    """Write one rebuilt trade inside the caller's transaction: every instrument the re-read gives
+    (its own and an option's underlying future) upserted by name, so a stored row takes the fixed
+    Bloomberg ticker, multiplier and currency; option terms merged (a typed term never lost); the
+    trade upserted with its theme kept; its legs replaced; its realised_pnl row dropped so the
+    ledger freezes it again from the new booking. A bundle membership follows a moved contract id.
+    Marks are never touched."""
+    trade = next(t for t in parts["trades"] if t.trade_id == tid)
+    legs = [leg for leg in parts["legs"] if leg.trade_id == tid]
+    names = ",".join(_INSTRUMENT_COLUMNS)
+    sets = ",".join(f"{c}=excluded.{c}" for c in _INSTRUMENT_COLUMNS if c != "instrument_id")
+    for inst in parts["instruments"]:
+        conn.execute(f"INSERT INTO instruments ({names}) VALUES ({','.join('?' for _ in _INSTRUMENT_COLUMNS)}) "
+                     f"ON CONFLICT(instrument_id) DO UPDATE SET {sets}", [getattr(inst, c) for c in _INSTRUMENT_COLUMNS])
+    conn.executemany(
+        f"INSERT INTO instrument_options ({','.join(_OPTION_COLUMNS)}) VALUES ({','.join('?' for _ in _OPTION_COLUMNS)}) "
+        "ON CONFLICT(instrument_id) DO UPDATE SET "
+        "strike = CASE WHEN excluded.strike != 0 THEN excluded.strike ELSE strike END, "
+        "option_type = CASE WHEN excluded.option_type != '' THEN excluded.option_type ELSE option_type END, "
+        "payoff = CASE WHEN excluded.payoff != 'VANILLA' THEN excluded.payoff ELSE payoff END",
+        [[getattr(o, c) for c in _OPTION_COLUMNS] for o in parts["instrument_options"]])
+    theme = conn.execute("SELECT theme FROM trades WHERE trade_id = ?", (tid,)).fetchone()
+    for table in TRADE_KEYED_CHILD_TABLES:
+        conn.execute(f"DELETE FROM {table} WHERE trade_id = ?", (tid,))
+    _upsert_trade(conn, trade)
+    if theme and theme[0]:
+        conn.execute("UPDATE trades SET theme = ? WHERE trade_id = ?", (theme[0], tid))
+    conn.executemany(f"INSERT INTO trade_legs ({','.join(_LEG_COLUMNS)}) VALUES ({','.join('?' for _ in _LEG_COLUMNS)})",
+                     [[getattr(leg, c) for c in _LEG_COLUMNS] for leg in legs])
+    if old_instrument != trade.instrument_id and _table_exists(conn, "instrument_theme"):
+        conn.execute("INSERT OR IGNORE INTO instrument_theme (instrument_id, theme) "
+                     "SELECT ?, theme FROM instrument_theme WHERE instrument_id = ?", (trade.instrument_id, old_instrument))
+
+
+def _unreferenced(conn: sqlite3.Connection, instrument_id: str) -> bool:
+    return not any(conn.execute(f"SELECT 1 FROM {table} WHERE instrument_id = ? LIMIT 1", (instrument_id,)).fetchone()
+                   for table in ("trades", "marks") if _table_exists(conn, table))
+
+
+def _rebuild_sentence(names: list[str], rebuilt: list, unchanged: list, failed: list, changes: list,
+                      moved_ids: bool) -> str:
+    """One plain sentence for the Data tab."""
+    on = ", ".join(names) or "the roots named"
+    if not (rebuilt or unchanged or failed):
+        return f"No trade on file is on {on}; nothing to rebuild."
+    parts = []
+    if rebuilt:
+        by_field: dict = {}
+        for c in changes:
+            by_field.setdefault(c["field"], []).append(c)
+        said = []
+        for field, rows in by_field.items():
+            first = rows[0]
+            before = first["before"] if first["before"] not in ("", None) else "none"
+            more = f" (+{len(rows) - 1} more)" if len(rows) > 1 else ""
+            said.append(f"{_FIELD_WORDS.get(field, field)} {before} → {first['after']}{more}")
+        what = "; ".join(said) if said else "legs and fills re-read"
+        parts.append(f"{len(rebuilt)} trade(s) on {on} rebuilt: {what}")
+        if unchanged:
+            parts.append(f"{len(unchanged)} already matched")
+    else:
+        parts.append(f"Nothing in the book changed: the {len(unchanged)} trade(s) on {on} already match the contract list"
+                     if unchanged else f"No trade on {on} was rebuilt")
+    if failed:
+        head = "; ".join(f"{f['trade_id']}: {f['why']}" for f in failed[:3])
+        extra = f" (+{len(failed) - 3} more)" if len(failed) > 3 else ""
+        parts.append(f"{len(failed)} could not be rebuilt and stay as they were ({head}{extra})")
+    sentence = "; ".join(parts) + "."
+    if moved_ids:
+        sentence += (" Prices on file stay under the old contract ids; press Pull Bloomberg now to price the new ones.")
+    elif rebuilt:
+        sentence += " Nothing was pulled; the next Bloomberg pull asks for the new tickers."
+    return sentence
+
+
+def reresolve_roots(conn: sqlite3.Connection, root_ids, before=None) -> dict:
+    """Rebuild every trade on the contract roots `root_ids` ('COMEX:HG', or a list of them) from its
+    stored broker fields against the contract list as it is NOW, so a fix applied to
+    config/contracts.csv from the Data tab (`data.contracts.apply_fixes`: Bloomberg root, yellow key,
+    currency, contract size, units, price scale, verified) reaches the book with no re-upload. The
+    user, 2026-09-30: "i should be able to do this in the app". Call it straight after the fix is
+    written. Asks Bloomberg nothing (hard rule 8).
+
+    In scope: every FUTURE, CMDTY_OPTION (and its underlying future's row) and LME_FWD whose
+    instrument's root (base_ccy) is named. contract-master's cache is cleared first, so the rewritten
+    file is read. Each trade goes through `blotter.resolve_stored` exactly as a re-upload of its row
+    would (the Symbol and Price cells as written, the Fin Type, PBRoot, date, side and size), and
+    must come back as the same trade, product and root.
+
+    - A trade whose booking is the same (instrument row, trade columns, legs) is `unchanged` and
+      not written: a bbg_verified fix alone changes nothing on file.
+    - A changed trade is `rebuilt`: its instrument(s) take the new Bloomberg ticker, multiplier,
+      currency (a Bloomberg root or yellow-key fix moves it to a new canonical contract id, 'HGZ26
+      Comdty' -> 'HGXZ26 Comdty', with its bundle membership), its fill and NOTIONAL legs are
+      rewritten, its realised_pnl row is dropped for the ledger to freeze again. All rebuilt trades
+      are written in ONE transaction; an old instrument row that nothing refers to any more (no
+      trade, no mark) is then removed, unless an option of the pass failed (its old underlying
+      future's row is kept for it).
+    - A trade that no longer resolves, or resolves to another product or root, stays exactly as it
+      was and is listed under `failed` with the reason: never dropped, never turned UNRECOGNISED
+      here (hard rule 6). Nothing raises for one trade; a database error on the write rolls the
+      whole pass back and every trade to be rebuilt is listed as failed with it.
+
+    Then Bloomberg's stored contract dates are put back (`contract_dates.apply_contract_dates`,
+    which re-keys an expiry's marks, never a value), and `reresolve_unrecognised` runs, since the
+    fixed file may now name a contract a row that needed a fix was missing. Marks are otherwise
+    never touched. The trades / trade_legs triggers set the Bloomberg library dirty (and it is set
+    here too); the screens' pricing memos key on the database file's (mtime_ns, size), so the write
+    itself makes every screen re-read.
+
+    `before` (optional): {root_id: ContractRoot} as `data.contracts.load_roots()` gave it BEFORE the
+    fix was written. Only an LME ticket needs it, and only when the fix changed the lot size: its
+    lots are not on file (quantity is tonnes), so they are recovered as tonnes / the old lot size.
+    Without it the current lot size is used, which leaves the tonnes as they are.
+
+    Returns {'rebuilt': [trade_id], 'unchanged': [trade_id], 'failed': [{'trade_id', 'why'}],
+    'changed_instruments': [{'instrument_id', 'field', 'before', 'after'}] (field in the
+    instruments columns, 'instrument_id' for a trade moved to a new contract id: before = the old
+    id), 'removed_instruments': [instrument_id], 'contract_dates': apply_contract_dates' result or
+    None, 'reresolved_unrecognised': [trade_id], 'sentence': one plain sentence, 'error': '' or the
+    database error}."""
+    out = {"rebuilt": [], "unchanged": [], "failed": [], "changed_instruments": [], "removed_instruments": [],
+           "contract_dates": None, "reresolved_unrecognised": [], "sentence": "", "error": ""}
+    roots_asked = [_root_key(r) for r in ([root_ids] if isinstance(root_ids, str) else list(root_ids or ()))]
+    roots_asked = [r for r in dict.fromkeys(roots_asked) if r]
+    try:
+        from data.contracts import load_roots
+        from data.contracts.universe import _load
+        _load.cache_clear()
+        known = load_roots()
+    except Exception as exc:  # noqa: BLE001 -- a contract file that will not load: nothing is rebuilt
+        out["error"] = f"the contract list could not be read ({exc})"
+        out["sentence"] = f"Nothing rebuilt: the contract list could not be read ({exc})."
+        return out
+    names = [getattr(known.get(r), "name", "") or r for r in roots_asked]
+    if not roots_asked:
+        out["sentence"] = "No contract named; nothing to rebuild."
+        return out
+    try:
+        holes = ",".join("?" for _ in roots_asked)
+        rows = _stored_rows(conn, f"SELECT t.* FROM trades t JOIN instruments i USING (instrument_id) "
+                                  f"WHERE i.base_ccy IN ({holes}) AND t.product IN ({','.join('?' for _ in ROOT_PRODUCTS)}) "
+                                  "ORDER BY t.trade_id", (*roots_asked, *ROOT_PRODUCTS))
+    except sqlite3.Error as exc:
+        out["error"] = str(exc)
+        out["sentence"] = f"Nothing rebuilt: the trades could not be read ({exc})."
+        return out
+
+    to_write = []          # (trade_id, old instrument row, parts)
+    for row in rows:
+        tid = str(row["trade_id"])
+        try:
+            instrument = _instrument_row(conn, row["instrument_id"]) or {"instrument_id": row["instrument_id"]}
+            legs = _stored_rows(conn, f"SELECT {','.join(_LEG_COLUMNS)} FROM trade_legs WHERE trade_id = ? "
+                                      "ORDER BY leg_no", (tid,))
+            parts, why = _rebuild_one(conn, row, instrument, legs, before)
+            if parts is None:
+                out["failed"].append({"trade_id": tid, "why": why})
+            elif _booking_changed(conn, row, legs, parts):
+                to_write.append((tid, instrument, parts))
+            else:
+                out["unchanged"].append(tid)
+        except Exception as exc:  # noqa: BLE001 -- one trade's failure is its reason, never the whole pass's
+            out["failed"].append({"trade_id": tid, "why": f"could not be re-read ({exc})"})
+
+    snapshots: dict = {}
+    for _tid, instrument, parts in to_write:
+        snapshots.setdefault(instrument["instrument_id"], instrument)
+        for inst in parts["instruments"]:
+            if inst.instrument_id not in snapshots:
+                snapshots[inst.instrument_id] = _instrument_row(conn, inst.instrument_id)
+    try:
+        with conn:
+            for tid, instrument, parts in to_write:
+                _write_rebuilt(conn, tid, instrument["instrument_id"], parts)
+            if to_write and _table_exists(conn, "bbg_library_state"):
+                conn.execute("UPDATE bbg_library_state SET dirty = 1")
+        out["rebuilt"] = [tid for tid, _i, _p in to_write]
+    except sqlite3.Error as exc:
+        out["error"] = str(exc)
+        out["failed"] += [{"trade_id": tid, "why": f"could not be written ({exc}); left as it was"}
+                          for tid, _i, _p in to_write]
+        to_write = []
+
+    try:
+        if to_write:
+            from data.ingest import contract_dates
+            out["contract_dates"] = contract_dates.apply_contract_dates(conn)
+        # Instruments the rebuilt trades left behind: removed when nothing refers to them any more.
+        new_ids = {inst.instrument_id for _t, _i, parts in to_write for inst in parts["instruments"]}
+        # A failed option may still need its old underlying future's row (it is referenced by no
+        # trade), so nothing is removed then.
+        failed_ids = {f["trade_id"] for f in out["failed"]}
+        failed_option = any(str(r["trade_id"]) in failed_ids and r["product"] == "CMDTY_OPTION" for r in rows)
+        if to_write and not failed_option:
+            gone = [iid for iid in snapshots if iid not in new_ids and snapshots[iid] is not None
+                    and _unreferenced(conn, iid)]
+            with conn:
+                for iid in gone:
+                    conn.execute("DELETE FROM instrument_options WHERE instrument_id = ?", (iid,))
+                    if _table_exists(conn, "instrument_theme"):
+                        conn.execute("DELETE FROM instrument_theme WHERE instrument_id = ?", (iid,))
+                    conn.execute("DELETE FROM instruments WHERE instrument_id = ?", (iid,))
+            out["removed_instruments"] = gone
+    except sqlite3.Error as exc:
+        out["error"] = out["error"] or str(exc)
+
+    # What changed per instrument: a moved trade against its old contract, every other against itself.
+    moved_ids = False
+    seen = set()
+    for tid, instrument, parts in to_write:
+        trade = next(t for t in parts["trades"] if t.trade_id == tid)
+        for inst in parts["instruments"]:
+            iid = inst.instrument_id
+            old = snapshots.get(iid)
+            if old is None and iid == trade.instrument_id:
+                old = instrument
+                if (iid, "instrument_id") not in seen:
+                    seen.add((iid, "instrument_id"))
+                    moved_ids = True
+                    out["changed_instruments"].append({"instrument_id": iid, "field": "instrument_id",
+                                                       "before": instrument["instrument_id"], "after": iid})
+            now = _instrument_row(conn, iid)
+            if old is None or now is None:
+                continue
+            for field in _INSTRUMENT_COLUMNS[1:]:
+                if field in old and not _same(old[field], now[field]) and (iid, field) not in seen:
+                    seen.add((iid, field))
+                    out["changed_instruments"].append({"instrument_id": iid, "field": field,
+                                                       "before": old[field], "after": now[field]})
+
+    unrec = reresolve_unrecognised(conn)
+    out["reresolved_unrecognised"] = [r["trade_id"] for r in unrec["resolved"]]
+    out["error"] = out["error"] or unrec["error"]
+    out["sentence"] = _rebuild_sentence(names, out["rebuilt"], out["unchanged"], out["failed"],
+                                        out["changed_instruments"], moved_ids)
+    if unrec["sentence"]:
+        out["sentence"] += " " + unrec["sentence"]
+    return out
+
+
 def import_blotter_report(payload, filename, db_path) -> dict:
     """`import_blotter`, with the outcome as data. Keys, exactly:
 

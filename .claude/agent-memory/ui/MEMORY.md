@@ -57,3 +57,4 @@
 - [Upload box two lines 2026-09-30](upload-box-two-lines-2026-09-30.md) — top-bar upload result = loaded counts + problems link to Data Trades card; no paragraph/notes; navy link CSS
 - [Risk rebuild + no research app 2026-09-30](risk-rebuild-bloomberg-history-2026-09-30.md) — one-sentence headline, 5-col table, stresses card, 3 folds, empty card; price_history helpers; with-history ui-check + shot recipe
 - [Book one line per trade 2026-09-30](book-one-line-table-2026-09-30.md) — 13 cols, z column after Level now, Check = actions only, no Gross/Net/Group/Expand, CSV link, tk-trades CSS fits 1680
+- [Bloomberg fixes in the app 2026-09-30](bbg-fixes-in-app-2026-09-30.md) — Data card: tick/pick fixes, dry run, confirm, reresolve_roots, git commit+push thread, Download report; proof recipe

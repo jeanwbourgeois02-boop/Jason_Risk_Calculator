@@ -1,6 +1,7 @@
 - [Upload merge rule](upload-merge-rule.md) — since 2026-09-28 an upload merges by Trade Id (replace / add / remove cancelled + MANUAL); theme kept, realised_pnl of a replaced id dropped
 - [Upload history](upload-history.md) — since 2026-09-29 each successful upload appends to upload_history (counts + trade ids); readers for the Blotter audit trail
 - [Every row loads](every-row-loads.md) — 2026-09-29: UNRECOGNISED trades written, reasons in upload_issues by trade_id + symbol as written, reresolve_unrecognised
+- [Rebuild on a contract fix](reresolve-roots.md) — 2026-09-30 reresolve_roots: bbg_root fix moves the contract id; LME lots via before; same-root check
 - [Contract dates](contract-dates.md) — Bloomberg last trade dates onto commodity futures; FUTURE_PX re-key is key-only; upload re-applies
 - [Phase 2 removal](phase2-removal.md) — package rule + IRS flip gone; book_fx_swap = two FX_SWAP trades (engine shape); irs_direction kept for blotter.load
 - [Phase 5 options / LME](phase5-options-lme.md) — breakdown labels, underlying-only futures, options get contract dates, all marks re-keyed

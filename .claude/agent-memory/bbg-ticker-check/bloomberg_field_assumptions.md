@@ -25,5 +25,10 @@ Nothing below has been seen on a terminal yet (no Bloomberg on the dev PC; the u
   - LAST_UPDATE_DT older than 7 days on a live need = stale (CHECK). An FX pair may return a time, not a date: then it is ignored.
   - Expired chain contracts (the two-digit year form 'C K24 Comdty') are judged only on a security error; one HistoricalDataRequest probes those refused. On the sample book the pull lists ~600 tickers (424 of them risk-history chain contracts), so `check_book(include_pull=True)` is off by default.
 
+- **App fixes search (added 2026-09-30, `check_book(include_search=True)`), unverified:**
+  - A Curncy root is searched with yellowKeyFilter `YK_FILTER_CURR` (commodity roots `YK_FILTER_CMDT`); the enum name is from the API docs, not seen on a terminal.
+  - Besides the search hits, the unknown root's alternate codes (bbg_root, exchange_code, `ALTERNATE_BBG_ROOTS`, a root named after "bbg_root" in its notes) are asked as generics; a Curncy root under Curncy and Comdty. SGX:XUC: XUC1 Curncy / XUC1 Comdty / UC1 Curncy / UC1 Comdty. Record which one answers.
+  - A candidate is judged on NAME / EXCH_CODE / CRNCY / a price of its generic only; a generic's NAME is "Generic 1st 'X' Future", so the name rarely helps.
+
 **Why:** the user runs the check only when they finally have Bloomberg access (2026-09-24). Every guess here is something the first real run confirms or corrects.
 **How to apply:** when a real report arrives, check these guesses first. Record what Bloomberg said, word for word. Related: [[worksheet-fixable-fields]].

@@ -86,8 +86,12 @@ Outputs under ``reports/`` (git-ignored): ``bbg_check_<stamp>.txt`` (plain Engli
 
 ``check_book(db_path, ...)`` (2026-09-30) is the Data tab's "Run Bloomberg check" button: the book
 part only (the roots the book holds, its futures, options on futures, LME curve and tickets, and
-conversion spots), no desk checks, search or option chains, no report file; it returns a dict of
-plain rows and never raises.
+conversion spots), no desk checks or option chains, no file written; it returns a dict of plain
+rows and never raises. With ``include_search`` it also searches for the held roots Bloomberg does
+not know. It returns the suggested fixes for the Data tab (``book_fixes``: worksheet rows with the
+root in words, the effect of applying each and, for an unknown root, the candidate roots), the
+plain-text report and the held roots not yet verified; the ui writes the ticked fixes to a
+worksheet and applies them through ``data.contracts.apply_fixes``.
 
 Hard rule 8: nothing here runs unless the user runs it. It never writes ``marks``, never touches
 a trade and never edits ``config/contracts.csv``. blpapi is imported only when a real check
@@ -2106,7 +2110,8 @@ class BlpapiClient:
                 out.setdefault(s, History(s, {}, security_error=f"no answer: {timed_out}", answered=False))
         return out
 
-    def search(self, query: str, max_results: int = SEARCH_MAX_RESULTS) -> List[Tuple[str, str]]:
+    def search(self, query: str, max_results: int = SEARCH_MAX_RESULTS,
+               yellow_key_filter: str = YELLOW_KEY_FILTER) -> List[Tuple[str, str]]:
         blpapi = self._blpapi
         if self._instruments is None:
             if not self.session.openService(INSTRUMENTS_SERVICE):
@@ -2114,7 +2119,7 @@ class BlpapiClient:
             self._instruments = self.session.getService(INSTRUMENTS_SERVICE)
         request = self._instruments.createRequest("instrumentListRequest")
         request.set("query", query)
-        request.set("yellowKeyFilter", YELLOW_KEY_FILTER)
+        request.set("yellowKeyFilter", yellow_key_filter or YELLOW_KEY_FILTER)
         request.set("languageOverride", "LANG_OVERRIDE_NONE")
         request.set("maxResults", int(max_results))
         cid = blpapi.CorrelationId(next(_SEARCH_CIDS))
@@ -2254,7 +2259,8 @@ class CheckResult:
 _PART_WORDS = {"root": "contract roots", "lme": "LME curve tickers", "contract": "futures",
                "book_option": "options on futures", "spot": "USD conversion spots", "option_chain": "option chains",
                "option": "options", "pull": "tickers the pull asks for",
-               "pull_probe": "expired contracts' history (a short probe)"}
+               "pull_probe": "expired contracts' history (a short probe)",
+               "candidate": "candidate roots for the roots Bloomberg does not know"}
 
 
 def _tell(result: CheckResult, n: int, part: str) -> None:
@@ -3952,9 +3958,12 @@ def _identity(answer: Optional[Answer]) -> str:
 
 
 def render_text(result: CheckResult, *, now: datetime, paths: Mapping[str, Path],
-                desk: Optional[DeskResult] = None, not_run: str = "") -> str:
+                desk: Optional[DeskResult] = None, not_run: str = "",
+                fixes: Optional[Sequence[Mapping[str, object]]] = None) -> str:
     """The plain-English report; ``desk`` adds the desk checks and the manual checks, ``not_run``
-    says why the root, LME, options and book checks did not run (Bloomberg unreachable)."""
+    says why the root, LME, options and book checks did not run (Bloomberg unreachable).
+    ``fixes`` (the app's check, ``check_book``): the suggested changes to config/contracts.csv
+    as the Data tab lists them, rendered in place of the file list and the worksheet line."""
     p = result.plan
     lines = [f"Bloomberg ticker check, {now:%Y-%m-%d %H:%M}" + (f" ({result.host})" if result.host else ""), ""]
     if not_run:
@@ -4014,6 +4023,11 @@ def render_text(result: CheckResult, *, now: datetime, paths: Mapping[str, Path]
             lines.append(f"  - {owner}: {subject}: {f.verdict}: {f.evidence}.")
         for owner, line in desk_code:
             lines.append(f"  - {owner}: {line}.")
+    if fixes is not None:
+        lines += ["", *_render_fixes(fixes)]
+        lines += ["", "Nothing was written to the marks, the trades or config/contracts.csv. A fix changes the file "
+                      "only when it is ticked and applied on the Data tab."]
+        return "\n".join(lines) + "\n"
     lines += ["", "Files"]
     for label, path in paths.items():
         lines.append(f"  {label}: {path}")
@@ -4539,10 +4553,320 @@ def book_check_rows(result: CheckResult) -> Tuple[List[dict], Dict[str, int]]:
     return out, stats
 
 
+# ---- the fixes the Data tab offers (check_book, 2026-09-30)
+#
+# User, 2026-09-30: "i should be able to do this in the app". ``check_book`` returns the worksheet
+# rows for the roots the book holds, each with the root in plain words, one sentence of what
+# applying it changes, and for a root Bloomberg does not know the roots it could be (a search of
+# //blp/instruments and a few direct ticker forms, then those candidates' generic tickers asked in
+# one request, best first). The ui writes the ticked rows to a worksheet and calls
+# ``data.contracts.apply_fixes``; nothing here writes a file.
+
+# Bloomberg roots worth trying beside bbg_root, the exchange's own code and any root the row's
+# notes name ("bbg_root UC with yellow key Curncy is a GUESS"): SGX's USD/CNH future is UC on SGX.
+ALTERNATE_BBG_ROOTS: Dict[str, Tuple[str, ...]] = {SGX_XUC_ROOT: ("UC", "XUC")}
+_NOTES_ROOT_RE = re.compile(r"\bbbg_root\s+(?:is\s+)?([A-Z0-9]{1,6})\b")
+_ROOT_CODE_RE = re.compile(r"^[A-Z0-9]{1,6}$")
+# The //blp/instruments filter per yellow key; YELLOW_KEY_FILTER (commodities) otherwise.
+_SEARCH_FILTERS = {"Curncy": "YK_FILTER_CURR", "Index": "YK_FILTER_INDX"}
+_PROBE_KEYS = ("Comdty", "Curncy")          # a future's generic is tried under both
+CANDIDATE_CHOICES = 5                       # choices offered per unknown root
+CANDIDATE_SEARCH_ROOTS = 5                  # search hits per unknown root whose generic is asked
+
+
+def _fixable_fields() -> Tuple[str, ...]:
+    try:
+        from data.contracts.fixes import FIXABLE_FIELDS
+        return tuple(FIXABLE_FIELDS)
+    except Exception:  # noqa: BLE001 -- the fixes module missing: every field the worksheet writes
+        return ("bbg_root", "bbg_yellow_key", "bbg_verified", "currency", "contract_size", "size_unit",
+                "quote_unit", "price_scale", "delivery")
+
+
+def alternate_codes(root: ContractRoot) -> List[str]:
+    """Bloomberg roots to try for ``root``: its bbg_root, its exchange code, ALTERNATE_BBG_ROOTS
+    and any root its notes name after 'bbg_root'; placeholders ('ZZ...') left out."""
+    raw = [root.bbg_root, root.exchange_code, *ALTERNATE_BBG_ROOTS.get(root.root_id, ()),
+           *_NOTES_ROOT_RE.findall(str(root.notes or ""))]
+    out: List[str] = []
+    for code in raw:
+        c = str(code or "").strip().upper()
+        if c and _ROOT_CODE_RE.match(c) and not c.startswith("ZZ") and c not in out:
+            out.append(c)
+    return out
+
+
+def _probe_keys(root: ContractRoot) -> List[str]:
+    """The yellow keys a candidate root is tried under: a commodity root's own only; a currency
+    or index future's own and Comdty (SGX's USD/CNH future may be either)."""
+    if root.bbg_yellow_key == "Comdty":
+        return ["Comdty"]
+    return list(dict.fromkeys([root.bbg_yellow_key, *_PROBE_KEYS]))
+
+
+def _search_with_filter(client, query: str, key: str) -> List[Tuple[str, str]]:
+    """``client.search`` with the yellow-key filter of ``key`` where there is one (a client whose
+    search takes no filter is asked without it)."""
+    filt = _SEARCH_FILTERS.get(key)
+    if filt:
+        try:
+            return list(client.search(query, SEARCH_MAX_RESULTS, yellow_key_filter=filt) or [])
+        except TypeError:
+            pass
+    return list(client.search(query, SEARCH_MAX_RESULTS) or [])
+
+
+def _candidate_label(root: ContractRoot, key: str, answer: Answer, priced: bool) -> str:
+    """Bloomberg's name, exchange and currency of a candidate, and what else choosing it needs."""
+    v = answer.fields
+    bits = [str(v.get("NAME") or "").strip() or "No name given",
+            str(v.get("EXCH_CODE") or "").strip() or "exchange not given",
+            str(v.get("CRNCY") or "").strip() or "currency not given"]
+    label = ", ".join(bits)
+    if not priced:
+        label += "; no price on this terminal"
+    if key != root.bbg_yellow_key:
+        label += f"; yellow key {key}, so the yellow key fix is needed too"
+    return label
+
+
+def _candidate_score(root: ContractRoot, key: str, answer: Answer, search_score: int) -> Tuple[float, bool]:
+    """(score, priced) of a resolved candidate: a price first, then the exchange, the currency,
+    the name, our own yellow key, then the search's own score."""
+    v = answer.fields
+    priced = _num(v.get("PX_LAST")) is not None or _num(v.get("PX_SETTLE")) is not None
+    exch = str(v.get("EXCH_CODE") or "").strip().upper()
+    major, _minor = currency_parts(str(v.get("CRNCY") or ""))
+    score = (8.0 if priced else 0.0) + (4.0 if exch and exchange_matches(root.exchange, exch) else 0.0)
+    score += 2.0 if major and same_currency(major, root.currency) else 0.0
+    score += 1.0 if words_fit(root.name, f"{v.get('NAME') or ''} {v.get('SECURITY_DES') or ''}") else 0.0
+    score += 1.0 if key == root.bbg_yellow_key else 0.0
+    return score + min(search_score, 99) / 100.0, priced
+
+
+def _book_search(client, result: CheckResult, size: int) -> Dict[str, List[dict]]:
+    """For each root of the book Bloomberg does not know: search //blp/instruments (the root's
+    name, with its yellow key's filter), then ask, in one batched request, the generic ticker of
+    the best search hits and of the root's alternate codes (``alternate_codes`` under Comdty and
+    Curncy). Returns root_id -> resolved candidates, best first: {code, key, ticker, answer,
+    score, priced, label}. Sets each root's ``search_status``; never raises but BloombergUnavailable."""
+    unknown = [r for r in result.roots if r.verdict == NOT_FOUND]
+    tried: Dict[str, List[Tuple[str, str, str, int]]] = {}      # root_id -> (code, key, ticker, search score)
+    errors = 0
+    for r in unknown:
+        root = r.root
+        ranked: List[dict] = []
+        if errors >= MAX_SEARCH_ERRORS:
+            r.search_status = f"not searched: {MAX_SEARCH_ERRORS} searches in a row failed"
+        else:
+            hits: List[Tuple[str, str]] = []
+            try:
+                for query in search_queries(root):
+                    result.searches_sent += 1
+                    hits.extend(_search_with_filter(client, query, root.bbg_yellow_key))
+                ranked = rank_candidates(root, hits)
+                errors = 0
+                r.search_status = (f"{len(hits)} search result{'s' if len(hits) != 1 else ''}, "
+                                   f"{len(ranked)} futures root{'s' if len(ranked) != 1 else ''}")
+            except SearchError as exc:
+                errors += 1
+                r.search_status = f"search failed: {exc}"
+        own = generic_ticker(root)
+        keys = _probe_keys(root)
+        forms: List[Tuple[str, str, str, int]] = []
+        for c in ranked[:CANDIDATE_SEARCH_ROOTS]:
+            for key in keys:
+                forms.append((c["root"], key, f"{padded_root(c['root'])}1 {key}", int(c["score"])))
+        for code in alternate_codes(root):
+            for key in keys:
+                forms.append((code, key, f"{padded_root(code)}1 {key}", 0))
+        seen: Set[str] = set()
+        kept = []
+        for code, key, ticker, score in forms:
+            if ticker.upper() == own.upper() and not root.bbg_placeholder:
+                continue                     # already asked by the root check, and refused
+            if ticker.upper() not in seen:
+                seen.add(ticker.upper())
+                kept.append((code, key, ticker, score))
+        tried[root.root_id] = kept
+    tickers = list(dict.fromkeys(t for forms in tried.values() for _c, _k, t, _s in forms))
+    answers = _ask(client, tickers, ROOT_FIELDS, size, result, "candidate") if tickers else {}
+    out: Dict[str, List[dict]] = {}
+    for r in unknown:
+        root = r.root
+        found: List[dict] = []
+        refused = 0
+        for code, key, ticker, search_score in tried.get(root.root_id, []):
+            a = answers.get(ticker)
+            if a is None or not a.answered or a.security_error:
+                refused += 1
+                continue
+            score, priced = _candidate_score(root, key, a, search_score)
+            found.append({"code": code, "key": key, "ticker": ticker, "answer": a, "score": score, "priced": priced,
+                          "label": _candidate_label(root, key, a, priced)})
+        found.sort(key=lambda c: (-c["score"], c["code"], c["key"]))
+        out[root.root_id] = found
+        n = len(tried.get(root.root_id, []))
+        tail = (f"{n} ticker form{'s' if n != 1 else ''} tried, {len(found)} known to Bloomberg"
+                + (": " + "; ".join(f"{c['ticker']} ({c['label']})" for c in found[:CANDIDATE_CHOICES]) if found else ""))
+        r.search_status = f"{r.search_status}; {tail}" if r.search_status else tail
+    return out
+
+
+def _root_trade_counts(result: CheckResult) -> Dict[str, int]:
+    """root_id -> how many of the book's open trades hang off it."""
+    trades: Dict[str, Set[str]] = {}
+    for c in result.contracts + result.book_options:
+        trades.setdefault(c.future.root_id, set()).update(t[0] for t in c.future.trades)
+    for t in result.book_lme:
+        trades.setdefault(t.ticket.root_id, set()).add(t.ticket.trade_id)
+    return {rid: len(ids) for rid, ids in trades.items()}
+
+
+def _trades_words(n: int) -> Tuple[str, str, str]:
+    """(subject, 'is' / 'are', 'it' / 'them') for the trades of a root."""
+    if n == 1:
+        return "the 1 open trade on it", "is", "it"
+    return (f"the {n} open trades on it" if n else "its trades"), "are", "them"
+
+
+def _fix_effect(row: Mapping[str, str], root: Optional[ContractRoot], n_trades: int) -> str:
+    """One plain sentence of what applying ``row`` changes."""
+    fld, cur, sug = row["field"], row["current"], row["suggested"]
+    trades, verb, them = _trades_words(n_trades)
+    if fld == "bbg_verified":
+        if str(sug).lower() == "true":
+            code = root.bbg_root if root is not None else ""
+            return (f"Bloomberg ticker {code} → {code}, marked verified: no price, date or P&L changes"
+                    if code else "Marked verified: no price, date or P&L changes")
+        return "Marked unverified: nothing is priced differently, the root shows as unverified until fixed"
+    if fld == "bbg_root":
+        return (f"Bloomberg ticker {cur} → {sug} (the choice made): {trades} {verb} rebuilt on the new ticker and "
+                f"the next Pull Bloomberg now prices {them}; the P&L follows the new prices")
+    if fld == "bbg_yellow_key":
+        return (f"Bloomberg yellow key {cur} → {sug}: {trades} {verb} rebuilt on the new ticker and the next Pull "
+                f"Bloomberg now prices {them}")
+    if fld in ("price_scale", "contract_size"):
+        word = "Price scale" if fld == "price_scale" else "Contract size"
+        mult = ""
+        try:
+            if root is not None and float(cur):
+                new = root.multiplier * float(sug) / float(cur)
+                mult = f" ({_g(root.multiplier)} → {_g(new)})"
+        except (TypeError, ValueError, ZeroDivisionError):
+            mult = ""
+        return f"{word} {cur} → {sug}: the value of 1 point changes{mult}, so the P&L of {trades} changes"
+    if fld == "currency":
+        conversion = "with no conversion" if str(sug).upper() == "USD" else f"converted to USD at {sug}'s spot"
+        return f"Currency {cur} → {sug}: {trades} {verb} valued in {sug}, {conversion}, so the USD P&L changes"
+    if fld == "size_unit":
+        return f"Size unit {cur} → {sug}: the value of 1 point is recomputed, so the P&L of {trades} can change"
+    if fld == "quote_unit":
+        return f"Quote unit {cur} → {sug}: the value of 1 point is recomputed, so the P&L of {trades} can change"
+    if fld == "delivery":
+        return (f"Delivery {cur or 'not known'} → {sug or 'not known'}: the expiry alert follows first notice or "
+                "last trade accordingly; no P&L changes")
+    return f"{fld} {cur} → {sug}"
+
+
+def book_fixes(result: CheckResult, candidates: Optional[Mapping[str, List[dict]]] = None,
+               roots: Optional[Mapping[str, ContractRoot]] = None) -> List[dict]:
+    """The worksheet rows (WORKSHEET_COLUMNS) for the roots the book holds and the pull's tickers,
+    each with ``root_name``, ``effect`` and ``choices``; a field ``apply_fixes`` cannot write is
+    left out. A root Bloomberg does not know gets one bbg_root row whose ``choices`` are the
+    resolved candidates of ``candidates`` (best first, its ``suggested`` the best), and a
+    bbg_yellow_key row when the best one sits under the other yellow key."""
+    roots = dict(roots) if roots is not None else load_roots()
+    candidates = candidates or {}
+    book = result.plan.book
+    wanted = set(book.held_roots) if book is not None else set()
+    wanted |= {r.root.root_id for r in result.roots}
+    wanted |= {it.root_id for it in result.pull if it.root_id}
+    fixable = set(_fixable_fields())
+    counts = _root_trade_counts(result)
+    rows: List[dict] = []
+    for w in worksheet_rows(result):
+        if w["root_id"] not in wanted or w["field"] not in fixable:
+            continue
+        if w["field"] == "bbg_root" and w["reason"].startswith("search ("):
+            continue                          # replaced by the one row with its choices below
+        rows.append(dict(w))
+    by_root = {r.root.root_id: r for r in result.roots}
+    for rid, found in candidates.items():
+        r = by_root.get(rid)
+        if r is None or not found:
+            continue
+        root = r.root
+        refusal = r.findings[0].evidence if r.findings else f"Bloomberg does not know {r.ticker!r}"
+        other_codes: List[dict] = []
+        for c in found:
+            if c["code"] != root.bbg_root.upper() and c["code"] not in (x["code"] for x in other_codes):
+                other_codes.append(c)
+        if other_codes:
+            best = other_codes[0]
+            rows.append({"root_id": rid, "field": "bbg_root", "current": root.bbg_root, "suggested": best["code"],
+                         "verdict": NOT_FOUND,
+                         "reason": f"{refusal}. Bloomberg knows {len(other_codes)} other root"
+                                   f"{'s' if len(other_codes) != 1 else ''} for it; best: {best['ticker']} "
+                                   f"({best['label']})",
+                         "apply": "",
+                         "choices": [{"suggested": c["code"], "label": c["label"]}
+                                     for c in other_codes[:CANDIDATE_CHOICES]]})
+        keyed = next((c for c in found[:CANDIDATE_CHOICES] if c["key"] != root.bbg_yellow_key), None)
+        if keyed is not None:
+            rows.append({"root_id": rid, "field": "bbg_yellow_key", "current": root.bbg_yellow_key,
+                         "suggested": keyed["key"], "verdict": NOT_FOUND,
+                         "reason": f"{refusal}. {keyed['ticker']} is known to Bloomberg ({keyed['label']}); "
+                                   f"apply this with the Bloomberg root {keyed['code']}",
+                         "apply": ""})
+    # A root with another fix suggested is not pre-ticked as verified: something on it disagrees.
+    disputed = {row["root_id"] for row in rows if row["field"] != "bbg_verified"}
+    for row in rows:
+        if row["field"] == "bbg_verified" and row["apply"] == "yes" and row["root_id"] in disputed:
+            row["apply"] = ""
+            row["reason"] += "; not pre-ticked: another fix is suggested for this root"
+    seen: Set[Tuple[str, str, str]] = set()
+    out: List[dict] = []
+    for row in rows:
+        key = (row["root_id"], row["field"], row["suggested"])
+        if key in seen:
+            continue
+        seen.add(key)
+        root = roots.get(row["root_id"]) or (by_root[row["root_id"]].root if row["root_id"] in by_root else None)
+        clean = {c: str(row.get(c, "")) for c in WORKSHEET_COLUMNS}
+        clean["root_name"] = _plain_root_name(root, row["root_id"])
+        clean["effect"] = _fix_effect(clean, root, counts.get(row["root_id"], 0))
+        clean["choices"] = list(row.get("choices") or [])
+        out.append(clean)
+    return out
+
+
+def _render_fixes(fixes: Sequence[Mapping[str, object]]) -> List[str]:
+    """The report's list of the suggested changes to config/contracts.csv, as the Data tab shows them."""
+    if not fixes:
+        return ["Suggested fixes to config/contracts.csv: none."]
+    lines = [f"Suggested fixes to config/contracts.csv ({len(fixes)}; nothing changes until one is ticked and "
+             "applied on the Data tab)"]
+    for f in fixes:
+        pre = ", pre-ticked" if str(f.get("apply", "")).lower() == "yes" else ""
+        lines.append(f"  - {f.get('root_name')} ({f.get('root_id')}), {f.get('field')}: {f.get('current') or '-'} -> "
+                     f"{f.get('suggested') or '-'} [{f.get('verdict')}{pre}]. Effect: {f.get('effect')}. "
+                     f"Why: {f.get('reason')}.")
+        for c in f.get("choices") or []:
+            lines.append(f"      choice {c.get('suggested')}: {c.get('label')}")
+    return lines
+
+
+def _unverified_roots(book: Optional[Book], roots: Mapping[str, ContractRoot]) -> List[str]:
+    if book is None:
+        return []
+    return sorted(rid for rid in book.held_roots if rid in roots and not roots[rid].bbg_verified)
+
+
 def check_book(db_path=None, host: str = "localhost", port: int = 8194,
                on_progress: Optional[Callable[[int, int, str], None]] = None,
                client_factory: Optional[Callable[[str, int], object]] = None,
-               today: Optional[date] = None, include_pull: bool = False) -> dict:
+               today: Optional[date] = None, include_pull: bool = False, include_search: bool = False) -> dict:
     """The book's own tickers against Bloomberg, for the Data tab's "Run Bloomberg check" button.
 
     Asks, on the press only (hard rule 8), for the roots the book holds (their generic ticker),
@@ -4554,15 +4878,26 @@ def check_book(db_path=None, host: str = "localhost", port: int = 8194,
     ``on_progress(done, total, words)`` is called before each request goes out and once at the end.
     ``include_pull`` (2026-09-30, off by default: on a real book it is several hundred tickers,
     the risk history's contract chains) adds the tickers "Pull Bloomberg now" asks that the book
-    rows do not already cover, as rows of area "Pull ticker".
+    rows do not already cover, as rows of area "Pull ticker". ``include_search`` (2026-09-30, off
+    by default) searches //blp/instruments for each held root Bloomberg does not know and asks
+    the candidates' generic tickers (and the root's alternate codes, ``alternate_codes``) in one
+    batched request, for the ``choices`` of its bbg_root fix.
 
     Returns {ok, reachable, reason, started_at, finished_at, seconds, requests_sent, summary,
-    counts {checked, ok, attention, no_answer}, rows [...]}: ``ok`` True when the check ran and
-    Bloomberg answered (the findings are in ``rows``), False with ``reason`` otherwise."""
+    counts {checked, ok, attention, no_answer}, rows [...], fixes [...], report_text,
+    unverified_roots [...]}: ``ok`` True when the check ran and Bloomberg answered (the findings
+    are in ``rows``), False with ``reason`` otherwise. ``fixes`` (``book_fixes``): the suggested
+    changes to config/contracts.csv for the roots the book holds and the pull's tickers, keys
+    WORKSHEET_COLUMNS plus ``root_name``, ``effect`` and ``choices`` ([{suggested, label}], best
+    first, on a bbg_root row of a root Bloomberg does not know; [] otherwise); written as a CSV
+    with WORKSHEET_COLUMNS they are what ``data.contracts.apply_fixes`` reads. ``report_text``:
+    the plain-text report of this check (``render_text``, with the fixes). ``unverified_roots``:
+    the root ids the book holds that config/contracts.csv has as not verified on a terminal
+    (filled whenever the book could be read, Bloomberg or not)."""
     started = datetime.now().astimezone()
     out: dict = {"ok": False, "reachable": False, "reason": "", "started_at": "", "finished_at": "", "seconds": 0.0,
                  "requests_sent": 0, "summary": "", "counts": {"checked": 0, "ok": 0, "attention": 0, "no_answer": 0},
-                 "rows": []}
+                 "rows": [], "fixes": [], "report_text": "", "unverified_roots": []}
 
     def finish(summary: str = "", reason: str = "") -> dict:
         ended = datetime.now().astimezone()
@@ -4571,6 +4906,10 @@ def check_book(db_path=None, host: str = "localhost", port: int = 8194,
         out["seconds"] = round((ended - started).total_seconds(), 1)
         out["reason"] = reason
         out["summary"] = summary or reason
+        if not out["report_text"]:
+            out["report_text"] = (f"Bloomberg ticker check of the book, {started:%Y-%m-%d %H:%M}\n\n"
+                                  f"{out['summary']}\n\nNothing was written to the marks, the trades or "
+                                  "config/contracts.csv.\n")
         return out
 
     def tell(done: int, total: int, words: str) -> None:
@@ -4597,6 +4936,7 @@ def check_book(db_path=None, host: str = "localhost", port: int = 8194,
             book = load_book(Path(db_path) if db_path else default_db_path(), as_of, roots)
         except BookError as exc:
             return finish(reason=f"The book could not be read: {exc}.")
+        out["unverified_roots"] = _unverified_roots(book, roots)
         the_plan = plan(roots, book=book, book_only=True, parts=BOOK_CHECK_PARTS, today=today or lme_today())
         if include_pull:
             try:
@@ -4619,6 +4959,16 @@ def check_book(db_path=None, host: str = "localhost", port: int = 8194,
                 out["reachable"] = False
                 return finish(reason=f"Bloomberg could not be reached: {exc}")
         result = run_check(client, the_plan, log=lambda _s: None, host=where, progress=tell)
+        candidates: Dict[str, List[dict]] = {}
+        unknown = [r for r in result.roots if r.verdict == NOT_FOUND]
+        if include_search and unknown and client is not None and result.any_answered:
+            n = len(unknown)
+            tell(result.requests_sent, result.requests_sent + 1,
+                 f"Searching Bloomberg for {n} root{'s' if n != 1 else ''} it does not know (up to "
+                 f"{sum(len(search_queries(r.root)) for r in unknown)} searches, then one request for the "
+                 "candidates)")
+            candidates = _book_search(client, result, the_plan.batch_size)
+            the_plan.search = True             # the report then counts the searches sent
         out["requests_sent"] = result.requests_sent
         rows, stats = book_check_rows(result)
         out["rows"] = rows
@@ -4627,14 +4977,20 @@ def check_book(db_path=None, host: str = "localhost", port: int = 8194,
         if the_plan.securities:
             tell(result.requests_sent, max(result.requests_sent, 1), "Done")
         if the_plan.securities and not result.any_answered:
+            out["report_text"] = render_text(result, now=datetime.now(), paths={}, fixes=[])
             return finish(reason=f"Bloomberg did not answer any request on {where}; nothing to judge. Run the check "
                                  "again.")
+        out["fixes"] = book_fixes(result, candidates, roots)
+        out["report_text"] = render_text(result, now=datetime.now(), paths={}, fixes=out["fixes"])
         out["ok"] = True
         summary = (f"Bloomberg answered for {stats['answered']} of {stats['asked']} of the book's tickers; "
                    + (f"{n_att} need{'s' if n_att == 1 else ''} attention" if n_att else "none needs attention"))
         code = stats["code"]
         if code:
             summary += f"; {code} finding{'s are' if code != 1 else ' is'} a code change for the housekeeper"
+        n_fix = len(out["fixes"])
+        if n_fix:
+            summary += f"; {n_fix} suggested fix{'es' if n_fix != 1 else ''} to the contract list"
         return finish(summary + ".")
     except BloombergUnavailable as exc:
         out["ok"] = False

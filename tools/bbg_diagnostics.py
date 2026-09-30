@@ -546,8 +546,8 @@ def _official_source(conn: sqlite3.Connection, as_of: str, instrument_id: str, s
 def check_contract_roots_verified(conn: sqlite3.Connection, as_of: str) -> List[Check]:
     """1. How many contract roots of config/contracts.csv a Bloomberg terminal has confirmed
     (bbg_verified), and which roots the open book stands on that are still unverified: their
-    tickers, currencies and price scales are best guesses until `py 2_launcher.py bbg-check`
-    is run at the terminal (CLAUDE.md "Bloomberg check")."""
+    tickers, currencies and price scales are best guesses until Run Bloomberg check on the
+    Data tab confirms them (CLAUDE.md "Bloomberg check")."""
     name = "Contract roots verified"
     from data.contracts import load_roots
     roots = load_roots()
@@ -563,8 +563,8 @@ def check_contract_roots_verified(conn: sqlite3.Connection, as_of: str) -> List[
     if not unverified and not unknown:
         return [_row(name, "pass", head + f"; every root in the open book ({_names(sorted(open_roots))}) is verified.")]
     message = head + (f"; {len(unverified)} of the {len(open_roots)} roots in the open book are unverified "
-                      f"({_names(unverified)}): their Bloomberg tickers and price scales are best guesses until "
-                      "`py 2_launcher.py bbg-check` is run at the terminal and its worksheet applied."
+                      f"({_names(unverified)}): Their Bloomberg tickers and price scales are best guesses until "
+                      "Run Bloomberg check on the Data tab confirms them."
                       if unverified else "")
     if unknown:
         message += (f" {_plural(len(unknown), 'root')} of the open book {'is' if len(unknown) == 1 else 'are'} not in "
@@ -606,8 +606,8 @@ def check_not_requestable(conn: sqlite3.Connection, as_of: str,
         sentences = ["their trades are still valued off the marks on file today"] + sentences
     head = (f"{len(said)} of {_plural(len(contracts), 'open contract')} have no Bloomberg ticker and are never "
             f"asked for, so no new price can arrive: {_names(said)}.")
-    tail = ("The fix is the root's Bloomberg root in config/contracts.csv: `py 2_launcher.py bbg-check` at the "
-            "terminal writes the worksheet and `contracts-apply` applies it.")
+    tail = ("The fix is the root's Bloomberg root in config/contracts.csv: Run Bloomberg check on the Data tab "
+            "suggests the fix and applies it.")
     return [_row(name, status, " ".join([head] + [s[0].upper() + s[1:] + "." for s in sentences] + [tail]))]
 
 

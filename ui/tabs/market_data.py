@@ -70,6 +70,21 @@ BBG_FSTORE_ID = "market-data-bbg-check-fstore"
 BBG_SORT_ID = "market-data-bbg-check-sort"
 BBG_CSV_ID = "market-data-bbg-check-csv"
 BBG_DOWNLOAD_ID = "market-data-bbg-check-download"
+BBG_SUMMARY_ID = "market-data-bbg-check-summary"      # the last check's summary line, above its fixes
+BBG_DONE_ID = "market-data-bbg-check-done"            # "running" / the finished stamp: redraws the fixes once
+BBG_REPORT_ID = "market-data-bbg-report"              # "Download report" (the check's report text)
+BBG_REPORT_DOWNLOAD_ID = "market-data-bbg-report-download"
+# The check's suggested fixes applied from the card (2026-09-30, user: "i should be able to do
+# this in the app"): a tick per fix, a pick where Bloomberg offers several, a dry run, a confirm.
+BBG_FIXES_ID = "market-data-bbg-fixes"
+BBG_FIX_RESULT_ID = "market-data-bbg-fix-result"
+BBG_FIX_APPLY_ID = "market-data-bbg-fix-apply"
+BBG_FIX_CONFIRM_ID = "market-data-bbg-fix-confirm"
+BBG_FIX_CANCEL_ID = "market-data-bbg-fix-cancel"
+BBG_FIX_STORE_ID = "market-data-bbg-fix-token"
+BBG_FIX_POLL_ID = "market-data-bbg-fix-poll"          # on while the commit and push run
+FIX_TICK_TYPE = "md-fix-tick"
+FIX_PICK_TYPE = "md-fix-pick"
 BBG_SORT_TYPE = "data-tick-sort"
 BBG_COL_TYPE = "md-tick-col"
 BBG_POLL_MS = 1000
@@ -2327,8 +2342,11 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
 
 BBG_TITLE = "Bloomberg"
 BBG_ABOUT = ("The last Bloomberg pull, its problems in full, and a check you can run at any time: the connection and "
-             "data checks, then the book's own tickers asked of Bloomberg and compared with ours.")
-BBG_CHECK_NOTE = "Asks Bloomberg for the book's own tickers only; writes nothing."
+             "data checks, then the book's own tickers asked of Bloomberg and compared with ours, and the fixes to "
+             "the contract list it suggests, applied here once you tick and confirm them.")
+BBG_CHECK_NOTE = ("Asks Bloomberg for the book's own tickers and every ticker a pull asks; writes nothing. Its "
+                  "suggested fixes are applied only when you tick them and confirm.")
+BBG_REPORT_NOTE = "Send this file to Claude: the last Bloomberg check's full report, as text."
 PARSE_TITLE = "Check a file before uploading"
 PARSE_ABOUT = ("Check a blotter file before uploading it: every row read exactly as an upload would read it, what it "
                "would be read as and what the upload would do with it against the book on file. Nothing is saved.")
@@ -2339,6 +2357,9 @@ def bloomberg_card() -> html.Div:
     """The Bloomberg card (static; its blocks filled by the body callback and the check's own)."""
     return kit.card(id=BBG_CARD_ID, className="data-bbg-card data-block", children=[
         kit.strip([kit.strip_title(BBG_TITLE, BBG_ABOUT),
+                   html.Button("Download report", id=BBG_REPORT_ID, n_clicks=0, className="btn btn--ghost",
+                               disabled=True, title=BBG_REPORT_NOTE),
+                   dcc.Download(id=BBG_REPORT_DOWNLOAD_ID),
                    html.Button("Download CSV", id=BBG_CSV_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
                                title="Every ticker of the last Bloomberg check, every field"),
                    dcc.Download(id=BBG_DOWNLOAD_ID)]),
@@ -2350,6 +2371,22 @@ def bloomberg_card() -> html.Div:
                             title=BBG_CHECK_NOTE),
                 html.Span(id=BBG_PROGRESS_ID, className="data-bbg-progress"),
             ]),
+            html.Div(id=BBG_SUMMARY_ID),
+            # the suggested fixes: the table, then its buttons (static, hidden by style), then the
+            # dry run's confirm lines or what the apply did
+            html.Div(id=BBG_FIXES_ID, className="data-bbg-fixes"),
+            html.Div(className="data-bbg-run", children=[
+                html.Button("Apply ticked fixes", id=BBG_FIX_APPLY_ID, n_clicks=0, className="btn", style=_HIDDEN,
+                            title="Shows what the ticked fixes change first; nothing is written until you confirm"),
+                html.Button("Confirm", id=BBG_FIX_CONFIRM_ID, n_clicks=0, className="btn", style=_HIDDEN,
+                            title="Write these fixes to the contract list and rebuild the trades on them"),
+                html.Button("Cancel", id=BBG_FIX_CANCEL_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
+                            title="Change nothing"),
+            ]),
+            html.Div(id=BBG_FIX_RESULT_ID, className="data-bbg-fix-result"),
+            dcc.Store(id=BBG_DONE_ID, data=""),
+            dcc.Store(id=BBG_FIX_STORE_ID),
+            dcc.Interval(id=BBG_FIX_POLL_ID, interval=BBG_POLL_MS, disabled=True),
             html.Div(id=BBG_RESULTS_ID, className="data-bbg-results"),
             dcc.Interval(id=BBG_POLL_ID, interval=BBG_POLL_MS, disabled=True),
             dcc.Store(id=BBG_RUN_STORE_ID),
@@ -2602,18 +2639,83 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     @app.callback(Output(BBG_RESULTS_ID, "children"), Output(BBG_PROGRESS_ID, "children"),
                   Output(BBG_POLL_ID, "disabled"), Output(BBG_CHECK_BUTTON_ID, "disabled"),
                   Output(BBG_CSV_ID, "style"),
+                  Output(BBG_SUMMARY_ID, "children"), Output(BBG_DONE_ID, "data"), Output(BBG_REPORT_ID, "disabled"),
                   Input(BBG_RUN_STORE_ID, "data"), Input(BBG_POLL_ID, "n_intervals"),
-                  Input(BBG_FSTORE_ID, "data"), Input(BBG_SORT_ID, "data"))
-    def _bbg_results(run, _ticks, fstate, sort):
+                  Input(BBG_FSTORE_ID, "data"), Input(BBG_SORT_ID, "data"), State(BBG_DONE_ID, "data"))
+    def _bbg_results(run, _ticks, fstate, sort, done_before):
         from ui import diagnostics_runner
         state = diagnostics_runner.state(get_db_path())
         refused = (run or {}).get("why") if run and not run.get("started") else ""
-        results, progress = bbg_check_view(state, fstate, sort)
+        results, progress = bbg_check_view(state, fstate, sort, with_summary=False)
         going = bool(state and state.get("running"))
         if refused and not going:        # a pull running: the sentence; another run going: its progress
             progress = html.Span(refused, className="cell-amber")
-        has_rows = bool(((state or {}).get("book") or {}).get("rows"))
-        return compact(results), progress, not going, going, ({} if has_rows else _HIDDEN)
+        book = (state or {}).get("book") or {}
+        has_rows = bool(book.get("rows"))
+        done = "running" if going else (str(state.get("finished_at") or "done") if state and book else "")
+        return (compact(results), progress, not going, going, ({} if has_rows else _HIDDEN),
+                compact(tidy(bbg_summary(state))), (dash.no_update if done == (done_before or "") else done),
+                not (book and not going))
+
+    # ---- the check's suggested fixes: tick, Apply (a dry run), Confirm (2026-09-30)
+    @app.callback(Output(BBG_FIXES_ID, "children"), Output(BBG_FIX_RESULT_ID, "children"),
+                  Output(BBG_FIX_APPLY_ID, "style"), Output(BBG_FIX_CONFIRM_ID, "style"),
+                  Output(BBG_FIX_CANCEL_ID, "style"), Output(BBG_FIX_POLL_ID, "disabled"),
+                  Output(BBG_FIX_APPLY_ID, "disabled"),
+                  Input(BBG_DONE_ID, "data"), Input(BBG_FIX_STORE_ID, "data"), Input(BBG_FIX_POLL_ID, "n_intervals"))
+    def _bbg_fixes(_done, _token, _ticks):
+        from ui import diagnostics_runner
+        db = get_db_path()
+        state = diagnostics_runner.state(db)
+        fx = diagnostics_runner.fix_state(db)
+        table, result, show_apply, show_confirm, git_going = fixes_view(state, fx)
+        return (compact(table), compact(result), {} if show_apply else _HIDDEN,
+                {} if show_confirm else _HIDDEN, {} if show_confirm else _HIDDEN, not git_going,
+                bool(fx and fx.get("stage") == "confirm"))
+
+    @app.callback(Output(BBG_FIX_STORE_ID, "data"), Input(BBG_FIX_APPLY_ID, "n_clicks"),
+                  State({"type": FIX_TICK_TYPE, "idx": ALL}, "value"),
+                  State({"type": FIX_PICK_TYPE, "idx": ALL}, "value"), prevent_initial_call=True)
+    def _bbg_fix_apply(n_clicks, _ticks, _picks):
+        if not n_clicks:
+            return dash.no_update
+        import time
+        from ui import diagnostics_runner
+        db = get_db_path()
+        state = diagnostics_runner.state(db) or {}
+        fixes = list(((state.get("book") or {}).get("fixes")) or [])
+        ticks = {str((s.get("id") or {}).get("idx")): s.get("value") for s in dash.ctx.states_list[0]}
+        picks = {str((s.get("id") or {}).get("idx")): s.get("value") for s in dash.ctx.states_list[1]}
+        diagnostics_runner.prepare_fixes(db, ticked_fixes(fixes, ticks, picks))
+        return {"at": time.time(), "step": "dry"}
+
+    @app.callback(Output(BBG_FIX_STORE_ID, "data", allow_duplicate=True), Input(BBG_FIX_CONFIRM_ID, "n_clicks"),
+                  prevent_initial_call=True)
+    def _bbg_fix_confirm(n_clicks):
+        if not n_clicks:
+            return dash.no_update
+        import time
+        from ui import diagnostics_runner
+        diagnostics_runner.confirm_fixes(get_db_path())
+        return {"at": time.time(), "step": "confirm"}
+
+    @app.callback(Output(BBG_FIX_STORE_ID, "data", allow_duplicate=True), Input(BBG_FIX_CANCEL_ID, "n_clicks"),
+                  prevent_initial_call=True)
+    def _bbg_fix_cancel(n_clicks):
+        if not n_clicks:
+            return dash.no_update
+        import time
+        from ui import diagnostics_runner
+        diagnostics_runner.cancel_fixes(get_db_path())
+        return {"at": time.time(), "step": "cancel"}
+
+    @app.callback(Output(BBG_REPORT_DOWNLOAD_ID, "data"), Input(BBG_REPORT_ID, "n_clicks"), prevent_initial_call=True)
+    def _bbg_report(n_clicks):
+        from ui import diagnostics_runner
+        state = diagnostics_runner.state(get_db_path()) or {}
+        if not n_clicks or not state.get("book"):
+            return dash.no_update
+        return {"content": report_text(state), "filename": report_filename(state), "type": "text/plain"}
 
     @app.callback(Output(BBG_DOWNLOAD_ID, "data"), Input(BBG_CSV_ID, "n_clicks"),
                   State(BBG_FSTORE_ID, "data"), State(BBG_SORT_ID, "data"), prevent_initial_call=True)
@@ -2691,11 +2793,33 @@ def _sub(title: str, hover: str, extra=None) -> html.Div:
     return html.Div(kids, className="data-bbg-subhead")
 
 
-def bbg_check_view(state: Optional[dict], fstate: Optional[dict], sort: Optional[dict]) -> Tuple[html.Div, Any]:
+def bbg_summary(state: Optional[dict]) -> html.Div:
+    """The last check's summary line with its time (and its reason when it could not run);
+    empty before the first run and while one runs."""
+    book = (state or {}).get("book") or {}
+    if not book or (state or {}).get("running"):
+        return html.Div()
+    parts: list = []
+    summary = cap(plain_words(book.get("summary") or book.get("reason") or ""))
+    when = _utc_words(book.get("finished_at") or (state or {}).get("finished_at"))
+    seconds = book.get("seconds")
+    tail = " · ".join(x for x in (when, f"{float(seconds):,.1f} s" if seconds else "") if x)
+    parts.append(html.Div([html.Span(summary or "The check finished.",
+                                     className=None if book.get("ok") else "cell-amber"),
+                           html.Span(f" · {tail}" if tail else "", className="cell-unit")],
+                          className="data-bbg-summary"))
+    if not book.get("ok") and book.get("reason") and book.get("reason") != book.get("summary"):
+        parts.append(html.Div(cap(plain_words(book["reason"])), className="data-bbg-summary cell-amber"))
+    return html.Div(parts)
+
+
+def bbg_check_view(state: Optional[dict], fstate: Optional[dict], sort: Optional[dict],
+                   with_summary: bool = True) -> Tuple[html.Div, Any]:
     """(the results block, the progress words) of the Bloomberg check's latest run in this process
     (`ui.diagnostics_runner.state`): nothing before the first press; while it runs the progress
     ("Asking Bloomberg for 39 of the book's tickers: 2 of 4 requests") and the connection checks as
-    soon as they are in; after it the summary with its time, the connection checks and the book's
+    soon as they are in; after it the summary with its time (`bbg_summary`, left out with
+    `with_summary` False: the card draws it above the fixes), the connection checks and the book's
     tickers (problems first, Status and Area funnels; their Download CSV in the card's strip)."""
     if not state:
         return html.Div(), ""
@@ -2711,17 +2835,8 @@ def bbg_check_view(state: Optional[dict], fstate: Optional[dict], sort: Optional
     else:
         when = _utc_words(state.get("finished_at"))
         progress = f"Last run {when}" if when else ""
-    if book:
-        summary = cap(plain_words(book.get("summary") or book.get("reason") or ""))
-        when = _utc_words(book.get("finished_at") or state.get("finished_at"))
-        seconds = book.get("seconds")
-        tail = " · ".join(x for x in (when, f"{float(seconds):,.1f} s" if seconds else "") if x)
-        parts.append(html.Div([html.Span(summary or "The check finished.",
-                                         className=None if book.get("ok") else "cell-amber"),
-                               html.Span(f" · {tail}" if tail else "", className="cell-unit")],
-                              className="data-bbg-summary"))
-        if not book.get("ok") and book.get("reason") and book.get("reason") != book.get("summary"):
-            parts.append(html.Div(cap(plain_words(book["reason"])), className="data-bbg-summary cell-amber"))
+    if book and with_summary:
+        parts.append(bbg_summary(state))
     if checks:
         parts += [_sub("Connection and data checks", "The fast checks on this PC: the Bloomberg session, the official "
                                                      "sources, the coverage of the book's marks, the last pull."),
@@ -2768,3 +2883,282 @@ def parse_view(result: Optional[dict], fstate: Optional[dict], sort: Optional[di
         shown = data_checks.filter_rows(recs, fstate, data_checks.PARSE_FIELDS)
         parts.append(data_checks.parse_table(shown, sort, PARSE_SORT_TYPE, fstate, PARSE_COL_TYPE, len(recs), recs))
     return tidy(html.Div(parts, className="data-parse-results"))
+
+
+# ---- the Bloomberg check's suggested fixes, applied from the card (2026-09-30)
+FIXES_TITLE = "Suggested fixes"
+FIXES_ABOUT = ("Where Bloomberg disagrees with the app's contract list, or confirms a contract still to be confirmed: one "
+               "row per change. Tick the ones to take and press Apply ticked fixes: you see what changes before "
+               "anything is written, and nothing is written until you confirm.")
+FIXES_NONE = "Every ticker the book uses is confirmed by Bloomberg"
+FIX_VERDICT_WORDS = {"OK": ("Confirmed", "green"), "NOT_FOUND": ("Not found", "red"), "NO_PRICE": ("No price", "amber"),
+                     "NO_ANSWER": ("No answer", "amber"), "CURRENCY_MISMATCH": ("Currency differs", "amber"),
+                     "SCALE_MISMATCH": ("Price scale differs", "amber"),
+                     "EXCHANGE_MISMATCH": ("Exchange differs", "amber"), "NAME_CHECK": ("Name to check", "amber")}
+FIX_FIELD_WORDS = {"bbg_root": "Bloomberg ticker", "bbg_yellow_key": "Bloomberg market sector", "currency": "Currency",
+                   "contract_size": "Contract size", "size_unit": "Size unit", "quote_unit": "Price unit",
+                   "price_scale": "Price scale", "delivery": "Delivery"}
+
+
+def _fix_name(fix: dict) -> str:
+    """The contract's plain name ('COMEX copper'), never its root id."""
+    name = str(fix.get("root_name") or "").strip()
+    if name:
+        return cap(plain_ids(name))
+    rid = str(fix.get("root_id") or "")
+    try:
+        from data.contracts import load_roots
+        root = load_roots().get(rid)
+    except Exception:  # noqa: BLE001 -- the short id then
+        root = None
+    return cap(short_root_name(root, rid))
+
+
+def fix_effect(fix: dict) -> str:
+    """What the fix changes, in plain words: the check's own `effect`, else from the field."""
+    effect = str(fix.get("effect") or "").strip()
+    if effect:
+        return cap(plain_ids(effect))
+    field = str(fix.get("field") or "")
+    cur, sug = str(fix.get("current") or ""), str(fix.get("suggested") or "")
+    if field == "bbg_verified":
+        return "Confirmed by Bloomberg" if sug.lower() in ("true", "1", "yes") else "No longer confirmed by Bloomberg"
+    if field == "bbg_root":
+        return "Bloomberg ticker changes"
+    words = FIX_FIELD_WORDS.get(field, cap(field.replace("_", " ")))
+    return f"{words} {cur or MISSING} → {sug or MISSING}"
+
+
+def _number_words(text) -> str:
+    try:
+        return format(float(text), ",.10g")
+    except (TypeError, ValueError):
+        return str(text or MISSING)
+
+
+def ticked_fixes(fixes: List[dict], ticks: Dict[str, Any], picks: Dict[str, Any]) -> List[dict]:
+    """The fixes ticked on screen (`ticks` {idx: the tick's value}), each with its pick
+    (`picks` {idx: the candidate chosen}) as its `suggested`."""
+    out = []
+    for i, fix in enumerate(fixes or []):
+        if not ticks.get(str(i)):
+            continue
+        row = dict(fix)
+        pick = picks.get(str(i))
+        if pick not in (None, ""):
+            row["suggested"] = str(pick)
+        out.append(row)
+    return out
+
+
+def _fix_key(row: dict) -> Tuple[str, str]:
+    return str(row.get("root_id") or "").upper(), str(row.get("field") or "").lower()
+
+
+def fixes_table(fixes: List[dict], chosen: Optional[List[dict]] = None) -> html.Table:
+    """One row per fix: a tick (pre-ticked where the check says apply, or as ticked for the dry
+    run), Contract (the root id on hover), What changes (Bloomberg's reason on hover; a pick of the
+    candidates where Bloomberg offers several), Bloomberg says."""
+    cols: Tuple[kit.Column, ...] = (
+        ("tick", "Apply", "l", "Ticked fixes are applied when you press Apply ticked fixes and confirm.", False),
+        ("name", "Contract", "l", "The contract the fix is for.", False),
+        ("effect", "What changes", "l", "What the fix changes in the app's contract list; Bloomberg's own words "
+                                        "on hover.", False),
+        ("verdict", "Bloomberg says", "l", "What Bloomberg's answer showed.", False))
+    picked = {_fix_key(r): r for r in chosen or []}
+    body = []
+    for i, fix in enumerate(fixes):
+        mine = picked.get(_fix_key(fix)) if chosen is not None else None
+        ticked = (mine is not None) if chosen is not None else str(fix.get("apply") or "").strip().lower() == "yes"
+        reason = cap(plain_words(str(fix.get("reason") or ""))) or None
+        effect: list = [html.Span(fix_effect(fix))]
+        choices = [c for c in fix.get("choices") or [] if str(c.get("suggested") or "")]
+        if choices:
+            value = str((mine or {}).get("suggested") or fix.get("suggested") or choices[0]["suggested"])
+            if value not in {str(c["suggested"]) for c in choices}:
+                value = str(choices[0]["suggested"])
+            effect.append(dcc.Dropdown(
+                id={"type": FIX_PICK_TYPE, "idx": i}, clearable=False, searchable=False, value=value,
+                options=[{"label": cap(plain_ids(str(c.get("label") or c["suggested"]))), "value": str(c["suggested"])}
+                         for c in choices],
+                className="data-fix-pick", style={"minWidth": "260px", "marginTop": "4px"}))
+        verdict = str(fix.get("verdict") or "")
+        words, level = FIX_VERDICT_WORDS.get(verdict, (cap(verdict.replace("_", " ").lower()) or MISSING, "grey"))
+        body.append(html.Tr([
+            kit.td(dcc.Checklist(id={"type": FIX_TICK_TYPE, "idx": i}, options=[{"label": "", "value": "yes"}],
+                                 value=["yes"] if ticked else [], className="data-fix-tick"), left=True),
+            kit.td(_fix_name(fix), left=True, title=str(fix.get("root_id") or "") or None),
+            kit.td(effect, left=True, title=reason),
+            kit.td(kit.chip(words, level, reason), left=True)]))
+    return tidy(kit.table(kit.head(cols, None, "data-bbg-none"), body, className="tk-small data-bbg-fixes-table"))
+
+
+def _lines(items: List[Any], className: str = "") -> html.Ul:
+    return html.Ul([html.Li(x) for x in items], className=" ".join(c for c in ("data-parse-notes", className) if c))
+
+
+def _applied_lines(entries: List[dict], rows: List[dict], trades: Dict[str, int]) -> Tuple[List[Any], int]:
+    """One line per fix taken ('COMEX copper: confirmed by Bloomberg'), an amber line where the
+    value of one price point changes, with the trades on file it reaches; (lines, multiplier changes)."""
+    by_key = {_fix_key(r): r for r in rows or []}
+    out: List[Any] = []
+    moved = 0
+    said: set = set()                      # the price point's change said once per contract
+    for e in entries or []:
+        row = by_key.get(_fix_key(e)) or {"root_id": e.get("root_id"), "field": e.get("field"),
+                                          "current": e.get("before"), "suggested": e.get("after")}
+        name = _fix_name(row)
+        taken = dict(row, current=e.get("before", row.get("current")), suggested=e.get("after", row.get("suggested")))
+        out.append(html.Span(f"{name}: {fix_effect(taken)}", title=str(e.get("root_id") or "") or None))
+        before, after = e.get("multiplier_before"), e.get("multiplier_after")
+        try:
+            changed = before not in (None, "") and after not in (None, "") and float(before) != float(after)
+        except (TypeError, ValueError):
+            changed = False
+        if changed and str(e.get("root_id") or "") not in said:
+            said.add(str(e.get("root_id") or ""))
+            moved += 1
+            n = int((trades or {}).get(str(e.get("root_id") or ""), 0))
+            reach = (f"the P&L of {n:,} trade{'' if n == 1 else 's'} on {name} changes" if n
+                     else f"no trade on file is on {name}")
+            out.append(html.Span(f"{name}: the value of one price point changes from {_number_words(before)} to "
+                                 f"{_number_words(after)}: {reach}.", className="cell-amber"))
+    return out, moved
+
+
+def _refused_lines(entries: List[dict], rows: List[dict]) -> List[Any]:
+    by_key = {_fix_key(r): r for r in rows or []}
+    out = []
+    for e in entries or []:
+        row = by_key.get(_fix_key(e)) or {"root_id": e.get("root_id"), "field": e.get("field")}
+        why = plain_words(str(e.get("why") or "refused"))
+        out.append(html.Span(f"{_fix_name(row)}: {fix_effect(row)}, not applied: {why}", className="cell-red",
+                             title=str(e.get("root_id") or "") or None))
+    return out
+
+
+def _fix_result(fx: dict) -> Tuple[list, bool]:
+    """(the blocks under the fixes' buttons, the commit still running) from the fixes' state."""
+    parts: list = []
+    stage = str(fx.get("stage") or "")
+    rows = fx.get("rows") or []
+    if stage == "confirm":
+        dry = fx.get("dry") or {}
+        applied = dry.get("applied") or []
+        lines, moved = _applied_lines(applied, rows, fx.get("trades") or {})
+        k = len(applied)
+        head = (f"Apply {k:,} fix{'' if k == 1 else 'es'} to the contract list?"
+                + (f" The value of a price point changes on {moved:,} contract{'s' if moved != 1 else ''}, so "
+                   "their P&L moves." if moved else ""))
+        parts.append(html.Div(head, className="data-bbg-summary" + (" cell-amber" if moved else "")))
+        parts.append(_lines(lines + _refused_lines(dry.get("refused") or [], rows)))
+    elif stage == "applied":
+        result = fx.get("result") or {}
+        applied = result.get("applied") or []
+        lines, _moved = _applied_lines(applied, rows, fx.get("trades") or {})
+        k = len(applied)
+        written = bool(k and result.get("written"))
+        only_confirmed = written and all(str(e.get("field") or "") == "bbg_verified" for e in applied)
+        if only_confirmed:
+            names = ", ".join(sorted({_fix_name(e) for e in applied}))
+            head = f"Marked as confirmed by Bloomberg: {names}."
+        elif written:
+            head = f"Applied {k:,} fix{'' if k == 1 else 'es'} to the contract list."
+        else:
+            head = "No fix was applied: the contract list is unchanged."
+        parts.append(html.Div(head, className="data-bbg-summary" + ("" if written else " cell-amber")))
+        extra: List[Any] = []
+        rebuild = fx.get("rebuild") or {}
+        if rebuild.get("sentence"):
+            extra.append(cap(plain_words(str(rebuild["sentence"]))))
+        if rebuild.get("error"):
+            extra.append(html.Span(cap(plain_words(str(rebuild["error"]))), className="cell-red"))
+        for f in rebuild.get("failed") or []:
+            extra.append(html.Span(f"Trade {f.get('trade_id', '')}: {plain_words(str(f.get('why') or 'not rebuilt'))}",
+                                   className="cell-red"))
+        parts.append(_lines(([] if only_confirmed else lines) + _refused_lines(result.get("refused") or [], rows)
+                            + extra))
+        if written and not only_confirmed:
+            # a new Bloomberg root gives the trades a new contract id: their prices come with the next pull
+            parts.append(html.Div("Press Pull Bloomberg now to price them.", className="data-bbg-summary cell-amber"))
+        git = fx.get("git") or {}
+        if git.get("running"):
+            parts.append(html.Div("Committing the contract list to git…", className="data-bbg-summary cell-unit"))
+        elif git.get("line"):
+            ok = "committed and pushed" in str(git["line"])
+            parts.append(html.Div(cap(str(git["line"])), className="data-bbg-summary" + ("" if ok else " cell-amber")))
+        parts.append(html.Div("Run Bloomberg check again to see what is left.", className="data-bbg-summary cell-unit"))
+    if fx.get("why"):
+        parts.append(html.Div(cap(plain_words(str(fx["why"]))), className="data-bbg-summary cell-amber"))
+    return parts, bool((fx.get("git") or {}).get("running"))
+
+
+def fixes_view(state: Optional[dict], fx: Optional[dict]) -> Tuple[Any, Any, bool, bool, bool]:
+    """(the fixes block, the result block, Apply shown, Confirm and Cancel shown, the commit
+    running) of the last check (`diagnostics_runner.state`) and its fixes (`fix_state`). Nothing
+    before a check, while one runs, or when the check could not give fixes; one line when it
+    found none."""
+    fx = fx or {}
+    result, git_going = _fix_result(fx) if fx else ([], False)
+    book = (state or {}).get("book") or {}
+    if not book or (state or {}).get("running") or not book.get("ok") or "fixes" not in book:
+        return html.Div(), tidy(html.Div(result)), False, False, git_going
+    fixes = list(book.get("fixes") or [])
+    stage = str(fx.get("stage") or "")
+    if stage == "applied":                 # the list is stale once written: the check runs again
+        return html.Div(), tidy(html.Div(result)), False, False, git_going
+    if not fixes:
+        unverified = [str(r) for r in book.get("unverified_roots") or [] if r]
+        if unverified:
+            names = ", ".join(_fix_name({"root_id": r}) for r in unverified)
+            line = html.Div(f"{len(unverified):,} contract{'s' if len(unverified) != 1 else ''} of the book "
+                            f"{'is' if len(unverified) == 1 else 'are'} still to be confirmed ({names}): Bloomberg "
+                            "suggested no fix for them.", className="data-bbg-summary cell-amber")
+        else:
+            line = html.Div(FIXES_NONE, className="data-bbg-summary")
+        return tidy(line), tidy(html.Div(result)), False, False, git_going
+    chosen = fx.get("rows") or None      # as ticked for the last dry run, else the check's own ticks
+    block = html.Div([_sub(f"{FIXES_TITLE} ({len(fixes):,})", FIXES_ABOUT), fixes_table(fixes, chosen)])
+    return tidy(block), tidy(html.Div(result)), True, stage == "confirm", git_going
+
+
+def report_text(state: dict) -> str:
+    """The last check's report as text: the check's own `report_text`, else built from its
+    summary, the connection checks and the rows."""
+    book = (state or {}).get("book") or {}
+    text = str(book.get("report_text") or "")
+    if text.strip():
+        return text
+    lines = [f"Bloomberg check, finished {book.get('finished_at') or (state or {}).get('finished_at') or ''}",
+             str(book.get("summary") or book.get("reason") or ""), ""]
+    checks = (state or {}).get("checks") or []
+    if checks:
+        lines.append("Connection and data checks")
+        lines += [f"  {c.get('status', '')}: {c.get('name', '')}: {c.get('message', '')}" for c in checks]
+        lines.append("")
+    rows = book.get("rows") or []
+    if rows:
+        lines.append("The book's tickers")
+        for r in rows:
+            lines.append("  " + " | ".join(str(r.get(c, "")) for c in data_checks.TICKER_CSV_COLUMNS))
+        lines.append("")
+    fixes = book.get("fixes") or []
+    if fixes:
+        lines.append("Suggested fixes")
+        for f in fixes:
+            lines.append("  " + " | ".join(str(f.get(c, "")) for c in ("root_id", "field", "current", "suggested",
+                                                                          "verdict", "reason", "apply")))
+    return "\n".join(lines) + "\n"
+
+
+def report_filename(state: dict) -> str:
+    """'bbg_report_20260930_1412.txt': the check's finishing time on this PC's clock."""
+    stamp = str(((state or {}).get("book") or {}).get("finished_at") or (state or {}).get("finished_at") or "")
+    try:
+        when = datetime.fromisoformat(stamp)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        when = when.astimezone()
+    except (TypeError, ValueError):
+        when = datetime.now()
+    return f"bbg_report_{when:%Y%m%d_%H%M}.txt"
