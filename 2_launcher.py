@@ -161,14 +161,30 @@ def pnl_function_block(newline: str = "\n") -> str:
     this clone's actual path. It only changes directory and calls `start`: the GitHub sync
     (fetch, stash local edits, fast-forward, reinstall packages if the code changed) lives in
     `sync_with_github` below so it runs identically from `chelsea` and from
-    `py 2_launcher.py start`."""
+    `py 2_launcher.py start`.
+
+    It first re-reads PATH from the registry (Machine, User, then this window's own entries,
+    duplicates dropped): a terminal opened before setup installed Python or Git, such as
+    VS Code's, still has the old PATH and would not find `py` or `git` (seen 2026-09-30).
+    With no `py` it falls back to the clone's .venv, else says to run 1_setup.cmd. Valid in
+    Windows PowerShell 5.1 and pwsh alike."""
     # A single quote inside the clone's path (O'Brien) is doubled: PowerShell's one escape
     # inside a single-quoted string. Spaces need nothing more than the quotes.
     lines = [
         CHELSEA_MARKER,
         "function chelsea {",
+        "    $p = @([Environment]::GetEnvironmentVariable('Path', 'Machine'),"
+        " [Environment]::GetEnvironmentVariable('Path', 'User'), $env:Path) -join ';'",
+        "    $env:Path = (($p -split ';') | Where-Object { $_ } | Select-Object -Unique) -join ';'",
         f"    Set-Location '{str(ROOT).replace(chr(39), chr(39) * 2)}'",
-        "    py -3 2_launcher.py start",
+        "    if (Get-Command py -ErrorAction SilentlyContinue) {",
+        "        py -3 2_launcher.py start @args",
+        "    } elseif (Test-Path -LiteralPath '.venv\\Scripts\\python.exe') {",
+        "        Write-Host 'py not found: starting with .venv\\Scripts\\python.exe'",
+        "        & '.venv\\Scripts\\python.exe' 2_launcher.py start @args",
+        "    } else {",
+        "        Write-Host 'Python not found: double-click 1_setup.cmd'",
+        "    }",
         "}",
         CHELSEA_END_MARKER,
     ]

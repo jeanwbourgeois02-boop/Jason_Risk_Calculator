@@ -195,6 +195,17 @@ Ok 'chelsea' 'installed into your PowerShell profile(s) by 2_launcher.py setup'
 
 Say '[7/7] Done'
 Write-Host '======================================================================'
-Write-Host ' Ready. Open a PowerShell terminal and type: chelsea'
+Write-Host ' Ready. From now on, start the app by typing  chelsea  in any NEW PowerShell window.'
+Write-Host ''
+Write-Host ' In VS Code: close VS Code completely and open it again first. A terminal'
+Write-Host ' opened before this setup does not know chelsea or the new PATH (Python, Git).'
 Write-Host '======================================================================'
-Read-Host 'Press Enter to close'
+Read-Host 'Press Enter to start the app now (or close this window)'
+# Start the app in this same window, so the first launch never depends on a new terminal.
+Refresh-Path
+Push-Location -LiteralPath $RepoRoot
+py -3 2_launcher.py start
+$startCode = $LASTEXITCODE
+Pop-Location
+if ($startCode -ne 0) { Write-Host "The app stopped (exit code $startCode). Setup is complete: start it again any time with  chelsea" -ForegroundColor Yellow }
+exit 0
