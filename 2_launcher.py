@@ -15,6 +15,7 @@ diagnostics).
     py 2_launcher.py reprice        re-price the FX options from the marks on file, day by day (no Bloomberg)
     py 2_launcher.py bbg-check      Bloomberg PC: check every contract root's ticker against config/contracts.csv
     py 2_launcher.py contracts-apply <worksheet>   apply the check's fixes worksheet to config/contracts.csv
+    py 2_launcher.py bbg-report     Bloomberg PC: diagnostics, ticker check and last pull in one file to send
 
 Backfilling P&L history from Bloomberg daily closes is part of every "Pull Bloomberg now"
 in the app (data/bloomberg/live.py runs data/bloomberg/backfill.py straight after
@@ -1127,6 +1128,23 @@ def cmd_bbg_check(args) -> int:
     return run([sys.executable, "-m", TICKER_CHECK, *bbg_check_argv(args)], check=False)
 
 
+# ----------------------------------------------------------------------------- bbg-report
+
+def cmd_bbg_report(args) -> int:
+    """Bloomberg PC, on request (hard rule 8): the connection and coverage diagnostics, the
+    ticker check of the book and the last pull's status in one file to send,
+    reports/bbg_report_<stamp>.txt (tools/bbg_report.py). Runs inside .venv (blpapi). Exit 2
+    Bloomberg unreachable, 1 something needs attention, 0 all OK."""
+    if not in_venv() and VENV_PY.exists():
+        return reexec_in_venv(sys.argv[1:])
+    from tools import bbg_report
+    argv = [flag for dest, flag in (("quick", "--quick"), ("no_open", "--no-open")) if getattr(args, dest)]
+    for dest, flag in (("db", "--db"), ("host", "--host"), ("port", "--port")):
+        if getattr(args, dest) is not None:
+            argv += [flag, str(getattr(args, dest))]
+    return bbg_report.main(argv)
+
+
 # ----------------------------------------------------------------------------- contracts-apply
 
 def cmd_contracts_apply(args) -> int:
@@ -1270,6 +1288,17 @@ def build_parser() -> argparse.ArgumentParser:
     bc.add_argument("--out", help="folder for the reports (default reports/)")
     bc.add_argument("--limit", type=int, help="only the first N roots")
     bc.set_defaults(func=cmd_bbg_check)
+
+    br = sub.add_parser("bbg-report", help="Bloomberg PC: the diagnostics, the ticker check of the book (the "
+                                           "tickers the pull asks for) and the last pull in one file to send, "
+                                           "reports/bbg_report_<stamp>.txt (exit 0 all OK, 1 attention, "
+                                           "2 Bloomberg unreachable)")
+    br.add_argument("--db", help="the app's database (default: $RISK_DB, else data/raw/risk.db; opened read-only)")
+    br.add_argument("--host", help="Bloomberg API host (default localhost)")
+    br.add_argument("--port", type=int, help="Bloomberg API port (default 8194)")
+    br.add_argument("--quick", action="store_true", help="skip the search for roots Bloomberg does not know")
+    br.add_argument("--no-open", action="store_true", help="do not open the reports folder in Explorer at the end")
+    br.set_defaults(func=cmd_bbg_report)
 
     ca = sub.add_parser("contracts-apply", help="apply the rows marked apply=yes of the bbg-check fixes worksheet "
                                                 "to config/contracts.csv (exit 1 when a row was refused)")

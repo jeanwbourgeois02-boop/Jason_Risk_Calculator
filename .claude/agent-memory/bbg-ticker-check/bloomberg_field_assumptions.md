@@ -20,5 +20,10 @@ Nothing below has been seen on a terminal yet (no Bloomberg on the dev PC; the u
   - SGX USD/CNH: contracts.csv has UC + Curncy (a guess); the check also tries UC Comdty, XUC Curncy, XUC Comdty.
   - LME OPEN_INT / PX_VOLUME: asked on LM<code>DS03 and on the research app's two-digit-year monthly tickers ('LPZ26 Comdty').
 
+- **Pull tickers part (added 2026-09-30, `--pull`), unverified:**
+  - A currency pair's CRNCY ('USDCNH Curncy') is assumed to be its quote currency (CNH); a mismatch is a CHECK. If every pair comes back CHECK on the first real run, this assumption is wrong, not the tickers.
+  - LAST_UPDATE_DT older than 7 days on a live need = stale (CHECK). An FX pair may return a time, not a date: then it is ignored.
+  - Expired chain contracts (the two-digit year form 'C K24 Comdty') are judged only on a security error; one HistoricalDataRequest probes those refused. On the sample book the pull lists ~600 tickers (424 of them risk-history chain contracts), so `check_book(include_pull=True)` is off by default.
+
 **Why:** the user runs the check only when they finally have Bloomberg access (2026-09-24). Every guess here is something the first real run confirms or corrects.
 **How to apply:** when a real report arrives, check these guesses first. Record what Bloomberg said, word for word. Related: [[worksheet-fixable-fields]].

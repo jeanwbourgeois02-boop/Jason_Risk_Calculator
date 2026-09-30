@@ -58,8 +58,19 @@ What it asks (``plan`` works it out and asks nothing):
    "Manual checks" list. The desk checks never change the exit code, and when Bloomberg cannot
    be reached they still write the report (their Bloomberg checks SKIPPED, 7 and 8 filled).
 
-A plain run does parts 1, 4, 5 and 7; ``--lme``, ``--options`` and / or ``--desk`` run only
-those parts. The book check runs whenever a book is given, except with ``--desk`` alone.
+8. Pull tickers (``--pull``, 2026-09-30; ``pull_list`` / ``_run_pull``): the EXACT securities
+   "Pull Bloomberg now" asks for on the book date, read from the app's own functions (the
+   library's needs, the LME step's pillars, the backfill's forward tenors, the risk history's
+   contract chains, FX pairs and LME cash / 3M), each asked once (PULL_FUTURE_FIELDS for a
+   future, PULL_FIELDS otherwise) and judged OK, CHECK, NO PRICE, UNKNOWN SECURITY (Bloomberg's
+   words quoted) or NO ANSWER; a need the app cannot ask is NOT ASKED with its reason. An expired
+   contract of a risk-history chain is judged only on a security error, with at most one short
+   history request for those reference data refuses. The report's section "Tickers the pull asks
+   for" lists problems first, then OK, one line each.
+
+A plain run does parts 1, 4, 5 and 7; ``--lme``, ``--options``, ``--pull`` and / or ``--desk`` run
+only those parts. The book check and the pull tickers run whenever a book is given, except with
+``--desk`` alone.
 
 Verdicts per root, most severe first: NO_ANSWER (the request timed out), NOT_FOUND (Bloomberg's
 own error words), NO_PRICE (resolves, but no PX_LAST or PX_SETTLE: an entitlement or a dead
@@ -952,6 +963,358 @@ def _conversion_spots(conn: sqlite3.Connection, as_of: date) -> Tuple[List[SpotN
     return sorted(by_ticker.values(), key=lambda s: s.ticker), ""
 
 
+# --------------------------------------------------------------------------- the pull's own tickers (2026-09-30)
+#
+# User, 2026-09-30: "i need the bloomberg diagnostics tool to make sure its pulling the correct
+# tickers - and then provide a report i can send to you". The other parts check tickers this
+# module builds itself; this part lists the EXACT securities "Pull Bloomberg now" asks for on the
+# book date, read from the app's own functions and never re-derived: the Bloomberg library's rows
+# in force (`library.needed_on`: spots, forward curves, futures and option prices, underlyings,
+# contract dates, the option inputs' OIS and vol tickers), the LME step's pillars
+# (`library.lme_curves_needed`, what `live._lme_step` asks), the backfill's forward tenor tickers
+# (`backfill._tenors_needed` / `_tenor_tickers`) and the risk history (`library.risk_history_needs`:
+# the contract chains, expired months included, the FX pairs, the LME cash and 3M). Each ticker is
+# asked once, in batches, and judged OK, CHECK, NO PRICE, UNKNOWN SECURITY or NO ANSWER; a row the
+# app itself cannot ask is NOT ASKED with the app's reason.
+
+PART_PULL = "pull"
+PULL_FIELDS = ("NAME", "CRNCY", "EXCH_CODE", "PX_LAST", "PX_MID", "LAST_UPDATE_DT")
+PULL_FUTURE_FIELDS = PULL_FIELDS + ("FUT_CONT_SIZE", "FUT_VAL_PT")
+PULL_PROBE_DAYS = 10          # the history probe reaches this many calendar days before an expired contract's end
+PULL_STALE_DAYS = 7           # a live need whose LAST_UPDATE_DT is older than this is a CHECK
+PULL_OK, PULL_CHECK, PULL_NO_PRICE, PULL_UNKNOWN, PULL_NO_ANSWER, PULL_NOT_ASKED = (
+    "OK", "CHECK", "NO PRICE", "UNKNOWN SECURITY", "NO ANSWER", "NOT ASKED")
+PULL_VERDICTS = (PULL_UNKNOWN, PULL_NO_PRICE, PULL_NO_ANSWER, PULL_CHECK, PULL_NOT_ASKED, PULL_OK)
+PK_FUTURE, PK_OPTION, PK_FX, PK_TENOR, PK_LME, PK_OIS, PK_VOL = (
+    "future", "option", "fx", "fx_tenor", "lme", "ois", "vol")
+SRC_PNL, SRC_DATES, SRC_LME, SRC_OPTION_INPUTS, SRC_TENORS, SRC_RISK = (
+    "P&L marks", "contract dates", "LME curve", "option inputs", "past-close forward tenors", "risk history")
+PULL_SOURCES = (SRC_PNL, SRC_DATES, SRC_LME, SRC_OPTION_INPUTS, SRC_TENORS, SRC_RISK)
+STALE = "STALE"                                  # an internal finding verdict: a CHECK
+_FINDING_TO_PULL = {NO_ANSWER: PULL_NO_ANSWER, NOT_FOUND: PULL_UNKNOWN, NO_PRICE: PULL_NO_PRICE}
+# The lane whose code builds each kind of ticker, told to the housekeeper when Bloomberg refuses one.
+_PULL_OWNERS = {PK_OPTION: OPTION_OWNER, PK_FX: "bbg-library", PK_TENOR: "bbg-live", PK_LME: LME_OWNER,
+                PK_OIS: "bbg-curves", PK_VOL: "bbg-curves"}
+_LME_LABELS = {"CASH": "cash", "3M": "3-month"}
+
+
+@dataclass
+class PullItem:
+    """One security the pull asks for (or a need it cannot ask: ``reason``), every purpose kept."""
+
+    ticker: str                                   # '' when the app has no ticker to ask
+    kind: str                                     # PK_*
+    what: str                                     # plain words: 'WTI Dec26', 'USDCNH', 'LME copper cash'
+    root_id: str = ""
+    pair: str = ""                                # FX pair ('USDCNH') or OIS currency
+    instrument_id: str = ""
+    purposes: List[str] = field(default_factory=list)
+    sources: Set[str] = field(default_factory=set)
+    trade_ids: Set[str] = field(default_factory=set)
+    live: bool = False                            # a need of today's pull, not the risk history alone
+    history_end: str = ""                         # risk history: the last day asked of this security
+    expired: bool = False                         # a risk-history contract past its last trade
+    reason: str = ""                              # NOT ASKED: the app's own words
+    answer: Optional[Answer] = None
+    probe: Optional[History] = None
+    findings: List[Finding] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def asked(self) -> bool:
+        return bool(self.ticker) and not self.reason
+
+    @property
+    def verdict(self) -> str:
+        if not self.asked:
+            return PULL_NOT_ASKED
+        if not self.findings:
+            return PULL_OK
+        return min((_FINDING_TO_PULL.get(f.verdict, PULL_CHECK) for f in self.findings), key=PULL_VERDICTS.index)
+
+
+@dataclass
+class PullList:
+    """The pull's securities on one book date (``pull_list``), nothing asked yet."""
+
+    db_path: Path
+    as_of: date
+    items: List[PullItem]
+    errors: List[str] = field(default_factory=list)   # a source the list could not be read from, in words
+    roots: Mapping[str, ContractRoot] = field(default_factory=dict, repr=False)   # the universe the list was read with
+
+    @property
+    def asked_items(self) -> List[PullItem]:
+        return [it for it in self.items if it.asked]
+
+    @property
+    def future_tickers(self) -> List[str]:
+        return [it.ticker for it in self.asked_items if it.kind == PK_FUTURE]
+
+    @property
+    def other_tickers(self) -> List[str]:
+        return [it.ticker for it in self.asked_items if it.kind != PK_FUTURE]
+
+    @property
+    def tickers(self) -> List[str]:
+        return self.future_tickers + self.other_tickers
+
+    def requests(self, batch_size: int) -> int:
+        size = max(1, batch_size)
+        return math.ceil(len(self.future_tickers) / size) + math.ceil(len(self.other_tickers) / size)
+
+    @property
+    def probe_requests(self) -> int:
+        """At most one short history request, for the expired contracts reference data refuses."""
+        return 1 if any(it.expired for it in self.asked_items) else 0
+
+    def source_counts(self) -> Dict[str, int]:
+        return {s: sum(1 for it in self.items if s in it.sources) for s in PULL_SOURCES}
+
+
+def _lme_pillar_words(root: Optional[ContractRoot], root_id: str, kind: str, pillar_date: str) -> str:
+    name = _plain_root_name(root, root_id)
+    if kind in _LME_LABELS:
+        return f"{name} {_LME_LABELS[kind]}"
+    try:
+        d = date.fromisoformat(str(pillar_date)[:10])
+        return f"{name} {d.day} {_MONTH_ABBR[d.month - 1]}{d.year % 100:02d} prompt"
+    except ValueError:
+        return f"{name} {kind.lower()} {pillar_date}"
+
+
+def pull_list(db_path, as_of: date, roots: Optional[Mapping[str, ContractRoot]] = None) -> PullList:
+    """The securities "Pull Bloomberg now" asks for on ``as_of``, from the app's own functions,
+    through a read-only connection (the library is worked out in memory when it is out of date:
+    nothing is written). De-duplicated by ticker, every purpose kept. Raises BookError when the
+    database cannot be read; a source that fails is named in ``errors`` and the rest is listed."""
+    path = Path(db_path)
+    if not path.exists():
+        raise BookError(f"no database at {path}")
+    roots = dict(roots) if roots is not None else load_roots()
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=60.0)
+    except sqlite3.Error as exc:
+        raise BookError(f"cannot open {path} read-only: {exc}") from None
+    iso = as_of.isoformat()
+    ref_year = as_of.year
+    items: Dict[str, PullItem] = {}
+    errors: List[str] = []
+
+    def item(ticker: str, kind: str, what: str, **kw) -> PullItem:
+        ticker = str(ticker or "").strip()
+        key = ticker.upper() if ticker and not kw.get("reason") else \
+            f"NOT ASKED|{kind}|{kw.get('instrument_id') or kw.get('root_id') or what}"
+        it = items.get(key)
+        if it is None:
+            it = items[key] = PullItem(ticker, kind, what, **kw)
+        return it
+
+    def add(it: PullItem, purpose: str, source: str, trade_ids: Iterable[str] = (), live: bool = True) -> None:
+        if purpose not in it.purposes:
+            it.purposes.append(purpose)
+        it.sources.add(source)
+        it.trade_ids.update(str(t) for t in trade_ids if t)
+        it.live = it.live or live
+
+    try:
+        if not _has_object(conn, "instruments") or not _has_object(conn, "trades"):
+            raise BookError(f"{path} holds no book (no instruments or trades table): upload a blotter first")
+        from data.bloomberg import library
+        base_of = {str(i): str(b or "") for i, b in conn.execute("SELECT instrument_id, base_ccy FROM instruments")}
+        listed = tuple(getattr(library, "LISTED_OPTION_PRODUCTS", ("EQ_OPTION", "CMDTY_OPTION")))
+
+        # 1. The library's rows in force: what the live pull, the contract dates and the curves /
+        #    vol steps ask (live.needed_live reads exactly this).
+        try:
+            needed = list(library.needed_on(conn, iso, include_unrequestable=True))
+        except Exception as exc:  # noqa: BLE001 -- a library problem is reported, the rest still listed
+            errors.append(f"the Bloomberg library could not be read ({type(exc).__name__}: {exc})")
+            needed = []
+        lme_trades: Dict[str, Set[str]] = {}
+        fwd_legs: Dict[str, List[dict]] = {}
+        sets: Dict[Tuple[str, str], Set[str]] = {}
+        for r in needed:
+            kind, key, role, product = r["kind"], str(r["key"]), r.get("role"), r.get("product")
+            tid = str(r.get("trade_id") or "")
+            ticker = str(r.get("bbg_ticker") or "").strip()
+            requestable = bool(r.get("requestable", True))
+            if library.is_lme_row(r):
+                if kind == library.LME_CURVE:
+                    lme_trades.setdefault(key, set()).add(tid)
+                if not requestable:
+                    it = item("", PK_LME, f"{_plain_root_name(roots.get(key), key)} curve", root_id=key,
+                              instrument_id=key, reason=r.get("reason") or "not requestable")
+                    add(it, "P&L mark: LME curve", SRC_LME, [tid])
+                continue
+            if kind in library.SET_KINDS:
+                sets.setdefault((kind, key), set()).add(tid)
+                continue
+            root_id = base_of.get(key, "")
+            root = roots.get(root_id)
+            if kind in ("SPOT", "FWD_OUTRIGHT"):
+                pk, what, extra = PK_FX, key, {"pair": key}
+            elif product in listed and not (kind == "FUTURE_PX" and role == library.ROLE_UNDERLYING):
+                pk, what, extra = PK_OPTION, _contract_words(key, "CMDTY_OPTION", root, ref_year), {"root_id": root_id}
+            else:
+                pk, what, extra = PK_FUTURE, _contract_words(key, "FUTURE", root, ref_year), {"root_id": root_id}
+            if kind == "SPOT":
+                if role == library.ROLE_CONVERSION:
+                    ccy = key[3:6] if key.startswith("USD") else key[:3]
+                    purpose, source = f"USD conversion of {ccy}", SRC_PNL
+                else:
+                    purpose, source = ("P&L mark: FX option's pair spot" if product == "FX_OPTION"
+                                       else "P&L mark: spot"), SRC_PNL
+            elif kind == "FWD_OUTRIGHT":
+                if str(r.get("settle_date") or "") > iso:
+                    fwd_legs.setdefault(key, []).append(r)
+                    purpose = "P&L mark: forward curve (FWD_CURVE)"
+                else:
+                    purpose = "P&L mark: spot (a leg settling today)"
+                source = SRC_PNL
+            elif kind == "FUTURE_PX":
+                if role == library.ROLE_UNDERLYING:
+                    purpose, source = "Option Greeks: underlying future's price", SRC_OPTION_INPUTS
+                elif pk == PK_OPTION:
+                    purpose, source = "P&L mark: option price (PX_MID)", SRC_PNL
+                else:
+                    purpose, source = "P&L mark: futures price", SRC_PNL
+            elif kind == library.CONTRACT_DATES:
+                purpose = "Contract dates: option expiry" if pk == PK_OPTION else \
+                    "Contract dates: last trade and first notice"
+                source = SRC_DATES
+            else:
+                continue                      # a kind the pull does not ask a security for
+            if not requestable or not ticker:
+                it = item("", pk, what, instrument_id=key,
+                          reason=r.get("reason") or f"no Bloomberg ticker for {key}", **extra)
+            else:
+                it = item(ticker, pk, what, instrument_id=key, **extra)
+            add(it, purpose, source, [tid])
+
+        # The option inputs: each OIS curve's and vol smile's own tickers (the curves and vol steps).
+        for (kind, key), tids in sorted(sets.items()):
+            if kind == "OIS_CURVE":
+                try:
+                    from data.bloomberg import rates_marketdata as rm
+                    specs = list(rm.ois_curve(key))
+                except Exception:  # noqa: BLE001 -- no curve in scope for this currency: nothing is asked
+                    continue
+                for spec in specs:
+                    add(item(spec.ticker, PK_OIS, f"{key} OIS {spec.tenor}", pair=key, instrument_id=key),
+                        f"Option Greeks: {key} discount curve", SRC_OPTION_INPUTS, tids)
+            elif kind == "VOL_SMILE":
+                try:
+                    from data.bloomberg import vol_marketdata as vm
+                    tickers = [(t, q, vm.vol_ticker(key, t, q)) for t in vm.VOL_TENORS for q in vm.VOL_QUOTE_TYPES]
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"the {key} vol smile tickers could not be listed ({type(exc).__name__}: {exc})")
+                    continue
+                for tenor, quote, ticker in tickers:
+                    add(item(ticker, PK_VOL, f"{key} vol {tenor} {quote}", pair=key, instrument_id=key),
+                        "FX option vol smile", SRC_OPTION_INPUTS, tids)
+
+        # 2. The LME step's pillars, exactly as live._lme_step reads them.
+        try:
+            curves = list(library.lme_curves_needed(conn, iso))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"the LME curves could not be listed ({type(exc).__name__}: {exc})")
+            curves = []
+        for entry in curves:
+            rid = entry["root_id"]
+            for p in entry.get("pillars") or []:
+                if not p.get("ticker"):
+                    continue
+                it = item(p["ticker"], PK_LME, _lme_pillar_words(roots.get(rid), rid, p["kind"], p["pillar_date"]),
+                          root_id=rid, instrument_id=rid)
+                add(it, f"P&L mark: LME curve ({_LME_LABELS.get(p['kind'], 'monthly')} pillar)", SRC_LME,
+                    lme_trades.get(rid, ()))
+
+        # 3. The backfill's forward tenor tickers for the open forward legs (past closes).
+        if fwd_legs:
+            try:
+                from data.bloomberg.backfill import _tenor_tickers, _tenors_needed
+                from engine.pnl.calendar import load_holidays
+                holidays = load_holidays()
+                for pair, legs in sorted(fwd_legs.items()):
+                    for tenor, ticker in _tenor_tickers(pair, _tenors_needed(pair, legs, as_of, holidays)).items():
+                        add(item(ticker, PK_TENOR, f"{pair} {tenor} forward", pair=pair, instrument_id=pair),
+                            "Past closes: forward tenor", SRC_TENORS, (r.get("trade_id") for r in legs))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"the backfill's forward tenors could not be listed ({type(exc).__name__}: {exc})")
+
+        # 4. The risk history (price_history): the contract chains, the FX pairs, the LME cash and 3M.
+        try:
+            risk = list(library.risk_history_needs(conn, as_of))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"the risk history could not be listed ({type(exc).__name__}: {exc})")
+            risk = []
+        for r in risk:
+            rid, iid = str(r.get("root_id") or ""), str(r["instrument_id"])
+            ticker = str(r.get("bbg_ticker") or "").strip()
+            reason = "" if r.get("requestable", True) and ticker else (r.get("reason") or "no Bloomberg ticker")
+            if r["kind"] == library.RISK_KIND_CONTRACT:
+                root = roots.get(rid)
+                it = item(ticker, PK_FUTURE, _contract_words(iid, "FUTURE", root, ref_year), root_id=rid,
+                          instrument_id=iid, reason=reason)
+                purpose = f"Risk history ({_plain_root_name(root, rid)} chain)"
+            elif r["kind"] == library.RISK_KIND_FX:
+                it = item(ticker, PK_FX, iid, pair=iid, instrument_id=iid, reason=reason)
+                purpose = "Risk history (FX)"
+            else:
+                label = iid.rsplit(" ", 1)[-1]
+                it = item(ticker, PK_LME, _lme_pillar_words(roots.get(rid), rid, label, ""), root_id=rid,
+                          instrument_id=iid, reason=reason)
+                purpose = f"Risk history (LME {_LME_LABELS.get(label, label)})"
+            add(it, purpose, SRC_RISK, live=False)
+            it.history_end = max(it.history_end, str(r.get("end") or ""))
+
+        # 5. The rows the parser could not identify (hard rule 6): never asked until the contract list knows them.
+        unrecognised = getattr(library, "UNRECOGNISED", "UNRECOGNISED")
+        trades_table = "trades_official" if _has_object(conn, "trades_official") else "trades"
+        for iid, tid, symbol in conn.execute(
+                f"SELECT instrument_id, trade_id, broker_symbol FROM {trades_table} WHERE product = ? "
+                "AND trade_date <= ? ORDER BY instrument_id, trade_id", (unrecognised, iso)):
+            shown = str(symbol or "").strip() or str(iid).split(":", 1)[-1]
+            it = item("", PK_FUTURE, f"{shown} (contract not recognised)", instrument_id=str(iid),
+                      reason="the upload could not identify this contract, so the pull never asks for it; add it to "
+                             "config/contracts.csv (or fix the file's symbol), then upload the blotter again")
+            add(it, "P&L mark", SRC_PNL, [tid])
+    except sqlite3.Error as exc:
+        raise BookError(f"cannot read the book in {path}: {exc}") from None
+    finally:
+        conn.close()
+    for it in items.values():
+        it.expired = (not it.live and it.kind == PK_FUTURE and bool(it.history_end) and it.history_end < iso)
+        if it.expired and "(expired)" not in it.what:
+            it.what += " (expired)"
+    order = (PK_FUTURE, PK_OPTION, PK_LME, PK_FX, PK_TENOR, PK_OIS, PK_VOL)
+    out = sorted(items.values(), key=lambda it: (order.index(it.kind), it.root_id or it.pair, it.expired,
+                                                 it.instrument_id, it.ticker))
+    return PullList(path, as_of, out, errors, roots)
+
+
+def pull_describe(pl: PullList, batch_size: int) -> List[str]:
+    """The dry-run lines of the pull part: how many tickers, from where, in how many requests."""
+    asked = pl.asked_items
+    n_not = len(pl.items) - len(asked)
+    reqs = pl.requests(batch_size)
+    counts = pl.source_counts()
+    lines = [f"Tickers the pull asks for on {pl.as_of.isoformat()}: {len(asked)} securit"
+             f"{'ies' if len(asked) != 1 else 'y'} to ask ({len(pl.future_tickers)} futures with their contract "
+             f"fields, {len(pl.other_tickers)} others) in {reqs} ReferenceDataRequest{'s' if reqs != 1 else ''} of up "
+             f"to {batch_size}"
+             + (", then at most one short history request for expired contracts Bloomberg refuses"
+                if pl.probe_requests else "")
+             + f"; {n_not} need{'s' if n_not != 1 else ''} the app cannot ask (NOT ASKED)."]
+    if any(counts.values()):
+        lines.append("  From: " + ", ".join(f"{counts[s]} {s}" for s in PULL_SOURCES if counts[s])
+                     + " (one ticker can serve several).")
+    for e in pl.errors:
+        lines.append(f"  Not listed: {e}.")
+    return lines
+
+
 # --------------------------------------------------------------------------- LME curve (Phase 5)
 
 def lme_prompt_field() -> str:
@@ -1397,6 +1760,15 @@ class Plan:
     option_placeholders: List[ContractRoot] = field(default_factory=list)   # option_style set, bbg_root a placeholder
     book_options: List[BookFuture] = field(default_factory=list)            # the book's options in scope
     book_lme: List[LmeTicket] = field(default_factory=list)                 # the book's LME tickets in scope
+    pull: Optional[PullList] = None           # the pull's own tickers (``pull_list``), when that part runs
+
+    @property
+    def pull_tickers(self) -> List[str]:
+        return self.pull.tickers if self.pull is not None else []
+
+    @property
+    def pull_requests(self) -> int:
+        return self.pull.requests(self.batch_size) if self.pull is not None else 0
 
     @property
     def root_tickers(self) -> List[str]:
@@ -1426,7 +1798,7 @@ class Plan:
     def securities(self) -> int:
         """Securities known before anything is asked (the option follow-ups come on top)."""
         return sum(len(t) for t in (self.root_tickers, self.lme_tickers, self.chain_tickers, self.contract_tickers,
-                                    self.book_option_tickers, self.spot_tickers))
+                                    self.book_option_tickers, self.spot_tickers, self.pull_tickers))
 
     @property
     def requests(self) -> int:
@@ -1434,7 +1806,7 @@ class Plan:
         plain = (self.root_tickers, self.lme_tickers, self.contract_tickers, self.book_option_tickers,
                  self.spot_tickers)
         return (sum(math.ceil(len(t) / size) for t in plain)
-                + math.ceil(len(self.chain_tickers) / max(1, min(size, CHAIN_BATCH_SIZE))))
+                + math.ceil(len(self.chain_tickers) / max(1, min(size, CHAIN_BATCH_SIZE))) + self.pull_requests)
 
     @property
     def max_option_followups(self) -> int:
@@ -1458,7 +1830,7 @@ class Plan:
     @property
     def empty(self) -> bool:
         return not (self.roots or self.lme or self.option_roots or self.option_placeholders or self.futures
-                    or self.spots or self.book_options or self.book_lme)
+                    or self.spots or self.book_options or self.book_lme or (self.pull is not None and self.pull.items))
 
     def describe(self) -> List[str]:
         lines: List[str] = []
@@ -1495,6 +1867,8 @@ class Plan:
                              "the LME curve above (nothing more asked).")
             if self.book.spot_error:
                 lines.append(f"Conversion spots not checked: {self.book.spot_error}.")
+        if self.pull is not None:
+            lines += pull_describe(self.pull, self.batch_size)
         lines.append(f"{self.securities} securit{'ies' if self.securities != 1 else 'y'} in {self.requests} "
                      f"ReferenceDataRequest{'s' if self.requests != 1 else ''} (up to {self.batch_size} each)"
                      + (f", then up to {self.max_option_followups} option tickers in up to "
@@ -1842,6 +2216,10 @@ class CheckResult:
     # progress(done, total, words), called before each request goes out (``run_check(progress=)``)
     progress: Optional[Callable[[int, int, str], None]] = field(default=None, repr=False, compare=False)
     progress_total: int = 0
+    pull: List[PullItem] = field(default_factory=list)      # the pull's own tickers, judged (``_run_pull``)
+
+    def pull_counts(self) -> Dict[str, int]:
+        return {v: sum(1 for it in self.pull if it.verdict == v) for v in PULL_VERDICTS}
 
     def counts(self) -> Dict[str, int]:
         out = {v: 0 for v in ROOT_VERDICTS}
@@ -1854,7 +2232,7 @@ class CheckResult:
         return (any(r.needs_attention for r in self.roots) or any(c.verdict != OK for c in self.contracts)
                 or any(s.verdict != OK for s in self.spots) or any(m.verdict != OK for m in self.lme)
                 or any(o.verdict != OK for o in self.options) or any(c.verdict != OK for c in self.book_options)
-                or any(t.verdict != OK for t in self.book_lme))
+                or any(t.verdict != OK for t in self.book_lme) or any(it.verdict != PULL_OK for it in self.pull))
 
     def code_findings(self) -> List[Tuple[str, str, Finding]]:
         """(lane, subject, finding) of every finding whose fix is code, not config/contracts.csv:
@@ -1865,6 +2243,7 @@ class CheckResult:
                 out += [(f.owner, f"{m.root.root_id} {p.label} [{p.ticker}]", f) for f in p.findings if f.owner]
         for o in self.options:
             out += [(f.owner, f"{o.root.root_id} options [{o.picked or o.ticker}]", f) for f in o.findings if f.owner]
+        out += _pull_code_findings(self.pull)
         return out
 
     @property
@@ -1874,7 +2253,8 @@ class CheckResult:
 
 _PART_WORDS = {"root": "contract roots", "lme": "LME curve tickers", "contract": "futures",
                "book_option": "options on futures", "spot": "USD conversion spots", "option_chain": "option chains",
-               "option": "options"}
+               "option": "options", "pull": "tickers the pull asks for",
+               "pull_probe": "expired contracts' history (a short probe)"}
 
 
 def _tell(result: CheckResult, n: int, part: str) -> None:
@@ -2143,7 +2523,8 @@ def run_check(client, the_plan: Plan, *, log: Callable[[str], None] = print, hos
     judge every answer. Writes nothing. ``progress(done, total, words)``, when given, is called
     before each request goes out (total: the plan's requests and its most option follow-ups)."""
     result = CheckResult(the_plan, [], [], [], host=host, progress=progress,
-                         progress_total=the_plan.requests + the_plan.max_followup_requests)
+                         progress_total=(the_plan.requests + the_plan.max_followup_requests
+                                         + (the_plan.pull.probe_requests if the_plan.pull is not None else 0)))
     size = the_plan.batch_size
     root_answers = _ask(client, the_plan.root_tickers, ROOT_FIELDS, size, result, "root") if the_plan.asked else {}
     for root in the_plan.roots:
@@ -2193,6 +2574,8 @@ def run_check(client, the_plan: Plan, *, log: Callable[[str], None] = print, hos
         spot_answers = _ask(client, the_plan.spot_tickers, SPOT_FIELDS, size, result, "spot")
         for need in the_plan.spots:
             result.spots.append(_check_spot(need, spot_answers.get(need.ticker)))
+    if the_plan.pull is not None:
+        _run_pull(client, the_plan.pull, result, size)
     return result
 
 
@@ -2220,6 +2603,203 @@ def _run_options(client, the_plan: Plan, result: CheckResult, size: int) -> None
         res.picked_answer = answers.get(res.picked)
         res.ours_answer = answers.get(res.ours) if res.ours else None
         _option_findings(res, root_px.get(res.root.root_id), None)
+
+
+def _run_pull(client, pl: PullList, result: CheckResult, size: int) -> None:
+    """Ask each ticker of the pull once (futures with their contract fields, the rest with
+    PULL_FIELDS), then at most one short history request for the expired contracts reference data
+    refuses, and judge every one into ``result.pull``."""
+    items = [dataclasses.replace(it, purposes=list(it.purposes), sources=set(it.sources),
+                                 trade_ids=set(it.trade_ids), answer=None, probe=None, findings=[], notes=[])
+             for it in pl.items]
+    answers: Dict[str, Answer] = {}
+    futures = list(dict.fromkeys(pl.future_tickers))
+    others = list(dict.fromkeys(pl.other_tickers))
+    if futures:
+        answers.update(_ask(client, futures, PULL_FUTURE_FIELDS, size, result, "pull"))
+    if others:
+        answers.update(_ask(client, others, PULL_FIELDS, size, result, "pull"))
+    for it in items:
+        if it.asked:
+            it.answer = answers.get(it.ticker)
+    refused = [it for it in items if it.asked and it.expired and it.answer is not None and it.answer.answered
+               and it.answer.security_error and not _ENTITLEMENT_RE.search(it.answer.security_error)]
+    refused = refused[:max(1, size)]
+    history = getattr(client, "history", None)
+    if refused and history is not None:
+        ends = [date.fromisoformat(it.history_end[:10]) for it in refused]
+        start, end = min(ends) - timedelta(days=PULL_PROBE_DAYS), max(ends)
+        _tell(result, len(refused), "pull_probe")
+        result.requests_sent += 1
+        try:
+            got = history([it.ticker for it in refused], ("PX_LAST",), start, end) or {}
+        except BloombergUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- the probe is extra evidence; its failure is said, never fatal
+            got = {it.ticker: History(it.ticker, {}, security_error=f"no answer: {type(exc).__name__}: {exc}",
+                                      answered=False) for it in refused}
+        by_upper = {str(k).upper(): v for k, v in got.items()}
+        for it in refused:
+            it.probe = got.get(it.ticker) or by_upper.get(it.ticker.upper())
+    for it in items:
+        judge_pull(it, pl.roots, pl.as_of)
+    result.pull = items
+
+
+def _pull_refusal(it: PullItem, root: Optional[ContractRoot], answer: Answer) -> Finding:
+    """Bloomberg refused the security: its own words, and what to change (config or code)."""
+    words = answer.security_error
+    said = f'Bloomberg said: "{words}"'
+    if _ENTITLEMENT_RE.search(words):
+        return Finding(NO_PRICE, f"Bloomberg refused {it.ticker!r}. {said}",
+                       "this terminal is not entitled to it: ask Bloomberg for the entitlement, then run the check "
+                       "again")
+    probe = ""
+    if it.probe is not None:
+        pw = it.probe.security_error or ("no answer" if not it.probe.answered else "no closes in the window asked")
+        probe = f'; its daily history was refused too ("{pw}")'
+    owner = _PULL_OWNERS.get(it.kind, "")
+    bare = _strip_key(it.ticker)
+    if it.kind == PK_FUTURE and it.expired:
+        owner = "contract-master"     # data.contracts builds every contract ticker, expired ones included
+        action = (f"check {bare} on the terminal (SECF <GO>): if Bloomberg names this expired contract another "
+                  "way, the request ticker rule (data.contracts.request_ticker) changes; until then its risk "
+                  "history is missing")
+    elif it.kind == PK_FUTURE:
+        owner = ""
+        action = (f"{root.root_id}'s bbg_root {root.bbg_root!r} or its yellow key in config/contracts.csv is likely "
+                  "wrong: run again with --search, or SECF <GO> on the terminal, and put the right root in bbg_root"
+                  if root is not None else "the contract is not in config/contracts.csv")
+    elif it.kind == PK_OPTION:
+        action = "our option ticker form is not Bloomberg's: run again with --options to compare it with its chain"
+    elif it.kind == PK_FX:
+        action = f"the pair's ticker comes from the book's instrument row; check {bare} on the terminal"
+    elif it.kind == PK_TENOR:
+        action = (f"the forward tenor naming ('<pair><tenor> Curncy', pull_marks.tenor_ticker) does not fit "
+                  f"{it.pair}: find the tenor's ticker on the terminal")
+    elif it.kind == PK_LME:
+        action = f"the LME ticker naming (engine.lme) does not fit this metal: find {bare}'s right form on the terminal"
+    else:
+        action = ("the ticker map (data/bloomberg/rates_marketdata.py or vol_marketdata.py) is wrong for this "
+                  "ticker: find the right one on the terminal")
+    return Finding(NOT_FOUND, f"Bloomberg does not know {it.ticker!r}. {said}{probe}", action, owner=owner)
+
+
+def judge_pull(it: PullItem, roots: Mapping[str, ContractRoot], as_of: date) -> None:
+    """The verdict on one pull ticker from Bloomberg's answer (``it.answer``, ``it.probe``): its
+    findings and notes are rebuilt. An expired contract is judged on a security error only."""
+    it.findings, it.notes = [], []
+    if not it.asked:
+        return
+    a, t = it.answer, it.ticker
+    root = roots.get(it.root_id) if it.root_id else None
+    if a is None or not a.answered:
+        words = a.security_error if a is not None else "not asked"
+        it.findings.append(Finding(NO_ANSWER, f"Bloomberg did not answer for {t!r} ({words})", "run the check again"))
+        return
+    if a.security_error:
+        p = it.probe
+        if p is not None and p.answered and not p.security_error and p.days:
+            n = len(p.days)
+            it.notes.append(f'reference data refused it ("{a.security_error}"), but its daily history answers '
+                            f"({n} close{'s' if n != 1 else ''}, {min(p.days)} to {max(p.days)})")
+            return
+        it.findings.append(_pull_refusal(it, root, a))
+        return
+    v = a.fields
+    name = str(v.get("NAME") or "").strip()
+    bare = _strip_key(t)
+    if it.expired:
+        # Judged on a security error only: the live contracts of the same root carry the identity checks.
+        if _num(v.get("PX_LAST")) is None and _num(v.get("PX_MID")) is None:
+            it.notes.append("expired: no reference price, as expected; the pull asks its daily history")
+        return
+    if _num(v.get("PX_LAST")) is None and _num(v.get("PX_MID")) is None:
+        it.findings.append(Finding(
+            NO_PRICE, f"{t!r} resolves{f' as {name!r}' if name else ''} but returned no PX_LAST or PX_MID"
+                      + _bloomberg_said(a, ("PX_LAST", "PX_MID")),
+            f"an entitlement this terminal lacks, or a contract that does not trade: look at {bare} GP on the "
+            "terminal"))
+    if v.get("LAST_UPDATE_DT") not in (None, ""):
+        try:
+            updated = to_date(v.get("LAST_UPDATE_DT"))
+        except ValueError:
+            updated = None
+        if updated is not None and (as_of - updated).days > PULL_STALE_DAYS:
+            it.findings.append(Finding(
+                STALE, f"Bloomberg last updated {t!r} on {updated.isoformat()}, {(as_of - updated).days} days before "
+                       f"the book date {as_of.isoformat()}",
+                "a stale price: check on the terminal that this is the contract the book means and that it trades"))
+    ccy_raw = str(v.get("CRNCY") or "").strip()
+    major, minor = currency_parts(ccy_raw)
+    exch = str(v.get("EXCH_CODE") or "").strip().upper()
+    if it.kind in (PK_FUTURE, PK_OPTION) and root is not None:
+        if ccy_raw and not same_currency(major, root.currency):
+            fix = ("currency", root.currency, major) if it.kind == PK_FUTURE else ("", "", "")
+            it.findings.append(Finding(
+                CURRENCY_MISMATCH, f"Bloomberg prices {t!r} in {ccy_raw}; config/contracts.csv says {root.currency} "
+                                   f"for {root.root_id}",
+                f"if the name and exchange are right, set currency to {major} (the worksheet); if not, the ticker "
+                "is another contract and bbg_root is wrong", *fix))
+        elif it.kind == PK_FUTURE:
+            it.findings.extend(_scale_findings(root, t, v, ccy_raw, major, minor, it.notes))
+        if exch and not exchange_matches(root.exchange, exch):
+            known = _exchange_named_by(exch)
+            meaning = f"which this check reads as {'/'.join(known)}" if known else "a code this check does not know"
+            it.findings.append(Finding(
+                EXCHANGE_MISMATCH, f"Bloomberg lists {t!r} on exchange code {exch!r}, {meaning}; config/contracts.csv "
+                                   f"says {root.exchange}",
+                f"confirm on the terminal ({bare} DES) that this is the {root.exchange} contract and not a look-alike"))
+        if it.kind == PK_FUTURE:
+            problems = _name_problems(root, v)
+            if problems:
+                it.findings.append(Finding(NAME_CHECK, "; ".join(problems),
+                                           f"check on the terminal ({bare} DES) that this ticker is the {root.name}"))
+        elif name and not words_fit(root.name, name):
+            it.notes.append(f"Bloomberg's name {name!r} has none of the words of {root.name!r}")
+    elif it.kind == PK_FX and len(it.pair) == 6 and ccy_raw and not same_currency(major, it.pair[3:]):
+        it.findings.append(Finding(
+            CURRENCY_MISMATCH, f"Bloomberg prices {t!r} in {ccy_raw}; the pair {it.pair}'s quote currency is "
+                               f"{it.pair[3:]}",
+            f"check {bare} DES on the terminal: the ticker may name another pair (it comes from the book's "
+            "instrument row)", owner="bbg-library"))
+    elif it.kind == PK_LME:
+        if ccy_raw and not same_currency(major, LME_CURRENCY):
+            it.findings.append(Finding(
+                CURRENCY_MISMATCH, f"Bloomberg prices {t!r} in {ccy_raw}; an LME metal is priced in {LME_CURRENCY}",
+                "the LME ticker is another contract: find the right one on the terminal", owner=LME_OWNER))
+        metal = _plain_root_name(root, it.root_id)
+        if root is not None and name and not words_fit(metal, name):
+            it.findings.append(Finding(
+                NAME_CHECK, f"none of the words of {metal!r} are in Bloomberg's name {name!r}",
+                f"check on the terminal ({bare} DES) that this is {metal}", owner=LME_OWNER))
+        if exch and not exchange_matches("LME", exch):
+            it.notes.append(f"Bloomberg lists it on exchange code {exch!r}, not LME")
+
+
+_PULL_KIND_WORDS = {PK_FUTURE: "contracts", PK_OPTION: "options", PK_FX: "currency pairs", PK_TENOR: "forward tenors",
+                    PK_LME: "LME tickers", PK_OIS: "OIS tickers", PK_VOL: "vol tickers"}
+
+
+def _pull_code_findings(items: Sequence[PullItem]) -> List[Tuple[str, str, Finding]]:
+    """The pull's findings whose fix is code, one line per (lane, root or pair, kind, verdict):
+    ``(lane, subject, finding)`` as ``CheckResult.code_findings`` gives them."""
+    groups: Dict[Tuple[str, str, str, str], List[Tuple[PullItem, Finding]]] = {}
+    for it in items:
+        label = "expired contracts" if it.expired else _PULL_KIND_WORDS.get(it.kind, it.kind)
+        for f in it.findings:
+            if f.owner:
+                groups.setdefault((f.owner, it.root_id or it.pair or it.kind, label, f.verdict), []).append((it, f))
+    out: List[Tuple[str, str, Finding]] = []
+    for (owner, group, label, verdict), pairs in groups.items():
+        tickers = [it.ticker for it, _f in pairs]
+        shown = ", ".join(tickers[:FORM_EXAMPLES]) + (f" +{len(tickers) - FORM_EXAMPLES} more"
+                                                      if len(tickers) > FORM_EXAMPLES else "")
+        first = pairs[0][1]
+        evidence = first.evidence if len(pairs) == 1 else \
+            f"{len(pairs)} tickers the pull asks, the first: {first.evidence}"
+        out.append((owner, f"{group} {label} [{shown}]", Finding(verdict, evidence, first.action, owner=owner)))
+    return out
 
 
 # --------------------------------------------------------------------------- desk checks (2026-09-29)
@@ -3326,6 +3906,14 @@ def worksheet_rows(result: CheckResult) -> List[Dict[str, str]]:
                 rows.append({"root_id": o.root.root_id, "field": f.field, "current": f.current,
                              "suggested": f.suggested, "verdict": f.verdict, "reason": f"{f.evidence}. {f.action}",
                              "apply": ""})
+    # The pull's own tickers: a currency or price scale Bloomberg disagrees with (one row per root and
+    # suggestion, the dedupe below; a refused ticker has no suggestion of its own: the root check's search).
+    for it in result.pull:
+        for f in it.findings:
+            if f.field and it.root_id:
+                rows.append({"root_id": it.root_id, "field": f.field, "current": f.current,
+                             "suggested": f.suggested, "verdict": f.verdict,
+                             "reason": f"the pull's ticker {it.ticker}: {f.evidence}. {f.action}", "apply": ""})
     seen: Set[Tuple[str, str, str]] = set()
     unique: List[Dict[str, str]] = []
     for row in rows:
@@ -3373,10 +3961,12 @@ def render_text(result: CheckResult, *, now: datetime, paths: Mapping[str, Path]
         reason = not_run.rstrip() if not_run.rstrip()[-1:] in ".?!" else not_run.rstrip() + "."
         lines.append(f"Bloomberg could not be reached: {reason} The root, LME, options and book checks did not "
                      "run; the desk checks below say what could be read without it.")
-    elif p.parts or p.book is not None:
+    elif p.parts or p.book is not None or p.pull is not None:
         lines += p.describe()
         lines.append(f"Sent {result.requests_sent} reference request{'s' if result.requests_sent != 1 else ''}"
                      + (f" and {result.searches_sent} searches" if p.search else "") + ".")
+    if p.pull is not None and not not_run:
+        lines += ["", *_render_pull(result)]
     if PART_ROOTS in p.parts and not not_run:
         lines += ["", "Summary of the contract roots"]
         counts = result.counts()
@@ -3434,6 +4024,66 @@ def render_text(result: CheckResult, *, now: datetime, paths: Mapping[str, Path]
         lines += ["", "Manual checks (no Bloomberg field can settle these)"]
         lines += [f"  - {m}" for m in manual_checks(desk)]
     return "\n".join(lines) + "\n"
+
+
+def _pull_line(it: PullItem) -> str:
+    """One line per pull ticker: verdict, ticker, the contract in words, what it is for, how many
+    trades, then Bloomberg's answer (OK) or its words and what to do (a problem)."""
+    n = len(it.trade_ids)
+    who = (f"{n} trade{'s' if n != 1 else ''}" if n else
+           "risk history only" if it.sources == {SRC_RISK} else "no trade named")
+    head = f"{it.verdict:<16} {it.ticker or '-':<20} {it.what}: {'; '.join(it.purposes)}; {who}"
+    if it.verdict == PULL_NOT_ASKED:
+        return f"{head}. Not asked: {it.reason}."
+    a = it.answer
+    said = ""
+    if a is not None and a.answered and not a.security_error:
+        v = a.fields
+        px = v.get("PX_LAST") if _num(v.get("PX_LAST")) is not None else v.get("PX_MID")
+        bits = [str(v.get("NAME") or "").strip(), str(v.get("CRNCY") or "").strip(),
+                str(v.get("EXCH_CODE") or "").strip(),
+                f"{'PX_LAST' if _num(v.get('PX_LAST')) is not None else 'PX_MID'} {_g(px)}"
+                if _num(px) is not None else "no price",
+                f"updated {_date_text(v.get('LAST_UPDATE_DT'))}" if v.get("LAST_UPDATE_DT") not in (None, "") else ""]
+        said = "Bloomberg: " + ", ".join(b for b in bits if b)
+    if it.verdict == PULL_OK:
+        if not said:
+            return f"{head}. {it.notes[0][:1].upper() + it.notes[0][1:]}." if it.notes else f"{head}."
+        return f"{head}. {said}" + (f" (note: {it.notes[0]})" if it.notes else "") + "."
+
+    message, fix = _findings_words(it.findings)
+    return f"{head}. {message}." + (f" {said}." if said else "") + (f" What to do: {fix}." if fix else "")
+
+
+def _render_pull(result: CheckResult) -> List[str]:
+    pl = result.plan.pull
+    items = result.pull
+    tally = result.pull_counts()
+    asked = sum(1 for it in items if it.asked)
+    lines = [f"Tickers the pull asks for (book date {pl.as_of.isoformat()}, {pl.db_path})",
+             f"  {asked} asked: {tally[PULL_OK]} OK, {tally[PULL_CHECK]} check, {tally[PULL_NO_PRICE]} no price, "
+             f"{tally[PULL_UNKNOWN]} unknown security, {tally[PULL_NO_ANSWER]} no answer; {tally[PULL_NOT_ASKED]} "
+             "not asked.",
+             "  What the pull asks: the Bloomberg library's needs on the book date (P&L marks, USD conversions, "
+             "contract dates, the options' inputs), the LME curve pillars, the backfill's forward tenors and the "
+             "risk history (every contract of each held root's chain, expired months included, the FX pairs, "
+             "LME cash and 3M). An expired contract is judged only on Bloomberg refusing it."]
+    counts = pl.source_counts()
+    if any(counts.values()):
+        lines.append("  From: " + ", ".join(f"{counts[s]} {s}" for s in PULL_SOURCES if counts[s])
+                     + " (one ticker can serve several).")
+    for e in pl.errors:
+        lines.append(f"  Not listed: {e}.")
+    order = (PK_FUTURE, PK_OPTION, PK_LME, PK_FX, PK_TENOR, PK_OIS, PK_VOL)
+    problems = sorted((it for it in items if it.verdict != PULL_OK),
+                      key=lambda it: (PULL_VERDICTS.index(it.verdict), order.index(it.kind), it.expired,
+                                      it.root_id or it.pair, it.instrument_id))
+    oks = [it for it in items if it.verdict == PULL_OK]
+    if problems:
+        lines += ["", f"  Problems first ({len(problems)})"] + [f"  {_pull_line(it)}" for it in problems]
+    if oks:
+        lines += ["", f"  OK ({len(oks)})"] + [f"  {_pull_line(it)}" for it in oks]
+    return lines
 
 
 def _render_lme(result: CheckResult) -> List[str]:
@@ -3572,7 +4222,7 @@ def _render_book(result: CheckResult) -> List[str]:
 
 
 def _field_rows(result: CheckResult) -> Tuple[List[str], List[List[str]]]:
-    value_fields = list(dict.fromkeys((*ROOT_FIELDS, *lme_fields(), *OPTION_FIELDS, CHAIN_FIELD)))
+    value_fields = list(dict.fromkeys((*ROOT_FIELDS, *lme_fields(), *OPTION_FIELDS, CHAIN_FIELD, *PULL_FUTURE_FIELDS)))
     columns = ["part", "root_id", "instrument_id", "security", "verdict", "answered", "security_error",
                "field_errors", *value_fields]
     rows: List[List[str]] = []
@@ -3612,6 +4262,9 @@ def _field_rows(result: CheckResult) -> Tuple[List[str], List[List[str]]]:
             emit("book_option", c.future.root_id, c.future.instrument_id, c.future.ticker, c.verdict, c.answer)
     for s in result.spots:
         emit("spot", "", s.need.instrument_id, s.need.ticker, s.verdict, s.answer)
+    for it in result.pull:
+        if it.asked:
+            emit(f"pull_{it.kind}", it.root_id, it.instrument_id, it.ticker, it.verdict, it.answer)
     return columns, rows
 
 
@@ -3662,10 +4315,12 @@ BOOK_CHECK_PARTS = (PART_ROOTS, PART_LME)
 ROW_OK, ROW_CHECK, ROW_NO_ANSWER, ROW_ERROR = "OK", "CHECK", "NO ANSWER", "ERROR"
 AREA_FUTURE, AREA_ROOT, AREA_SPOT, AREA_LME, AREA_OPTION = (
     "Future", "Contract root", "FX spot", "LME", "Option on a future")
+AREA_PULL = "Pull ticker"          # check_book(include_pull=True): a pull ticker the book rows do not already cover
 # Verdicts where the ticker cannot price at all: the P&L it feeds has no mark.
 _ERROR_VERDICTS = frozenset({NOT_FOUND, NO_PRICE, NO_TICKER, NO_CURVE, NO_OPTIONS, OFF_CURVE})
 _ROW_ORDER = (ROW_ERROR, ROW_NO_ANSWER, ROW_CHECK, ROW_OK)
-_AREA_ORDER = (AREA_FUTURE, AREA_OPTION, AREA_LME, AREA_SPOT, AREA_ROOT)
+_AREA_ORDER = (AREA_FUTURE, AREA_OPTION, AREA_LME, AREA_SPOT, AREA_ROOT, AREA_PULL)
+_PULL_ROW_STATUS = {PULL_OK: ROW_OK, PULL_CHECK: ROW_CHECK, PULL_NO_ANSWER: ROW_NO_ANSWER}
 _MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
@@ -3693,15 +4348,21 @@ def _month_words(code: str, year_digits: str, ref_year: int) -> str:
 
 def _future_words(fut: BookFuture, root: Optional[ContractRoot], ref_year: int) -> str:
     """'COMEX copper Dec26'; an option: 'COMEX copper Dec26 call 450'."""
-    name = _plain_root_name(root, fut.root_id)
-    parts = parse_option_ticker(fut.instrument_id) if fut.kind == "CMDTY_OPTION" else None
+    return _contract_words(fut.instrument_id, fut.kind, root, ref_year, fut.root_id)
+
+
+def _contract_words(instrument_id: str, kind: str, root: Optional[ContractRoot], ref_year: int,
+                    fallback: str = "") -> str:
+    """A contract id in plain words: 'COMEX copper Dec26'; kind CMDTY_OPTION: 'COMEX copper Dec26 call 450'."""
+    name = _plain_root_name(root, fallback or (root.root_id if root is not None else ""))
+    parts = parse_option_ticker(instrument_id) if kind == "CMDTY_OPTION" else None
     if parts is not None:
         _r, code, year, cp, strike, _k = parts
-        return f"{name} {_month_words(code, year, ref_year)} {'call' if cp == 'C' else 'put'} {strike}"
-    parts4 = parse_bbg_ticker(fut.instrument_id)
+        return f"{name} {_month_words(code, year, ref_year)} {'call' if cp == 'C' else 'put'} {strike}".strip()
+    parts4 = parse_bbg_ticker(instrument_id)
     if parts4 is not None:
-        return f"{name} {_month_words(parts4[1], parts4[2], ref_year)}"
-    return f"{name} {fut.instrument_id}"
+        return f"{name} {_month_words(parts4[1], parts4[2], ref_year)}".strip()
+    return f"{name} {instrument_id}".strip()
 
 
 def _side_words(quantity: float, unit: str) -> str:
@@ -3836,6 +4497,25 @@ def book_check_rows(result: CheckResult) -> Tuple[List[dict], Dict[str, int]]:
         rows.append((_book_row(AREA_ROOT, _plain_root_name(root, root.root_id), root.root_id, r.ticker, r.verdict,
                                said, ours, r.findings), r.asked))
 
+    if result.pull:
+        covered = {row["ticker"].upper() for row, _a in rows if row["ticker"]}
+        for it in result.pull:
+            if it.ticker and it.ticker.upper() in covered:
+                continue                      # judged above as the book's own ticker
+            status = _PULL_ROW_STATUS.get(it.verdict, ROW_ERROR)
+            if not it.asked:
+                message, fix = f"Not asked: {it.reason}", "Fix the contract root in config/contracts.csv (the worksheet)"
+                said = "Not asked"
+            else:
+                message, fix = ("", "") if status == ROW_OK else _findings_words(it.findings)
+                said = _answer_words(it.answer, (("name", "NAME"), ("currency", "CRNCY"), ("exchange", "EXCH_CODE"),
+                                                 ("price", "PX_LAST"), ("updated", "LAST_UPDATE_DT")))
+            n = len(it.trade_ids)
+            ours = "; ".join(it.purposes) + (f"; {n} trade{'s' if n != 1 else ''}" if n else "")
+            rows.append(({"area": AREA_PULL, "what": it.what[:1].upper() + it.what[1:], "instrument_id": it.instrument_id,
+                          "ticker": it.ticker, "status": status, "bloomberg": said, "ours": ours[:1].upper() + ours[1:],
+                          "message": message, "fix": fix}, it.asked))
+
     code_rows = []
     for lane, subject, f in result.code_findings():
         message, fix = _findings_words([f])
@@ -3862,7 +4542,7 @@ def book_check_rows(result: CheckResult) -> Tuple[List[dict], Dict[str, int]]:
 def check_book(db_path=None, host: str = "localhost", port: int = 8194,
                on_progress: Optional[Callable[[int, int, str], None]] = None,
                client_factory: Optional[Callable[[str, int], object]] = None,
-               today: Optional[date] = None) -> dict:
+               today: Optional[date] = None, include_pull: bool = False) -> dict:
     """The book's own tickers against Bloomberg, for the Data tab's "Run Bloomberg check" button.
 
     Asks, on the press only (hard rule 8), for the roots the book holds (their generic ticker),
@@ -3872,6 +4552,9 @@ def check_book(db_path=None, host: str = "localhost", port: int = 8194,
     session (a fake for a call without a terminal; the reachability probe is then skipped).
     ``today`` is the book's day and the LME's (default: ``live.book_today`` and London's today).
     ``on_progress(done, total, words)`` is called before each request goes out and once at the end.
+    ``include_pull`` (2026-09-30, off by default: on a real book it is several hundred tickers,
+    the risk history's contract chains) adds the tickers "Pull Bloomberg now" asks that the book
+    rows do not already cover, as rows of area "Pull ticker".
 
     Returns {ok, reachable, reason, started_at, finished_at, seconds, requests_sent, summary,
     counts {checked, ok, attention, no_answer}, rows [...]}: ``ok`` True when the check ran and
@@ -3915,6 +4598,11 @@ def check_book(db_path=None, host: str = "localhost", port: int = 8194,
         except BookError as exc:
             return finish(reason=f"The book could not be read: {exc}.")
         the_plan = plan(roots, book=book, book_only=True, parts=BOOK_CHECK_PARTS, today=today or lme_today())
+        if include_pull:
+            try:
+                the_plan.pull = pull_list(book.db_path, as_of, roots)
+            except BookError as exc:
+                return finish(reason=f"The pull's tickers could not be listed: {exc}.")
         if not the_plan.securities:
             unaskable = sum(1 for f in the_plan.futures + the_plan.book_options if not f.ticker)
             if not unaskable and not the_plan.book_lme and not book.spot_error:
@@ -3988,6 +4676,10 @@ def _parser() -> argparse.ArgumentParser:
                     help="the desk checks: futures close against settlement, open interest and volume, LME "
                          "per-prompt liquidity, SGX USD/CNH history, delivery type, exchange holidays, price "
                          "history on file, contract dates stored; a plain run includes them")
+    ap.add_argument("--pull", action="store_true",
+                    help="only the tickers 'Pull Bloomberg now' asks for on the book date (P&L marks, contract "
+                         "dates, LME curve, option inputs, forward tenors, risk history), each asked once and judged; "
+                         "reads --db, else the app's database. A run with a book includes it")
     ap.add_argument("--host", default="localhost")
     ap.add_argument("--port", type=int, default=8194)
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="folder for the reports (default: reports/)")
@@ -4020,11 +4712,11 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
         return 1
     root_map = load_roots() if roots is None else {r.root_id: r for r in roots}
     picked = tuple(p for p, on in ((PART_LME, args.lme), (PART_OPTIONS, args.options)) if on)
-    desk_on = bool(args.desk or not picked)
-    parts = picked or (() if args.desk else ALL_PARTS)
+    desk_on = bool(args.desk or not (picked or args.pull))
+    parts = picked or (() if (args.desk or args.pull) else ALL_PARTS)
     today = as_of or lme_today()
     book: Optional[Book] = None
-    if args.db or args.book:
+    if args.db or args.book or args.pull:
         if as_of is None:
             as_of = _book_day()
         try:
@@ -4038,6 +4730,13 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
                             limit=args.limit, search=args.search, parts=parts, today=today)
         else:
             the_plan = Plan(roots=[], asked=[], placeholders=[], parts=(), today=today)
+        if book is not None and (args.pull or parts):
+            # The pull's own tickers: whenever a book is checked, and alone with --pull.
+            try:
+                the_plan.pull = pull_list(book.db_path, book.as_of, root_map)
+            except BookError as exc:
+                print(f"Pull tickers not listed: {exc}.")
+                return 1
         desk_plan = plan_desk(root_map, book=book, as_of=as_of or _book_day(), root_ids=args.root,
                               sector=args.sector) if desk_on else None
     except ValueError as exc:
@@ -4046,7 +4745,8 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
     if the_plan.empty and desk_plan is None:
         print("Nothing to check: no contract root matches the filters" + (" and the book holds none." if book else "."))
         return 1
-    if parts:
+    run_main = bool(parts) or the_plan.pull is not None
+    if run_main:
         for line in the_plan.describe():
             print(line)
     if desk_plan is not None:
@@ -4059,8 +4759,8 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
     client = None
     host = f"{args.host}:{args.port}"
     desk_needs = desk_plan is not None and desk_plan.needs_bloomberg
-    if (parts and the_plan.needs_bloomberg) or desk_needs:
-        if parts and the_plan.needs_bloomberg:
+    if (run_main and the_plan.needs_bloomberg) or desk_needs:
+        if run_main and the_plan.needs_bloomberg:
             print(f"Asking Bloomberg on {host} for {the_plan.securities} securities in {the_plan.requests} requests"
                   + (f", then up to {the_plan.max_option_followups} option tickers in up to "
                      f"{the_plan.max_followup_requests} more" if the_plan.max_option_followups else "")
@@ -4081,7 +4781,7 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
             return 2
     desk: Optional[DeskResult] = None
     try:
-        result = run_check(client, the_plan, host=host) if parts else CheckResult(the_plan, [], [], [], host=host)
+        result = run_check(client, the_plan, host=host) if run_main else CheckResult(the_plan, [], [], [], host=host)
         if desk_plan is not None:
             desk = run_desk(client, desk_plan)
     except BloombergUnavailable as exc:
@@ -4090,7 +4790,7 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
     finally:
         if client is not None and hasattr(client, "close"):
             client.close()
-    if parts and the_plan.securities and not result.any_answered:
+    if run_main and the_plan.securities and not result.any_answered:
         print(f"Bloomberg did not answer any request on {host}; nothing to judge. Run the check again.")
         return 2
     stamp_time = now or datetime.now()
@@ -4112,6 +4812,11 @@ def main(argv: Optional[Sequence[str]] = None, *, client_factory: Optional[Calla
                  f"flagged" if result.book_options else "")
               + (f"; {len(result.book_lme)} LME tickets, {sum(1 for t in result.book_lme if t.verdict != OK)} "
                  f"flagged" if result.book_lme else "") + ".")
+    if the_plan.pull is not None:
+        tally = result.pull_counts()
+        print(f"Pull tickers: {sum(1 for it in result.pull if it.asked)} asked: "
+              + ", ".join(f"{tally[v]} {v}" for v in (PULL_OK, PULL_CHECK, PULL_NO_PRICE, PULL_UNKNOWN, PULL_NO_ANSWER))
+              + f"; {tally[PULL_NOT_ASKED]} not asked.")
     if desk is not None:
         _print_desk(desk)
     code = len(result.code_findings()) + (len(desk.housekeeper_lines()) if desk is not None else 0)

@@ -38,6 +38,15 @@ The Risk tab, the Book's z-score, carry and days to exit read Bloomberg's daily 
 only the new days afterwards). Nothing reads the research app any more (2026-09-30). After the first
 pull, desk check 7 and the Data tab's "Price history" line show the days on file per root.
 
+## The report to send (`bbg-report`)
+
+With the Terminal logged in: `git pull`, press **Pull Bloomberg now** once in the app, then
+`py 2_launcher.py bbg-report`. It runs the diagnostics, checks every ticker the pull asks for
+(prices, contract dates, LME curves, conversion spots, OIS and vol, and the risk-history
+chains) on Bloomberg, runs the root and desk checks and reads the last pull. It then writes one file,
+`reports\bbg_report_<stamp>.txt`, with every problem listed at the top. Send that file to a Claude
+session. `--quick` skips the search for unknown roots.
+
 ## Running the check
 
 1. `git pull`, then in the project folder: `py 2_launcher.py bbg-check --dry-run`. It asks
