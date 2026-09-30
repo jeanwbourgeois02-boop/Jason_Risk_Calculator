@@ -648,6 +648,199 @@ def lme_curves_needed(conn: sqlite3.Connection, as_of: str) -> List[dict]:
             for key in sorted(found)]
 
 
+# --- Risk history (2026-09-30) ---------------------------------------------------------------
+# User decision 2026-09-30: the Risk tab stops reading the research app's database; its daily
+# history comes from Bloomberg, on "Pull Bloomberg now" only (hard rule 8), into this app's own
+# `price_history` table (risk input only, never a mark). `risk_history_needs` says what that
+# history is for the book open on a day; bbg-backfill asks it. Worked out at read time from
+# `trades_official` / `instruments` / contract-master, never stored in `bbg_library` (the chain
+# of a root is not a per-trade need, and a contract's dates move when Bloomberg's are stored,
+# which no trigger reports): nothing here writes, nothing asks Bloomberg.
+# About 2.5 years: risk-metrics' blended vol needs 500 daily observations (config/risk.yaml
+# trail_window_bd), and a Chinese exchange trades ~245 days a year, so 760 days fell short.
+RISK_HISTORY_CALENDAR_DAYS = 900
+RISK_KIND_CONTRACT = "CONTRACT"
+RISK_KIND_FX = "FX"
+RISK_KIND_LME = "LME"
+# The risk history converts CNY and CNH through USDCNH, the research app's rule and the pair
+# the book hedges with (engine/risk/commodity_history.py); every other currency through its
+# conventional USD pair (live._usd_pair_name).
+_RISK_FX_PAIR = {"CNY": "USDCNH", "CNH": "USDCNH"}
+
+# Open positions on :as_of, netted per instrument (a flat instrument is not held). A future's
+# NOTIONAL leg is dated its expiry, an LME ticket's legs its prompt.
+_RISK_FUTURES_SQL = f"""
+SELECT i.instrument_id, i.base_ccy, i.quote_ccy, SUM(t.quantity)
+FROM trades_official t JOIN instruments i USING (instrument_id)
+WHERE i.asset_class = 'FUTURE' AND t.product NOT IN ({_in(LME_PRODUCTS + LISTED_OPTION_PRODUCTS + (UNRECOGNISED,))})
+  AND t.trade_date <= :as_of
+  AND (SELECT MAX(l.settle_date) FROM trade_legs l WHERE l.trade_id = t.trade_id) >= :as_of
+GROUP BY i.instrument_id, i.base_ccy, i.quote_ccy
+ORDER BY i.instrument_id
+"""
+_RISK_OPTIONS_SQL = f"""
+SELECT i.instrument_id, i.base_ccy, i.quote_ccy, SUM(t.quantity)
+FROM trades_official t JOIN instruments i USING (instrument_id)
+WHERE t.product IN ({_in(LISTED_OPTION_PRODUCTS)}) AND t.trade_date <= :as_of AND i.expiry_date >= :as_of
+GROUP BY i.instrument_id, i.base_ccy, i.quote_ccy
+ORDER BY i.instrument_id
+"""
+_RISK_FX_SQL = f"""
+SELECT DISTINCT i.base_ccy, i.quote_ccy
+FROM trades_official t JOIN instruments i USING (instrument_id)
+WHERE t.trade_date <= :as_of AND t.product NOT IN ({_in(LME_PRODUCTS + (UNRECOGNISED,))})
+  AND ((i.asset_class = 'FX'
+        AND (SELECT MAX(l.settle_date) FROM trade_legs l WHERE l.trade_id = t.trade_id) >= :as_of)
+       OR (t.product = 'FX_OPTION' AND i.expiry_date >= :as_of))
+"""
+_RISK_LME_SQL = f"""
+SELECT instrument_id, prompt, SUM(quantity) FROM (
+  SELECT t.trade_id, i.instrument_id, t.quantity,
+         (SELECT MAX(l.settle_date) FROM trade_legs l WHERE l.trade_id = t.trade_id) AS prompt
+  FROM trades_official t JOIN instruments i USING (instrument_id)
+  WHERE t.product IN ({_in(LME_PRODUCTS)}) AND t.trade_date <= :as_of)
+WHERE prompt >= :as_of
+GROUP BY instrument_id, prompt
+ORDER BY instrument_id, prompt
+"""
+
+
+def _risk_fx_pair(ccy: str) -> str:
+    from data.bloomberg.live import _usd_pair_name
+    return _RISK_FX_PAIR.get(ccy) or _usd_pair_name(ccy)
+
+
+def _root_chain(conn: sqlite3.Connection, root_id: str, held: set, as_of, window_start) -> List[dict]:
+    """The contracts of `root_id` whose life overlaps [window_start, as_of]: every month of the
+    root's cycle (contract-master's `active_months`) from the one live at the window's start up
+    to the first cycle month after the furthest month held, plus every month held. Dates are
+    Bloomberg's when stored, else contract-master's conservative estimate."""
+    from data.contracts import contract_month, get_root, request_ticker
+    root = get_root(root_id)
+    furthest = max(held)
+    cycle = set(root.active_months or range(1, 13))
+    wanted = set(held)
+    y, m = window_start.year, window_start.month - 1      # a month early: a contract can stop before its month
+    if m == 0:
+        y, m = y - 1, 12
+    while True:
+        if m in cycle:
+            wanted.add((y, m))
+            if (y, m) > furthest:
+                break                                     # the one listed contract beyond the furthest held
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    reason = f"no verified Bloomberg ticker for {root.root_id}" if root.bbg_placeholder else ""
+    out = []
+    for y, m in sorted(wanted):
+        contract = contract_month(root.root_id, m, y, conn)
+        if contract.last_trade_date < window_start:
+            continue
+        out.append({"instrument_id": contract.contract_id,
+                    "bbg_ticker": "" if reason else request_ticker(contract, as_of),
+                    "kind": RISK_KIND_CONTRACT, "root_id": root.root_id,
+                    "start": window_start.isoformat(),
+                    "end": min(as_of, contract.last_trade_date).isoformat(),
+                    "requestable": not reason, "reason": reason})
+    return out
+
+
+def risk_history_needs(conn: sqlite3.Connection, as_of) -> List[dict]:
+    """The daily history the Risk tab needs for the book open on `as_of` (2026-09-30), what
+    bbg-backfill asks Bloomberg's daily history for and stores in `price_history` (a risk
+    input, never a mark). One dict per security:
+    {instrument_id, bbg_ticker, kind: CONTRACT | FX | LME, root_id ('' for FX), start, end,
+    requestable, reason ('' when requestable)}, over the window
+    [as_of - RISK_HISTORY_CALENDAR_DAYS, as_of]:
+
+      * CONTRACT: for every contract root held on `as_of` (a future's, an option on a future's
+        underlying; FX-sector roots such as SGX:XUC included), every contract of the root's
+        month cycle whose life overlaps the window, from the one live at its start up to one
+        listed contract beyond the furthest month held, expired ones included (the per-contract
+        and constant-maturity series of engine/risk/commodity_history.py). instrument_id the
+        canonical id ('CLZ26 Comdty'), bbg_ticker `data.contracts.request_ticker` on `as_of`
+        (the two-digit year once expired); start the window's start (contract-master does not
+        know a listing date: Bloomberg returns nothing before it), end min(as_of, last trade
+        date: Bloomberg's when stored, else the conservative estimate). A root whose Bloomberg
+        ticker is a placeholder is listed with bbg_ticker '' and requestable False.
+      * FX: the USD pair of every non-USD currency in the open book (futures' and options'
+        quote currencies, FX trades' two currencies), CNY and CNH through USDCNH; whole window.
+      * LME: each LME metal held, its cash and 3M pillars ('LME:CA CASH', 'LME:CA 3M' under
+        engine.lme's cash and 3M tickers); whole window.
+
+    Held = a net position on `as_of` (trades dated on or before it, not expired / settled):
+    an instrument whose trades net to zero is not held. Sorted: contracts by root then month,
+    then the FX pairs, then the LME pillars. Read-only (nothing stored in `bbg_library`, no
+    LIBRARY_VERSION change), no Bloomberg call."""
+    from datetime import date, timedelta
+    day = as_of if isinstance(as_of, date) else date.fromisoformat(str(as_of)[:10])
+    window_start = day - timedelta(days=RISK_HISTORY_CALENDAR_DAYS)
+    params = {"as_of": day.isoformat()}
+    held: Dict[str, set] = {}          # root id -> {(year, month)} held
+    unknown: Dict[str, dict] = {}      # instrument id -> a row for a contract contract-master cannot place
+    ccys: set = set()
+
+    def hold(root_id: str, instrument_id: str) -> None:
+        try:
+            from data.contracts import contract_for
+            c = contract_for(root_id, instrument_id)
+            held.setdefault(c.root_id, set()).add((c.year, c.month))
+        except Exception as exc:  # noqa: BLE001 -- UnknownContract, KeyError: listed, never asked
+            unknown[instrument_id] = {
+                "instrument_id": instrument_id, "bbg_ticker": "", "kind": RISK_KIND_CONTRACT,
+                "root_id": root_id, "start": window_start.isoformat(), "end": day.isoformat(),
+                "requestable": False, "reason": f"contract not placed on its root's chain: {exc}"}
+
+    for instrument_id, root, quote, net in conn.execute(_RISK_FUTURES_SQL, params):
+        if not net or not is_contract_root(root):
+            continue
+        hold(root, instrument_id)
+        ccys.add(quote)
+    for instrument_id, root, quote, net in conn.execute(_RISK_OPTIONS_SQL, params):
+        if not net or not is_contract_root(root):
+            continue
+        try:
+            from data.contracts import option_for
+            underlying = option_for(root, instrument_id).underlying
+            held.setdefault(underlying.root_id, set()).add((underlying.year, underlying.month))
+        except Exception as exc:  # noqa: BLE001 -- an option id contract-master cannot read back
+            unknown[instrument_id] = {
+                "instrument_id": instrument_id, "bbg_ticker": "", "kind": RISK_KIND_CONTRACT,
+                "root_id": root, "start": window_start.isoformat(), "end": day.isoformat(),
+                "requestable": False, "reason": f"underlying future not known: {exc}"}
+        ccys.add(quote)
+    for base, quote in conn.execute(_RISK_FX_SQL, params):
+        ccys.update((base, quote))
+    lme_held = sorted({root for root, _prompt, net in conn.execute(_RISK_LME_SQL, params) if net})
+
+    out: List[dict] = []
+    for root_id in sorted(held):
+        try:
+            out.extend(_root_chain(conn, root_id, held[root_id], day, window_start))
+        except (KeyError, ValueError) as exc:
+            out.append({"instrument_id": root_id, "bbg_ticker": "", "kind": RISK_KIND_CONTRACT,
+                        "root_id": root_id, "start": window_start.isoformat(), "end": day.isoformat(),
+                        "requestable": False, "reason": f"{root_id} is not in config/contracts.csv: {exc}"})
+    out.extend(unknown[k] for k in sorted(unknown))
+    for pair in sorted({_risk_fx_pair(c) for c in ccys if c and c != "USD" and not is_contract_root(c)}):
+        _instrument, ticker = _pair_row(conn, pair)
+        out.append({"instrument_id": pair, "bbg_ticker": ticker or f"{pair} Curncy", "kind": RISK_KIND_FX,
+                    "root_id": "", "start": window_start.isoformat(), "end": day.isoformat(),
+                    "requestable": True, "reason": ""})
+    for root_id in lme_held:
+        reason = _lme_curve_reason(root_id)
+        try:
+            from engine.lme import cash_ticker, three_month_ticker
+            pillars = (("CASH", cash_ticker(root_id)), ("3M", three_month_ticker(root_id)))
+        except (ImportError, KeyError, ValueError) as exc:
+            reason = reason or f"{root_id} is not an LME metal: {exc}"
+            pillars = (("CASH", ""), ("3M", ""))
+        for label, ticker in pillars:
+            out.append({"instrument_id": f"{root_id} {label}", "bbg_ticker": "" if reason else ticker,
+                        "kind": RISK_KIND_LME, "root_id": root_id, "start": window_start.isoformat(),
+                        "end": day.isoformat(), "requestable": not reason, "reason": reason})
+    return out
+
+
 def keys(conn: sqlite3.Connection, as_of: str, kind: str) -> List[str]:
     """Sorted distinct `key`s of one kind in force on `as_of` (live): the currencies whose
     OIS curve the pull asks for, the pairs whose vol smile it asks for. A retired kind

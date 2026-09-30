@@ -1341,7 +1341,7 @@ def _data_link(child, idx: str, hover: str):
 # target". The book's 1y VaR (1-day) and its blended vol as a share of the vol target, exactly as
 # risk-metrics' `book_risk(conn, as_of)["book"]` gives them (the Risk tab's own cards); nothing
 # here computes a metric. `book_risk` reads the history files and takes seconds (about 7 s on the
-# golden book, mostly the research history's constant-maturity series), so:
+# golden book, mostly the price history's constant-maturity series), so:
 #   - `_build_figures` never calls it: it shows the memoised result when there is one for this
 #     database revision, as-of and history, else "VaR …" (pending, the reason on hover);
 #   - the chip's own callback (`register_callbacks`), chained on the figures' output so it runs
@@ -1367,14 +1367,15 @@ _CONFIG_KEYS = ("vol_target_usd", "vol_target_placeholder", "vol_target_note", "
                 "var_confidence", "blended")
 
 
-def _risk_inputs() -> tuple:
-    """(history, commodity history, config, identity): risk-metrics' own loaders (each cached on
-    its files' mtimes, about 10 ms warm), so the memo key moves when the history or
-    config/risk.yaml changes, not only when the book does."""
+def _risk_inputs(conn: sqlite3.Connection) -> tuple:
+    """(history, commodity history, config, identity): risk-metrics' own loaders on the ACTIVE
+    book database's Bloomberg price history (`price_history`, 2026-09-30; each cached on the
+    file's stamp, about 10 ms warm), so the memo key moves when the history or config/risk.yaml
+    changes, not only when the book does."""
     from engine.risk.commodity_history import load_commodity_history
     from engine.risk.config import load_config
     from engine.risk.history import load_history
-    history, commodity, config = load_history(), load_commodity_history(), load_config()
+    history, commodity, config = load_history(conn), load_commodity_history(conn), load_config()
     ident = (history.path, history.last_date, commodity.path, commodity.first_date, commodity.last_date,
              json.dumps(config, sort_keys=True, default=str))
     return history, commodity, config, ident
@@ -1413,7 +1414,7 @@ def _risk_summary_uncached(conn: sqlite3.Connection, as_of: str, inputs: tuple) 
 
 def _risk_key(conn: sqlite3.Connection, as_of: str) -> tuple:
     """(memo key or None for an in-memory database, the inputs)."""
-    inputs = _risk_inputs()
+    inputs = _risk_inputs(conn)
     rev = _db_revision(conn)
     return ((*rev, as_of, inputs[3]) if rev is not None else None), inputs
 

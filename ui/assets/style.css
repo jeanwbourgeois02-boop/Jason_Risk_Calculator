@@ -623,9 +623,6 @@ p { margin: 8px 0; }
 .book-table tbody tr:last-child td:first-child { border-bottom-left-radius: 7px; }
 .book-table tbody tr:last-child td:last-child { border-bottom-right-radius: 7px; }
 .book-table thead th[title] { cursor: help; }
-.book-table th.book-research, .book-table td.book-research { font-weight: 400; }
-.book-table th.book-research { color: rgba(255,255,255,.72); }
-.book-table td.book-research { color: var(--muted); }
 .book-table td.book-spark-cell { padding-top: 3px; padding-bottom: 3px; }
 .book-spark { display: block; margin-left: auto; width: 90px; height: 18px; }
 .book-table th.l, .book-table td.l { text-align: left; }
@@ -964,8 +961,6 @@ p { margin: 8px 0; }
 .pnl-score-table, .pnl-ideas-table, .pnl-rolls-table { font-variant-numeric: tabular-nums; }
 .book-fold > summary.pnl-fold-summary { list-style: none; font-size: 12.5px; color: var(--navy); }
 .book-fold > summary.pnl-fold-summary::-webkit-details-marker { display: none; }
-.pnl-research-tag { color: var(--muted); font-size: 11px; border: 1px solid var(--line); border-radius: 3px;
-  padding: 0 4px; margin-left: 4px; cursor: help; }
 .pnl-carry-line { font-size: 13px; margin: 2px 0 10px; }
 .pnl-carry-line > span[title] { cursor: help; }
 .pnl-rolls-table td.pnl-rolls-sub { color: var(--muted); font-style: italic; font-size: 12px; background: #f7f8fa; }
@@ -1127,7 +1122,7 @@ p { margin: 8px 0; }
   .tk-table td.tk-what .tk-clip { max-width: 270px; }
   .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 170px; }
   .tf-bar.blotter-filter-bar { flex-wrap: wrap; }
-  /* a cell's markers (Excl. 2, Mock history) go under its figure rather than widen the column */
+  /* a cell's markers (Excl. 2) go under its figure rather than widen the column */
   .book-main .book-table.book-grid td { white-space: normal; }
   .book-main .book-table.book-grid td > span, .book-main .book-table.book-grid td .marker { white-space: nowrap; }
   .book-main .book-table.book-grid td .marker--small { display: block; margin-left: 0; }
@@ -1371,3 +1366,24 @@ p { margin: 8px 0; }
 .tk-table .tk-chip--red { color: var(--neg); background: #fdecea; }
 .tk-table td.tk-parts-cell { text-align: center; }
 .tk-table td.tk-parts-cell .tk-parts { font-size: 12px; }
+
+/* risk rebuild 2026-09-30: one headline sentence, the table, the worst stresses, three folds */
+.risk-headline-card { padding: 16px 20px; margin: 0 0 14px; }
+.risk-headline-card .tk-headline { margin: 0; gap: 6px 24px; }
+.risk-var-line { font-size: 18px; color: var(--text); cursor: help; }
+.risk-var-line .risk-var-figure { font-weight: 700; color: var(--neg); font-variant-numeric: tabular-nums; }
+.risk-var-line .marker { font-size: 12px; margin-left: 6px; }
+.risk-var-limit { font-size: 13px; color: var(--muted); cursor: help; }
+.risk-empty-card { display: flex; flex-direction: column; gap: 8px; padding: 22px 26px; margin: 0 0 14px; }
+.risk-empty-card .book-empty-title { font-size: 18px; color: var(--navy); }
+.risk-stress-card { padding: 0; margin: 0 0 14px; }
+.risk-stress-card > .tk-strip { border-bottom: 1px solid var(--line); }
+.risk-stress-card .tk-table-slot { overflow-x: auto; }
+/* inside an overflow slot the book-grid's sticky head would sit a top bar's height down, over the first line */
+.risk-stress-card .book-table.book-grid thead th { position: static; }
+.risk-stress-card .risk-quiet { padding: 10px 14px; margin: 0; }
+.tk-table.risk-stress-table tr.tk-row { cursor: pointer; }
+.tk-table.risk-stress-table td.risk-stress-trade { padding-left: 28px; }
+.risk-panel { gap: 18px; align-items: flex-start; }
+.tk-table.tk-kv.risk-kv thead th { position: static; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+.risk-trade-table td.tk-what { max-width: 520px; }

@@ -1,3 +1,4 @@
 - [contract_static in the snapshot (2026-09-24)](contract_static_in_snapshot_2026_09_24.md) — apply_contract_dates before realise_settled on import, ensure_static_table, fixture-count trap
 - [Macro tables removed (2026-09-24)](macro_tables_removed_2026_09_24.md) — MARKET_TABLES down to 5, old snapshot folder deleted, old snapshots' extra tables ignored
+- [price_history in the snapshot (2026-09-30)](price_history_in_snapshot_2026_09_30.md) — price_history/<YYYY-MM>.csv, group by day on its date index, costs
 - [Marks by month + skip (2026-09-30)](marks_by_month_and_skip_2026_09_30.md) — marks/<YYYY-MM>.csv, <db>.snapshot_state.json, fingerprint blind spot, costs

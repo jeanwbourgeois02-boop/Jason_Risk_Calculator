@@ -47,10 +47,12 @@
 #             treated as one for the futures' conversion).
 #   replay    a past window, start close to end close: each position takes the historical %
 #             move of the contract that was at the same distance to expiry on the start close,
-#             held to the end close without a roll, from the research app's settlement history
-#             (risk-history; COMMODITY_HISTORY_DB, else ../Commodity Dashboard/var/rv.sqlite). With no history for a
-#             commodity it is named under "missing"; with no history at all the scenario is
-#             n/a with the reason. Nothing is typed in here: the moves are the history's.
+#             held to the end close without a roll, from the Bloomberg price history in the
+#             book database's price_history table (risk-history; filled by "Pull Bloomberg now").
+#             A window that starts before the first close on file shows no result with the
+#             reason "No price history for <start> to <end>: before the history on file"; with no history
+#             for a commodity it is named under "missing"; with no history at all the
+#             scenario is n/a with the reason. Nothing is typed in here: the moves are the history's.
 
 curve_defaults:
   front_months: 1     # contracts expiring within a month take the full front move

@@ -2,15 +2,16 @@
 interest and average daily volume, because getting out is the risk on deferred months and on the
 Chinese exchanges.
 
-RESEARCH CONTEXT, labelled 'research': the open interest and volume are the research app's
-(``engine.risk.commodity_history.contract_liquidity``, read-only from its ``price_daily``). They
-are never a mark, never in P&L or delta (hard rule 2), and nothing here asks Bloomberg (hard rule
-8), reads ``marks`` or writes anything. The thresholds are ``config/limits.yaml``'s ``liquidity:``
-section, placeholders until Jason gives his (``placeholder`` says so).
+A RISK INPUT, labelled 'Bloomberg history': the open interest and volume are Bloomberg's
+(OPEN_INT and PX_VOLUME, which the backfill stores in the book database's ``price_history``; read
+through ``engine.risk.commodity_history.contract_liquidity``, since 2026-09-30). They are never a
+mark, never in P&L or delta (hard rule 2), and nothing here asks Bloomberg (hard rule 8), reads
+``marks`` or writes anything. The thresholds are ``config/limits.yaml``'s ``liquidity:`` section,
+placeholders until Jason gives his (``placeholder`` says so).
 
 What is checked: the contracts of the open commodity positions of curve-positions
 (``engine.curve.curve_positions``): a future at its lots, an LME ticket at its lots (tonnes over
-the lot's tonnes) on the research app's contract of its prompt month, an option on a future at
+the lot's tonnes) on the metal's 3M pillar's figures (risk-history's rule), an option on a future at
 its delta lots (option lots x its DELTA mark, curve-positions' ``delta_factor``) on its underlying
 future; an option with no delta is counted nowhere and said so (the contract is tested on the
 lots that are known, ``incomplete`` True and the option named in ``excluded`` and ``reason``;
@@ -18,8 +19,9 @@ with nothing known the level is NO_DATA). A contract a position bought and sold 
 future like any other. FX spot, forwards, swaps and FX options are not exchange contracts and are
 listed in ``skipped``.
 
-Per contract, with the size in the research contract's lots (ours x our lot / its lot when both
-are sized in the same unit, else as they are, said in ``note``):
+Per contract, with the size in the lots Bloomberg's figures count (ours x our lot / its lot
+when both are sized in the same unit, else as they are, said in ``note``; the keys
+``research_lots`` and ``research_contract_id`` keep their names):
   pct_of_oi     |lots| / open interest (the latest on or before as-of)
   pct_of_adv    |lots| / average daily volume (over the last ``window`` days with a volume)
   days_to_exit  |lots| / (participation x average daily volume)
@@ -28,10 +30,11 @@ are sized in the same unit, else as they are, said in ``note``):
                 ``red_days_to_exit``); a test whose figure is missing is not run (``tests`` says
                 which ran, ``reason`` why not); with no test run the level is NO_DATA, never GREEN.
                 Open interest of 0, or no volume over the window, with a position is RED.
-No factor is applied to a Chinese exchange's figures (single- or double-sided counting is not
-verified on a terminal): the research app's note is passed through in ``note``. A deferred month
-the research app does not keep has no figures: NO_DATA, "no liquidity data for this month", with
-its place in the strip; never zero.
+No factor is applied to a Chinese exchange's figures (whether Bloomberg's open interest there is
+single- or double-sided is not verified on a terminal): risk-history's note on it is passed
+through in ``note``. A month with no Bloomberg volume or open interest on file (none stored, or
+-1 = not given) has no figures: NO_DATA, "no liquidity data for this month", with its place in
+the strip; never zero.
 
 Two views of each contract:
   * ``contracts``: the book's net in it (every position and product netted: what one would have
@@ -59,8 +62,8 @@ LIQUIDITY_LEVELS = (RED, AMBER, GREEN, NO_DATA)
 _RANK = {NO_DATA: 0, GREEN: 1, AMBER: 2, RED: 3}
 FX_PRODUCTS = ("FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION")
 FX_SKIP = "FX: not an exchange contract"
-LABEL = "research"
-BASIS = ("research context: open interest and average daily volume from the research app's database, "
+LABEL = "Bloomberg history"
+BASIS = ("risk input: Bloomberg volume and open interest (daily history stored in the book database), "
          "never a mark, never in P&L or delta")
 PLACEHOLDER_NOTE = "thresholds are placeholders (config/limits.yaml, liquidity) until Jason gives his"
 NO_MONTH_DATA = "no liquidity data for this month"
@@ -111,7 +114,7 @@ def _level_of(value: Optional[float], amber: Optional[float], red: Optional[floa
 
 
 def _measure(lots: Optional[float], liq: Optional[dict], params: Dict[str, Any], factor: float) -> dict:
-    """The figures and level of |lots| (ours) against one contract's research figures."""
+    """The figures and level of |lots| (ours) against one contract's Bloomberg volume and open interest."""
     out = {"research_lots": None, "open_interest": None, "oi_date": None, "adv": None, "adv_days": 0,
            "pct_of_oi": None, "pct_of_adv": None, "days_to_exit": None, "level": NO_DATA,
            "tests": {"open_interest": None, "days_to_exit": None}, "reason": ""}
@@ -124,7 +127,7 @@ def _measure(lots: Optional[float], liq: Optional[dict], params: Dict[str, Any],
     size = abs(lots) * factor
     out["research_lots"] = size
     if liq is None:
-        out["reason"] = "no research figures for this contract"
+        out["reason"] = "no Bloomberg volume and open interest for this contract"
         return out
     reasons: List[str] = []
     oi, adv = out["open_interest"], out["adv"]
@@ -213,7 +216,7 @@ def _exposure(tid: str, f: dict, row: Optional[dict], flat: Optional[dict], root
 
 
 def _factor(roots: dict, root_id: Optional[str], liq: Optional[dict]) -> Tuple[float, str]:
-    """(our lots -> research lots, '' or a note)."""
+    """(our lots -> the lots Bloomberg's figures count, '' or a note)."""
     if not liq:
         return 1.0, ""
     theirs, unit = _num(liq.get("lot_size")), str(liq.get("lot_unit") or "")
@@ -224,8 +227,8 @@ def _factor(roots: dict, root_id: Optional[str], liq: Optional[dict]) -> Tuple[f
     if same_unit and abs(ours[0] - theirs) <= _EPS:
         return 1.0, ""
     if same_unit:
-        return ours[0] / theirs, f"our lot of {ours[0]:g} {ours[1]} converted to research lots of {theirs:g} {unit}"
-    return 1.0, (f"lots compared as they are: a research lot is {theirs:g} {unit}, ours {ours[0]:g} {ours[1]} "
+        return ours[0] / theirs, f"our lot of {ours[0]:g} {ours[1]} converted to lots of {theirs:g} {unit}"
+    return 1.0, (f"lots compared as they are: a lot in Bloomberg's figures is {theirs:g} {unit}, ours {ours[0]:g} {ours[1]} "
                  "(units differ, no conversion)")
 
 
@@ -239,8 +242,9 @@ def liquidity(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = No
     """The liquidity check on ``as_of`` (module docstring). ``spreads`` / ``curve``:
     ``engine.spreads.book_spreads(conn, as_of)`` and ``engine.curve.curve_positions(conn, as_of)``,
     built when None. ``config``: a ``LimitsConfig`` (``load_limits()`` when None) or the liquidity
-    mapping itself. ``db_path``: the research database (``contract_liquidity``'s own search when
-    None). Reads the trades and legs only; never raises on missing data: every gap is a reason.
+    mapping itself. ``db_path``: the book database whose ``price_history`` holds Bloomberg's
+    volume and open interest (a path or an open connection); None = ``conn``'s own database.
+    Reads the trades and legs only; never raises on missing data: every gap is a reason.
 
     Returns ``{as_of, available, reason, label, basis, placeholder, placeholder_note, params,
     contracts, positions, skipped, summary}``:
@@ -319,13 +323,13 @@ def liquidity(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = No
         if legs:
             pos_legs.append((p, legs))
 
-    # -- the research figures, once
+    # -- Bloomberg's volume and open interest, once
     window = params.get("window")
     liq: Dict[str, dict] = {}
     if want:
         from engine.risk.commodity_history import LIQUIDITY_WINDOW, contract_liquidity
         window = int(window or LIQUIDITY_WINDOW)
-        liq = contract_liquidity(want, as_of, window=window, db_path=db_path)
+        liq = contract_liquidity(want, as_of, window=window, db_path=conn if db_path is None else db_path)
     out["params"] = {**params, "window": window}
 
     def figures(cid: str, root: Optional[str], lots: Optional[float]) -> dict:
@@ -334,7 +338,7 @@ def liquidity(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = No
         factor, fnote = _factor(roots, root, rec if resolved else None)
         m = _measure(lots, rec if resolved else None, params, factor)
         if rec is not None and not resolved:
-            m["reason"] = f"{NO_MONTH_DATA}: {rec.get('reason') or 'not in the research database'}"
+            m["reason"] = f"{NO_MONTH_DATA}: {rec.get('reason') or 'no Bloomberg history on file'}"
         elif resolved and m["level"] == NO_DATA and lots is not None:
             m["reason"] = f"{NO_MONTH_DATA}: {m['reason']}"
         m["lot_factor"] = factor
@@ -421,7 +425,7 @@ def liquidity(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = No
     out["available"] = any(c["level"] != NO_DATA for c in out["contracts"])
     if not out["available"]:
         out["reason"] = why_none or ("no open commodity position" if not want else
-                                     "no research figures for any contract the book holds")
+                                     "no Bloomberg volume or open interest for any contract the book holds")
     out["summary"] = _summary(out)
     return out
 

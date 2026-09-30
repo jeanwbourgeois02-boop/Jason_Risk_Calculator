@@ -404,7 +404,9 @@ ASK_LABELS = {"spot": "FX closes", "fwd": "forward-curve tenors", "future": "fut
               "inputs_plan": "the smiles and curves each day lacks", "closes": "saving the closes",
               "forwards": "the day's forward curves", "inputs": "the day's vol smiles and OIS curves",
               "options": "the day's option pricing", "ledger": "the ledger", "closing": "the closing ledger step",
-              "bookkeeping": "the backfill's status bookkeeping"}
+              "bookkeeping": "the backfill's status bookkeeping",
+              # the risk history step (2026-09-30): its own report, status["backfill"]["risk_history"]
+              "risk_history": "risk history (settlements, volume, open interest)"}
 
 
 # bbg-curves' wording and test for a value that is not a number (fwd_curve, 2026-09-29), so a
@@ -2684,6 +2686,321 @@ def _pull_ledger_repeat(db_path, today: date) -> dict:
                          "refrozen": [], "kept": list(led.get("kept") or [])}, today.isoformat())
 
 
+# --------------------------------------------------------------------------- risk history (2026-09-30)
+# User decision 2026-09-30: the Risk tab stops reading the research app's database; its daily
+# history (settlement, volume, open interest per contract; PX_LAST per FX pair and LME pillar)
+# comes from Bloomberg into this app's own table `price_history`. A risk input only: never a
+# mark, never in `marks`, never in P&L or delta (hard rule 2). Filled at the end of the
+# backfill of a real pull ("Pull Bloomberg now", hard rule 8), after the closes and the
+# closing ledger step, before the snapshot export; what to ask is the Bloomberg library's
+# `risk_history_needs(conn, as_of)`.
+PRICE_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS price_history (
+  instrument_id   TEXT NOT NULL,
+  as_of_date      TEXT NOT NULL,
+  settle          REAL NOT NULL,
+  volume          REAL NOT NULL DEFAULT -1,
+  open_interest   REAL NOT NULL DEFAULT -1,
+  bbg_ticker      TEXT NOT NULL DEFAULT '',
+  source          TEXT NOT NULL DEFAULT 'BBG_BDH',
+  snapped_at      TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (instrument_id, as_of_date)
+)
+"""
+RISK_HISTORY_FIELDS = ["PX_LAST", "PX_VOLUME", "OPEN_INT"]   # a contract or an LME pillar
+RISK_HISTORY_FX_FIELDS = ["PX_LAST"]                          # an FX pair: no volume, no open interest
+RISK_HISTORY_SOURCE = "BBG_BDH"
+RISK_HISTORY_NO_ROWS = "Bloomberg returned no history"
+# db -> the "risk_history" block of the last run, published under status["backfill"]
+_risk_blocks: Dict[str, dict] = {}
+
+
+def _ensure_price_history(conn: sqlite3.Connection) -> None:
+    """Create `price_history` when ingest-schema's DDL has not reached this database yet (the
+    same columns); nothing is written when it exists (a plain read of sqlite_master)."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'price_history'").fetchone():
+        return
+    conn.execute(PRICE_HISTORY_DDL)
+    conn.commit()
+
+
+def _has_weekday(lo: date, hi: date) -> bool:
+    """Whether [lo, hi] holds a Monday-to-Friday day. Weekdays, not config/holidays.txt: a
+    Chinese exchange trades on a New York holiday, and Bloomberg sends only the days that traded."""
+    if lo > hi:
+        return False
+    first = lo + timedelta(days=max(0, 7 - lo.weekday()) if lo.weekday() >= 5 else 0)
+    return first <= hi
+
+
+def _risk_asks(needs: List[dict], stored: Dict[str, tuple], last_day: date) -> List[dict]:
+    """The stretches to ask per requestable need: {ticker, instrument_id, fields, lo, hi,
+    fresh}. With nothing on file, its whole window [start, end]; else the days before the
+    first stored day and after the last one (the new days). A stored day is never asked again,
+    with one exception: the last stored day of a contract whose volume or open interest came
+    as none (-1) is asked with the new days, since Bloomberg publishes those a day late. A day
+    inside the stored span with no row (a holiday of that exchange) is not asked on every
+    press. `end` is capped at `last_day` (the day before the book's today: today's PX_LAST is
+    a live price, not a close)."""
+    out: List[dict] = []
+    for need in needs:
+        try:
+            lo, hi = date.fromisoformat(str(need["start"])), date.fromisoformat(str(need["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue                                   # said by the caller as not asked
+        hi = min(hi, last_day)
+        fx = str(need.get("kind") or "").upper() == "FX"
+        base = {"ticker": need["bbg_ticker"], "instrument_id": need["instrument_id"],
+                "fields": tuple(RISK_HISTORY_FX_FIELDS if fx else RISK_HISTORY_FIELDS)}
+        have = stored.get(need["instrument_id"])
+        if have is None:
+            if _has_weekday(lo, hi):
+                out.append({**base, "lo": lo, "hi": hi, "fresh": True})
+            continue
+        first, last, last_incomplete = have
+        head_hi = first - timedelta(days=1)
+        if _has_weekday(lo, min(head_hi, hi)):
+            out.append({**base, "lo": lo, "hi": min(head_hi, hi), "fresh": False})
+        tail_lo = max(lo, last + timedelta(days=1))
+        if _has_weekday(tail_lo, hi):
+            if last_incomplete and not fx and lo <= last:
+                tail_lo = last                         # its volume / open interest, a day late
+            out.append({**base, "lo": tail_lo, "hi": hi, "fresh": False})
+    return out
+
+
+def _risk_chunks(asks: List[dict]) -> List[List[dict]]:
+    """`asks` packed into requests: one field list per request, in order of their stretch so
+    that the securities of one request want about the same days, HISTORY_CHUNK securities at
+    most and never one ticker twice (its window is then the union of its securities')."""
+    chunks: List[List[dict]] = []
+    by_fields: Dict[tuple, List[dict]] = {}
+    for a in asks:
+        by_fields.setdefault(a["fields"], []).append(a)
+    for group in by_fields.values():
+        group.sort(key=lambda a: (a["lo"], a["hi"], a["ticker"]))
+        current: List[dict] = []
+        for a in group:
+            if len(current) >= HISTORY_CHUNK or any(c["ticker"] == a["ticker"] for c in current):
+                chunks.append(current)
+                current = []
+            current.append(a)
+        if current:
+            chunks.append(current)
+    return chunks
+
+
+def _risk_fetch_with_errors(security_errors: Dict[str, str]) -> Callable:
+    """pull_marks.fetch_historical_series with Bloomberg's own per-security error kept
+    (`security_errors`, ticker -> sentence): the fetcher does not raise on an unknown security,
+    it returns no rows, and its diagnostics record says why."""
+    from data.bloomberg import pull_marks as pm
+
+    def fetch(session, service, tickers, fields, start, end):
+        diag = pm.Diagnostics()
+        try:
+            return pm.fetch_historical_series(session, service, tickers, fields, start, end, diag=diag)
+        finally:
+            for rec in diag.requests:
+                for sec in rec.get("raw_response") or []:
+                    err = sec.get("securityError") if isinstance(sec, dict) else None
+                    if err:
+                        security_errors[str(sec.get("security"))] = (
+                            f"Bloomberg does not know this security: {err.get('message') or 'security error'}")
+    return fetch
+
+
+def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[Callable] = None,
+                      today: Optional[date] = None, log: Callable[[str], None] = print,
+                      host: str = "localhost", port: int = 8194) -> dict:
+    """Fill `price_history` (the Risk tab's daily history, user decision 2026-09-30) for every
+    need of `data.bloomberg.library.risk_history_needs(conn, today)`, and return the status
+    block "risk_history" (also kept for `start_auto_backfill`'s publication):
+
+      {"ran_at", "as_of_date", "needs": <int>, "up_to_date": <int> (nothing new to ask),
+       "asked": <int> securities asked, "requests": `_Asks.summary()`, "rows_written": <int>,
+       "failures": [{"ticker", "instrument_id", "reason"}, ...], "failure_count",
+       "not_numbers": [{"what", "day", "reason"}, ...], "not_number_count",
+       "unrequestable": [{"instrument_id", "ticker", "reason"}, ...], "unrequestable_count",
+       "error": "" or why the step did not run}
+
+    A requestable need is asked Bloomberg's daily history (PX_LAST, PX_VOLUME, OPEN_INT; an FX
+    pair PX_LAST alone) only for its days not on file (`_risk_asks`), many securities per
+    request (`_risk_chunks`) through the backfill's own `_Asks` (a failing request re-asked
+    ticker by ticker, nothing sent after TIMEOUTS_BEFORE_GIVING_UP timeouts in a row). Rows are
+    written INSERT OR REPLACE, source BBG_BDH, the ticker as asked, snapped_at now; a volume or
+    open interest Bloomberg did not give is -1; a value that is not a number is never written
+    (a settle: the day is left out; a volume or open interest: -1) and is reported. An
+    unrequestable need is listed with its reason and never asked. Never raises, and never
+    writes `marks`: a failure here is reported in its own block and fails neither the pull nor
+    the backfill.
+
+    `session`: a `(session, service)` to ask on (the live pull's lent one); without it one is
+    opened here (pull_marks.open_session) and stopped. `fetch` (tests, scratch checks): the
+    history fetcher `(session, service, tickers, fields, start, end) -> {ticker: {date_iso:
+    {field: value}}}`, default pull_marks.fetch_historical_series."""
+    from data.bloomberg.live import book_today
+    today = today or book_today()
+    key = _db_key(db_path)
+    block: dict = {"ran_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                   "as_of_date": today.isoformat(), "needs": 0, "up_to_date": 0, "asked": 0, "requests": {},
+                   "rows_written": 0, "failures": [], "failure_count": 0, "not_numbers": [], "not_number_count": 0,
+                   "unrequestable": [], "unrequestable_count": 0, "error": ""}
+    _risk_blocks[key] = block
+    conn = None
+    own_session = None
+    failures: Dict[str, dict] = {}
+
+    def _fail(ticker: str, instrument_id: str, reason: str) -> None:
+        failures.setdefault(ticker, {"ticker": ticker, "instrument_id": instrument_id, "reason": reason})
+
+    try:
+        try:
+            from data.bloomberg.library import risk_history_needs
+        except Exception as exc:  # noqa: BLE001 -- bbg-library's function not in this checkout yet
+            block["error"] = f"the list of risk-history needs is not available ({_plain_error(exc)}); nothing asked"
+            return block
+        conn = _listing_connection(db_path)
+        _ensure_price_history(conn)
+        needs = [dict(n) for n in (risk_history_needs(conn, today.isoformat()) or [])]
+        block["needs"] = len(needs)
+        requestable = []
+        unrequestable = []
+        for n in needs:
+            ticker = str(n.get("bbg_ticker") or "")
+            if n.get("requestable") and ticker and n.get("instrument_id"):
+                requestable.append({**n, "bbg_ticker": ticker})
+            else:
+                unrequestable.append({"instrument_id": n.get("instrument_id") or "", "ticker": ticker,
+                                      "reason": str(n.get("reason") or "no Bloomberg ticker for it")})
+        block["unrequestable_count"] = len(unrequestable)
+        block["unrequestable"] = unrequestable[:MAX_STATUS_ERRORS]
+        stored: Dict[str, tuple] = {}
+        for iid, lo, hi, vol, oi in conn.execute(
+                "SELECT p.instrument_id, x.lo, x.hi, p.volume, p.open_interest FROM price_history p "
+                "JOIN (SELECT instrument_id, MIN(as_of_date) AS lo, MAX(as_of_date) AS hi FROM price_history "
+                "GROUP BY instrument_id) x ON p.instrument_id = x.instrument_id AND p.as_of_date = x.hi"):
+            try:
+                stored[iid] = (date.fromisoformat(lo), date.fromisoformat(hi),
+                               (vol is None or vol < 0) or (oi is None or oi < 0))
+            except (TypeError, ValueError):
+                continue
+        wanted = _risk_asks(requestable, stored, today - timedelta(days=1))
+        for n in requestable:
+            try:
+                date.fromisoformat(str(n["start"]))
+                date.fromisoformat(str(n["end"]))
+            except (KeyError, TypeError, ValueError):
+                _fail(n["bbg_ticker"], n["instrument_id"],
+                      f"no valid window to ask (start {n.get('start')!r}, end {n.get('end')!r}); not asked")
+        block["up_to_date"] = len({n["instrument_id"] for n in requestable}
+                                  - {a["instrument_id"] for a in wanted}
+                                  - {f["instrument_id"] for f in failures.values()})
+        block["asked"] = len({a["ticker"] for a in wanted})
+        if not wanted:
+            return block
+        _release_lock(conn)
+        security_errors: Dict[str, str] = {}
+        if fetch is None:
+            fetch = _risk_fetch_with_errors(security_errors)
+        if session is None:
+            from data.bloomberg import pull_marks as pm
+            try:
+                own_session = pm.open_session(host, port)
+            except Exception as exc:  # noqa: BLE001 -- no session: every security said as not asked
+                reason = f"{NOT_ASKED}: no Bloomberg session ({_plain_error(exc)})"
+                for a in wanted:
+                    _fail(a["ticker"], a["instrument_id"], reason)
+                block["error"] = reason
+                return block
+            session = own_session
+        sess, service = session
+        asks = _Asks(conn, log)
+        snapped = datetime.now(NY).isoformat(timespec="seconds")
+        for chunk in _risk_chunks(wanted):
+            fields = list(chunk[0]["fields"])
+            lo, hi = min(a["lo"] for a in chunk), max(a["hi"] for a in chunk)
+            key_of = {a["ticker"]: a["instrument_id"] for a in chunk}
+            got = asks.series("risk_history", fetch, sess, service, list(key_of), fields, lo, hi, key_of=key_of)
+            rows = []
+            for a in chunk:
+                per_day = got.get(a["ticker"]) or {}
+                in_window = {d: v for d, v in per_day.items()
+                             if isinstance(v, dict) and a["lo"].isoformat() <= str(d) <= a["hi"].isoformat()}
+                why = asks.reason("risk_history", a["instrument_id"], a["lo"])
+                if why:
+                    _fail(a["ticker"], a["instrument_id"], why)
+                    continue
+                if not in_window:
+                    if a["ticker"] in security_errors:
+                        _fail(a["ticker"], a["instrument_id"], security_errors[a["ticker"]])
+                    elif a["fresh"]:
+                        _fail(a["ticker"], a["instrument_id"], f"{RISK_HISTORY_NO_ROWS} for {a['ticker']} "
+                                                               f"({a['lo']}..{a['hi']})")
+                    continue                           # a stretch of holidays only: nothing to say
+                for day_iso, values in sorted(in_window.items()):
+                    settle = _number(values.get("PX_LAST"))
+                    if settle is None:
+                        if "PX_LAST" in values:
+                            asks.not_number(f"{a['ticker']} PX_LAST", day_iso, values.get("PX_LAST"))
+                        continue               # no settle that day: no row (never a guessed one)
+                    extra = []
+                    for field in ("PX_VOLUME", "OPEN_INT"):
+                        raw = values.get(field)
+                        value = _number(raw) if field in fields else None
+                        if value is None and field in fields and raw is not None:
+                            asks.not_number(f"{a['ticker']} {field}", day_iso, raw)
+                        extra.append(-1.0 if value is None else value)
+                    rows.append((a["instrument_id"], day_iso, settle, extra[0], extra[1], a["ticker"],
+                                 RISK_HISTORY_SOURCE, snapped))
+            if rows:
+                try:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO price_history (instrument_id, as_of_date, settle, volume, "
+                        "open_interest, bbg_ticker, source, snapped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                    conn.commit()
+                    block["rows_written"] += len(rows)
+                except Exception as exc:  # noqa: BLE001 -- this request's rows fail alone
+                    _rollback(conn)
+                    reason = f"the rows could not be saved: {_plain_error(exc)}"
+                    for a in chunk:
+                        _fail(a["ticker"], a["instrument_id"], reason)
+        block["requests"] = asks.summary()
+        block["not_number_count"] = asks.not_number_count
+        block["not_numbers"] = list(asks.not_numbers)
+        return block
+    except Exception as exc:  # noqa: BLE001 -- never a failure of the pull or the backfill
+        if conn is not None:
+            _rollback(conn)
+        block["error"] = f"the risk history step stopped: {_plain_error(exc)}"
+        return block
+    finally:
+        if own_session is not None:
+            try:
+                own_session[0].stop()
+            except Exception:  # noqa: BLE001
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        block["failure_count"] = len(failures)
+        block["failures"] = list(failures.values())[:MAX_STATUS_ERRORS]
+        problems = block["failure_count"] + block["not_number_count"]
+        try:
+            if block["error"]:
+                log(_problem(f"Risk history: {block['error']}."))
+            elif problems:
+                log(_problem(f"Risk history: {block['rows_written']} row(s) written; {block['failure_count']} "
+                             f"security(ies) failed, {block['not_number_count']} value(s) not a number left out; "
+                             f"see the Data tab."))
+            else:
+                log(f"Risk history: {block['rows_written']} row(s) written for {block['asked']} security(ies).")
+        except Exception:  # noqa: BLE001 -- the terminal is a courtesy
+            pass
+
+
 def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                    fetch: Optional[Callable] = None, fwd_fetch: Optional[Callable] = None,
                    fut_fetch: Optional[Callable] = None, session_factory: Optional[Callable] = None,
@@ -3083,6 +3400,10 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
       "not_numbers": [{"what", "day", "reason"}, ... at most MAX_STATUS_ERRORS] -- values
               Bloomberg sent that are not numbers ('N.A.', NaN), never written (hard rule 2);
               "not_number_count": how many in all.
+      "risk_history": the Risk tab's daily history step of the last real pull (2026-09-30,
+              `risk_history_step`'s block: securities asked, rows written, failures by ticker,
+              values not a number, the unrequestable needs with their reasons, "error"); its
+              failures are its own, never in "errors" or "reason".
     "days" holds the header's reference dates and the newest days that are not DONE (a
     day lacking a smile or a curve its FX options need counts as not DONE), so
     the header can say WHY a period is n/a. A "reason" of a run that raised contains the
@@ -3163,6 +3484,14 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                 crashed = f"auto-backfill failed: {exc!r}"
                 _publish({"running": False, "reason": crashed})
             if real_pull:
+                # The Risk tab's daily history (2026-09-30), after the closes and the closing
+                # ledger step, before the snapshot: a real pull only, on the lent session when
+                # there is one; reported in its own block, never a failure of the backfill.
+                progress.stage("the risk history")
+                try:
+                    risk_history_step(db_path, session=session, log=_QuietLog(), host=host, port=port)
+                except Exception as exc:  # noqa: BLE001 -- the step never raises; belt and braces
+                    _risk_blocks[key] = {"error": f"the risk history step stopped: {_plain_error(exc)}"}
                 progress.stage("saving the marks snapshot")
             _save()
         finally:
@@ -3176,6 +3505,8 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                          "errors": report["errors"], "error_count": report["error_count"],
                          "requests": report["requests"], "not_numbers": report["not_numbers"],
                          "not_number_count": report["not_number_count"],
+                         # 2026-09-30: the Risk tab's history step, its own report
+                         "risk_history": _risk_blocks.get(key, {}),
                          "last_run": datetime.now().astimezone().isoformat(timespec="seconds")}
                 if not crashed:
                     patch["reason"] = failure_sentence(report)

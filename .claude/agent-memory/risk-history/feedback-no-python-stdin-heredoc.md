@@ -11,3 +11,5 @@ Never run Python through `py -3 -` and a heredoc. Write the script to the scratc
 **How to apply:** this covers every inline Python run in this repo, including throwaway checks.
 
 2026-09-29: it happened again with an EMPTY heredoc (`py -3 - <<'EOF' ... EOF` with nothing inside). It still hung, and the rest of the chained command never ran. Never type `py -3 -` in any form.
+
+2026-09-30: it happened a third time with `py -3 - 2>/dev/null </dev/null` (no heredoc, stdin redirected): it still hung and blocked the rest of the chain. Stopped with `kill <bash pid> <py pid>` on my own PIDs from `ps -ef` (Git Bash), never by name.

@@ -1,5 +1,5 @@
-"""The Risk tab's parameters: `config/risk.yaml`, with the nm-dashboard's own constants
-(`fx_alpha/core/risk.py`) as the defaults when the file is missing, the way
+"""The Risk tab's parameters: `config/risk.yaml`, with the macro risk model's original
+constants as the defaults when the file is missing, the way
 `engine/pnl/stress.py::load_scenarios` treats `config/stress.yaml`.
 
 Keys (see the yaml for the meaning of each):

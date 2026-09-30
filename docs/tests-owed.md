@@ -107,3 +107,22 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 
 - Delete (the box was rebuilt, not re-pinned), in `tests/test_uploads.py`: `test_headline_keeps_whatever_the_list_does_not_reproduce`, `test_notes_render_as_a_list_under_the_headline_with_nothing_lost_or_doubled`, `test_real_ingest_report_on_the_sample_names_its_two_rejects_and_stays_open`, `test_real_ingest_report_on_the_clean_sample_is_structured_clean_and_lists_its_notes`, `test_real_ingest_report_with_one_unreadable_row_is_sticky`.
 - New coverage owed: `report_result` on a clean report (one line, --info) and a problem report (two lines, --warning, the Data tab link).
+
+## Rebuild on `price_history` (Phase H, 2026-09-30: no research app, no nm-dashboard folder)
+- `tests/test_risk_history.py`: every test errors at setup (the `_no_env` fixture deletes the removed
+  `ENV_VAR`); the history.py tests use the parquet folder (`FILES`, `SPOT_FILE`); the commodity tests
+  build the research app's `price_daily` / `fx_daily`. Rebuild on synthetic `price_history` rows;
+  delete the four `research_curve` tests (the function is gone).
+- `tests/test_risk.py` (risk-metrics): the parquet fixtures (`history_mod.SPOT_FILE`, `history_dir`,
+  `spot_last_date`, `RISK_HISTORY_DIR`) and the commodity section's `write_research_db` / `research`
+  fixture (~490-870); rebuild on `price_history`.
+- `tests/test_commodity_stress.py`: `_research_db` and the two replay tests setting
+  `COMMODITY_HISTORY_DB`; rebuild on `price_history` (a replay before the history reads
+  "No price history for <start> to <end>: before the history on file").
+- `tests/test_spread_levels.py`: its `research_id` / `research_instance` checks, if those fields go.
+- `tests/test_ui_risk.py`: pinned to the old Risk layout (seven columns, Price check fold); delete
+  what the slim Risk tab no longer has.
+- `tests/test_research_spreads.py`: deleted with its module.
+- `tests/test_ui_risk.py`: its 11 tests of the old Risk layout (the two cards and worst-day line, the
+  margin and limits tables, the not-set drawer) are deleted, not re-pinned; the Risk parts of
+  `tests/test_ui_curve.py` likewise. `tests/test_ui_smoke.py` still calls `risk.render` (kept).

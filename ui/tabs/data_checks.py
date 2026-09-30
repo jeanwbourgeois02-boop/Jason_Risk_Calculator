@@ -32,7 +32,7 @@ from dash import html
 from ui.tabs import data_kit as kit
 from ui.tabs.formatting import (
     cap, cap_parts, tidy,
-    MINUS, MISSING, is_fx_pair, missing_cell, parse_contract_id, plain_words, price_text, short_date,
+    MINUS, MISSING, is_fx_pair, missing_cell, parse_contract_id, plain_ids, plain_words, price_text, short_date,
 )
 
 STATUS_ORDER = {"MISSING": 0, "CHECK": 1, "OK": 2}
@@ -330,6 +330,64 @@ def pull_problems(status: Optional[dict]) -> List[dict]:
                 out.append(_problem("red", "Failed", "Past closes", "Bloomberg stopped answering; the backfill gave up",
                                     "The closes not asked stay missing until the next pull",
                                     problem_tip=f"{req.get('tickers_not_asked', 0)} tickers not asked", rank=2))
+        out += history_problems(backfill.get("risk_history"))
+    return out
+
+
+HISTORY_FIELDS = {"PX_LAST": "close", "PX_VOLUME": "volume", "OPEN_INT": "open interest"}
+RISK_EFFECT = "Risk figures of the trades holding it: daily risk, VaR, hedge %, z and days to exit"
+
+
+def history_name(instrument_id: Any) -> str:
+    """A price history row's security in plain words: 'WTI Dec26', 'LME copper cash', 'USDCNH'."""
+    return plain_ids(str(instrument_id or "")).replace(" CASH", " cash") or "A security"
+
+
+def history_problems(block: Any) -> List[dict]:
+    """The Risk tab's daily price history step of the last pull (`status["backfill"]["risk_history"]`,
+    bbg-backfill, 2026-09-30) as problem rows: the step stopped, a security Bloomberg did not
+    answer, a value that was not a number, a security that cannot be asked."""
+    out: List[dict] = []
+    if not isinstance(block, dict) or not block:
+        return out
+    if block.get("error"):
+        out.append(_problem("red", "Failed", "Price history", plain_words(block["error"]),
+                            "Risk figures not updated: the Risk tab runs on the history on file",
+                            problem_tip=str(block["error"]), rank=2))
+    fails = [f for f in block.get("failures") or [] if isinstance(f, dict)]
+    for f in fails:
+        why = str(f.get("reason") or "no rows returned")
+        name = history_name(f.get("instrument_id"))
+        ticker = str(f.get("ticker") or "")
+        shown = why.replace(ticker, name) if ticker else why      # the ticker on hover only
+        out.append(_problem("red", "Failed", f"Price history: {name}",
+                            plain_ids(plain_words(shown)), RISK_EFFECT,
+                            price_tip=str(f.get("ticker") or f.get("instrument_id") or ""), problem_tip=shown, rank=2.2))
+    more = int(block.get("failure_count") or 0) - len(fails)
+    if more > 0:
+        out.append(_problem("red", "Failed", "Price history", f"{more} more securities not fetched, not listed one "
+                                                              "by one", RISK_EFFECT, rank=2.6))
+    nans = [n for n in block.get("not_numbers") or [] if isinstance(n, dict)]
+    for n in nans:
+        day = str(n.get("day") or "")
+        what = str(n.get("what") or "")
+        field = next((w for f, w in HISTORY_FIELDS.items() if what.endswith(f)), "value")
+        out.append(_problem("amber", "Check", "Price history", f"Bloomberg sent a {field} that is not a number",
+                            f"That day is left out of the history{f' ({short_date(day)})' if day else ''}",
+                            price_tip=what, problem_tip=str(n.get("reason") or ""), rank=3.2))
+    more = int(block.get("not_number_count") or 0) - len(nans)
+    if more > 0:
+        out.append(_problem("amber", "Check", "Price history", f"{more} more values that were not numbers",
+                            "Those days are left out of the history", rank=3.6))
+    unreq = [u for u in block.get("unrequestable") or [] if isinstance(u, dict)]
+    for u in unreq:
+        why = str(u.get("reason") or "no Bloomberg ticker for it yet")
+        out.append(_problem("amber", "Not asked", f"Price history: {history_name(u.get('instrument_id'))}",
+                            plain_ids(plain_words(why)), RISK_EFFECT, problem_tip=plain_ids(why), rank=3.4))
+    more = int(block.get("unrequestable_count") or 0) - len(unreq)
+    if more > 0:
+        out.append(_problem("amber", "Not asked", "Price history", f"{more} more securities that cannot be asked",
+                            RISK_EFFECT, rank=3.8))
     return out
 
 

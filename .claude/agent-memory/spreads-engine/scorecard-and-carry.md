@@ -1,6 +1,6 @@
 ---
 name: scorecard-and-carry
-description: 2026-09-29 scorecard.py (trader ideas, closed-at-flat rule, P&L at as-of, stats) and carry.py (calendar roll-down on the research curve); choices taken and sample quirks
+description: 2026-09-29 scorecard.py (trader ideas, closed-at-flat rule, P&L at as-of, stats) and carry.py (calendar roll-down; research curve until 2026-09-30, then Bloomberg closes in price_history); choices taken and sample quirks
 metadata:
   type: project
 ---
@@ -31,5 +31,14 @@ usd_per_unit (already signed). Front check: research `last_trade_date` of Mi-1 <
 - Sample: WTI Z26/F27 research -0.95, rolled (X26/Z26) -1.43, roll -0.48 USD/bbl, -7,200 USD on the 15-lot
   position (-4,800 on the '' strategy's 10-lot pair).
 
-**How to verify:** scratch copy of `data/raw/sample.db`; `sum(open unrealised) + sum(closed total)` = book LTD
+**Since 2026-09-30** (user: the app stops reading the research app's database): the curve is the book db's own
+`price_history` (Bloomberg closes of every contract of each held root's chain, ~2 years), loaded by
+`load_commodity_history(conn)` (the BOOK connection, never no-arg). Fields renamed: research_contracts ->
+history_contracts, research_date -> history_date, level_research -> level_curve, trades' carry_research_date ->
+carry_history_date; LABEL 'Bloomberg history'. The no-history reason is the history's own NO_HISTORY sentence.
+levels.research_key / research_id fields stay (template ids, no reader left). The mock-DB quirk above is history.
+Verify on a scratch db: tests.golden_book.build_book(conn, through=today), then random-walk rows into
+price_history for every id of data.bloomberg.library.risk_history_needs(conn, today) (ui/sample_book.py is gone).
+
+**How to verify (before 2026-09-30):** scratch copy of `data/raw/sample.db`; `sum(open unrealised) + sum(closed total)` = book LTD
 when nothing is excluded; carry front case: CLU26/CLV26 spec at 2026-09-18 (CLQ26 expired 08-31).

@@ -46,13 +46,15 @@ What it asks (``plan`` works it out and asks nothing):
 7. Desk checks (``--desk``, 2026-09-29; ``plan_desk`` / ``run_desk``): the open questions only a
    terminal settles, each PASS / WARN / FAIL / SKIPPED with a plain line. (1) the book's futures'
    PX_LAST against PX_SETTLE over the last DESK_DAYS days, per exchange in ticks (FUT_TICK_SIZE);
-   (2) their OPEN_INT and PX_VOLUME beside the research app's (``contract_liquidity``) with the
-   ratio; (3) OPEN_INT / PX_VOLUME on each held LME metal's 3M and the research app's monthly
-   prompt tickers; (4) a year of PX_LAST on the SGX USD/CNH future in several ticker forms;
-   (5) physical / cash settlement (DELIVERY_FIELDS, candidates) against the ``delivery`` column;
-   (6) CALENDAR_NON_SETTLEMENT_DATES per exchange calendar against ``config/calendars/``;
-   (7) the research database's history depth against the replay dates, and (8) whether
-   Bloomberg's contract dates are stored, both from local data. The report ends with a short
+   (2) their OPEN_INT and PX_VOLUME beside the figures the last pull stored in the book's own
+   ``price_history`` (``contract_liquidity``, the Risk tab's Days to exit input); (3) OPEN_INT /
+   PX_VOLUME on each held LME metal's 3M and our own monthly prompt tickers (the book's prompt
+   months and the next LME_MONTHS_AHEAD); (4) a year of PX_LAST on the SGX USD/CNH future in
+   several ticker forms; (5) physical / cash settlement (DELIVERY_FIELDS, candidates) against the
+   ``delivery`` column; (6) CALENDAR_NON_SETTLEMENT_DATES per exchange calendar against
+   ``config/calendars/``; (7) the price history on file in the book's ``price_history`` per held
+   root (days, first and last close, the replay dates it reaches), and (8) whether Bloomberg's
+   contract dates are stored, both from the book database alone. The report ends with a short
    "Manual checks" list. The desk checks never change the exit code, and when Bloomberg cannot
    be reached they still write the report (their Bloomberg checks SKIPPED, 7 and 8 filled).
 
@@ -2234,12 +2236,12 @@ def _run_options(client, the_plan: Plan, result: CheckResult, size: int) -> None
 
 DESK_TITLES = {
     1: "Futures close against exchange settlement",
-    2: "Open interest and volume, one- or two-sided",
+    2: "Open interest and volume against the stored history",
     3: "LME per-prompt liquidity",
     4: "SGX USD/CNH future history",
     5: "Delivery type",
     6: "Exchange holidays",
-    7: "Research history depth",
+    7: "Price history on file",
     8: "Contract dates stored",
 }
 DESK_DAYS = 5                               # business days of history compared in checks 1 and 2
@@ -2247,7 +2249,9 @@ DESK_WINDOW_CALENDAR_DAYS = 14              # asked back from the as-of, so 5 bu
 DESK_HISTORY_FIELDS = ("PX_LAST", "PX_SETTLE", "OPEN_INT", "PX_VOLUME")
 DESK_TICK_FIELDS = ("FUT_TICK_SIZE",)
 LME_LIQUIDITY_FIELDS = ("OPEN_INT", "PX_VOLUME")
-LME_RESEARCH_MONTHS = 3                     # the research app's nearest listed monthly prompts asked per metal
+LME_MONTHS_AHEAD = 3                        # the nearest monthly prompts asked per metal, beside the book's own
+HISTORY_FRESH_DAYS = 7                      # check 7: a root's last close on file this old or newer is fresh
+PRICE_HISTORY_TABLE = "price_history"       # the book's own Bloomberg history (bbg-backfill writes it on a pull)
 SGX_XUC_ROOT = "SGX:XUC"
 SGX_HISTORY_DAYS = 365
 SGX_MIN_CLOSES = 200                        # a year's history counts as there with this many closes
@@ -2315,9 +2319,12 @@ class DeskPlan:
     calendars: List[Tuple[str, str, str]] = field(default_factory=list)     # check 6: (calendar, security, root id)
     calendars_unasked: List[Tuple[str, str]] = field(default_factory=list)  # (calendar, why)
     history_roots: List[str] = field(default_factory=list)            # check 7
-    research_path: Optional[Path] = None
-    research_why: str = ""
     batch_size: int = BATCH_SIZE
+
+    @property
+    def history_db(self) -> Optional[Path]:
+        """The book database whose ``price_history`` checks 2 and 7 read (None without a book)."""
+        return Path(self.book.db_path) if self.book is not None else None
 
     @property
     def window(self) -> Tuple[date, date]:
@@ -2417,11 +2424,11 @@ class DeskPlan:
                      + (f"; not asked: {', '.join(f'{c} ({w})' for c, w in self.calendars_unasked)}"
                         if self.calendars_unasked else "") + ".")
         if self.book is None:
-            lines.append("  7-8. Research history depth and contract dates stored: skipped (no book: give --db).")
+            lines.append("  7-8. Price history on file and contract dates stored: skipped (no book: give --db).")
         else:
             k = len(self.history_roots)
-            lines.append(f"  7. Research history depth: local, no Bloomberg: {k} root{s(k)}"
-                         + (f" in {self.research_path}" if self.research_path else f" ({self.research_why})") + ".")
+            lines.append(f"  7. Price history on file: local, no Bloomberg: {k} root{s(k)} in {PRICE_HISTORY_TABLE} "
+                         f"of {self.history_db}.")
             lines.append(f"  8. Contract dates stored: local, no Bloomberg: {len(self.futures)} future"
                          f"{s(len(self.futures))} and {len(self.options)} option{s(len(self.options))} on futures.")
         lines.append(f"  Desk total: {self.securities} securit{'y' if self.securities == 1 else 'ies'} in "
@@ -2434,7 +2441,6 @@ class DeskResult:
     plan: DeskPlan
     checks: List[DeskCheck]
     requests_sent: int = 0
-    research: Dict[str, str] = field(default_factory=dict)     # the research database's newest date and last pull
 
     def counts(self) -> Dict[str, int]:
         out = {s: 0 for s in DESK_STATUSES}
@@ -2451,52 +2457,28 @@ class DeskResult:
 
 # ---- the plan
 
-def research_db() -> Tuple[Optional[Path], str]:
-    """The research app's database (``engine.risk.commodity_history.candidates``), or (None, why)."""
+def _book_connect(path: Path) -> sqlite3.Connection:
+    """A read-only connection to the book database (``mode=ro``: any write through it raises)."""
+    return sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+
+
+def _lme_monthly_tickers(root_id: str, as_of: date,
+                         prompt_months: Sequence[Tuple[int, int]]) -> Tuple[List[Tuple[str, str]], str]:
+    """Our monthly prompt tickers of one metal (``engine.lme.monthly_ticker``): the months of the
+    book's open prompts and the next LME_MONTHS_AHEAD monthly prompts on or after ``as_of``.
+    ([(label, ticker)], note)."""
     try:
-        from engine.risk import commodity_history as ch
-        cands = ch.candidates()
-    except Exception as exc:  # noqa: BLE001 -- a problem there is a reason, never a crash
-        return None, f"the research history module could not be loaded ({type(exc).__name__}: {exc})"
-    found = [c for c in cands if c.get("exists")]
-    if not found:
-        return None, "no research database: tried " + ", ".join(str(c.get("path")) for c in cands)
-    return Path(found[0]["path"]), ""
-
-
-def _research_connect(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True, timeout=5.0)
-
-
-def _research_lme_tickers(path: Optional[Path], root_id: str, as_of: date,
-                          prompt_months: Sequence[Tuple[int, int]]) -> Tuple[List[Tuple[str, str]], str]:
-    """The research app's monthly prompt tickers of one metal (the months of the book's open
-    prompts and the next LME_RESEARCH_MONTHS listed), or our own form for the book's prompt months
-    when the research database has none. ([(label, ticker)], note)."""
-    why = "no research database"
-    if path is not None:
-        try:
-            conn = _research_connect(path)
-            try:
-                rows = conn.execute("SELECT year, month, bbg_ticker FROM contract WHERE instrument_id = ? "
-                                    "AND last_trade_date >= ? ORDER BY last_trade_date",
-                                    (root_id, as_of.isoformat())).fetchall()
-            finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            rows, why = [], f"the research database could not be read ({exc})"
-        else:
-            why = f"the research database lists no live {root_id} contract"
-        if rows:
-            wanted = set(prompt_months)
-            picked = [r for i, r in enumerate(rows) if i < LME_RESEARCH_MONTHS or (r[0], r[1]) in wanted]
-            return [(f"monthly {y}-{m:02d} (research)", str(t)) for y, m, t in picked if str(t or "").strip()], ""
-    try:
-        from engine.lme import monthly_ticker
-        ours = [(f"monthly {y}-{m:02d} (ours)", monthly_ticker(root_id, y, m)) for y, m in dict.fromkeys(prompt_months)]
+        from engine.lme import monthly_prompt, monthly_ticker
+        months: List[Tuple[int, int]] = []
+        y, m = as_of.year, as_of.month
+        while len(months) < LME_MONTHS_AHEAD:
+            if monthly_prompt(y, m) >= as_of:
+                months.append((y, m))
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        wanted = sorted(dict.fromkeys(list(months) + list(prompt_months)))
+        return [(f"monthly {y}-{m:02d}", monthly_ticker(root_id, y, m)) for y, m in wanted], ""
     except Exception as exc:  # noqa: BLE001 -- reported, never a crash
-        return [], f"{why}; our monthly tickers could not be built ({exc})"
-    return ours, f"{why}: our own monthly tickers for the book's prompt months instead"
+        return [], f"{root_id}: our monthly tickers could not be built ({type(exc).__name__}: {exc})"
 
 
 def _calendar_securities(roots: Mapping[str, ContractRoot], held: Set[str],
@@ -2535,7 +2517,6 @@ def plan_desk(roots: Optional[Iterable[ContractRoot]] = None, *, book: Optional[
     selected = _select(list(by_id.values()), root_ids, sector) if narrowed else []
     in_scope = {r.root_id for r in selected} if narrowed else None
     out = DeskPlan(as_of=as_of, book=book, roots=by_id, batch_size=batch_size)
-    out.research_path, out.research_why = research_db()
     held: Set[str] = set()
     if book is not None:
         out.futures = [f for f in book.futures if in_scope is None or f.root_id in in_scope]
@@ -2561,7 +2542,7 @@ def plan_desk(roots: Optional[Iterable[ContractRoot]] = None, *, book: Optional[
                 pairs.append(("3M", three_month_ticker(rid)))
             except Exception as exc:  # noqa: BLE001 -- reported, never a crash
                 out.lme_note = f"{rid}: the 3M ticker could not be built ({exc})"
-            monthly, note = _research_lme_tickers(out.research_path, rid, as_of, months)
+            monthly, note = _lme_monthly_tickers(rid, as_of, months)
             pairs += monthly
             if note:
                 out.lme_note = note
@@ -2649,16 +2630,11 @@ def _field_words(errors: Mapping[str, str], names: Sequence[str]) -> str:
     return ("; Bloomberg said " + "; ".join(said)) if said else ""
 
 
-def _ratio_words(r: Optional[float]) -> str:
-    if r is None:
-        return "no ratio"
-    if 0.9 <= r <= 1.1:
-        return "the same counting"
-    if 1.8 <= r <= 2.2:
-        return "Bloomberg twice the research figure: one of them counts both sides"
-    if 0.45 <= r <= 0.55:
-        return "Bloomberg half the research figure: one of them counts both sides"
-    return "they differ"
+def _agree(a: Optional[float], b: Optional[float]) -> Optional[bool]:
+    """Whether two figures of the same day agree (within 0.5 %); None when either is missing."""
+    if a is None or b is None:
+        return None
+    return abs(a - b) <= 0.005 * max(1.0, abs(a), abs(b))
 
 
 def _exchange(root: Optional[ContractRoot]) -> str:
@@ -2749,17 +2725,20 @@ def _check_settlement(dp: DeskPlan, hist: Mapping[str, History], ticks: Mapping[
     return c
 
 
-def _check_liquidity(dp: DeskPlan, hist: Mapping[str, History], research: Mapping[str, dict],
-                     research_note: str) -> DeskCheck:
-    """2: Bloomberg's OPEN_INT and PX_VOLUME beside the research app's figures, with the ratio."""
+def _check_liquidity(dp: DeskPlan, hist: Mapping[str, History], stored: Mapping[str, dict],
+                     stored_note: str) -> DeskCheck:
+    """2: Bloomberg's OPEN_INT and PX_VOLUME now beside the figures the last pull stored in the
+    book's ``price_history`` (``contract_liquidity``: the Risk tab's Days to exit reads them), on
+    the same day where the window has it. Agreement says the pull stores what Bloomberg gives;
+    a contract with nothing on file has no Days to exit until a pull fetches its history."""
     c = DeskCheck(2)
-    ratios: List[float] = []
+    same = differ = missing = 0
     bbg_any = china = False
     for fut in dp.futures:
         root = dp.roots.get(fut.root_id)
         ex = _exchange(root)
         china = china or _is_china(root)
-        tag = " [China: confirm by hand]" if _is_china(root) else ""
+        tag = " [China: one- or two-sided counting, confirm by hand]" if _is_china(root) else ""
         if not fut.ticker:
             continue
         h = hist.get(fut.ticker)
@@ -2767,7 +2746,7 @@ def _check_liquidity(dp: DeskPlan, hist: Mapping[str, History], research: Mappin
             c.lines.append(f"{ex:<6} {fut.instrument_id}: "
                            + (_refused(fut.ticker, h.security_error) if h else "not asked") + tag)
             continue
-        rec = research.get(fut.instrument_id) or {}
+        rec = stored.get(fut.instrument_id) or {}
         days = sorted(h.days)
 
         def on(fname: str, day: Optional[str], h: History = h, days: List[str] = days) -> Tuple[Optional[float], str]:
@@ -2779,44 +2758,53 @@ def _check_liquidity(dp: DeskPlan, hist: Mapping[str, History], research: Mappin
                     return v, d
             return None, ""
 
-        oi, oi_day = on("OPEN_INT", rec.get("oi_date"))
-        vol, vol_day = on("PX_VOLUME", rec.get("volume_date"))
+        s_oi_day, s_vol_day = rec.get("oi_date") or "", rec.get("volume_date") or ""
+        oi, oi_day = on("OPEN_INT", s_oi_day)
+        vol, vol_day = on("PX_VOLUME", s_vol_day)
         bbg_any = bbg_any or oi is not None or vol is not None
-        r_oi, r_vol = _num(rec.get("open_interest")), _num(rec.get("volume_last"))
-        ratio_oi = oi / r_oi if oi is not None and r_oi else None
-        ratio_vol = vol / r_vol if vol is not None and r_vol else None
-        if ratio_oi is not None:
-            ratios.append(ratio_oi)
+        s_oi, s_vol = _num(rec.get("open_interest")), _num(rec.get("volume_last"))
         bbg = (f"Bloomberg OI {_g(oi)} ({oi_day or '-'}), volume {_g(vol)} ({vol_day or '-'})"
                + _field_words(h.field_errors, ("OPEN_INT", "PX_VOLUME")))
-        if r_oi is not None or r_vol is not None:
-            res = (f"research OI {_g(r_oi)} ({rec.get('oi_date') or '-'}), volume {_g(r_vol)} "
-                   f"({rec.get('volume_date') or '-'})")
-            rat = ((f"ratio OI {ratio_oi:.2f}" if ratio_oi is not None else "ratio OI -")
-                   + (f", volume {ratio_vol:.2f}" if ratio_vol is not None else ", volume -")
-                   + f": {_ratio_words(ratio_oi)}")
-            c.lines.append(f"{ex:<6} {fut.instrument_id}: {bbg}; {res}; {rat}{tag}")
+        if s_oi is None and s_vol is None:
+            missing += 1
+            why = rec.get("reason") or stored_note or "nothing on file"
+            c.lines.append(f"{ex:<6} {fut.instrument_id}: {bbg}; on file: {why}{tag}")
+            continue
+        verdicts = [v for v in (_agree(oi, s_oi) if oi_day == s_oi_day else None,
+                                _agree(vol, s_vol) if vol_day == s_vol_day else None) if v is not None]
+        if verdicts and all(verdicts):
+            same += 1
+            word = "agree"
+        elif verdicts:
+            differ += 1
+            word = "DIFFER on the same day"
         else:
-            why = rec.get("reason") or research_note or "no research figure"
-            c.lines.append(f"{ex:<6} {fut.instrument_id}: {bbg}; research: {why}{tag}")
-    off = [r for r in ratios if not 0.9 <= r <= 1.1]
+            word = "no common day to compare"
+        c.lines.append(f"{ex:<6} {fut.instrument_id}: {bbg}; on file OI {_g(s_oi)} ({s_oi_day or '-'}), volume "
+                       f"{_g(s_vol)} ({s_vol_day or '-'}); {word}{tag}")
     if not bbg_any:
         c.status = FAIL
         c.summary = "Bloomberg returned no OPEN_INT or PX_VOLUME for any of the book's contracts"
-    elif off:
+    elif differ or missing:
         c.status = WARN
-        c.summary = (f"{len(off)} of {len(ratios)} contracts count differently from the research app "
-                     "(a ratio near 2 or 0.5 means one of them counts both sides)")
-    elif ratios:
+        bits = []
+        if differ:
+            bits.append(f"{differ} contract{'s differ' if differ != 1 else ' differs'} from what the last pull "
+                        "stored on the same day (the pull's figure is stale or another contract's)")
+        if missing:
+            bits.append(f"{missing} contract{'s have' if missing != 1 else ' has'} no open interest or volume on "
+                        "file, so no Days to exit: press Pull Bloomberg now")
+        c.summary = "; ".join(bits)
+    elif same:
         c.status = PASS
-        c.summary = f"Bloomberg's open interest agrees with the research app's on all {len(ratios)} contracts compared"
+        c.summary = f"Bloomberg's figures agree with those on file on all {same} contracts compared"
     else:
         c.status = WARN
-        c.summary = "Bloomberg answered, but the research app has no figure to compare with"
+        c.summary = "Bloomberg answered, but no stored figure falls on a day it gave"
     if china:
         c.summary += ". Chinese contracts: one- or two-sided counting is settled by hand (Manual checks)"
-    if research_note:
-        c.lines.append(f"note: {research_note}")
+    if stored_note:
+        c.lines.append(f"note: {stored_note}")
     return c
 
 
@@ -3071,62 +3059,82 @@ def _check_calendars(dp: DeskPlan, answers: Mapping[str, Answer]) -> DeskCheck:
     return c
 
 
-def research_status(path: Optional[Path]) -> Dict[str, str]:
-    """The research database's newest settlement date and its last pull's provider, read-only."""
-    if path is None:
-        return {}
-    out: Dict[str, str] = {"path": str(path)}
-    try:
-        conn = _research_connect(path)
-        try:
-            out["newest"] = str(conn.execute("SELECT MAX(date) FROM price_daily").fetchone()[0] or "")
-            if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'job'").fetchone():
-                row = conn.execute("SELECT provider, finished_at FROM job WHERE kind = 'pull' "
-                                   "ORDER BY job_id DESC LIMIT 1").fetchone()
-                if row:
-                    out["provider"], out["finished"] = str(row[0] or ""), str(row[1] or "")
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        out["error"] = str(exc)
+def _history_ids_by_root(conn: sqlite3.Connection, roots: Mapping[str, ContractRoot],
+                         wanted: Sequence[str]) -> Dict[str, List[str]]:
+    """The ``price_history`` ids of each wanted root: a future's canonical ids ('CLZ26 Comdty')
+    by its Bloomberg root and yellow key, an LME metal's 'LME:CA CASH' / 'LME:CA 3M' pillars."""
+    keys: Dict[Tuple[str, str], List[str]] = {}
+    for rid in wanted:
+        r = roots.get(rid)
+        if r is not None and str(r.bbg_root or "").strip():
+            keys.setdefault((r.bbg_root.strip().upper(), r.bbg_yellow_key.upper()), []).append(rid)
+    out: Dict[str, List[str]] = {rid: [] for rid in wanted}
+    for (iid,) in conn.execute(f"SELECT DISTINCT instrument_id FROM {PRICE_HISTORY_TABLE}"):
+        text = str(iid)
+        head, _, pillar = text.rpartition(" ")
+        if head in out and pillar in ("CASH", "3M"):
+            out[head].append(text)
+            continue
+        parts = parse_bbg_ticker(text)
+        if parts is not None:
+            for rid in keys.get((parts[0], parts[3].upper()), []):
+                out[rid].append(text)
     return out
 
 
 def _check_history_depth(dp: DeskPlan) -> DeskCheck:
-    """7: the research database's earliest settlement per root the book holds, against the replays."""
+    """7: the price history on file in the book database's ``price_history`` (Bloomberg's daily
+    closes, fetched by a pull) per root the book holds: days, first and last close, whether the
+    last is fresh, and which replay dates it reaches. Local data only, read-only."""
     c = DeskCheck(7)
-    if dp.book is None:
+    if dp.book is None or dp.history_db is None:
         c.summary = "no book: give --db"
         return c
     if not dp.history_roots:
         c.summary = "the book holds no commodity contract"
         return c
-    if dp.research_path is None:
-        c.summary = dp.research_why
-        return c
-    short = both = absent = 0
-    conn = _research_connect(dp.research_path)
+    conn = _book_connect(dp.history_db)
     try:
+        if not _has_object(conn, PRICE_HISTORY_TABLE):
+            c.status = WARN
+            c.summary = (f"no {PRICE_HISTORY_TABLE} table in {dp.history_db}: no risk figure or replay until a "
+                         "pull (Pull Bloomberg now) fetches the history")
+            return c
+        ids = _history_ids_by_root(conn, dp.roots, dp.history_roots)
+        fresh = stale = absent = 0
+        reach = {name: 0 for name, _d in REPLAYS}
         for rid in dp.history_roots:
-            first, last = conn.execute(
-                "SELECT MIN(date), MAX(date) FROM price_daily WHERE contract_id IN "
-                "(SELECT contract_id FROM contract WHERE instrument_id = ?)", (rid,)).fetchone()
-            if not first:
+            mine = ids.get(rid) or []
+            row = None
+            if mine:
+                marks = ",".join("?" * len(mine))
+                row = conn.execute(f"SELECT MIN(as_of_date), MAX(as_of_date), COUNT(DISTINCT as_of_date) FROM "
+                                   f"{PRICE_HISTORY_TABLE} WHERE instrument_id IN ({marks})", mine).fetchone()
+            if not row or not row[0]:
                 absent += 1
-                c.lines.append(f"{rid:<12} not in the research database: no history, so no risk figure or replay")
+                c.lines.append(f"{rid:<12} no history on file: no risk figure or replay until a pull fetches it")
                 continue
-            start = to_date(first)
-            if any(start > d for _name, d in REPLAYS):
-                short += 1
+            first, last, n = str(row[0])[:10], str(row[1])[:10], int(row[2] or 0)
+            age = (dp.as_of - to_date(last)).days
+            if age <= HISTORY_FRESH_DAYS:
+                fresh += 1
             else:
-                both += 1
-            c.lines.append(f"{rid:<12} {first} to {last}: " + "; ".join(
-                f"{'reaches' if start <= d else 'does NOT reach'} {d.isoformat()} ({name})" for name, d in REPLAYS))
+                stale += 1
+            start = to_date(first)
+            for name, d in REPLAYS:
+                if start <= d:
+                    reach[name] += 1
+            c.lines.append(f"{rid:<12} {n} days on file, {len(mine)} contract{'s' if len(mine) != 1 else ''}, "
+                           f"{first} to {last}" + (f" ({age} days old)" if age > HISTORY_FRESH_DAYS else "")
+                           + "; " + "; ".join(f"{'reaches' if start <= d else 'does not reach'} {d.isoformat()} "
+                                              f"({name})" for name, d in REPLAYS))
     finally:
         conn.close()
-    c.status = PASS if not short and not absent else WARN
-    c.summary = (f"{both} of {len(dp.history_roots)} roots reach both replay dates, {short} do not, {absent} have no "
-                 f"history ({dp.research_path})")
+    total = len(dp.history_roots)
+    c.status = PASS if not stale and not absent else WARN
+    c.summary = (f"{fresh} of {total} roots have fresh history on file (last close within {HISTORY_FRESH_DAYS} "
+                 f"days), {stale} stale, {absent} none" + ("" if not (stale or absent) else ": press Pull Bloomberg now")
+                 + "; " + ", ".join(f"{k} of {total} reach {name}" for name, k in reach.items()))
     return c
 
 
@@ -3165,7 +3173,6 @@ def run_desk(client, dp: DeskPlan, *, offline: str = "") -> DeskResult:
     asked; every Bloomberg check is then SKIPPED with it, and 7 and 8 still run from local data.
     A check that fails in itself is FAIL with its error; the others go on. Writes nothing."""
     dr = DeskResult(dp, [])
-    dr.research = research_status(dp.research_path)
 
     def skipped(n: int, why: str) -> DeskCheck:
         return DeskCheck(n, SKIPPED, why)
@@ -3193,18 +3200,15 @@ def run_desk(client, dp: DeskPlan, *, offline: str = "") -> DeskResult:
         hist = _desk_history(client, dp.contract_tickers, DESK_HISTORY_FIELDS, start, end, dr)
         ticks = _desk_reference(client, dp.contract_tickers, DESK_TICK_FIELDS, dr)
         dr.checks.append(guarded(1, lambda: _check_settlement(dp, hist, ticks)))
-        research: Dict[str, dict] = {}
+        stored: Dict[str, dict] = {}
         note = ""
         try:
             from engine.risk.commodity_history import contract_liquidity
-            research = contract_liquidity({f.instrument_id: f.root_id for f in dp.futures}, dp.as_of,
-                                          window=DESK_DAYS)
-        except Exception as exc:  # noqa: BLE001 -- the research side is context; its failure is a note
-            note = f"the research app's figures could not be read ({type(exc).__name__}: {exc})"
-        if dr.research.get("provider") == "mock":
-            note = ((note + "; ") if note else "") + ("the research app's last pull was mock data, so the "
-                                                      "ratios say nothing yet")
-        dr.checks.append(guarded(2, lambda: _check_liquidity(dp, hist, research, note)))
+            stored = contract_liquidity({f.instrument_id: f.root_id for f in dp.futures}, dp.as_of,
+                                        window=DESK_DAYS, db_path=dp.history_db)
+        except Exception as exc:  # noqa: BLE001 -- the stored side is a comparison; its failure is a note
+            note = f"the book's stored history could not be read ({type(exc).__name__}: {exc})"
+        dr.checks.append(guarded(2, lambda: _check_liquidity(dp, hist, stored, note)))
     # 3: LME per-prompt liquidity.
     if not dp.lme_tickers:
         dr.checks.append(skipped(3, "no book: give --db" if dp.book is None else (dp.lme_note or "nothing to ask")))
@@ -3264,18 +3268,7 @@ def run_desk(client, dp: DeskPlan, *, offline: str = "") -> DeskResult:
 
 def manual_checks(dr: Optional[DeskResult]) -> List[str]:
     """The things no Bloomberg field can settle, one line each."""
-    res = dr.research if dr is not None else {}
-    if res.get("newest"):
-        now = f"now: newest settlement {res['newest']}"
-        if res.get("provider"):
-            now += f", last pull by '{res['provider']}'" + (f" at {res['finished']}" if res.get("finished") else "")
-        if res.get("provider") == "mock":
-            now += ": mock data, not real"
-    else:
-        now = "no research database found on this PC"
-    lines = [f"SHFE counting: {SHFE_MANUAL}.",
-             "Research data: check that the research app on this PC is pulling real data: its price_daily newest "
-             f"date should be yesterday's and its last pull not 'mock' ({now})."]
+    lines = [f"SHFE counting: {SHFE_MANUAL}."]
     if dr is not None and any(c.number == 5 and c.status == SKIPPED and "FLDS" in c.summary for c in dr.checks):
         lines.append("Delivery field: FLDS <GO> on a front future, search 'delivery', and tell the session which "
                      "field says physical or cash.")
@@ -3993,8 +3986,8 @@ def _parser() -> argparse.ArgumentParser:
                     help="the options on futures: each option_style root's option chain and one option of it")
     ap.add_argument("--desk", action="store_true",
                     help="the desk checks: futures close against settlement, open interest and volume, LME "
-                         "per-prompt liquidity, SGX USD/CNH history, delivery type, exchange holidays, research "
-                         "history depth, contract dates stored; a plain run includes them")
+                         "per-prompt liquidity, SGX USD/CNH history, delivery type, exchange holidays, price "
+                         "history on file, contract dates stored; a plain run includes them")
     ap.add_argument("--host", default="localhost")
     ap.add_argument("--port", type=int, default=8194)
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="folder for the reports (default: reports/)")

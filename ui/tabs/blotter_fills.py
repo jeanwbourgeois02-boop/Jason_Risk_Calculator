@@ -452,8 +452,8 @@ def fills_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, Lis
     every column the table and its CSV show with their hovers (`FRAME_COLUMNS`); the Data issues
     lines [(label, sentence)]; whether any upload is recorded. Memoised per database revision and
     as-of (with the trade book's outside inputs); shared: never edit the result."""
-    from ui.tabs.blotter_pricing import research_inputs_key, screen_memo
-    return screen_memo("blotter-fills", conn, as_of, lambda: _build_frame(conn, as_of), extra=research_inputs_key())
+    from ui.tabs.blotter_pricing import config_inputs_key, screen_memo
+    return screen_memo("blotter-fills", conn, as_of, lambda: _build_frame(conn, as_of), extra=config_inputs_key())
 
 
 # ---- the filter

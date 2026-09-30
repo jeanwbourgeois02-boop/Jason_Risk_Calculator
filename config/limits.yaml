@@ -90,12 +90,13 @@ desk_limits:
 #   NYMEX:CL: {spot_month: null, single_month: null, all_months: null}
 exchange_limits: {}
 
-# ---------------------------------------------------------------- liquidity (research context)
-# Each open position's size against its contract's open interest and average daily volume, read
-# from the research app's database (engine/limits/liquidity.py; context only: never a mark, never
-# in P&L or delta, nothing asked of Bloomberg). Exiting is the risk on deferred months and on the
-# Chinese exchanges. Per contract, in the research contract's lots (ours converted where the lot
-# sizes differ in the same unit):
+# ---------------------------------------------------------------- liquidity (Bloomberg history)
+# Each open position's size against its contract's open interest and average daily volume:
+# Bloomberg volume and open interest (PX_VOLUME, OPEN_INT) from the book database's price_history
+# (engine/limits/liquidity.py; a risk input only: never a mark, never in P&L or delta, nothing
+# asked of Bloomberg by the check itself). Exiting is the risk on deferred months and on the
+# Chinese exchanges. Per contract, in the lots Bloomberg's figures count (ours converted where the
+# lot sizes differ in the same unit):
 #   pct_of_oi     = |lots| / open interest
 #   days_to_exit  = |lots| / (participation x average daily volume over `window` days)
 # The level is the worse of the two tests: AMBER from the amber figure, RED from the red one.

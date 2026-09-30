@@ -38,19 +38,19 @@ Per trade (parameters in `config/risk.yaml`; W = `trade_window_bd`, 252; a figur
                    `leg_correlation` (Pearson, a and b). Days both legs settled, the last W,
                    2-day moves on the same rule as hedge %. Leg A is the first leg of the trade's
                    level (spreads-engine's pair), else the bigger one.
-  z / percentile   the trade's level against the last `level_window_bd` (252) settlements of that
-                   same level, from each leg's own settlement history (risk-history's
-                   `commodity_history`, read-only): z = (now - mean) / sd, percentile = share of
+  z / percentile   the trade's level against the last `level_window_bd` (252) closes of that
+                   same level, from each leg's own Bloomberg price history (risk-history's
+                   `commodity_history`, the book database's `price_history`, read-only): z = (now - mean) / sd, percentile = share of
                    the window at or below now (percent). The level is spreads-engine's formula
                    (`engine.spreads.levels.converted`, weights and constant of the pair's
                    `level_spec`): a calendar near - far in the root's quote unit, a template or a
                    same-unit pair its difference in its unit; a China-against-West pair the
                    CONVERTED ratio China / foreign, both legs in USD per the template's quantity
-                   unit, the China leg through the research app's own USD/CNH (no FX history:
+                   unit, the China leg through the history's own USD/CNH (no FX history:
                    None with the reason, never an unconverted ratio). The trade's level is the
                    one pair of spreads-engine's `strategies` (a one-spread trade's front pair)
                    whose legs are all open; several: None, named. "Now" is the last settlement on
-                   or before as_of (`level_date`), the research history's, not our marks.
+                   or before as_of (`level_date`), the price history's, not our marks.
   z_entry / percentile_entry  the same on the trade's first trade date (`entry_date`), against the
                    window ending there.
 
@@ -61,10 +61,7 @@ this module keeps in process per (database file and its mtime and size, as_of, t
 the parameters), so a filter change costs a sum and a quantile, no re-pricing and no re-read.
 
 Nothing here reads `marks`, writes anything, or asks Bloomberg (hard rules 2, 3, 8); no P&L
-figure is touched (hard rule 7). The research history is a risk input and context only, and
-whose it is (Bloomberg's, or mock data on a PC without the research app's pulls) is said at the
-top of both results and on every row (`source_kind` / `source_note`, risk-history's
-`research_source`).
+figure is touched (hard rule 7). The Bloomberg price history is a risk input and context only.
 """
 from __future__ import annotations
 
@@ -283,37 +280,7 @@ def _trade_row(ctx: _Ctx, history, as_of: str, first_dates: Dict[str, str]) -> d
     out.update(_best_fit(ctx, sides, two_day, side_why, spec))
     out.update(_leg_risk(ctx, sides, two_day))
     out.update(_z_block(history, spec, spec_why, as_of, out["entry_date"], ctx))
-    kind, note = _source(history)
-    # every figure of the row is drawn from the research settlement history: each says whose it is
-    out.update(source_kind=kind, source_note=note if kind != "real" else "",
-               sources={k: kind for k in HISTORY_FIGURES})
     return out
-
-
-HISTORY_FIGURES = ("daily_risk_usd", "share_of_book", "contribution_var", "standalone_var", "hedge_pct",
-                   "best_fit_r2", "legs_risk", "level_sd", "move_sigma",
-                   "best_fit_ratio", "leg_correlation", "z", "percentile", "level_now", "z_entry",
-                   "percentile_entry", "level_at_entry")
-
-
-def _price_check(conn: sqlite3.Connection, as_of: str, history) -> dict:
-    """risk-history's `research_price_check`, passed through (it never raises; a failure is a reason)."""
-    try:
-        from engine.risk.commodity_history import research_price_check
-        return research_price_check(conn, as_of, db_path=getattr(history, "path", None) or None)
-    except Exception as exc:  # noqa: BLE001 -- another lane's check never takes the rows down
-        return {"available": False, "reason": f"the research price check could not run ({type(exc).__name__}: {exc})",
-                "rows": [], "flagged": []}
-
-
-def _source(history) -> Tuple[str, str]:
-    """(source_kind 'real' | 'mock' | 'unknown', source_note): risk-history's `research_source`
-    as the history object carries it."""
-    kind = str(getattr(history, "source_kind", "") or "unknown")
-    note = str(getattr(history, "source_note", "") or "")
-    if not note and kind != "real":
-        note = "research history's provider is unknown"
-    return kind, note
 
 
 def _window(ctx: _Ctx) -> Tuple[Optional[pd.Series], str]:
@@ -420,7 +387,7 @@ def _hedge_calendars(ctx: _Ctx, w: pd.Series, sides: List[dict], hedged: bool, o
         hedge % = 1 - sum over commodities sd(commodity) / sum sd(its bigger month)
     (= the sd-weighted mean of each commodity's own 1 - sd / sd_big). A commodity held in one
     month (an outright) enters at 0 %: sd = its bigger month's. Not value-weighted: a value needs
-    a price, and the research prices are context, not ours. A currency hedge with a series would
+    a price, and the history's prices are context, not ours. A currency hedge with a series would
     not fit this split, so such a trade is None with its reason."""
     out.update(hedge_method="within calendars (risk-weighted)", hedge_moves="1-day")
     if hedged:
@@ -606,10 +573,10 @@ def _level_spec(ctx: _Ctx) -> Tuple[Optional[LevelSpec], str]:
 
 def _leg_prices(history, leg, as_of: str
                 ) -> Tuple[Optional[pd.Series], str, Optional[str], Optional[pd.Series]]:
-    """(a level leg's settlements as quoted (the research app's raw settle = Bloomberg's quote) on
-    or before as_of, why None, the first date of its own settlements, the research contract read
-    on each date (a roll or the splice changes it)). An LME metal reads its
-    prompt month's research contract. Before the contract's first settlement, the contract that
+    """(a level leg's closes as quoted (Bloomberg's PX_LAST, the unit of our marks) on or before
+    as_of, why None, the first date of its own closes, the contract read on each date (a roll or
+    the splice changes it)). An LME metal reads its prompt month's monthly prompt (the third
+    Wednesday), interpolated between the cash and 3M closes. Before the contract's first settlement, the contract that
     held its place on the strip that day (its months ahead on as_of): the rule the P&L history
     already follows (`commodity_history.daily_pnl_series_for_position`), so the level's history
     reaches as far back as the trade's P&L history does."""
@@ -618,7 +585,7 @@ def _leg_prices(history, leg, as_of: str
             year, month = (int(x) for x in leg.month_key.split("-")[:2])
         except ValueError:
             return None, f"{leg.instrument_id}: its prompt month {leg.month_key!r} is not known", None, None
-        cid, _note, why = lme_history_contract(history, leg.root_id, year, month, f"{year:04d}-{month:02d}-15", as_of)
+        cid, _note, why = lme_history_contract(history, leg.root_id, year, month, "", as_of)
         if cid is None:
             return None, f"{leg.instrument_id} {leg.month_key}: {why}", None, None
         s = history.settle_series(cid)
@@ -658,7 +625,7 @@ def _usd_per(history, ccy: str, index: pd.DatetimeIndex) -> Tuple[Optional[pd.Se
         return pd.Series(1.0, index=index), ""
     conv = history.usd_per_unit(ccy)
     if conv.empty:
-        return None, (f"no {ccy} FX history in the research database ({conv.attrs.get('reason') or 'none'}), "
+        return None, (f"no {ccy} FX history in the Bloomberg price history ({conv.attrs.get('reason') or 'none'}), "
                       f"so the level cannot be converted")
     return _asof(conv, index), ""
 
@@ -818,7 +785,7 @@ def _level_sd(level: pd.Series, as_of: str, n: int, floor: int, switch_at=None) 
 def _move_sigma(book_level: Optional[dict], kind: str, sd: Optional[float], sd_why: str,
                 book_given: bool = False) -> dict:
     """Today's move of the Book's level (spreads-engine's trade_book `level.change`, our marks)
-    over level_sd (the research history's), when the caller passed trade_book."""
+    over level_sd (the price history's), when the caller passed trade_book."""
     out = {"level_move": None, "move_sigma": None, "move_sigma_reason": ""}
     if book_level is None:
         out["move_sigma_reason"] = ("not a trade of the Book's trade_book (no trade name): no level move"
@@ -839,8 +806,10 @@ def _move_sigma(book_level: Optional[dict], kind: str, sd: Optional[float], sd_w
 
 
 # --------------------------------------------------------------------------- public
-def _defaults(history, config):
-    return (history if history is not None else load_commodity_history(),
+def _defaults(conn: sqlite3.Connection, history, config):
+    """The caller's history and config, else the book database's own price history and
+    config/risk.yaml."""
+    return (history if history is not None else load_commodity_history(conn),
             config if config is not None else load_config())
 
 
@@ -945,17 +914,15 @@ def subset_var(conn: sqlite3.Connection, as_of: str, trade_names: Optional[Itera
     their currency hedge), var_usd (+ = a loss), var_reason, daily_risk_usd (1 sd of the summed
     daily P&L), daily_risk_reason, sum_daily_risk_usd (their daily risks added, for comparison),
     sum_daily_risk_reason, diversification_usd (sum - together), days, first_date, last_date,
-    book_var_usd (every trade's, `position_risk`'s book VaR), count, count_book, source_kind,
-    source_note (whose settlement history the figures are drawn from), and against the vol target
+    book_var_usd (every trade's, `position_risk`'s book VaR), count, count_book, and against the vol target
     (`_vs_target`): vol_target_usd, vol_target_placeholder, vol_target_note, vol_blended_ann_usd,
     vol_note, vol_vs_target_pct (the engine's definition: blended annual vol / target, percent),
     var_vs_target_pct (1-day VaR / target, percent), vs_target_reason}. None with its reason
     where a figure cannot be computed."""
-    history, config = _defaults(history, config)
+    history, config = _defaults(conn, history, config)
     block = _base_block(conn, as_of, history, config) or _block(conn, as_of, spreads, curve, history, config)
     out = _subset(block, trade_names, config)
     out.update(_vs_target(block, trade_names, config, out["var_usd"]))
-    out["source_kind"], out["source_note"] = _source(history)
     return out
 
 
@@ -964,7 +931,8 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
                config: Optional[Dict[str, Any]] = None, trade_book: Optional[dict] = None) -> dict:
     """Risk by trade for `as_of` (module docstring). `spreads` / `curve`: `book_spreads` and
     `curve_positions` of the same as-of when the caller has them (else computed); `history`: a
-    `CommodityHistory` (default `load_commodity_history()`); `trade_names`: only those rows
+    `CommodityHistory` (default `load_commodity_history(conn)`, the book database's own Bloomberg
+    price history); `trade_names`: only those rows
     (trade names or position ids), the shares still of the whole book, plus `subset` =
     `subset_var` of them; `trade_book`: spreads-engine's `trade_book(conn, as_of)` when the
     caller holds it: each trade's `level.spec` is then THE level (read before this module's own
@@ -991,18 +959,12 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
                 correlation squared), legs_risk [{contract_id, name, hedge, side, lots,
                 daily_risk_usd (1 sd of the leg's own daily USD P&L), daily_risk_reason,
                 corr_other_side, corr_with (the other side | the rest of the trade | the trade's
-                legs besides its hedges), corr_reason, days, moves}], source_kind, source_note,
-                sources}]
+                legs besides its hedges), corr_reason, days, moves}]}]
               (position_risk's order: the included by contribution, largest first, then the
               left out),
-      excluded_count, partial_note, missing, subset (only with trade_names), not_found,
-      source_kind ('real' | 'mock' | 'unknown') and source_note (risk-history's `research_source`:
-      whose settlement history every figure here is drawn from; each trade row repeats
-      source_kind, its source_note ('' when real) and `sources` {figure: source_kind}),
-      price_check (risk-history's `research_price_check(conn, as_of)`, passed through: whether
-      the research prices are the same market as ours, root by root)}.
+      excluded_count, partial_note, missing, subset (only with trade_names), not_found}.
     Every figure a number or None with its reason."""
-    history, config = _defaults(history, config)
+    history, config = _defaults(conn, history, config)
     book_levels = ({str(t.get("position_id")): (t.get("level") or {}) for t in (trade_book or {}).get("trades") or []
                     if t.get("position_id")} if trade_book is not None else None)
     block = _block(conn, as_of, spreads, curve, history, config, book_levels)
@@ -1014,20 +976,15 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
         "method": METHOD, "trades": rows, "excluded_count": sum(1 for r in rows if not r["included"]),
         "partial_note": pr.get("partial_note") or "", "missing": list(block["missing"]), "not_found": not_found,
     }
-    out["source_kind"], out["source_note"] = _source(history)
-    if "price_check" not in block:           # kept with the block: same database, as_of and history
-        block["price_check"] = _price_check(conn, as_of, history)
-    out["price_check"] = block["price_check"]
     if trade_names is not None:
         out["subset"] = _subset(block, trade_names, config)
         out["subset"].update(_vs_target(block, trade_names, config, out["subset"]["var_usd"]))
-        out["subset"]["source_kind"], out["subset"]["source_note"] = out["source_kind"], out["source_note"]
     return out
 
 
 METHOD = {
     "daily_risk": "1 standard deviation of the trade's daily USD P&L over its last 252 days, today's "
-                  "position held constant across the research settlement history.",
+                  "position held constant across Bloomberg's daily price history.",
     "share": "The trade's historical component VaR over the book's: its P&L averaged over the book's tail "
              "days nearest the 95 % quantile, scaled so the shares add up to 100 %.",
     "hedge": "1 - the trade's P&L volatility / its bigger leg's alone, over a year; legs closing hours "
@@ -1035,5 +992,5 @@ METHOD = {
     "best_fit": "The lots of one leg per lot of the other that minimise the pair's variance (a regression "
                 "of their P&L per lot), beside the lots held; two-leg trades only.",
     "z": "The trade's level (a calendar's near - far, a China-West pair's converted ratio China / "
-         "foreign) against its own last 252 settlements; research settlement history, context only.",
+         "foreign) against its own last 252 daily closes (Bloomberg price history), context only.",
 }

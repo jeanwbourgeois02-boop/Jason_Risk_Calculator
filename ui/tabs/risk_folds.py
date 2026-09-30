@@ -1,8 +1,9 @@
-"""The Risk tab's folds (Phase G round 2b, 2026-09-29; the design doc's "Risk folds"): Net by
-commodity (with the month grid and the commodity's curves on a click: the Exposure tab's grid and
-curve, moved here when Exposure merged into Risk), Currency, Stress and the research Price check.
-Each is folded, opens on a click of its title (the open folds are a session store, so they survive
-a refresh and a tab switch) and follows the shared filter: it reads only the trades showing.
+"""The Risk tab's blocks under the table (rebuilt simple on 2026-09-30): the worst stresses (five
+scenarios, one line each, a click for the trades each hits), then three folds, Net by commodity
+(with the month grid and the commodity's curves on a click), Currency and Option Greeks. Each
+fold opens on a click of its title (the open folds and stress lines are a session store, so they
+survive a refresh and a tab switch) and follows the shared filter: it reads only the trades
+showing.
 
 What is read, never recomputed:
   - `engine.curve.curve_positions` (`blotter_pricing.shared_curve`): each open contract's delta in
@@ -13,9 +14,9 @@ What is read, never recomputed:
   - `engine.spreads.trade_book` (`shared_trade_book`): the leftover per leg (USD per 1 % move),
     the currency hedge per trade (exposure, hedge, coverage) and the legs' USD values;
   - `engine.stress.commodity_stress` on the same positions and spreads: each scenario's P&L per
-    contract, summed over the contracts of the trades showing; the hardest-hit trade is the
-    trade whose contracts lose most (contracts two trades share are not attributed);
-  - `engine.risk.commodity_history.research_price_check`, through `trade_risk`'s `price_check`.
+    position (`by_position`), summed over the trades showing; the hardest-hit trade is the one
+    that loses most. A replay before the price history on file has no figure: its reason goes
+    to the drawer (`stress_issues`), never a line of dashes.
 """
 from __future__ import annotations
 
@@ -29,8 +30,8 @@ from dash import dcc, html
 
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
-    cap, cap_parts, plain_ids, MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text,
-    short_date, sum_known, contract_name, is_fx_pair, quoted_unit, count_text,
+    cap, plain_ids, MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words,
+    short_date, sum_known, count_text,
 )
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,11 @@ STRESS_SHOWN = 5
 FOLD_TYPE = "risk-fold"                  # a fold's title: {"type", "idx": fold key}
 COMMODITY_ROW_TYPE = "risk-commodity-row"   # a commodity row of the Net fold: {"type", "idx": subsector}
 UNIT_TYPE = "risk-grid-unit"             # the month grid's unit switch: {"type", "idx": "grid"}
-FOLD_NET, FOLD_CCY, FOLD_STRESS, FOLD_PRICE, FOLD_STRESS_MORE = "net", "currency", "stress", "price", "stress-more"
+FOLD_NET, FOLD_CCY = "net", "currency"
+# Kept for tools/ui_check.py, which still names them (the Stress fold became the stresses card and the
+# Price check left on 2026-09-30): an open key nothing reads.
+FOLD_STRESS, FOLD_PRICE, FOLD_STRESS_MORE = "stress", "price", "stress-more"
+STRESS_LINE = "stress:"                   # a stress line's open key: "stress:<scenario name>"
 UNITS = (("lots", "Lots"), ("usd", "USD"), ("physical", "Physical"))
 DEFAULT_UNIT = "lots"
 
@@ -59,13 +64,10 @@ CCY_ABOUT = ("One row per currency the trades showing hold other than USD (CNY a
              "legs priced in it (full size), the currency hedge against them, what is left unhedged and the coverage "
              "(amber under 80 % or over 150 %). Only the China legs have a hedge convention (a long China leg is "
              "hedged by a short USD/CNH position); other currencies show their exposure only.")
-STRESS_ABOUT = ("Each scenario of the stress file applied to the trades showing, first order on today's delta (an option "
-                "at its delta), worst first: the P&L of the rows showing and the trade hit hardest. Designed scenarios "
-                "are placeholders until Jason sets his own; a replay is today's book over a past window of the research "
-                "history.")
-PRICE_ABOUT = ("Whether the research app's prices, which every risk figure here is drawn from, are the same market as ours: "
-               "per commodity our latest official price (or the average fill before a pull) against the research "
-               "app's settle, flagged beyond 20 % (2 % for the USD/CNH rate, which converts every China trade's history).")
+STRESS_ABOUT = ("The five scenarios of the stress file that hurt the trades showing most, first order on today's "
+                "positions (an option at its delta): the P&L and the trade hit hardest; click a line for every trade "
+                "it moves. The designed moves are stand-ins until Jason sets his own; a replay is today's book over a "
+                "past window of Bloomberg's price history.")
 PLACEHOLDER_WORDS = ("placeholder: the stress file holds stand-in scenarios until Jason sets his own "
                      "(docs/open-questions.md)")
 KIND_WORDS = {"outright": "Designed", "curve": "Designed", "spread": "Designed", "replay": "Historical replay",
@@ -1086,6 +1088,8 @@ def _stress_by_position(e: dict, s: dict, ctx: dict, shown_pids: Dict[str, str])
     e["note"] = _lines(*notes)
     if e["total"] is None and not whys:
         e["why"] = [s.get("reason") or "the scenario moves none of the trades showing"]
+    e["by"] = sorted(((shown_pids.get(pid) or names.get(pid) or pid, _num(bp[pid])) for pid in keep
+                      if _num(bp[pid]) is not None and abs(_num(bp[pid])) >= 0.5), key=lambda x: x[1])
     losers = [(pid, _num(bp[pid])) for pid in keep if _num(bp[pid]) is not None and _num(bp[pid]) <= -0.5]
     if losers:
         pid, v = min(losers, key=lambda x: x[1])
@@ -1109,7 +1113,8 @@ def stress_entries(ctx: dict, stress: Optional[dict]) -> List[dict]:
         e = {"name": str(s.get("name") or ""), "kind": KIND_WORDS.get(kind, kind), "placeholder": bool(placeholder),
              "hover": " ".join(x for x in (s.get("description"), (f"{s.get('start')} to {s.get('end')}"
                                                                    if s.get("start") else "")) if x),
-             "total": None, "excl": 0, "why": [], "hit": "", "hit_value": None, "hit_reason": ""}
+             "total": None, "excl": 0, "why": [], "hit": "", "hit_value": None, "hit_reason": "", "by": [],
+             "currency": kind == "fx"}
         if kind == "fx":
             by_ccy = [(str(c.get("currency") or ""), _num(c.get("pnl_change_usd"))) for c in s.get("by_currency") or []]
             valued = [(c, v) for c, v in by_ccy if v is not None]
@@ -1132,154 +1137,99 @@ def stress_entries(ctx: dict, stress: Optional[dict]) -> List[dict]:
     return sorted(out, key=lambda e: (e["total"] is None, e["total"] if e["total"] is not None else 0.0))
 
 
-def _stress_tr(e: dict) -> html.Tr:
-    kind = [e["kind"], html.Span(" placeholder", className="risk-grey", title=PLACEHOLDER_WORDS) if e["placeholder"] else None]
-    if e["total"] is None:
-        total = html.Td(missing_cell(_lines(*e["why"][:8]) or "no figure"))
-    else:
-        total = html.Td([km_cell(e["total"], hover=e.get("note") or ""),
-                         marker(f"excl. {e['excl']}", _lines(*e["why"][:8]), "marker--small") if e["excl"] else None])
+def _stress_line(e: dict, is_open: bool) -> List[html.Tr]:
+    """One scenario: its name, the P&L of the trades showing and the trade hit hardest; open, a row
+    per trade it moves (worst first)."""
+    total = html.Td([km_cell(e["total"], hover=e.get("note") or ""),
+                     marker(f"excl. {e['excl']}", _lines(*e["why"][:8]), "marker--small") if e["excl"] else None])
     if e["hit_value"] is None:
-        hit = html.Td(missing_cell(e["hit_reason"] or "no figure"), className="l")
+        hit = html.Td(html.Span(cap(e["hit_reason"]) or "", className="tk-sub"), className="l")
     else:
-        hit = html.Td([html.Span(e["hit"], className="tk-name"), " ", km_cell(e["hit_value"])], className="l",
-                      title=plain_words(_lines(f"{e['hit']}: {format_cell(e['hit_value'])} USD", e.get("hit_note", ""))))
-    return html.Tr([html.Td(e["name"], className="l", title=plain_words(e["hover"]) or None),
-                    html.Td(kind, className="l tk-sub"), total, hit])
+        hit = html.Td([html.Span(e["hit"], className="tk-name"), " ", km_cell(e["hit_value"])], className="l")
+    rows = [html.Tr([html.Td([html.Span("▾ " if is_open else "▸ ", className="tk-chev"),
+                              html.Span(e["name"], className="tk-name")], className="l",
+                             title=plain_words(e["hover"]) or None),
+                     total, hit], id={"type": FOLD_TYPE, "idx": STRESS_LINE + e["name"]}, n_clicks=0,
+                    className="tk-row" + (" tk-row--open" if is_open else ""))]
+    if is_open:
+        if e.get("currency"):
+            rows.append(html.Tr([html.Td("Not split per trade: a currency scenario moves the currencies held",
+                                         className="l tk-sub", colSpan=3)], className="tk-leg"))
+        elif not e.get("by"):
+            rows.append(html.Tr([html.Td("No trade showing moves in this scenario", className="l tk-sub", colSpan=3)],
+                                className="tk-leg"))
+        for name, value in e.get("by") or []:
+            rows.append(html.Tr([html.Td(name, className="l risk-stress-trade"), html.Td(km_cell(value)), html.Td("")],
+                                className="tk-leg"))
+    return rows
 
 
-def stress_table(entries: Sequence[dict]) -> html.Table:
-    head = html.Thead(html.Tr([
-        html.Th("Scenario", className="l", title="The scenario; its definition on hover."),
-        html.Th("Kind", className="l", title="Designed (a move of the stress file), historical replay (a past window) or "
-                                             "currency."),
-        html.Th("P&L", title="The trades showing, first order on today's delta; a currency scenario only for the whole "
-                             "book."),
-        html.Th("Hardest hit", className="l", title="The trade (or, for a currency scenario, the currency) that loses "
-                                                    "most.")]))
-    return html.Table([head, html.Tbody([_stress_tr(e) for e in entries])],
-                      className="book-table book-grid tk-table risk-stress-table")
+def shown_entries(ctx: dict, stress: Optional[dict]) -> List[dict]:
+    """The scenarios with a figure for the trades showing, worst first (the currency scenarios only
+    for the whole book: they are not split per trade)."""
+    return [e for e in stress_entries(ctx, stress) if e["total"] is not None]
 
 
-def stress_fold(ctx: dict, stress: Optional[dict], is_open: bool, more_open: bool) -> html.Div:
-    entries = stress_entries(ctx, stress) if stress is not None else []
-    priced = [e for e in entries if e["total"] is not None and not (abs(e["total"]) < 0.5 and e["excl"])]
-    worst = priced[0] if priced else None
+def stress_card(ctx: dict, stress: Optional[dict], open_set: Any) -> html.Div:
+    """The worst stresses: the five scenarios that hurt the trades showing most, one line each, a
+    click for every trade each moves."""
+    opened = set(open_set or [])
+    entries = shown_entries(ctx, stress) if stress is not None else []
+    body: Any
     if stress is None:
-        count: Any = "Click to run the scenarios"
+        body = html.Div(missing_cell("the scenarios are still being computed"), className="risk-quiet")
     elif not entries:
-        count = "No scenario on file"
-    elif worst is None:
-        count = f"{_plural(len(entries), 'scenario')} · no scenario priced yet"
+        why = "; ".join((stress or {}).get("reasons") or []) or "no scenario moves the trades showing"
+        body = html.Div(missing_cell(why), className="risk-quiet")
     else:
-        count = f"{_plural(len(entries), 'scenario')} · worst {km_text(worst['total'])} ({worst['name']})"
-    body: List[Any] = []
-    if is_open:
-        if stress is None:
-            body.append(html.Div("Computing the scenarios...", className="risk-quiet"))
-        elif not entries:
-            why = "; ".join((stress or {}).get("reasons") or []) or "no scenario in the stress file"
-            body.append(html.Div(missing_cell(why), className="risk-quiet"))
-        else:
-            body.append(html.Div(stress_table(entries[:STRESS_SHOWN]), className="tk-table-slot"))
-            rest = entries[STRESS_SHOWN:]
-            if rest:
-                body.append(html.Div([html.Span("▾ " if more_open else "▸ ", className="tk-chev"),
-                                      f"{len(rest)} more"], id={"type": FOLD_TYPE, "idx": FOLD_STRESS_MORE}, n_clicks=0,
-                                     className="risk-more"))
-                if more_open:
-                    body.append(html.Div(stress_table(rest), className="tk-table-slot"))
-    return fold(FOLD_STRESS, "Stress", count, STRESS_ABOUT, is_open, body)
+        head = html.Thead(html.Tr([
+            html.Th("Scenario", className="l", title="The scenario; its definition on hover. Click for every trade "
+                                                    "it moves."),
+            html.Th("P&L", title="The trades showing, first order on today's positions; a currency scenario only for "
+                                 "the whole book."),
+            html.Th("Hardest hit", className="l", title="The trade (for a currency scenario, the currency) that loses "
+                                                        "most.")]))
+        rows: List[Any] = []
+        for e in entries[:STRESS_SHOWN]:
+            rows += _stress_line(e, STRESS_LINE + e["name"] in opened)
+        body = html.Div(html.Table([head, html.Tbody(rows)], className="book-table book-grid tk-table risk-stress-table"),
+                        className="tk-table-slot")
+    return html.Div(className="book-card risk-block risk-stress-card", children=[
+        html.Div(about("Worst stresses", STRESS_ABOUT, level="span", className="tk-title"), className="tk-strip"),
+        body])
 
 
-# --------------------------------------------------------------------------- Price check
-def _pc_unit(r: dict, roots: Dict[str, Any]) -> str:
-    """The unit a price-check row's prices are quoted in (`price_text` reads its tick from it): the
-    contract's quote unit, the pair for an FX rate."""
-    if str(r.get("kind")) == "fx":
-        pair = str(r.get("contract_id") or r.get("root_id") or "")[:6]
-        return pair if is_fx_pair(pair) else ""
-    return quoted_unit(roots.get(str(r.get("root_id") or ""))) if roots.get(str(r.get("root_id") or "")) else ""
+def trade_stress(stress: Optional[dict], position_id: str, n: int = STRESS_SHOWN) -> List[Tuple[str, float]]:
+    """[(scenario, the position's P&L)] of the scenarios that move one trade, worst first, at most
+    `n` (the engine's `by_position`, never recomputed)."""
+    if not stress or not position_id:
+        return []
+    out = []
+    for s in stress.get("scenarios") or []:
+        v = _num((s.get("by_position") or {}).get(position_id))
+        if v is not None and abs(v) >= 0.5:
+            out.append((str(s.get("name") or ""), v))
+    return sorted(out, key=lambda x: x[1])[:n]
 
 
-def _pc_name(r: dict) -> str:
-    cid = str(r.get("contract_id") or "")
-    name = contract_name(cid) if cid else ""
-    return name or plain_ids(cid or str(r.get("root_id") or ""))
-
-
-def _gap_td(r: dict, flag: bool) -> html.Td:
-    """The engine's gap in percent, signed at one decimal, amber when flagged."""
-    gap = _num(r.get("gap_pct"))
-    if gap is None:
-        return html.Td(missing_cell(r.get("reason") or "not compared"))
-    body = f"{abs(gap):.1f} %"
-    text = (MINUS if gap < 0 and float(f"{abs(gap):.1f}") else "+" if gap > 0 else "") + body
-    return html.Td(html.Span(text, className="cell-amber" if flag else None))
-
-
-def price_check_fold(pc: Optional[dict], is_open: bool) -> html.Div:
-    pc = pc or {}
-    try:
-        from data.contracts import load_roots
-        roots = dict(load_roots())
-    except Exception:  # noqa: BLE001 -- the prices then show at their own decimals
-        roots = {}
-    rows = pc.get("rows") or []
-    flagged = sum(1 for r in rows if r.get("flagged"))
-    # the engine's sentence (how many are off, the rule) is the count's hover, never a loose line
-    sentence = cap(plain_ids(plain_words(str(pc.get("sentence") or "")))) or None
-    if not pc:
-        count: Any = "Not run yet"
-    elif not rows:
-        count = html.Span(cap(plain_words(str(pc.get("reason") or ""))) or "Nothing to compare", title=sentence)
-    else:
-        count = html.Span(f"{flagged} of {len(rows)} off" if flagged else f"{len(rows)} checked, all within range",
-                          className="cell-amber" if flagged else None, title=sentence)
-    body: List[Any] = []
-    if is_open:
-        if rows:
-            head = html.Thead(html.Tr([html.Th(t, className=c or None, title=plain_words(h)) for t, c, h in (
-                ("Check", "l", "Off: the research price is further from ours than allowed."),
-                ("Kind", "l", "A future, an LME metal or the USD/CNH rate."),
-                ("Price", "l", "Our contract (the research contract on hover)."),
-                ("Ours", "", "Our latest official price, or the average fill before a pull."),
-                ("Research", "", "The research app's latest settle or rate."),
-                ("Factor", "", "Research over ours: 1.00 is the same price."),
-                ("Gap", "", "How far the research price is from ours, in percent (the factor less one)."),
-                ("Allowed", "", "The gap allowed before the check flags it: 20 % for futures and LME, 2 % for the "
-                                "USD/CNH rate."))]))
-            body_rows = []
-            for r in rows:
-                flag = bool(r.get("flagged"))
-                factor = _num(r.get("factor"))
-                ours_hover = _lines(f"{r.get('ours_kind') or ''} of {r.get('ours_date') or ''}".strip(), r.get("note") or "")
-                unit = _pc_unit(r, roots)
-                body_rows.append(html.Tr([
-                    html.Td(html.Span("Off" if flag else ("OK" if factor is not None else MISSING),
-                                      className="cell-amber tk-bold" if flag else "tk-sub",
-                                      title=cap_parts(plain_ids(str(r.get("sentence") or r.get("reason") or "")))
-                                      or None), className="l"),
-                    html.Td({"future": "Future", "lme": "LME", "fx": "FX"}.get(str(r.get("kind")), str(r.get("kind") or "")),
-                            className="l"),
-                    html.Td(html.Span(_pc_name(r),
-                                      title=_lines(f"Bloomberg: {r.get('contract_id') or r.get('root_id') or ''}",
-                                                   f"Research: {r.get('research_contract_id') or ''}")), className="l"),
-                    html.Td(html.Span(price_text(_num(r.get("ours")), unit), title=plain_words(ours_hover) or None)
-                            if _num(r.get("ours")) is not None else missing_cell(r.get("reason") or "no price of ours")),
-                    html.Td(html.Span(price_text(_num(r.get("research")), unit),
-                                      title=plain_words(f"settle of {r.get('research_date') or ''}"))
-                            if _num(r.get("research")) is not None else missing_cell(r.get("reason") or "no research price")),
-                    html.Td(html.Span(f"×{factor:.2f}", className="cell-amber" if flag else None,
-                                      title=plain_words(r.get("hint") or "") or None) if factor is not None
-                            else missing_cell(r.get("reason") or "not compared")),
-                    _gap_td(r, flag),
-                    html.Td(f"{_num(r.get('threshold')) * 100:g} %" if _num(r.get("threshold")) is not None
-                            else missing_cell("no threshold"), className="tk-sub"),
-                ]))
-            body.append(html.Div(html.Table([head, html.Tbody(body_rows)],
-                                            className="book-table book-grid tk-table risk-price-table"),
-                                 className="tk-table-slot"))
-        elif pc.get("reason"):
-            body.append(html.Div(missing_cell(pc["reason"]), className="risk-quiet"))
-    return fold(FOLD_PRICE, "Price check (research)", count, PRICE_ABOUT, is_open, body)
+def stress_issues(ctx: dict, stress: Optional[dict]) -> List[Tuple[str, str, str]]:
+    """The drawer's rows for the scenarios with no figure (a replay before the price history on
+    file, a scenario that could not be priced) and the stress file's own reasons."""
+    if not stress:
+        return []
+    entries = stress_entries(ctx, stress)
+    # the file's own reasons, less the per-scenario ones listed below by name
+    named = tuple(f"{e['name']}:" for e in entries)
+    out = [("Stress", "", str(r)) for r in stress.get("reasons") or [] if r and not str(r).startswith(named)]
+    filtered_ccy = 0
+    for e in entries:
+        if e["total"] is not None:
+            continue
+        if e.get("currency") and ctx.get("filtered"):
+            filtered_ccy += 1
+            continue
+        out.append(("Stress", e["name"], "; ".join(str(w) for w in e["why"][:4]) or "no figure"))
+    if filtered_ccy:
+        out.append(("Stress", "", f"{_plural(filtered_ccy, 'currency scenario')} not shown while a filter is set: they "
+                                  "move the currencies held, not one trade"))
+    return out

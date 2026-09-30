@@ -2190,12 +2190,17 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
             trades_block = html.Div(missing_cell(f"the last upload could not be read ({type(exc).__name__}: {exc})"),
                                     className="data-bbg-line")
             issues.append((TRADES_TITLE, f"The trades' problems could not be read ({type(exc).__name__}: {exc})."))
+        try:
+            from ui.tabs.blotter_pricing import price_history_summary
+            history = price_history_summary(conn)
+        except Exception as exc:  # noqa: BLE001 -- the card says it could not be read
+            history = {"rows": 0, "contracts": 0, "first": "", "last": "", "error": f"{type(exc).__name__}: {exc}"}
         arrived = sum(1 for r in mark_rows if r["arrived"])
         line = status_line(feed_status, n_pull, (len(mark_rows), arrived), closes, dates, trades_part)
     finally:
         conn.close()
     drawer = issues_drawer(issues, id=f"{ISSUES_ID}-drawer") or blank
-    bbg_line, pull_panel = bloomberg_head(feed_status, pulls)
+    bbg_line, pull_panel = bloomberg_head(feed_status, pulls, history)
     tidy([line, marks_empty, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel, trades_block])
     return (line, problems, {} if problems else _HIDDEN, mark_rows, marks_filter_options(mark_rows), marks_empty,
             tools_style, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel, trades_block, trade_rows)
@@ -2206,14 +2211,45 @@ PULL_PROBLEMS_ABOUT = ("Every failed or partial step of the last Bloomberg pull 
                        "full, with what it leaves the book's figures with. The one place a pull's errors are written.")
 
 
-def bloomberg_head(status: Optional[dict], pulls: List[dict]) -> Tuple[html.Div, html.Div]:
-    """The Bloomberg card's first two blocks: the last pull in one line, then "Pull problems (N)"."""
+def _long_date(iso: str) -> str:
+    try:
+        d = date.fromisoformat(str(iso)[:10])
+    except (TypeError, ValueError):
+        return str(iso or "")
+    return f"{d.day} {d:%b %Y}"
+
+
+def history_line(history: Optional[dict]) -> html.Div:
+    """'Price history: 433 contracts, first 12 Mar 2024, last 30 Sep 2026' (the book database's own
+    Bloomberg daily history, the Risk tab's input), or 'none yet' before the first pull."""
+    h = history or {}
+    hover = ("Bloomberg's daily closes, volume and open interest, fetched by Pull Bloomberg now (about two and a "
+             "half years the first time, then only the new days): the input of every risk figure, never a mark")
+    if h.get("error"):
+        words, warn = f"Price history: could not be read ({h['error']})", True
+    elif not h.get("rows"):
+        words, warn = "Price history: none yet, press Pull Bloomberg now", True
+    else:
+        n = int(h.get("contracts") or 0)
+        words = (f"Price history: {n:,} {'contract' if n == 1 else 'contracts'}, first {_long_date(h.get('first'))}, "
+                 f"last {_long_date(h.get('last'))}")
+        hover += f" · {int(h['rows']):,} daily rows"
+        warn = False
+    return html.Div(html.Span(words, className="cell-amber" if warn else None, title=hover),
+                    className="tk-headline data-bbg-line data-history-line")
+
+
+def bloomberg_head(status: Optional[dict], pulls: List[dict],
+                   history: Optional[dict] = None) -> Tuple[html.Div, html.Div]:
+    """The Bloomberg card's first blocks: the last pull in one line, the price history on file in
+    one line, then "Pull problems (N)"."""
     from ui.feed_controls import short_state
     no_pull = short_state(top_bar_status(status)) == "no pull yet"
     words, hover = data_checks.bloomberg_line(status, no_pull=no_pull)
     warn = no_pull or bool(pulls) or (status or {}).get("connected") is False
-    line = html.Div(html.Span(words, className="cell-amber" if warn else None, title=plain_words(hover) or None),
-                    className="tk-headline data-bbg-line")
+    line = html.Div([html.Div(html.Span(words, className="cell-amber" if warn else None,
+                                        title=plain_words(hover) or None), className="tk-headline data-bbg-line"),
+                     history_line(history)])
     panel = html.Div([
         html.Div(kit.strip_title(f"{PULL_PROBLEMS_TITLE} ({len(pulls)})", PULL_PROBLEMS_ABOUT),
                  className="data-bbg-subhead"),

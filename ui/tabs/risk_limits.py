@@ -82,15 +82,14 @@ def _lots(value: Any) -> str:
 _PLAIN_REASONS: Tuple[Tuple[str, Optional[str]], ...] = (
     ("no market history", "no FX price history on this PC"),
     ("no commodity history on or before", None),
-    ("no commodity history database", "research data not on this PC"),
-    ("no research database", "research data not on this PC"),
+    ("No price history yet", "no price history yet: press Pull Bloomberg now"),
     ("no commodity history", "no commodity price history"),
     ("no commodity row has a history series", "no commodity price history"),
     ("no open commodity futures", "no positions"),
     ("no currency or metal position", "no positions"),
     ("no commodity position", "no positions"),
 )
-RESEARCH_GONE = "research data not on this PC"
+NO_HISTORY = "no price history yet: press Pull Bloomberg now"
 _PATH_TAIL = re.compile(r"[:(]?\s*tried\s+[A-Za-z]:\\.*$|[:(]?\s*tried\s+/.*$")
 # engine words in a reason or a note, and their plain words (applied after the causes)
 _PLAIN_WORDS = (("not in the book series", "not in the book's figures"), ("' series", "' figures"),
@@ -122,8 +121,8 @@ def plain_reason(text: Any) -> str:
             seg = seg.replace(engine_words, plain)
         if seg and seg not in out:
             out.append(seg)
-    if out and all(RESEARCH_GONE in seg for seg in out):
-        return RESEARCH_GONE          # every leg's reason is the same missing file: said once, no tickers
+    if out and all(NO_HISTORY in seg for seg in out):
+        return NO_HISTORY             # every leg's reason is the same: said once, no tickers
     return "; ".join(out)
 
 
@@ -554,7 +553,7 @@ def limits_pass(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[str, Any], L
         why = f"the commodity positions could not be computed ({type(exc).__name__}: {exc})"
         return ({"available": False, "reasons": [why]},
                 [{"limit": "limit checks", "scope": "", "level": "N/A", "reason": why}],
-                {"available": False, "reason": why, "label": "research", "positions": [], "summary": {}})
+                {"available": False, "reason": why, "label": "Bloomberg history", "positions": [], "summary": {}})
     spreads = None
     if curve.get("rows"):
         try:
@@ -574,5 +573,5 @@ def limits_pass(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[str, Any], L
         liq = liquidity(conn, as_of, spreads=spreads, curve=curve)
     except Exception as exc:  # noqa: BLE001
         liq = {"available": False, "reason": f"the liquidity check could not be computed ({type(exc).__name__}: {exc})",
-               "label": "research", "positions": [], "summary": {}}
+               "label": "Bloomberg history", "positions": [], "summary": {}}
     return margin, checks, liq

@@ -20,6 +20,7 @@ Carried from `.claude/agent-memory/data-ingest/schema-generic-migration.md` and 
 - Scratch DBs: the Bash safety check refuses `rm -f "$D"/*.db`; use fresh file names (or `"${D:?}"`) instead of deleting.
 - A `trades` column's `-- comment` in the DDL may span two lines (continuation lines start with `--`); `_strip_sql_comments` removes them before parsing, and `_CREATE_TABLE_RE` still needs the block to end in `
 );`.
+- A new table goes into `_TABLES_DDL` (its own `_X_DDL` string); that alone makes `create_schema` add it to an old DB (`_expected_objects` sees it missing). Keep bulk market/history tables OUT of `schema.TABLES`: `upload.py` copies every `TABLES` table through its staging. 2026-09-30: `price_history` (Bloomberg daily closes, risk only, never a mark, no FK; spec shared with bbg-library / bbg-backfill / bbg-snapshot) added that way, with `ix_price_history_date`; the brief relayed the user's decision to move risk history off the research DB.
 
 **Why:** a stale hand-kept migration list caused a live 500 in 2026-09-17 (`instrument_options.payoff`).
 **How to apply:** check these when you add a table, add a column or retire a table. Related: [[phase2-macro-removal-2026-09-24]].

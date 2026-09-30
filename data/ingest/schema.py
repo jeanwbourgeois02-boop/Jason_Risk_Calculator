@@ -349,6 +349,31 @@ INSERT OR IGNORE INTO bbg_library_state (id, dirty, synced_at) VALUES (1, 1, '')
     for table in ("trades", "trade_legs") for name, event in (("ai", "INSERT"), ("au", "UPDATE"), ("ad", "DELETE")))
 
 
+# --------------------------------------------------------------------------- price history
+# Bloomberg's daily closes kept for risk only (user decision 2026-09-30: the Risk tab stops
+# reading the research app's database; its history comes from Bloomberg into this one).
+# Read by the Risk tab, the stress, the liquidity check and the Book's z-score. NEVER a
+# mark: nothing in P&L or delta reads it, and it is not in `marks_official` (hard rules 2
+# and 3). No foreign key to `instruments`: an expired chain contract nobody traded has no
+# instruments row. Kept out of `TABLES`, so an upload's staging never copies it.
+PRICE_HISTORY_TABLES = ("price_history",)
+_PRICE_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS price_history (
+  instrument_id   TEXT NOT NULL,      -- canonical contract id 'CLZ26 Comdty' (futures, expired chain contracts
+                                      -- nobody traded included); FX pair 'USDCNH'; LME pillar 'LME:CA CASH' / 'LME:CA 3M'
+  as_of_date      TEXT NOT NULL,      -- ISO date of the daily close
+  settle          REAL NOT NULL,      -- Bloomberg daily PX_LAST, in Bloomberg's quote units
+  volume          REAL NOT NULL DEFAULT -1,         -- PX_VOLUME; -1 = not given
+  open_interest   REAL NOT NULL DEFAULT -1,         -- OPEN_INT; -1 = not given
+  bbg_ticker      TEXT NOT NULL DEFAULT '',         -- the security as asked
+  source          TEXT NOT NULL DEFAULT 'BBG_BDH',
+  snapped_at      TEXT NOT NULL DEFAULT '',         -- ISO timestamp of the write
+  PRIMARY KEY (instrument_id, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS ix_price_history_date ON price_history (as_of_date);
+"""
+
+
 _CREATE_TABLE_RE = re.compile(r'CREATE TABLE IF NOT EXISTS\s+"?(\w+)"?\s*\((.*?)\n\);', re.DOTALL)
 _CONSTRAINT_KEYWORDS = frozenset({"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"})
 
@@ -439,7 +464,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
                 conn.execute(f'ALTER TABLE {table} ADD COLUMN "{name}" {coldef}')
 
 
-_TABLES_DDL = _DDL + _LEDGER_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL
+_TABLES_DDL = _DDL + _LEDGER_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL + _PRICE_HISTORY_DDL
 _CREATE_OBJECT_RE = re.compile(r'CREATE\s+(TABLE|INDEX|TRIGGER)\s+IF\s+NOT\s+EXISTS\s+"?(\w+)"?', re.IGNORECASE)
 
 

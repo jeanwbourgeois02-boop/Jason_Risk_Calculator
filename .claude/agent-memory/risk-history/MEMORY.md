@@ -1,5 +1,6 @@
-- [Dev PC parquet gap and package init](dev-pc-parquet-and-package-init.md) — no pyarrow here; engine/risk/__init__ imports metrics, so a removed name breaks collection
-- [Research db quirks](research-db-quirks.md) — rv.sqlite: ZZ ids, raw x multiplier, WAL files, depth, OI caveats; dev copy is MOCK (job table provider)
-- [Research spread keys](research-spread-keys.md) — cal id / near-year instance rule, tracked instances only, values in quote units, 5 templates absent
-- [No python stdin heredocs](feedback-no-python-stdin-heredoc.md) — `py -3 -` heredocs hang and cannot be killed here; use scratchpad scripts
-- [Benchmarking book_risk](benchmarking-book-risk.md) — COMMODITY_HISTORY_DB for a HEAD copy; profiler inflates; attrs deepcopy; MIN+MAX scan trap; prefetch is SQL-bound
+- [Package init and names metrics imports](dev-pc-parquet-and-package-init.md) — engine/risk/__init__ imports metrics; keep YIELDS_FILE, History, load_history; no parquet since 2026-09-30
+- [Research db quirks](research-db-quirks.md) — history only since 2026-09-30: rv.sqlite no longer read (ZZ ids, raw x multiplier, depth)
+- [Price history reader](price-history-reader.md) — 2026-09-30: price_history in the book db (futures, LME, FX for history.py); LME synthetic prompt rows, memory-db copy
+- [Research spread keys](research-spread-keys.md) — history only: research_spreads.py deleted 2026-09-30 (no link to the research app)
+- [No python stdin heredocs](feedback-no-python-stdin-heredoc.md) — never type `py -3 -` in any form (hangs even with </dev/null); scratchpad scripts
+- [Benchmarking book_risk](benchmarking-book-risk.md) — profiler inflates; attrs deepcopy; MIN+MAX scan trap (COMMODITY_HISTORY_DB env is gone since 2026-09-30)

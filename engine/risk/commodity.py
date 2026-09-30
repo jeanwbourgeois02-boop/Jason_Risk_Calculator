@@ -1,7 +1,7 @@
 """The commodity underlyers of the Risk tab (commodity conversion, Phase 4): the book's
-commodity positions held constant across the research app's settlement history
-(`engine.risk.commodity_history`, risk-history's), the same way `metrics.py` holds the FX
-delta constant across the nm-dashboard's closes.
+commodity positions held constant across Bloomberg's daily price history (the book database's
+`price_history`, read by `engine.risk.commodity_history`, risk-history's), the same way `metrics.py` holds the FX
+delta constant across Bloomberg's FX closes (`engine.risk.history`).
 
 Positions are the book's own, never recomputed here:
   * `engine.curve.curve_positions(conn, as_of)["rows"]` (curve-positions): one row per open
@@ -12,14 +12,14 @@ Positions are the book's own, never recomputed here:
 No mark is read here and nothing is written anywhere.
 
 The daily USD P&L of one contract held (`CommodityHistory.daily_pnl_series_for_position`):
-  raw settle change x our multiplier x lots x USD per quote unit that day (a CNY contract
-  through USDCNH, the research app's rule); its own settlements while it has them, the
-  constant-maturity changes at the same depth before. The history of
+  close change (Bloomberg's quoted price) x our multiplier x lots x USD per quote unit that day
+  (a CNY contract through USDCNH); its own closes while it has them, the constant-maturity
+  changes at the same depth before. The history of
     * a FUTURE is its own contract's;
     * a CMDTY_OPTION is its underlying future's (`underlying_id`), at the option's delta lots;
-    * an LME_FWD is the research app's LME contract of its prompt month (same root, same year
-      and month); with none on file, the listed contract whose last trade date is nearest the
-      prompt, said in the contract's note.
+    * an LME_FWD is its own prompt's ('LME:CA 2026-12-10'), which the history reads off the
+      metal's cash and 3M closes, linear in time between them (a prompt that is not a date
+      takes its month's monthly prompt, the third Wednesday).
 Each series stops at `as_of`. The per-lot series of a contract is computed once and scaled
 (the P&L is linear in lots).
 
@@ -39,6 +39,7 @@ clean spread has no net outright by construction.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
@@ -104,7 +105,7 @@ class _PerLot:
                 s = s[s.index <= self.cut]
                 if s.empty:
                     self._memo[key] = (None, attrs, f"contract {contract_id}: no settlement change on or before "
-                                                    f"{self.as_of} in the research history")
+                                                    f"{self.as_of} in the Bloomberg price history")
                 else:
                     self._memo[key] = (s.astype(float), attrs, "")
         return self._memo[key]
@@ -112,40 +113,35 @@ class _PerLot:
 
 def lme_history_contract(history, root_id: str, year: Optional[int], month: Optional[int],
                          prompt: str, as_of: str) -> Tuple[Optional[str], str, str]:
-    """(the research contract id an LME forward's history is read from, a note, a reason).
-    The prompt month's contract of the same root; else the listed one (last trade after as_of)
-    whose last trade date is nearest the prompt."""
+    """(the id an LME forward's history is read from, a note, a reason): the ticket's own prompt,
+    f"{root} {prompt}" ('LME:CA 2026-12-10'), which risk-history's reader interpolates in time
+    between the metal's cash and 3M closes. A `prompt` that is not a date takes the monthly
+    prompt (the third Wednesday) of `year`-`month`. `as_of` is kept for the callers' signature."""
     if not getattr(history, "available", False):
-        return None, "", getattr(history, "reason", "") or "no commodity history"
+        return None, "", getattr(history, "reason", "") or "no price history"
     root = str(root_id or "").replace(" ", "").upper()
-    contracts = history.contracts
-    if contracts is None or contracts.empty or "instrument_id" not in contracts.columns:
-        return None, "", f"root {root_id} is not in the research database ({history.path})"
-    mine = contracts[contracts["instrument_id"] == root]
-    if mine.empty:
-        return None, "", f"root {root_id} is not in the research database ({history.path})"
-    if year is not None and month is not None:
-        hit = mine[(mine["year"] == int(year)) & (mine["month"] == int(month))]
-        if not hit.empty:
-            cid = str(hit.index[0])
-            return cid, f"LME prompt {prompt}: the research app's {cid} (the prompt month's contract)", ""
-    listed = mine[mine["last_trade_date"].astype(str) > as_of]
-    if listed.empty:
-        return None, "", f"no {root_id} contract listed after {as_of} in the research database"
+    day = None
     try:
-        target = pd.Timestamp(prompt)
-    except (TypeError, ValueError):
+        day = dt.date.fromisoformat(str(prompt or "")[:10])
+    except ValueError:
+        if year is not None and month is not None:
+            try:
+                from engine.lme import monthly_prompt
+                day = monthly_prompt(int(year), int(month))
+            except Exception as exc:  # noqa: BLE001 -- a month that will not resolve is a reason
+                return None, "", f"LME prompt month {year}-{month}: no monthly prompt ({type(exc).__name__}: {exc})"
+    if day is None:
         return None, "", f"LME prompt {prompt!r} is not a date"
-    gaps = (pd.to_datetime(listed["last_trade_date"]) - target).abs()
-    cid = str(gaps.idxmin())
-    return cid, (f"LME prompt {prompt}: no {root_id} contract for that month in the research database, "
-                 f"read from {cid}, the listed month nearest the prompt"), ""
+    cid, why = history.resolve_contract(f"{root} {day.isoformat()}", root)
+    if cid is None:
+        return None, "", why or f"no cash and 3M price history on file for {root}"
+    return cid, f"LME prompt {day.isoformat()}: interpolated in time between the {root} cash and 3M closes", ""
 
 
 def _contract_detail(row: dict) -> dict:
     return {"contract_id": row.get("contract_id"), "product": row.get("product"), "history_contract": None,
             "delta_lots": row.get("delta_lots"), "multiplier": row.get("multiplier"),
-            "currency": row.get("currency", ""), "research_contract_id": None, "months_ahead": None,
+            "currency": row.get("currency", ""), "months_ahead": None,
             "own_from": None, "fallback_days": None, "fx_pair": "", "fx_missing_days": None,
             "days": 0, "in_series": False, "reason": "", "note": ""}
 
@@ -180,7 +176,9 @@ def contract_series(row: dict, per_lot: _PerLot, as_of: str) -> Tuple[dict, Opti
         hist_id = row.get("contract_id")
     d["history_contract"] = hist_id
     unit, attrs, why = per_lot.get(root_id, hist_id, mult, d["currency"])
-    for k in ("research_contract_id", "months_ahead", "own_from", "fallback_days", "fx_pair", "fx_missing_days"):
+    if attrs.get("research_contract_id"):          # the id the history read (risk-history's attr name)
+        d["history_contract"] = str(attrs["research_contract_id"])
+    for k in ("months_ahead", "own_from", "fallback_days", "fx_pair", "fx_missing_days"):
         if k in attrs:
             v = attrs[k]
             d[k] = int(v) if k in ("months_ahead", "fallback_days", "fx_missing_days") and v is not None else v
@@ -236,7 +234,7 @@ def commodity_underlyers(conn: sqlite3.Connection, as_of: str, history, curve: d
         rows.append({"key": key, "underlyer": root_id, "name": c.get("name", root_id), "kind": KIND_COMMODITY,
                      "role": ROLE_PART, "series": root_id, "sector": sector, "net_usd": net,
                      "gross_usd": gross, "net_delta_lots": c.get("net_delta_lots"), "carry": False,
-                     "reason": reason, "note": "research settlement history (risk input only)",
+                     "reason": reason, "note": "Bloomberg daily price history (risk input only)",
                      "parts": [], "contracts": details})
         if s is not None:
             series[key] = s

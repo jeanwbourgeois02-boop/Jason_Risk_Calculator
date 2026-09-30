@@ -288,16 +288,15 @@ def screen_memo(kind: str, conn: sqlite3.Connection, as_of: str, compute, extra:
 
 
 def outside_inputs_key(*paths) -> tuple:
-    """A key part for a result that also reads files outside the database (the Risk tab's
-    config and the research app's histories): each path's (mtime_ns, size), None when it is
+    """A key part for a result that also reads files outside the database (the risk, stress
+    and limits config): each path's (mtime_ns, size), None when it is
     missing. A path ending in `-wal` that is empty also counts as None: a read-only open of a
     WAL database leaves an empty `-wal` beside it, and that is no change of data (the rule
     `engine.risk.commodity_history._cache_key` keys its own history cache on).
 
     Since 2026-09-29 (the warm-up) there is no quarter-hour in the key: a result stays cached
-    until one of its files changes. A write by the research app lands in its WAL file (size
-    and mtime change) or, after a checkpoint, in the main file, so both are stamped; the as-of
-    day is already in every memo key (`screen_memo`), so the 17:00 roll re-reads it too."""
+    until one of its files changes; the as-of day is already in every memo key (`screen_memo`),
+    so the 17:00 roll re-reads it too."""
     out = []
     for p in paths:
         try:
@@ -349,35 +348,47 @@ def shared_curve(conn: sqlite3.Connection, as_of: str) -> dict:
 # --------------------------------------------------------------------------- the trade as the unit (Phase G)
 # 2026-09-29 (Phase G, round 1): `engine.spreads.trade_book` (one entry per trade name: its legs,
 # type, size, level, hedge, next date, P&L) and `engine.risk.trades.trade_risk` (z, hedge %,
-# daily risk per trade) are computed once per (database revision, as-of, outside inputs) and
+# daily risk per trade) are computed once per (database revision, as-of, config files) and
 # shared by the Book, the P&L tab and the Risk tab: one valuation per date (the filled reader for
-# the trade book, the engine's own for the risk, as each tab read them before). Both also read the
-# research app's database (roll-down, z, history), so their key carries its file stamps and the
-# config files' (`outside_inputs_key`). Shared: never edit the result.
-def research_inputs_key() -> tuple:
-    """The outside-inputs key of a result that reads the research app's history and the risk
-    config: each file's (mtime_ns, size), the research database's WAL file included."""
+# the trade book, the engine's own for the risk, as each tab read them before). Their price
+# history is the book database's own (`price_history`), so the revision covers it; the key adds
+# the config files' stamps (`config_inputs_key`). Shared: never edit the result.
+def config_inputs_key() -> tuple:
+    """The outside-inputs key of a result that reads the risk, stress and limits config files:
+    each file's (mtime_ns, size). The Bloomberg price history the risk figures read is the book
+    database's own `price_history` (2026-09-30), already in every memo's revision key."""
     from pathlib import Path
     config = Path(__file__).resolve().parents[2] / "config"
-    try:
-        from engine.risk import commodity_history as ch
-        research = os.environ.get(ch.ENV_VAR, "").strip() or str(ch.DEFAULT_PATH)
-    except Exception:  # noqa: BLE001 -- then keyed on the config alone
-        research = None
-    return outside_inputs_key(config / "risk.yaml", config / "commodity_stress.yaml", config / "limits.yaml",
-                              research, f"{research}-wal" if research else None)
+    return outside_inputs_key(config / "risk.yaml", config / "commodity_stress.yaml", config / "limits.yaml")
+
+
+def price_history_summary(conn: sqlite3.Connection) -> dict:
+    """{rows, contracts, first, last, error}: what the book database's own Bloomberg price
+    history (`price_history`, the risk figures' one input since 2026-09-30) holds, a COUNT / MIN /
+    MAX read once per database revision. No table (an old database before its first start-up on
+    this code) or an unreadable one reads as empty, with the reason in `error`."""
+    def compute():
+        try:
+            n, k, first, last = conn.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT instrument_id), MIN(as_of_date), MAX(as_of_date) "
+                "FROM price_history").fetchone()
+            return {"rows": int(n or 0), "contracts": int(k or 0), "first": first or "", "last": last or "",
+                    "error": ""}
+        except sqlite3.Error as exc:
+            return {"rows": 0, "contracts": 0, "first": "", "last": "", "error": f"{type(exc).__name__}: {exc}"}
+    return screen_memo("price-history", conn, "", compute)
 
 
 def shared_trade_book(conn: sqlite3.Connection, as_of: str) -> dict:
     """`engine.spreads.trade_book(conn, as_of)` on the screens' filled reader and the Book's own
     `book_spreads` (`shared_spreads(filled=True)`), once per database revision, as-of and state
-    of the research inputs. Shared: never edit the result."""
+    of the config files. Shared: never edit the result."""
     def compute():
         from engine.spreads.trades import trade_book
         spreads = shared_spreads(conn, as_of, filled=True)
         with pricing_snapshot(conn, "Trade book"):
             return trade_book(conn, as_of, spreads=spreads, value_fn=priced_value_book)
-    return screen_memo("trade-book", conn, as_of, compute, extra=research_inputs_key())
+    return screen_memo("trade-book", conn, as_of, compute, extra=config_inputs_key())
 
 
 def _trade_risk_compute(conn: sqlite3.Connection, as_of: str):
@@ -401,10 +412,10 @@ def _trade_risk_compute(conn: sqlite3.Connection, as_of: str):
 
 def shared_trade_risk(conn: sqlite3.Connection, as_of: str, wait: bool = True) -> Optional[dict]:
     """`engine.risk.trades.trade_risk(conn, as_of)` on the engine's own spreads and curve, once per
-    database revision, as-of and state of the research inputs. With `wait=False` it never blocks:
+    database revision, as-of and state of the config files. With `wait=False` it never blocks:
     the result when it is ready, else None, and the computation is started on a thread of its own
     (the Book shows its table first and its z column a moment later). Shared: never edit it."""
-    extra = research_inputs_key()
+    extra = config_inputs_key()
     if wait:
         return screen_memo("trade-risk", conn, as_of, lambda: _trade_risk_compute(conn, as_of), extra=extra)
     key = _render_cache_key(conn)

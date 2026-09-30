@@ -1,6 +1,6 @@
 ---
 name: research-spread-keys
-description: rv.sqlite spread_def / spread_stats conventions research_spreads.py relies on: calendar id and instance rule, tracked instances, units in quote units, template ids missing
+description: HISTORY ONLY - research_spreads.py deleted 2026-09-30; rv.sqlite spread_def / spread_stats conventions it relied on: calendar id and instance rule, tracked instances, units in quote units, template ids missing
 metadata:
   type: project
 ---

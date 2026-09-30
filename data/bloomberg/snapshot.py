@@ -28,7 +28,8 @@ What travels: `marks` whole, every source, exactly as Bloomberg and the app's ow
 wrote it on the Bloomberg PC (values, sources and `snapped_at` untouched, so
 `marks_official` decides the official row here the way it does there), plus every other
 table a pull writes (MARKET_TABLES: the OIS curves and their quotes, the FX vol quotes,
-Bloomberg's commodity contract dates), the `instruments` rows those marks hang off,
+Bloomberg's commodity contract dates, and since 2026-09-30 the risk history `price_history`,
+one file per month like marks, `price_history/<YYYY-MM>.csv`), the `instruments` rows those marks hang off,
 only so a mark's foreign key holds before the blotter is uploaded here, each table's DDL
 (so a table this database has never created still lands), and the pull's own log, the
 status JSON the live feed writes next to the database (`live.status_path`), copied as
@@ -70,7 +71,7 @@ MANIFEST = "snapshot.json"
 # `source` column so the MANUAL rule below applies to all of them alike; a table the
 # source database has not created yet is simply not in the snapshot.
 INSTRUMENTS = "instruments"
-MARKET_TABLES = ("marks", "curves", "curve_quotes", "vol_quotes", "contract_static")
+MARKET_TABLES = ("marks", "curves", "curve_quotes", "vol_quotes", "contract_static", "price_history")
 # Left out since 2026-09-24 (commodity conversion Phase 2, user yes: the macro trader's
 # products leave the app): index_fixings (swap fixings), rate_vol_quotes (swaption and cap
 # vols) and equity_dividend_yields (SPX). An older snapshot that still carries them is read
@@ -90,6 +91,17 @@ PULL_STATUS = "pull_status.json"
 MARKS = "marks"
 MARKS_DIR = "marks"
 LEGACY_MARKS = "marks.csv"
+# price_history (2026-09-30, user: risk history from Bloomberg into this app's own database,
+# replacing the research app's): the daily settle, volume and open interest per contract,
+# written by the pull, a few hundred thousand rows, so one file per month of as_of_date like
+# marks, `price_history/<YYYY-MM>.csv`, with the same unchanged-fingerprint skip. Its primary
+# key is (instrument_id, as_of_date), so it is grouped by month in SQL and a month's rows are
+# in primary-key order within their file. It holds no MANUAL row; the import's MANUAL rule
+# applies to it all the same. No foreign key to instruments, so no row is skipped.
+PRICE_HISTORY = "price_history"
+# table -> its folder of month files; the import also reads `<table>.csv` when the folder
+# holds none (the single file of an older snapshot of marks).
+MONTHLY_TABLES = {MARKS: MARKS_DIR, PRICE_HISTORY: "price_history"}
 _MONTH = re.compile(r"\d{4}-\d{2}")
 STATE_SUFFIX = ".snapshot_state.json"
 STATE_VERSION = 1
@@ -183,9 +195,57 @@ def _plan(conn: sqlite3.Connection, recorded: dict, out_dir: Path, name: str, ta
     return _File(name, fp, len(rows), cols, rows)
 
 
-def _month_file(month: str) -> str:
+def _month_file(month: str, folder: str = MARKS_DIR) -> str:
     # an as_of_date that is not ISO still gets a file of its own, named safely
-    return f"{MARKS_DIR}/{month if _MONTH.fullmatch(month) else 'other-' + month.encode('utf-8').hex()}.csv"
+    return f"{folder}/{month if _MONTH.fullmatch(month) else 'other-' + month.encode('utf-8').hex()}.csv"
+
+
+def _monthly_plan(conn: sqlite3.Connection, recorded: dict, out_dir: Path, table: str, info: List[tuple]) -> tuple:
+    """A table other than marks, one file per month of as_of_date (price_history), rows in
+    primary-key order within each file: one fingerprint query grouped by day (it walks the
+    schema's as_of_date index, ix_price_history_date, so SQLite sorts nothing; grouping by
+    month sorted and cost twice as much), a month's fingerprint being its days' rows. The
+    rows of the months that changed are read by a date range each, or, when every month
+    changed (a first export), in one pass split by month in Python. Returns (the files, the
+    first and the last as_of_date)."""
+    folder = MONTHLY_TABLES[table]
+    cols, key = _columns(info)
+    months: Dict[str, List[list]] = {}
+    first = last = None
+    for row in conn.execute(f"SELECT as_of_date, {_aggregates(conn, table, info)} "
+                            f"FROM {_q(table)} GROUP BY as_of_date ORDER BY as_of_date"):
+        months.setdefault(str(row[0])[:7], []).append(list(row))
+        first, last = first if first is not None else row[0], row[0]
+    files: List[_File] = []
+    changed: Dict[str, list] = {}
+    for month, days in months.items():
+        name, fp = _month_file(month, folder), [cols, sum(int(d[1]) for d in days), days]
+        rec = recorded.get(name)
+        if _same_fp(fp, rec) and _stat_matches(rec, out_dir / name):
+            files.append(_File(name, fp, fp[1]))
+        else:
+            changed[month] = fp
+    select, order = f"SELECT {', '.join(map(_q, cols))} FROM {_q(table)}", f"ORDER BY {', '.join(map(_q, key))}"
+    if changed and len(changed) == len(months):
+        by_month: Dict[str, List[tuple]] = {m: [] for m in changed}
+        at = cols.index("as_of_date")
+        for r in conn.execute(f"{select} {order}"):
+            by_month[str(r[at])[:7]].append(r)
+    else:
+        by_month = {m: conn.execute(f"{select} {where} {order}", params).fetchall()
+                    for m in changed for where, params in [_month_where(m)]}
+    for month, fp in changed.items():
+        rows = by_month[month]
+        files.append(_File(_month_file(month, folder), fp, len(rows), cols, rows))
+    return files, first, last
+
+
+def _month_where(month: str) -> tuple:
+    """(WHERE clause, params) for the rows whose as_of_date falls in `month`: a range on the
+    date for an ISO month, so an index on as_of_date serves it."""
+    if _MONTH.fullmatch(month):
+        return "WHERE as_of_date >= ? AND as_of_date < ?", (month, month[:-1] + chr(ord(month[-1]) + 1))
+    return "WHERE substr(as_of_date, 1, 7) = ?", (month,)
 
 
 def _marks_plan(conn: sqlite3.Connection, recorded: dict, out_dir: Path, info: List[tuple]) -> tuple:
@@ -202,10 +262,7 @@ def _marks_plan(conn: sqlite3.Connection, recorded: dict, out_dir: Path, info: L
         first, last = first if first is not None else row[0], row[0]
     files = []
     for month, days in months.items():
-        if _MONTH.fullmatch(month):
-            where, params = "WHERE as_of_date >= ? AND as_of_date < ?", (month, month[:-1] + chr(ord(month[-1]) + 1))
-        else:
-            where, params = "WHERE substr(as_of_date, 1, 7) = ?", (month,)
+        where, params = _month_where(month)
         count = sum(int(d[1]) for d in days)
         files.append(_plan(conn, recorded, out_dir, _month_file(month), MARKS, cols, key, (count, days), where, params))
     return files, first, last
@@ -256,10 +313,10 @@ def _save_state(db_path: Path, out_dir: Path, files: dict) -> None:
         pass
 
 
-def _write_files(out_dir: Path, plan: List[_File], recorded: dict) -> tuple:
-    """Write the files of `plan` that changed; remove month files no longer in the book and
-    an older snapshot's single marks.csv. Returns (names whose bytes changed or that were
-    removed, the new record)."""
+def _write_files(out_dir: Path, plan: List[_File], recorded: dict, folders: tuple = (MARKS_DIR,)) -> tuple:
+    """Write the files of `plan` that changed; remove the month files, in `folders` (those of
+    the monthly tables exported), no longer in the database, and an older snapshot's single
+    marks.csv. Returns (names whose bytes changed or that were removed, the new record)."""
     changed: List[str] = []
     files: Dict[str, dict] = {}
     for f in plan:
@@ -287,7 +344,7 @@ def _write_files(out_dir: Path, plan: List[_File], recorded: dict) -> tuple:
         files[f.name] = {"fp": json.loads(json.dumps(f.fp)), "sha1": digest, "size": st.st_size,
                          "mtime_ns": st.st_mtime_ns}
     keep = {f.name for f in plan}
-    stale = [p for p in (out_dir / MARKS_DIR).glob("*.csv") if f"{MARKS_DIR}/{p.name}" not in keep]
+    stale = [p for folder in folders for p in (out_dir / folder).glob("*.csv") if f"{folder}/{p.name}" not in keep]
     if any(f.name.startswith(MARKS_DIR + "/") for f in plan):
         stale.append(out_dir / LEGACY_MARKS)
     for p in stale:
@@ -349,6 +406,7 @@ def _export(db_path: Union[str, Path], out_dir: Union[str, Path] = SNAPSHOT_DIR)
         rows: Dict[str, int] = {}
         ddl: Dict[str, str] = {}
         plan: List[_File] = []
+        folders: List[str] = [MARKS_DIR]
         info = _table_info(conn, INSTRUMENTS)
         cols, key = _columns(info)
         where = "WHERE instrument_id IN (SELECT DISTINCT instrument_id FROM marks)"
@@ -363,6 +421,11 @@ def _export(db_path: Union[str, Path], out_dir: Union[str, Path] = SNAPSHOT_DIR)
                 months, first, last = _marks_plan(conn, recorded, out_dir, info)
                 plan += months
                 rows[table] = sum(f.count for f in months)
+            elif table in MONTHLY_TABLES:
+                months, _, _ = _monthly_plan(conn, recorded, out_dir, table, info)
+                plan += months
+                rows[table] = sum(f.count for f in months)
+                folders.append(MONTHLY_TABLES[table])
             else:
                 cols, key = _columns(info)
                 fp_row = conn.execute(f"SELECT {_aggregates(conn, table, info)} FROM {_q(table)}").fetchone()
@@ -372,7 +435,7 @@ def _export(db_path: Union[str, Path], out_dir: Union[str, Path] = SNAPSHOT_DIR)
     finally:
         conn.close()
     out_dir.mkdir(parents=True, exist_ok=True)
-    written, files = _write_files(out_dir, plan, recorded)
+    written, files = _write_files(out_dir, plan, recorded, tuple(folders))
     _save_state(db_path, out_dir, files)
     last_pull, status_changed = _copy_pull_status(db_path, out_dir)
     if status_changed:
@@ -435,13 +498,14 @@ def _insert(conn: sqlite3.Connection, table: str, cols: List[str], rows: List[tu
     return conn.total_changes - before
 
 
-def _marks_files(in_dir: Path) -> List[Path]:
-    """The snapshot's marks files: marks/<YYYY-MM>.csv in name order (2026-09-30), else an
-    older snapshot's single marks.csv; [] when there is neither."""
-    months = sorted((in_dir / MARKS_DIR).glob("*.csv"))
+def _marks_files(in_dir: Path, table: str = MARKS) -> List[Path]:
+    """The snapshot's files of a monthly table: <folder>/<YYYY-MM>.csv in name order
+    (2026-09-30), else a single <table>.csv (an older snapshot's marks.csv); [] when there
+    is neither."""
+    months = sorted((in_dir / MONTHLY_TABLES[table]).glob("*.csv"))
     if months:
         return months
-    legacy = in_dir / LEGACY_MARKS
+    legacy = in_dir / f"{table}.csv"
     return [legacy] if legacy.exists() else []
 
 
@@ -454,7 +518,9 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
     `apply_contract_dates`' own result ({'checked', 'updated', 'missing_dates'}), run after
     the load and before the freeze so the ledger sees Bloomberg's expiries (None if that
     module cannot be imported). Reads marks by month (marks/*.csv) or an older snapshot's
-    single marks.csv. Raises SnapshotError, touching nothing, when `in_dir` holds neither."""
+    single marks.csv, and price_history by month (price_history/*.csv) when the snapshot has
+    it (an older one does not: this PC's price_history is then left as it is). Raises
+    SnapshotError, touching nothing, when `in_dir` holds no marks."""
     from data.ingest.schema import connect
 
     in_dir = Path(in_dir)
@@ -474,7 +540,12 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
             known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
             ddl = (out["manifest"] or {}).get("ddl") or {}
             for table in MARKET_TABLES:
-                paths = marks_files if table == MARKS else [p for p in [in_dir / f"{table}.csv"] if p.exists()]
+                if table == MARKS:
+                    paths = marks_files
+                elif table in MONTHLY_TABLES:
+                    paths = _marks_files(in_dir, table)
+                else:
+                    paths = [p for p in [in_dir / f"{table}.csv"] if p.exists()]
                 if paths and not _table_info(conn, table) and table == CONTRACT_STATIC:
                     _ensure_contract_static(conn)
                 if paths and not _table_info(conn, table) and ddl.get(table):
@@ -482,8 +553,11 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
                 info = _table_info(conn, table)
                 if not paths or not info:
                     continue
-                out["dropped"][table] = conn.execute(
-                    f"DELETE FROM {_q(table)} WHERE source <> ?", (KEPT_SOURCE,)).rowcount
+                if any(c[1] == "source" for c in info):
+                    out["dropped"][table] = conn.execute(
+                        f"DELETE FROM {_q(table)} WHERE source <> ?", (KEPT_SOURCE,)).rowcount
+                else:  # no source column: nothing typed here to keep
+                    out["dropped"][table] = conn.execute(f"DELETE FROM {_q(table)}").rowcount
                 loaded = 0
                 for path in paths:  # each file with its own header: a month kept from an older export may differ
                     cols, rows = _read_rows(path, info)

@@ -10,3 +10,4 @@ Older notes on backfill.py live in `.claude/agent-memory/bbg-data/` (lane split 
 - [Quiet terminal (2026-09-30)](quiet_terminal_2026_09_30.md) — in-app run prints problem lines (`_problem`) + one summary; CLI keeps the table
 - [Fault isolation, Phase G (2026-09-29)](fault_isolation_2026_09_29.md) — _Asks chunks/split/timeout give-up/lock release, not-a-number refusals, guarded steps, transient retry, progress; tests it flips
 - [Pull speed (2026-09-30)](pull_speed_2026_09_30.md) — lent session, listing memo + fingerprint, closing-ledger skip rules, after_last_day kept, connect() writes the DB
+- [Risk history step (2026-09-30)](risk_history_step_2026_09_30.md) — price_history from Bloomberg for the Risk tab: edges-only asks, late-OI refresh, own status block, real pull only

@@ -17,44 +17,26 @@ checks marked **auto** and writes a report and a fixes worksheet under `reports/
 | 2 | Price scales (cents or dollars, pence or pounds) | A wrong scale is a 100x P&L error | auto: root check (SCALE_MISMATCH) |
 | 3 | Jason's fills against Bloomberg's price, incl. the broker's $/lb roots (cattle, COMEX copper) | Confirms the broker price conversion | auto: `--book` |
 | 4 | Futures close = exchange settlement (PX_LAST against PX_SETTLE, last 5 days) | The app marks at PX_LAST; Chinese exchanges settle at the day's average price | auto: desk check 1 |
-| 5 | Open interest and volume: one- or two-sided on SHFE, DCE, INE | Sets the liquidity check's figures for China | auto: desk check 2, then **manual**: compare one SHFE copper contract with SHFE's own daily report |
+| 5 | Open interest and volume: one- or two-sided on SHFE, DCE, INE | Sets the liquidity check's figures for China | auto: desk check 2 (Bloomberg against what the last pull stored), then **manual**: compare one SHFE copper contract with SHFE's own daily report (the only way to tell one- from two-sided) |
 | 6 | LME open interest and volume per prompt month | Whether the liquidity check means anything for LME tickets | auto: desk check 3 |
 | 7 | SGX USD/CNH future: ticker and one year of history | The Risk tab needs it to count the CNY hedges | auto: desk check 4 |
 | 8 | Physical or cash delivery per root | Decides whether the app warns at first notice or last trade | auto: desk check 5 |
 | 9 | Exchange holidays 2026-2027 (`config/calendars/`, every `# unverified` line, China 2027, GME) | Business-day counts to expiry and the P&L reference dates | auto: desk check 6 |
-| 10 | Research history depth: reaches April 2020 (negative WTI) and March 2022 (LME nickel)? | Those stress replays are n/a without it | auto: desk check 7 (no terminal needed) |
+| 10 | Price history on file (the book database's `price_history`): days per root, first and last close, fresh | Risk, carry, days to exit and the Book's z-score read it; the pull fetches about 2.5 years, so the 2020 and 2022 stress replays stay n/a | auto: desk check 7 (no terminal needed) |
 | 11 | Bloomberg's contract dates (last trade, first notice) stored for the book's futures | Until then expiries are estimated and flagged early | auto: desk check 8; one Pull Bloomberg now stores them |
 | 12 | LME curve tickers and prompt dates (cash, 3M, monthlies) | The LME forwards' marks | auto: `--lme` |
-| 13 | The research app on this PC pulls real data (its newest settlement is yesterday's, not mock) | Risk, carry, liquidity and the z-scores all read it | **manual**: open the research app, or read desk check 7's dates |
 | 15 | Each exchange's close / settlement time (`close_time` in `config/contracts.csv`, `data.contracts.EXCHANGE_CLOSE`): LME, SGX incl. the USD/CNH future, CME HRC and TIO, ICE Europe per product, HKEX, EEX, GME are best estimates | The "legs closed Nh apart" note and hedge % (2-day moves for legs closing hours apart) read them | **manual**: each exchange's contract specification; the time of PX_LAST's last update |
 | 14 | FX forward points divisor and broken-date forwards (`docs/open-questions.md` 27, 28, 71) | Only if Jason books FX forwards (none in his export yet) | auto: `py 2_launcher.py doctor --bloomberg` |
 
 After the fixes are applied: one **Pull Bloomberg now**, then the Data tab's status line
 should read marks complete, reference closes complete and contract dates from Bloomberg.
 
-## Real research history (item 13)
+## Price history (item 10)
 
-The Risk tab's VaR, daily risk, hedge %, best-fit ratio and liquidity, and the Book's z-score,
-percentile and carry, all read the research app's database. On the development PC that database
-holds generated prices (provider `mock`), so those figures are for layout only and the Risk tab
-says "mock history". On the Bloomberg PC:
-
-1. **Load the research app's real history** by its own procedure, `docs/BLOOMBERG_TRIP.md` in the
-   research repo (`J.Singh_Commodity_Dashboard`): `setup.bat bloomberg` (never without `bloomberg`:
-   it would load mock prices, and a real pull refuses to mix the two), the ticker search and
-   check, then `run_pull --dry-run --backfill --sector <s>` and `run_pull --backfill --sector <s>`,
-   then `rvapp.quant.engine --mode full`. Jason's book needs three sectors, in this order:
-   `metals` (SHFE silver and zinc, COMEX silver and copper, LME copper and zinc), `ferrous` (CME
-   HRC, SGX iron ore) and `agriculture` (CME feeder and live cattle); its `fx_daily` (USDCNH) comes
-   with the pull. Each backfill stops at the daily cap and resumes where it stopped.
-2. **Point the monitor at it.** The monitor looks for `..\Commodity Dashboard\var\rv.sqlite` next
-   to its own folder, or the path in `COMMODITY_HISTORY_DB`. The research repo clones as
-   `J.Singh_Commodity_Dashboard`, so either clone it into a folder named `Commodity Dashboard`
-   beside the monitor, or set the path once:
-   `setx COMMODITY_HISTORY_DB "C:\path\to\J.Singh_Commodity_Dashboard\var\rv.sqlite"`
-   and open a new Command Prompt before typing `chelsea`.
-3. **Check** that the Risk tab no longer says "mock history", and that its price check shows no
-   root more than 20 % from Jason's fills.
+The Risk tab, the Book's z-score, carry and days to exit read Bloomberg's daily history, which
+"Pull Bloomberg now" fetches into the book database (about 2.5 years the first time, a few minutes;
+only the new days afterwards). Nothing reads the research app any more (2026-09-30). After the first
+pull, desk check 7 and the Data tab's "Price history" line show the days on file per root.
 
 ## Running the check
 

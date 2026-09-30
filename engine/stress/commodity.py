@@ -15,7 +15,9 @@ Kinds (the YAML header documents each): ``outright`` (most specific move wins),
 ``curve`` (front / back, linear in months to expiry), ``spread`` (legs moved against each
 other; a leg may name spreads of the book by id, template or family), ``fx`` (a currency
 against the USD, applied to the P&L the non-USD positions hold in it) and ``replay`` (a past
-window, moves from the research history through risk-history's ``window_move``).
+window, moves from the Bloomberg price history in the book database's ``price_history``
+table, through risk-history's ``window_move``; a window that starts before the first close on
+file is n/a with a plain reason).
 """
 
 from __future__ import annotations
@@ -139,21 +141,39 @@ def _curve_move(s: dict, row: dict, as_of: str) -> Tuple[bool, Optional[float], 
     return True, s["front"] + w * (s["back"] - s["front"]), ""
 
 
-def default_history() -> Tuple[Optional[HistoryFn], str]:
-    """risk-history's window move on the research history it finds, or (None, why) when the
+def default_history(conn: Union[None, str, Path, sqlite3.Connection] = None) -> Tuple[Optional[HistoryFn], str]:
+    """risk-history's window move on the Bloomberg price history of the book database ``conn``
+    (an open connection or a path; None = the app's default database), or (None, why) when the
     module or the history is not there."""
     try:
         from engine.risk.commodity_history import load_commodity_history
     except ImportError as exc:
-        return None, (f"the commodity settlement history (risk-history, engine/risk/commodity_history.py) "
+        return None, (f"the Bloomberg price history (risk-history, engine/risk/commodity_history.py) "
                       f"is not available: {exc}")
     try:
-        history = load_commodity_history()
+        history = load_commodity_history(conn)
     except Exception as exc:  # the history is a risk input: its fault is named, never raised
-        return None, f"the commodity settlement history could not be read: {exc}"
+        return None, f"the Bloomberg price history could not be read: {exc}"
     if not history.available:
-        return None, history.reason or "the commodity settlement history is not available"
+        return None, history.reason or "the Bloomberg price history is not available"
     return history.window_move_detail, ""
+
+
+def _history_start(history: Optional[HistoryFn]) -> Optional[str]:
+    """The first close on file of the history behind ``history`` (risk-history's
+    ``CommodityHistory.first_date``, read off a bound ``window_move`` / ``window_move_detail``),
+    or None when the callable does not say (a caller's own function)."""
+    owner = getattr(history, "__self__", None)
+    first = getattr(owner, "first_date", None)
+    return str(first)[:10] if first else None
+
+
+def _before_history(s: dict, first: Optional[str]) -> str:
+    """The plain reason a replay window starting before the first close on file has no result;
+    '' when the window is inside the history (or its start is not known)."""
+    if not first or str(s["start"]) >= first:
+        return ""
+    return f"No price history for {s['start']} to {s['end']}: before the history on file"
 
 
 def _replay_move(history: HistoryFn, s: dict, row: dict,
@@ -164,7 +184,7 @@ def _replay_move(history: HistoryFn, s: dict, row: dict,
     try:
         got = history(row.get("root_id", ""), months, s["start"], s["end"])
     except Exception as exc:  # a history fault is this position's n/a, never the whole tab's
-        return True, None, f"history lookup failed: {exc}", None
+        return True, None, f"the price history lookup failed: {exc}", None
     if isinstance(got, dict):
         detail = {k: v for k, v in got.items() if k not in ("move", "reason")}
         move, reason = got.get("move"), got.get("reason") or ""
@@ -173,7 +193,8 @@ def _replay_move(history: HistoryFn, s: dict, row: dict,
         move, reason = got if isinstance(got, tuple) else (got, "")
     move = _number(move)
     if move is None:
-        return True, None, reason or f"no history for {row.get('root_id')} over {s['start']} to {s['end']}", detail
+        return True, None, (reason or f"no Bloomberg price history for {row.get('root_id')} over "
+                                      f"{s['start']} to {s['end']}"), detail
     return True, move, "", detail
 
 
@@ -373,7 +394,10 @@ def commodity_stress(conn: Optional[sqlite3.Connection], as_of: str,
     else it is read with ``book_spreads(conn, as_of)`` only when a scenario selects by spread,
     template or family. ``history``: the replay moves, ``(root_id, months_to_expiry, start,
     end) -> (move, reason)`` or a ``{move, reason, ...}`` dict; None = risk-history's
-    ``window_move_detail`` on the research history it finds.
+    ``window_move_detail`` on the Bloomberg price history of ``conn`` (the book database's
+    ``price_history`` table). A replay whose window starts before the history's first close
+    (read off a bound risk-history method, whether given or default) is n/a with the reason
+    "No price history for <start> to <end>: before the history on file", never an error.
 
     Returns ``{as_of, available, basis, config, scenarios, reasons}``; each scenario is
     ``{name, kind, description, basis ('delta'), total_usd, by_sector {sector: usd}, by_root
@@ -441,14 +465,18 @@ def commodity_stress(conn: Optional[sqlite3.Connection], as_of: str,
 
     hist_fn, hist_why = history, ""
     if history is None and any(s["kind"] == "replay" for s in parsed):
-        hist_fn, hist_why = default_history()
+        hist_fn, hist_why = default_history(conn)
+    hist_first = _history_start(hist_fn)
 
     results = []
     for s in parsed:
+        early = _before_history(s, hist_first) if s["kind"] == "replay" else ""
         if s["kind"] == "fx":
             res = _fx(s, positions)
         elif s["kind"] == "replay" and hist_fn is None:
             res = _na(s, hist_why, {"start": s["start"], "end": s["end"]})
+        elif early:
+            res = _na(s, early, {"start": s["start"], "end": s["end"]})
         elif spreads_why and _selects_spreads(s):
             res = _na(s, spreads_why)
         else:

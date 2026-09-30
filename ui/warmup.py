@@ -2,13 +2,13 @@
 
 User, 2026-09-29: "the site is super slow". Once warm every tab renders in well under half a
 second; cold, the first Book after a start, an upload or a pull paid the one-time loads (the
-research history, the contract universe, the spread templates) and the first pricing of every
+price history, the contract universe, the spread templates) and the first pricing of every
 date and every shared result. This module does that work on a daemon thread straight after
 start-up and after each change of the database, by calling the SAME functions with the SAME
 arguments as the tabs, so each tab's first render is a memo hit:
 
-  1. research   `engine.risk.commodity_history.warm(book_db=<db>)`: the history, its lookups,
-                the settlements of the book's roots
+  1. history    `engine.risk.commodity_history.warm(db_path=<db>)`: the book database's own
+                Bloomberg price history, its lookups, the closes of the book's roots
   2. universe   `data.contracts.load_roots()`, `engine.spreads.templates.load_templates()`
   3. value      `blotter_pricing.priced_value_book(conn, as_of)` (the shared filled reader)
   4. spreads    `shared_spreads(conn, as_of, filled=True)` (Book, header, P&L)
@@ -28,9 +28,9 @@ arguments as the tabs, so each tab's first render is a memo hit:
 Since 2026-09-29 (S6) the daily series, the curve positions and the book positions read the one
 shared valuation per date (`blotter_pricing.raw_value_book`), so steps 8 to 14 price no date twice.
 
-The memos that also read the research app's database and the risk config carry those files'
-(mtime_ns, size) in their key (`blotter_pricing.research_inputs_key`), so everything the warm-up
-fills stays warm until the next write to the book, the research data or the config.
+The memos that also read the risk config carry those files' (mtime_ns, size) in their key
+(`blotter_pricing.config_inputs_key`); the price history is in the book database itself, so
+everything the warm-up fills stays warm until the next write to the book or the config.
 
 Read-only: every connection is `ui.app.connect_readonly`, nothing is written to the database,
 and no figure changes (the caches are the ones the screens fill anyway, keyed on the database
@@ -70,10 +70,10 @@ STALE_BUSY_SECONDS = 15 * 60   # a "running" pull or backfill not updated for th
 
 # The last completed run, for the Data tab's diagnostics: {started_at (UTC ISO), finished_at,
 # db_path, as_of, seconds {step: s}, total, ok, reason, errors {step: sentence}, runs (count),
-# research ('' when warmed, else why the research app's data is not available on this PC)}.
+# history ('' when warmed, else why no price history is on file yet)}.
 last_run: Dict[str, object] = {}
 _RUNS = 0
-_SAID: set = set()        # the "research not available" reasons already logged (once per process)
+_SAID: set = set()        # the "no price history" reasons already logged (once per process)
 
 
 def status() -> dict:
@@ -304,12 +304,12 @@ def _run_once(db_path_fn, as_of_fn) -> bool:
     if not path or not Path(path).exists():
         info["reason"] = f"no database at {path or '(none)'}"
     else:
-        # The research app's database may simply not be on this PC: that is "not available", kept in
-        # `research`, never a failed step; a real error while warming it is one.
-        info["research"] = step("research", lambda: _research(path)) or ""
-        if info["research"] and info["research"] not in _SAID:
-            _SAID.add(info["research"])
-            log.debug("warm-up: research not available (%s)", info["research"])
+        # No price history before the first pull: that is "not available", kept in `history`, never
+        # a failed step; a real error while warming it is one.
+        info["history"] = step("history", lambda: _history(path)) or ""
+        if info["history"] and info["history"] not in _SAID:
+            _SAID.add(info["history"])
+            log.debug("warm-up: price history not available (%s)", info["history"])
         step("universe", _universe)
         from ui.app import connect_readonly
         conn = connect_readonly(path)
@@ -342,11 +342,11 @@ def _run_once(db_path_fn, as_of_fn) -> bool:
     return changed
 
 
-def _research(path: str) -> str:
-    """'' when warmed; the reason when the research app's data is not available on this PC (not a
-    failure). A real error while warming (`warm`'s "warm-up stopped (...)") raises: a failed step."""
+def _history(path: str) -> str:
+    """'' when warmed; the reason when no price history is on file yet (not a failure). A real
+    error while warming (`warm`'s "warm-up stopped (...)") raises: a failed step."""
     from engine.risk.commodity_history import warm
-    out = warm(book_db=path)
+    out = warm(db_path=path)
     reason = str(out.get("reason") or "")
     if out.get("ok") or not reason:
         return ""
@@ -407,7 +407,7 @@ def _screens(conn, as_of: str, step) -> None:
     step("risk", risk)
 
     def risk_folds():
-        # computed when a fold is opened: the currency fold's delta, the stress list
+        # the worst stresses (always shown) and the currency fold's delta (computed when opened)
         from ui.tabs import risk as risk_tab
         from ui.tabs import risk_folds as rf
         rf.book_positions(conn, as_of)
@@ -415,20 +415,12 @@ def _screens(conn, as_of: str, step) -> None:
     step("risk_folds", risk_folds)
 
     def risk_subsets():
-        # the Risk headline's and the group rows' VaR (subset_var of the trades showing), unfiltered,
-        # for each grouping of the switch
+        # the Risk headline's and total row's VaR (subset_var of the trades showing), unfiltered
         from ui.tabs import risk as risk_tab
-        from ui.tabs import trade_filter as tf
         data = risk_tab.gather(conn, as_of)
         risk = bp.shared_trade_risk(conn, as_of, wait=True)
         rows = [(t, r) for t, r in risk_tab.rows_of(data, risk) if r]
         risk_tab.subset(conn, as_of, [str(r.get("trade")) for _t, r in rows])
-        for group in (tf.GROUP_BY_TYPE, tf.GROUP_BY_COMMODITY):
-            by = {}
-            for t, r in rows:
-                by.setdefault(tf.group_of(t, group), []).append(str(r.get("trade")))
-            for names in by.values():
-                risk_tab.subset(conn, as_of, names)
     step("risk_subsets", risk_subsets)
 
     def pnl_periods():

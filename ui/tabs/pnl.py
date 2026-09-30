@@ -230,8 +230,8 @@ def _memo(kind: str, conn: sqlite3.Connection, as_of: str, build: Callable[[], A
 
 def base(conn: sqlite3.Connection, as_of: str) -> dict:
     """What no period changes: the daily series, the Book's trades, the months, the record."""
-    from ui.tabs.blotter_pricing import research_inputs_key
-    return _memo("base", conn, as_of, lambda: _base(conn, as_of), extra=research_inputs_key())
+    from ui.tabs.blotter_pricing import config_inputs_key
+    return _memo("base", conn, as_of, lambda: _base(conn, as_of), extra=config_inputs_key())
 
 
 def _base(conn: sqlite3.Connection, as_of: str) -> dict:

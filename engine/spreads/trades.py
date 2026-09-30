@@ -8,7 +8,7 @@ leftover, rolls, next key date, P&L and flags. It adds nothing to the P&L: a tra
 strategy position's (``book_spreads``: the ``value_book`` rows of its trades summed, the header's
 period rule), a leg's LTD its trades' ``value_book`` rows summed, a leg's Daily its trades' parts
 of the strategy's Daily split. Everything else is display arithmetic beside the P&L (levels,
-sizes, notionals, research carry), read from the machinery the Book already uses
+sizes, notionals, carry), read from the machinery the Book already uses
 (``strategies.py``, ``levels.py``, ``carry.py``, ``rolls.py``, ``engine.expiry``).
 
 **The type rule** (written once, like the grouping rule): the trade's non-hedge legs
@@ -1041,7 +1041,7 @@ def _template_level(book, part: _Part, pleg_by_cid: Dict[str, st.PLeg], prev_day
     whole (a 3-2-1 crack: RBOB, heating oil, WTI; a soy board crush: meal, oil, beans): every leg
     of the part one leg of the template, signs that fit its weights (``grouping.candidates``, the
     grouping rule's own matcher; the closest ratio, then the template file's order, when two
-    fit). The level is the template's formula in its unit (``levels.py``, the research app's), at
+    fit). The level is the template's formula in its unit (``levels.py``), at
     entry from the fills, on the previous close and now from the marks, like every level; a
     ratio of lots outside the template's 5 % is said in ``note``, and the size (USD per unit) is
     the template's fitted size, its smallest leg. None when no template covers the part."""
@@ -1076,17 +1076,17 @@ def _template_level(book, part: _Part, pleg_by_cid: Dict[str, st.PLeg], prev_day
 # ------------------------------------------------------------------ carry
 def _roll_downs(book, rows: List[dict], pleg_by_cid: Dict[str, st.PLeg], history,
                 memo: Optional[dict] = None) -> Tuple[Optional[float], str, str]:
-    """Each open non-hedge leg's roll-down per month (``carry.curve_roll_downs``, research), written
-    on its row; (the trade's carry per month in USD when every such leg is on one curve and read,
-    else None, why, the research date)."""
+    """Each open non-hedge leg's roll-down per month (``carry.curve_roll_downs``, on the chain's
+    Bloomberg closes), written on its row; (the trade's carry per month in USD when every such leg
+    is on one curve and read, else None, why, the date of the closes read)."""
     from engine.spreads.carry import curve_roll_downs
     legs = [r for r in rows if not r["hedge"] and r["status"] == "open" and r["contract_id"] in pleg_by_cid]
     if not legs:
         return None, "no open leg to roll down", ""
     if history is None:
         for r in legs:
-            r["roll_down_reason"] = "research history not loaded"
-        return None, "research history not loaded", ""
+            r["roll_down_reason"] = "price history not loaded"
+        return None, "price history not loaded", ""
     by_root: Dict[str, List[dict]] = defaultdict(list)
     for r in legs:
         by_root[r["root_id"]].append(r)
@@ -1097,8 +1097,8 @@ def _roll_downs(book, rows: List[dict], pleg_by_cid: Dict[str, st.PLeg], history
                                                for r in rs], book.as_of, memo)
         s, s_why = st._spot_on(book, root.currency, book.as_of)
         s_why = s_why.replace(", the trade date", "")
-        if res["research_date"]:
-            dates.append(res["research_date"])
+        if res["history_date"]:
+            dates.append(res["history_date"])
         for r in rs:
             got = res["legs"][r["contract_id"]]
             r["roll_down_unit"] = root.quote_unit
@@ -1518,7 +1518,7 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         "commodity_family": families[0] if len(families) == 1 else (FAMILY_CROSS if families else ""),
         "what_it_is": _what_it_is(book, kind, parts, rows, hedge),
         "legs": rows, "size": size, "level": level,
-        "carry_per_month": carry, "carry_reason": carry_why, "carry_research_date": carry_date,
+        "carry_per_month": carry, "carry_reason": carry_why, "carry_history_date": carry_date,
         "hedge": hedge, "leftover": leftover,
         "rolls": [r for r in (roll_data or {}).get("rolls") or [] if r.get("trade_name") == name],
         "next": nxt, "next_reason": nxt_why,
@@ -1620,8 +1620,8 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
     ``spreads``: the ``book_spreads(conn, as_of, value_fn=...)`` result the caller already holds
     (built here with ``value_fn`` when None); pass the SAME ``value_fn`` it was built with (a
     screen: its memoised filled reader), so the legs read the rows the trade's P&L was summed
-    from. ``history``: a ``commodity_history.CommodityHistory`` for the roll-down (loaded here
-    when None; research context). Deterministic: the same database and arguments give the same
+    from. ``history``: a ``commodity_history.CommodityHistory`` for the roll-down (the book
+    database's own ``price_history``, loaded here from ``conn`` when None; context only). Deterministic: the same database and arguments give the same
     dict, so a screen may memoise it on its database revision and as-of. ``rows``: the as-of
     valuation the caller already holds (``value_fn(conn, as_of)``'s frame, or its tuple), used
     for ``as_of`` instead of valuing it again; it must be what ``value_fn`` would return.
@@ -1645,7 +1645,7 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
       currency, trade_ids, open_trade_ids, avg_fill / avg_fill_reason (the open lots' average
       entry, quoted), mark / mark_source / mark_reason (the as-of ``value_book`` row), value_usd /
       value_reason (open lots x multiplier x mark x spot; a hedge's USD notional), pnl_usd {daily,
-      ltd} / pnl_reasons, roll_down (quote unit per month, research), roll_down_unit,
+      ltd} / pnl_reasons, roll_down (quote unit per month, Bloomberg history), roll_down_unit,
       roll_down_usd_per_month, horizon_months, roll_down_reason}.
     - ``size``: {basis, sides [{label, root_ids, lots, value_fill_usd, value_fill_reason,
       value_mark_usd, value_mark_reason, physical, physical_unit}] (two), ratio_text ('91 : 167'),
@@ -1667,8 +1667,8 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
       estimate of hard rule 2, a spot or mark whose source starts ``INTERP:``) with
       entry_estimate_note / prev_estimate_note / now_estimate_note (the sentence naming each
       estimate, '' when exact) and estimate_note (them joined), reason}.
-    - ``carry_per_month`` (USD, research: the legs' roll-downs summed only when every non-hedge
-      open leg is on one curve) / ``carry_reason`` / ``carry_research_date``.
+    - ``carry_per_month`` (USD, Bloomberg history: the legs' roll-downs summed only when every
+      non-hedge open leg is on one curve) / ``carry_reason`` / ``carry_history_date``.
     - ``hedge``: {present, currency, hedge_usd, exposure_usd, exposure_basis, coverage (-hedge /
       exposure, 1.0 = hedged), hedge_oversized ('' or the sentence: more than 50 % larger than the
       exposure), direction_note, reason, instruments}.
@@ -1718,16 +1718,16 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
     if history is None:
         try:
             from engine.risk.commodity_history import load_commodity_history
-            history = load_commodity_history()
-        except Exception as exc:  # noqa: BLE001 -- research context: a reason, never a failure
-            notes.append(f"the research history could not be read ({type(exc).__name__}: {exc}): no roll-down")
+            history = load_commodity_history(conn)
+        except Exception as exc:  # noqa: BLE001 -- context: a reason, never a failure
+            notes.append(f"the price history could not be read ({type(exc).__name__}: {exc}): no roll-down")
     if history is not None and not getattr(history, "available", False):
-        notes.append(f"research history not found ({getattr(history, 'reason', '')}): no roll-down")
+        notes.append(f"no roll-down: {getattr(history, 'reason', '') or 'no price history on file'}")
     entries = {str(s.get("name") or ""): s for s in spreads.get("strategies") or []}
     symbols = _broker_symbols(conn, [t for s in entries.values() for t in s.get("trade_ids") or []])
-    memo: dict = {}          # the research lookups of the roll-downs, shared by every trade
+    memo: dict = {}          # the history lookups of the roll-downs, shared by every trade
     if history is not None and getattr(history, "available", False):
-        # every root a roll-down will read, in one research query (served from memory after)
+        # every root a roll-down will read, in one history query (served from memory after)
         try:
             history.prefetch_roots(sorted({str(book.by_id[t]["base_ccy"] or "") for s in entries.values()
                                            if s.get("name") for t in s.get("trade_ids") or []

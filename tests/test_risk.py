@@ -563,9 +563,8 @@ def write_research_db(path):
 
 @pytest.fixture(autouse=True)
 def _no_sibling_research_db(tmp_path, monkeypatch):
-    """Every test here reads only what it writes: the research database defaults to a path that
-    does not exist unless a test names its own."""
-    monkeypatch.setenv(ch_mod.ENV_VAR, str(tmp_path / "no-research-db.sqlite"))
+    """Every test here reads only what it writes: the price history is the book database's own
+    (2026-09-30), so nothing outside tmp_path is read; the history cache starts empty."""
     ch_mod._CACHE.clear()
 
 

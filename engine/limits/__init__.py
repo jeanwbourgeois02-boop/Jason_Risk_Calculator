@@ -8,7 +8,7 @@
   net USD per commodity and sector, lots per contract month) and the exchanges' position limits
   (spot month, single month, all months) (``checks.py``).
 - ``liquidity(conn, as_of)``: each open position's size against its contracts' open interest and
-  average daily volume, research context from the research app's database, never a mark
+  average daily volume, Bloomberg's (stored in the book database's price_history), never a mark
   (``liquidity.py``, 2026-09-29; thresholds in ``config/limits.yaml`` ``liquidity:``, placeholders).
 - ``load_limits``: ``config/limits.yaml``, checked (``config.py``). Every rate and limit there
   is the user's; an unset rate makes the commodity n/a, an unset limit NOT_SET.

@@ -1,6 +1,6 @@
 ---
 name: research-db-quirks
-description: Quirks of the Commodity Dashboard's rv.sqlite that commodity_history.py depends on (contract ids, WAL side files, depth, units, date range)
+description: HISTORY ONLY since 2026-09-30 (rv.sqlite no longer read) - quirks of the research db the old commodity_history.py depended on
 metadata:
   type: project
 ---

@@ -575,7 +575,7 @@ def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issue
       - a (where, sentence) pair: the trade, contract or section it is about, then the reason; a
         `where` that opens with a period ("DAILY 910000032", "LTD COPAR1") puts the period in the
         small Kind column ("Daily", "LTD") and the rest under Where;
-      - a (kind, where, sentence) triple: the three columns as given ("Research", "", "...");
+      - a (kind, where, sentence) triple: the three columns as given ("Price history", "", "...");
       - a Dash component: one row, shown as it is.
     The same reason about the same place under two kinds is one row ("Daily, LTD"). Only the
     columns some row fills are drawn. Plain names on screen (`plain_ids`), the id on hover; every
@@ -626,8 +626,8 @@ def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issue
 
 # ----------------------------------------------------------------------------- the row "i" marker
 # Layout wave (2026-09-29, user yes): a badge that repeats on most cells of a row ("Excl. 2" on each
-# figure, "Mock history" on the z cell) becomes ONE small, quiet "i" per row with every reason on
-# hover; a column whose every value carries the same caveat (research history) carries one "i" in
+# figure) becomes ONE small, quiet "i" per row with every reason on
+# hover; a column whose every value carries the same caveat carries one "i" in
 # its heading instead. Totals rows keep their single "Excl. N". The reason never disappears: it moves
 # to the hover.
 def row_info(reasons, className: str = ""):
@@ -651,7 +651,7 @@ def row_info(reasons, className: str = ""):
 
 def head_info(reasons):
     """`row_info` for a column heading (white on the navy head): the one caveat every value of the
-    column carries ("Research history: mock data ..."), instead of a badge on every cell."""
+    column carries, instead of a badge on every cell."""
     return row_info(reasons, "row-info--head")
 
 

@@ -1,13 +1,13 @@
 ---
 name: dev-pc-parquet-and-package-init
-description: Dev PC has no pyarrow or fastparquet, and engine/risk/__init__ imports metrics.py, so history tests break when risk-metrics' import lags a history.py change
+description: engine/risk/__init__ imports metrics.py, so a removed history.py name breaks collection; parquet is gone from history.py since 2026-09-30
 metadata:
   type: project
 ---
 
-On the dev PC (checked 2026-09-24) neither pyarrow nor fastparquet is installed, so no parquet read in `engine/risk/history.py` can be exercised here; `tests/test_risk_history.py` tests only what needs no parquet engine (file list, status shape, missing-folder / missing-file / unreadable-file reasons, cache key, folder order).
+Since 2026-09-30 `engine/risk/history.py` reads no parquet at all (the nm-dashboard folder reader was replaced by the book database's `price_history` FX rows), so the dev PC's missing pyarrow no longer matters to my files; the `pyarrow>=15` line in `2_launcher.py` (infra) exists only for that retired reader.
 
-`engine/risk/__init__.py` does `from .metrics import book_risk`, so importing `engine.risk.history` runs `metrics.py`. When a history.py name is removed before risk-metrics drops its import (Phase 2, `RATES_FILE`), my own tests fail at collection. Verified them by stubbing `sys.modules['engine.risk']` as a bare package with `__path__` in a `py -3 -c` wrapper around `pytest.main`.
+`engine/risk/__init__.py` does `from .metrics import book_risk`, so importing `engine.risk.history` runs `metrics.py`. When a history.py name is removed before risk-metrics drops its import, my own tests fail at collection. metrics.py imports `YIELDS_FILE, History, load_history` from history.py: keep those three names (kept on 2026-09-30).
 
 **Why:** lanes edit in parallel; my removal and the consumer's import removal land in the same wave.
-**How to apply:** when removing an exported name, list the consumer's import line under Requests, and verify my tests with the stub if the consumer has not landed yet. `commodity_history.py` (Phase 4, 2026-09-24) reads SQLite, so it has no parquet gap and is fully tested here. See [[research-db-quirks]].
+**How to apply:** when removing an exported name, list the consumer's import line under Requests, and verify with a direct call if the consumer has not landed yet. See [[price-history-reader]].

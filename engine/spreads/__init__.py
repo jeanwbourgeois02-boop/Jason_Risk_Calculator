@@ -113,8 +113,9 @@ it went flat or settled, with win rate, payoff ratio, expectancy and holding day
 type and by trade name; an unpriced idea left out with its reason.
 
 Carry (2026-09-29; ``carry.py``): the roll-down of each calendar position and term-structure
-pair over the next contract step on the research app's curve, in the pair's unit and in USD.
-Research context: never a mark, never in P&L, delta or a total.
+pair over the next contract step on the chain's own Bloomberg closes (the book database's
+``price_history`` since 2026-09-30), in the pair's unit and in USD. Context: never a mark, never
+in P&L, delta or a total.
 
 Trades (2026-09-29, Phase G; ``trades.py``): the trade, Jason's PBRoot name, is the unit of the
 screens. ``trade_book(conn, as_of, spreads)`` gives every trade's Book row and panel in one dict:

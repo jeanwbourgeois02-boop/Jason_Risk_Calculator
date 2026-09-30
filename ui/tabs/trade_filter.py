@@ -324,10 +324,14 @@ CLEAR_WORDS = "Clear filters"
 CLEAR_TIP = "Every column's filter and the search back to All (the grouping stays)"
 
 
+# The tabs whose strip has no Group switch (Risk, 2026-09-30: one flat table by daily risk).
+NO_GROUP_TABS = frozenset({"risk"})
+
+
 def bar(tab: str, state: Optional[dict], options: Optional[Dict[str, List[dict]]] = None) -> html.Div:
     """The table strip's own controls on `tab` ('book', 'pnl', 'risk'), set from the shared state:
-    the free-text search, the Group switch (Slice on P&L) and "Clear filters" (only while a filter
-    is set). Every other filter is a column's funnel (`funnel`). `options` is not read any more
+    the free-text search, the Group switch (Slice on P&L; none on `NO_GROUP_TABS`) and "Clear
+    filters" (only while a filter is set). Every other filter is a column's funnel (`funnel`). `options` is not read any more
     (kept for the callers of the filter bar this replaced)."""
     s = normal(state)
     return html.Div(className="tf-tools", children=[
@@ -335,7 +339,7 @@ def bar(tab: str, state: Optional[dict], options: Optional[Dict[str, List[dict]]
             dcc.Input(id=_cid(SEARCH_TYPE, tab), type="text", value=s["search"], debounce=True,
                       placeholder="Search trade, contract or symbol", className="blotter-filter-search tf-search",
                       autoComplete="off")]),
-        html.Span(className="tf-group", children=[
+        None if tab in NO_GROUP_TABS else html.Span(className="tf-group", children=[
             html.Label("Group" if tab != "pnl" else "Slice", className="tk-k",
                        title=plain_words(GROUP_ABOUT if tab != "pnl" else SLICE_ABOUT)),
             dcc.RadioItems(id=_cid(GROUP_TYPE, tab), className="book-switch", options=_group_options(tab),
@@ -423,7 +427,7 @@ def funnel(key: str, body: Sequence[Any], active: bool, summary: str = "") -> ht
 def head_th(title: Any, cls: str = "", tip: str = "", sort_id: Optional[dict] = None, arrow: str = "",
             pop: Optional[html.Details] = None, right: bool = False, note: Any = None) -> html.Th:
     """A column heading: its title (a click sorts when `sort_id` is given; the arrow only on the
-    column sorted), a note (the research "i"), then its funnel. `right`: the panel opens leftwards
+    column sorted), a note (a small "i"), then its funnel. `right`: the panel opens leftwards
     (a column in the right half of the table)."""
     hover = plain_words(tip) or None
     if sort_id is not None:
@@ -466,88 +470,19 @@ def number_funnel(tab: str, state: Optional[dict], col: str, hint: str = NUMBER_
     return funnel(f"{tab}:{col}", pop_number(col_id(tab, col), text, hint=hint), bool(text), text)
 
 
-# --------------------------------------------------------------------------- research figures
-# Every figure the Book and Risk read from the research app's database (z, percentile, z at entry,
-# carry, hedge %) goes through `research_mark`: a grey "mock history" marker with the source's
-# sentence on hover whenever the research history is not real Bloomberg data
-# (`engine.risk.commodity_history.research_source`, risk-history, 2026-09-29).
-MOCK_WORDS = "mock history"
+# --------------------------------------------------------------------------- price history
+# The risk figures (z, hedge %, daily risk, VaR, days to exit) read the book database's own
+# Bloomberg daily history (`price_history`, fetched by "Pull Bloomberg now", 2026-09-30). Before the
+# first pull every trade's reason says so: the Book and Risk say it ONCE, never once per trade.
+NO_HISTORY_TEXT = ("No price history yet: press Pull Bloomberg now (the first pull fetches about two and a half "
+                   "years of daily closes, later pulls only the new days)")
+_NO_HISTORY = re.compile(r"no price history|no (commodity|bloomberg) (price )?history|no history series",
+                         re.IGNORECASE)
 
 
-def research_source() -> Dict[str, Any]:
-    """{kind, note, missing, tried}: 'real' | 'mock' | 'unknown' and its one sentence; `missing`
-    True when no research database is on this PC (`tried`: the paths looked at, for a hover only);
-    never raises."""
-    try:
-        from engine.risk.commodity_history import candidates
-        from engine.risk.commodity_history import research_source as read
-        src = read() or {}
-        missing = not str(src.get("path") or "")
-        tried = ", ".join(str(c.get("path")) for c in candidates()) if missing else ""
-        return {"kind": str(src.get("source_kind") or "unknown"), "note": str(src.get("source_note") or ""),
-                "missing": missing, "tried": tried}
-    except Exception as exc:  # noqa: BLE001 -- unknown, said so
-        return {"kind": "unknown", "note": f"the research history's source could not be read ({type(exc).__name__})",
-                "missing": False, "tried": ""}
-
-
-# Research data not on this PC (user, 2026-09-30: three drawer lines each dumping the file path were
-# unclear): ONE drawer line per tab, the path on hover only, and every engine reason that only says
-# the database is missing left out of the drawer (`is_research_missing_reason`).
-RESEARCH_MISSING_WHERE = "z, carry, roll-down, hedge %"
-RESEARCH_MISSING_TEXT = "Research data not on this PC: z, carry, roll-down and hedge % are blank"
-_RESEARCH_MISSING = re.compile(r"research history not found|no (commodity|research) (price )?history( database)?\b|"
-                               r"no research database|research database|provider is unknown|no research figures|"
-                               r"research data not on this PC",
-                               re.IGNORECASE)
-
-
-def research_missing(source: Optional[Dict[str, Any]]) -> bool:
-    """True when the research database is not on this PC."""
-    return bool((source or {}).get("missing"))
-
-
-def is_research_missing_reason(text: Any) -> bool:
-    """True for a reason that only says the research data is missing (said once, by `research_issue`)."""
-    return bool(_RESEARCH_MISSING.search(str(text or "")))
-
-
-def research_issue(source: Optional[Dict[str, Any]], where: str = RESEARCH_MISSING_WHERE,
-                   text: str = RESEARCH_MISSING_TEXT) -> Optional[tuple]:
-    """The drawer's one line for the missing research data: (kind, where, the sentence with the paths
-    tried on hover), or None when the research data is there."""
-    if not research_missing(source):
-        return None
-    tried = str((source or {}).get("tried") or "")
-    return ("Research", where, html.Span(text, title=f"Looked for the research database at: {tried}" if tried else None))
-
-
-def research_mark(source: Optional[Dict[str, str]] = None):
-    """The grey "mock history" marker (the sentence on hover), or None when the history is real."""
-    from ui.tabs.formatting import marker
-    src = source if source is not None else research_source()
-    if src.get("kind") == "real":
-        return None
-    return marker(MOCK_WORDS if src.get("kind") == "mock" else "unverified history",
-                  src.get("note") or "the research history's provider is not known", "marker--small")
-
-
-def research_head(source: Optional[Dict[str, str]] = None):
-    """The one small "i" for the heading of a column whose every value is research (z, percentile,
-    carry, hedge %, roll-down) while the research history is not real, its sentence on hover, or
-    None when it is real (layout wave, 2026-09-29: one mark per column, never a badge per cell)."""
-    from ui.tabs.formatting import head_info
-    src = source if source is not None else research_source()
-    if src.get("kind") == "real":
-        return None
-    head = "Research history: mock data" if src.get("kind") == "mock" else "Research history: not verified as real"
-    return head_info([head, src.get("note") or "the research history's provider is not known"])
-
-
-def research_words(source: Optional[Dict[str, str]] = None) -> str:
-    """The same as a hover line ('' when real)."""
-    src = source if source is not None else research_source()
-    return "" if src.get("kind") == "real" else f"({src.get('note') or 'research history not verified as real'})"
+def is_no_history_reason(text: Any) -> bool:
+    """True for a reason that only says the price history is not on file yet."""
+    return bool(_NO_HISTORY.search(str(text or "")))
 
 
 # --------------------------------------------------------------------------- the headline

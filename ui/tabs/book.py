@@ -4,8 +4,7 @@ design doc's "Table specs").
 The trade is the unit: one row per trade name (Jason's PBRoot suffix, `JSHY10_ZNA1` and
 `JSHY10.3_ZNA1` one trade), every leg and hedge under it, never split. Columns: Trade | Type |
 What it is | Entry | Now | z | Move | Daily | LTD | Next | Flags; a row's caveats (a figure
-leaving fills out) sit in one small "i" after its name (`formatting.row_info`), the research caveat
-once on the z heading. Nothing sits between the header and the card (user, 2026-09-30): the card's
+leaving fills out) sit in one small "i" after its name (`formatting.row_info`). Nothing sits between the header and the card (user, 2026-09-30): the card's
 title strip holds the search, the Group switch and, only while a filter is set, the rows' MTD and
 YTD. The table's first row is the total ("Book · 6 trades", "Filtered · 3 of 6"), sticky, with
 Gross and Net USD in its What-it-is cell and the flag count in its Flags cell, equal unfiltered to
@@ -24,8 +23,8 @@ What is read, never recomputed:
     header's figure;
   - `engine.risk.trades.trade_risk` (`blotter_pricing.shared_trade_risk`, computed on its own
     thread; the z column fills in a moment after the table): z, percentile, z at entry, the What it
-    is hover's hedge % and correlation. Research figures carry the "mock history" marker while the
-    research data is not real (`trade_filter.research_mark`);
+    is hover's hedge % and correlation, from the book database's own Bloomberg price history
+    (`price_history`); before the first pull the z column is left out and the drawer says why once;
   - `engine.spreads.trades.level_history` for the panel's chart (at most 60 closes).
 
 Display rules: `ui.tabs.formatting` (k / m with one decimal and the sign on trade rows, full
@@ -103,7 +102,7 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
                            "several spreads says how many, each one's level in the row's panel."),
     ("now", "Now", "", "The same level at the latest official marks."),
     ("z", "z", "", "Where Now sits in one year of this exact level: (Now minus the mean) over the standard "
-                   "deviation of the last 252 settlements (research history)."),
+                   "deviation of the last 252 daily closes (Bloomberg price history)."),
     ("today", "Move", "", "The level's move since the previous close, in the level's own unit, green when it helps "
                           "the trade; a dash when it did not move."),
     ("daily", "Daily", "", "Today's P&L in USD, every fill of the trade including its hedge."),
@@ -388,9 +387,9 @@ def _fill_name(inst: str, product: str, roots: Dict[str, Any]) -> str:
 
 def gather(conn: sqlite3.Connection, as_of: str) -> dict:
     """Everything the Book shows for `as_of` but the risk figures (computed apart, so the table does
-    not wait for them), once per database revision, as-of and research inputs. Shared: never edit."""
-    from ui.tabs.blotter_pricing import research_inputs_key
-    return _memo("gather", conn, as_of, lambda: _gather(conn, as_of), extra=research_inputs_key())
+    not wait for them), once per database revision, as-of and config files. Shared: never edit."""
+    from ui.tabs.blotter_pricing import config_inputs_key
+    return _memo("gather", conn, as_of, lambda: _gather(conn, as_of), extra=config_inputs_key())
 
 
 def _gather(conn: sqlite3.Connection, as_of: str) -> dict:
@@ -442,7 +441,8 @@ def _gather(conn: sqlite3.Connection, as_of: str) -> dict:
     # What it is in words (the lots, long or short, first side first), once per gather: the shared
     # trade dicts are copied, never edited; the search reads `what_words` (trade_filter._search_blob)
     data["trades"] = [_with_words(t, roots) for t in trades]
-    data["research"] = tf.research_source()
+    from ui.tabs.blotter_pricing import price_history_summary
+    data["history"] = price_history_summary(conn)
     return data
 
 
@@ -1020,7 +1020,7 @@ def what_line(t: dict) -> str:
     return f"{text} · {tail}" if tail and tail not in text else text
 
 
-def _what_td(t: dict, r: Optional[dict], research: dict) -> html.Td:
+def _what_td(t: dict, r: Optional[dict]) -> html.Td:
     """What it is: line 1 the position in words, line 2 grey the sizes, months, what else is held and
     the hedge (amber when it is wrong); on hover both lines, the other parts, then each leg's lots,
     the value per side, the balance, the USD per 1-unit move of the level, hedge % and correlation,
@@ -1040,7 +1040,7 @@ def _what_td(t: dict, r: Optional[dict], research: dict) -> html.Td:
     rest = [str(leg.get("name") or "") for leg in t.get("legs") or [] if str(leg.get("name") or "") not in listed]
     hover = _lines(cap(what), " · ".join(x for x in (sub, tail) if x), tail_hover, structure,
                    _lines("Also held:", *others) if others else "",
-                   size_hover(t, r, research), *(f"· {n}" for n in rest if n))
+                   size_hover(t, r), *(f"· {n}" for n in rest if n))
     second: List[Any] = []
     if sub:
         second.append(sub)
@@ -1171,7 +1171,7 @@ def size_text(t: dict) -> Tuple[str, str]:
     return " ".join(x for x in (fig, unit, f"+{more} more" if more else "") if x), ""
 
 
-def size_hover(t: dict, r: Optional[dict], research: dict) -> str:
+def size_hover(t: dict, r: Optional[dict]) -> str:
     size, level = t.get("size") or {}, t.get("level") or {}
     lines = []
     subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
@@ -1202,10 +1202,8 @@ def size_hover(t: dict, r: Optional[dict], research: dict) -> str:
     lines.append(f"{words}: {format_cell(usd)}" if usd is not None else f"USD per move of the level: {words}")
     if r is not None:
         hp, corr = _num(r.get("hedge_pct")), _num(r.get("leg_correlation"))
-        mark = tf.research_words(research)
         if hp is not None:
-            lines.append(f"Hedge %: {pct_text(hp / 100.0)}" + (f" · correlation {corr:.2f}" if corr is not None else "")
-                         + (f" {mark}" if mark else ""))
+            lines.append(f"Hedge %: {pct_text(hp / 100.0)}" + (f" · correlation {corr:.2f}" if corr is not None else ""))
         elif r.get("hedge_reason"):
             lines.append(f"Hedge %: not given ({r['hedge_reason']})")
     else:
@@ -1229,7 +1227,7 @@ def _now_td(t: dict, check: Sequence[str] = ()) -> html.Td:
     carry = ""
     if tf.type_code(t) == "CALENDAR" or level.get("source") == "calendar":
         c = _num(t.get("carry_per_month"))
-        carry = (f"Carry per month: {full_signed(c)} USD (the legs' roll-down on one curve, research)"
+        carry = (f"Carry per month: {full_signed(c)} USD (the legs' roll-down on one curve)"
                  if c is not None else f"Carry per month: not summed ({t.get('carry_reason') or 'not given'})")
     hover = _lines(level_unit_line(level) if level.get("mode") == "premium" else "",
                    (level.get("sources") or {}).get("now", ""), level.get("note") or "", carry,
@@ -1239,7 +1237,7 @@ def _now_td(t: dict, check: Sequence[str] = ()) -> html.Td:
                                hover, estimated=estimated, with_unit=True), className="tk-level tk-now")
 
 
-def _z_td(r: Optional[dict], ready: bool, research: dict) -> html.Td:
+def _z_td(r: Optional[dict], ready: bool) -> html.Td:
     if not ready:
         return html.Td(missing_cell("the risk figures are still being computed"))
     if r is None:
@@ -1250,14 +1248,13 @@ def _z_td(r: Optional[dict], ready: bool, research: dict) -> html.Td:
     pct, ze = _num(r.get("percentile")), _num(r.get("z_entry"))
     hover = _lines(f"Percentile: {pct_text(pct / 100.0) if pct is not None else MISSING}",
                    f"z at entry: {z_text(ze)}" if ze is not None else f"z at entry: {r.get('z_entry_reason') or 'not given'}",
-                   f"Window: {r.get('level_days') or ''} settlements to {r.get('level_date') or ''}, research history",
-                   tf.research_words(research))
-    # the research caveat sits once, on the column's heading (`head`), never on every cell
+                   f"Window: {r.get('level_days') or ''} daily closes to {r.get('level_date') or ''} (Bloomberg price "
+                   "history)")
     return html.Td(html.Span(z_text(z), className="tk-bold" if abs(z) >= 2 else None, title=plain_words(hover)))
 
 
 def sigma_words(r: Optional[dict], ready: bool, level: dict) -> str:
-    """'Move in σ: +1.4 (a daily σ of 0.21 $/bbl over 251 changes, research history)' from
+    """'Move in σ: +1.4 (a daily σ of 0.21 $/bbl over 251 changes)' from
     `trade_risk`'s move_sigma / level_sd, or the engine's reason."""
     if not ready:
         return "Move in σ: the risk figures are still being computed"
@@ -1271,7 +1268,7 @@ def sigma_words(r: Optional[dict], ready: bool, level: dict) -> str:
         unit = unit_words(r.get("level_unit") or level.get("unit"))
         days = r.get("level_sd_days")
         sd_text = (f" (a daily σ of {level_text(sd, level)}{' ' + unit if unit else ''}"
-                   + (f" over {days} daily changes" if days else "") + ", research history)")
+                   + (f" over {days} daily changes" if days else "") + ")")
     return f"Move in σ: {z_text(ms)}{sd_text}"
 
 
@@ -1476,9 +1473,9 @@ def trade_tr(data: dict, t: dict, r: Optional[dict], ready: bool, opened: bool, 
     cells = [
         html.Td([html.Span("▾ " if opened else "▸ ", className="tk-chev"),
                  html.Span(name, className="tk-name", title=name_hover or None), info], className="l"),
-        _type_td(t), _what_td(t, r, data.get("research") or {}),
+        _type_td(t), _what_td(t, r),
         *([_parts_td(t, n_parts, opened)] if n_parts else [_entry_td(tv), _now_td(tv, check)]),
-        *([(html.Td(missing_cell("closed: no z")) if closed else _z_td(r, ready, data.get("research") or {}))]
+        *([(html.Td(missing_cell("closed: no z")) if closed else _z_td(r, ready))]
           if show_z else []),
         _today_td(tv, r, ready, check),
         money_td(*daily, hover=_split_hover(t), check=check, row=True),
@@ -1651,7 +1648,7 @@ def next_sort(current: Optional[dict], key: str) -> Optional[dict]:
 LIST_FUNNELS = {"trade": ("trade",), "type": ("type",), "what": ("commodity",)}
 NUMBER_FUNNELS = {"entry": "The level at entry, in the level's own unit.",
                   "now": "The level now, in the level's own unit.",
-                  "z": "The z-score (research history); a trade whose z is still being computed does not show.",
+                  "z": "The z-score; a trade whose z is still being computed does not show.",
                   "today": "The level's move since the previous close, in the level's own unit.",
                   "daily": "Today's P&L in USD.", "ltd": "The P&L since the trade opened, in USD."}
 FLAG_ANY, FLAG_RED = "any", "red"
@@ -1666,28 +1663,26 @@ def _flags_funnel(state: Optional[dict]) -> html.Details:
 
 
 def columns(show_z: bool = True) -> Tuple[Tuple[str, str, str, str], ...]:
-    """The trade view's columns; without z when the research data is not on this PC (no row can have
-    one, user 2026-09-30)."""
+    """The trade view's columns; without z before the first Bloomberg price history is on file (no row
+    can have one)."""
     return COLUMNS if show_z else tuple(c for c in COLUMNS if c[0] != "z")
 
 
 def show_z_column(data: dict, risk: Optional[dict]) -> bool:
-    """False only when the research data is missing and no row has a z."""
-    if not tf.research_missing(data.get("research") or {}):
+    """False only when no price history is on file and no row has a z."""
+    if (data.get("history") or {}).get("rows"):
         return True
     return any(_num(r.get("z")) is not None for r in (risk or {}).get("trades") or [])
 
 
-def head(sort: Optional[dict], research: Optional[dict] = None, state: Optional[dict] = None,
+def head(sort: Optional[dict], state: Optional[dict] = None,
          options: Optional[Dict[str, List[dict]]] = None, show_z: bool = True) -> html.Thead:
     """The column heads: each title sorts, each filterable column carries its funnel (`trade_filter.
-    funnel`); z (every value research) carries the one research "i" while the research history is
-    not real (`trade_filter.research_head`)."""
+    funnel`)."""
     ths = []
     cols = columns(show_z)
     half = len(cols) // 2
     for i, (key, title, cls, tip) in enumerate(cols):
-        note = tf.research_head(research) if key == "z" and research is not None else None
         pop = None
         if key in LIST_FUNNELS:
             pop = tf.trade_funnel(TAB, state, options or {}, LIST_FUNNELS[key], key)
@@ -1696,7 +1691,7 @@ def head(sort: Optional[dict], research: Optional[dict] = None, state: Optional[
         elif key == "flags":
             pop = _flags_funnel(state)
         ths.append(tf.head_th(title, cls, tip, sort_id={"type": SORT_TYPE, "idx": key} if key in SORTABLE else None,
-                              arrow=tf.arrow_of(sort, key), pop=pop, right=i > half, note=note))
+                              arrow=tf.arrow_of(sort, key), pop=pop, right=i > half))
     return html.Thead(html.Tr(ths))
 
 
@@ -1871,9 +1866,8 @@ def leg_tr(data: dict, leg: dict, level_note: str) -> html.Tr:
 
     roll = _num(leg.get("roll_down_usd_per_month"))
     roll_hover = _lines(f"{price_text(leg.get('roll_down'))} {leg.get('roll_down_unit') or ''} a month over "
-                        f"{leg.get('horizon_months') or ''} months on the research curve"
-                        if _num(leg.get("roll_down")) is not None else "",
-                        tf.research_words(data.get("research") or {}))
+                        f"{leg.get('horizon_months') or ''} months on the Bloomberg history's curve"
+                        if _num(leg.get("roll_down")) is not None else "")
     roll_cell = (html.Span(full_signed(roll), title=plain_words(roll_hover) or None) if roll is not None
                  else missing_cell(leg.get("roll_down_reason") or "no roll-down"))
     side = str(leg.get("side") or "")
@@ -1894,10 +1888,9 @@ def leg_tr(data: dict, leg: dict, level_note: str) -> html.Tr:
        + (" tk-leg--unrec" if unrec else ""))
 
 
-def _leg_head(research: Optional[dict] = None) -> html.Thead:
-    """The legs' heads; Roll-down (research) carries the one research "i" while it is not real."""
-    return html.Thead(html.Tr([html.Th([title, tf.research_head(research) if k == "roll" and research is not None
-                                        else None], className=cls or None) for k, title, cls in LEG_COLUMNS]))
+def _leg_head() -> html.Thead:
+    """The legs' heads."""
+    return html.Thead(html.Tr([html.Th(title, className=cls or None) for _k, title, cls in LEG_COLUMNS]))
 
 
 def _sub_tr(text: str, ids: Sequence[str], data: dict, level: Optional[dict] = None) -> html.Tr:
@@ -1973,7 +1966,7 @@ def panel_legs(data: dict, t: dict) -> html.Table:
         body.extend(leg_tr(data, leg, note) for leg in hedges)
     ids = [str(i) for i in t.get("trade_ids") or []]
     carry = _num(t.get("carry_per_month"))
-    carry_cell = (html.Span(full_signed(carry), title=plain_words(tf.research_words(data.get("research") or {})) or None)
+    carry_cell = (html.Span(full_signed(carry), title="The legs' roll-down a month on one curve")
                   if carry is not None else html.Span("Not summed", className="tk-sub",
                                                       title=plain_words(str(t.get("carry_reason") or "not given"))))
     gross = _num(t.get("gross_usd"))
@@ -1983,7 +1976,7 @@ def panel_legs(data: dict, t: dict) -> html.Table:
                      html.Td(""), html.Td(""),
                      html.Td(full_signed(fill_sum(data, "daily", ids)[0])),
                      html.Td(full_signed(fill_sum(data, "ltd", ids)[0])), html.Td(carry_cell)])]
-    return html.Table([_leg_head(data.get("research")), html.Tbody(body), html.Tfoot(foot)],
+    return html.Table([_leg_head(), html.Tbody(body), html.Tfoot(foot)],
                       className="book-table tk-table tk-legs")
 
 
@@ -2054,12 +2047,12 @@ def _closes(first: str, as_of: str, n: int = HISTORY_POINTS) -> List[str]:
 def history(conn: sqlite3.Connection, data: dict, t: dict) -> dict:
     """`level_history` of the trade over its closes (at most 60), memoised per trade."""
     from engine.spreads.trades import level_history
-    from ui.tabs.blotter_pricing import priced_value_book, research_inputs_key
+    from ui.tabs.blotter_pricing import priced_value_book, config_inputs_key
 
     def compute():
         dates = _closes(str(t.get("first_trade_date") or data["as_of"]), data["as_of"])
         return level_history(conn, t, dates, value_fn=priced_value_book)
-    return _memo("level", conn, data["as_of"], compute, extra=(str(t.get("trade")), *research_inputs_key()))
+    return _memo("level", conn, data["as_of"], compute, extra=(str(t.get("trade")), *config_inputs_key()))
 
 
 def level_figure(hist: dict, t: dict) -> dict:
@@ -2260,7 +2253,7 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
         if is_open:
             for t in sorted(closed_rows, key=lambda t: closed_on(data, t), reverse=True):
                 add(t)
-    return (html.Table([head(sort, data.get("research") or {}, s, tf.options_for(data.get("trades") or []), show_z),
+    return (html.Table([head(sort, s, tf.options_for(data.get("trades") or []), show_z),
                         html.Tbody(body)], id=TABLE_ID,
                        className="book-table book-grid tk-table"),
             [str(t.get("trade")) for t in shown])
@@ -2291,14 +2284,13 @@ ISSUE_KIND_WORDS = {"daily": "Daily", "ltd": "LTD"}
 
 def issue_items(data: dict, risk: Optional[dict]) -> List[Any]:
     """The drawer's rows as (kind, where, reason): a fill with no figure under its trade ("Daily" and
-    "LTD" of the same reason made one row by the drawer), the engine's notes, the risk and research
-    caveats. The research data missing from this PC is said once (`trade_filter.research_issue`),
-    never once per engine note that repeats it."""
-    src = data.get("research") or {}
-    gone = tf.research_missing(src)
+    "LTD" of the same reason made one row by the drawer), the engine's notes, the risk caveats.
+    Before the first Bloomberg price history is on file that is said once (`trade_filter.
+    NO_HISTORY_TEXT`), never once per engine note that repeats it."""
+    no_history = not (data.get("history") or {}).get("rows")
     items: List[Any] = [(kind, "", why) for kind, why in data.get("errors") or []]
     for n in data.get("notes") or []:
-        if not (gone and tf.is_research_missing_reason(n)):
+        if not (no_history and tf.is_no_history_reason(n)):
             items.append(("Trades", "", str(n)))
     trade_of = {str(i): str(t.get("trade") or "") for t in data.get("trades") or [] for i in t.get("trade_ids") or []}
     for key in ("daily", "ltd"):
@@ -2309,14 +2301,10 @@ def issue_items(data: dict, risk: Optional[dict]) -> List[Any]:
         for tid, why in zip(bad.get("trade_id", []), bad.get("reason", [])):
             where = " · ".join(x for x in (trade_of.get(str(tid), ""), f"Fill {tid}") if x)
             items.append((ISSUE_KIND_WORDS[key], where, str(why or "no figure")))
-    if gone:
-        items.append(tf.research_issue(src))
-        return items
-    if risk is not None and not risk.get("available"):
-        items.append(("Risk", "", f"z and hedge % unavailable: {risk.get('reason') or 'no risk history'}"))
-    if src.get("kind") != "real":
-        items.append(("Research", tf.RESEARCH_MISSING_WHERE,
-                      src.get("note") or "the research history is not verified as real"))
+    if no_history:
+        items.append(("Price history", "z, hedge %, carry", tf.NO_HISTORY_TEXT))
+    elif risk is not None and not risk.get("available"):
+        items.append(("Risk", "", f"z and hedge % unavailable: {risk.get('reason') or 'no price history'}"))
     return items
 
 

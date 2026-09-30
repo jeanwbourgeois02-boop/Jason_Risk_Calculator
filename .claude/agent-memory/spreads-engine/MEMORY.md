@@ -6,7 +6,7 @@
 - [Gross/net notional](gross-net-notional.md) — 2026-09-28: gross_usd / net_usd / notional_reason per spread, position, outright; open option blanks the group; closed = 0
 - [Strategies as pairs](strategies-pairs.md) — 2026-09-28: label rule first then fallback with a note, whole-lot pairing, raw China/foreign ratio, hedges via hedges.py (FX options yes, XAU no), CNY coverage, split only when the Daily exists
 - [Period explain](period-explain.md) — 2026-09-29: one bucket order (explain + Book Daily split), positions_of, hedges.py (XAU no, FX option yes)
-- [Scorecard and carry](scorecard-and-carry.md) — 2026-09-29: ideas closed at flat, P&L at as-of LTD, stats; calendar roll-down on the research curve, common date
+- [Scorecard and carry](scorecard-and-carry.md) — 2026-09-29: ideas closed at flat, P&L at as-of LTD, stats; calendar roll-down, common date; since 2026-09-30 on price_history (load_commodity_history(conn)), fields renamed
 - [Rolls](rolls.md) — 2026-09-29: rolls from fills, position per trade name, pooled pass, roll-ins kept labelled; real book: 2 cattle roll-ins, 1 HRC roll
 - [Value sizing, one spread per name](value-sizing-one-spread.md) — 2026-09-29: value between commodities, physical for same commodity / cracks; one spread per name; leftover on front leg
 - [Trade book](trade-book.md) — 2026-09-29 Phase G: type rule (roll-aware day calendars), converted CN/West ratio, no-marks hedge fallback

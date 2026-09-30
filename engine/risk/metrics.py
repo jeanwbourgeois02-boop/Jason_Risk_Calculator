@@ -1,21 +1,22 @@
-"""The Risk tab's numbers: the nm-dashboard's risk metrics (its Portfolio tab, `fx_alpha/
-dashboard.py` "Portfolio risk, held-constant book") on this book's own positions.
+"""The Risk tab's numbers: the held-constant-book risk metrics of the macro risk model the app
+was forked from, on this book's own positions.
 
 `book_risk(conn, as_of)` takes the book's delta from `engine.ladder.positions.book_positions`
 (each currency's USD delta with the FX options' delta in it, and the metals: the app's
-official marks, nothing recomputed here) and applies the nm-dashboard market history
-(`engine.risk.history`) to it, held constant, the way the dashboard does, with its
-definitions. The macro trader's rates (DV01) and equity-index (ES + SPX) underlyers left
+official marks, nothing recomputed here) and applies Bloomberg's daily FX and metal closes
+(`engine.risk.history`, the book database's `price_history`) to it, held constant, with the
+model's definitions. The macro trader's rates (DV01) and equity-index (ES + SPX) underlyers left
 in Phase 2 (user approval 2026-09-24): `book_positions`' `rates` and `equity_index`
 blocks are not read.
 
 Commodity underlyers (Phase 4, `engine/risk/commodity.py`): COMMODITY (one per contract
 root, its contracts at curve-positions' delta lots), SECTOR (the sum of its commodities) and
-SPREAD (each open spread of spreads-engine, its futures legs at their open lots), on the
-research app's settlement history (`engine.risk.commodity_history`). Every row has a `role`:
+SPREAD (each open spread of spreads-engine, its futures legs at their open lots), on
+Bloomberg's daily price history in the book database's own `price_history` table
+(`engine.risk.commodity_history`, risk-history's). Every row has a `role`:
 the PARTS are FX, METAL and COMMODITY, and the book's series is their sum; SECTOR and SPREAD
 are VIEWS (they re-add parts) and never enter the book's series, so nothing is counted twice.
-The commodity rows take their own lag-2 date: the last settlement on or before as_of among
+The commodity rows take their own lag-2 date: the last close on or before as_of among
 the book's commodity series, less 2 business days; the book's is the later of the FX and the
 commodity lag-2 dates.
 
@@ -23,8 +24,8 @@ commodity lag-2 dates.
     FX / METAL: usd_delta x (dln(series) + carry[t]), the log-diff of the USD-per-unit
       close plus carry[t] = (yield_ccy[t-1] - yield_USD[t-1]) / 100 / 365
       (`core/bbg_loader.py::daily_moves_and_carry`: yields in percent, lagged one day,
-      forward-filled onto the spot dates); with no yields on file the spot term alone,
-      said in the row's note.
+      forward-filled onto the spot dates); no short-rate history is pulled (2026-09-30), so
+      the spot term alone, said in the row's note.
   lag2_date = the history's last date on or before as_of, less 2 business days
     (`pd.offsets.BusinessDay(2)`); s_hist = the series up to it, what the dashboard's
     sizer saw.
@@ -34,7 +35,7 @@ commodity lag-2 dates.
     that window has more than one observation, else trailing; blended = w_trail x
     trailing + w_stress x crisis (2/3, 1/3). `vol_trailing_ann_usd` and
     `vol_crisis_ann_usd` are reported beside it. When the cutover is passed but the crisis
-    window has no data (the research history starts in 2020), the blended vol is the
+    window has no data (the Bloomberg price history holds about two years), the blended vol is the
     trailing vol alone, and `vol_note` and the row's `reason` say "crisis window not in
     history: trailing vol only" (a documented choice, 2026-09-24).
   var95_1d_usd (the dashboard's `var95_1y_$M`): minus the 5th percentile (linear
@@ -66,15 +67,16 @@ lists; the UI renders it and recomputes nothing):
 
   {
     "as_of": "2026-09-22",
-    "history": {"available", "path", "last_date", "used_to" (last history date on or before
-                as_of), "lag2_date", "reason", "note" (the copies seen with their last dates,
-                then the coverage for as_of, then whether carry is in), "carry" (bool: yields
-                on file), "candidates": [{path, exists, last_date}],
+    "history": {"available", "path" (the book database), "last_date", "used_to" (last history
+                date on or before as_of), "lag2_date", "reason", "note" (the FX closes on file
+                and their pairs, then the coverage for as_of, then that carry is not in),
+                "carry" (bool: yields on file), "candidates": [{path, exists}], "pairs",
                 "files": {spot | yields: {file, path, loaded, rows, columns, first_date,
                 last_date, reason}}},
-    "commodity_history": {CommodityHistory.status() keys (available, path, reason, first_date,
-                last_date, note, candidates, roots, contracts, fx_pairs), "used_to", "lag2_date",
-                "positions_note" (curve-positions' note), "note" (the database, then the coverage)},
+    "commodity_history": {CommodityHistory.status() keys (available, path (the book database),
+                reason, first_date, last_date, note, candidates, roots, contracts, fx_pairs), "used_to",
+                "lag2_date", "positions_note" (curve-positions' note), "note" (the database, then the
+                coverage)},
     "config": {vol_target_usd, vol_target_placeholder (True while the 4.5m is the macro fund's),
                vol_target_note, stress_pct, stress_cap_usd, blended {...}, var_window_bd,
                var_confidence, worst_day_start, shock_dates [{date, name}], file, loaded, note},
@@ -100,7 +102,7 @@ lists; the UI renders it and recomputes nothing):
                     "worst_day_ex_vs_target_pct", "days", "first_date", "last_date", "reason",
                     "reasons", "note"; COMMODITY adds name, sector, net_delta_lots and
                     "contracts" [{contract_id, product, history_contract, delta_lots,
-                    multiplier, currency, research_contract_id, months_ahead, own_from,
+                    multiplier, currency, months_ahead, own_from,
                     fallback_days, fx_pair, fx_missing_days, days, in_series, reason, note}];
                     SECTOR adds name, sector; SPREAD adds name, spread_id, spread_kind, family,
                     "legs" [{contract_id, root_id, product, open_lots, currency, in_series,
@@ -112,7 +114,7 @@ lists; the UI renders it and recomputes nothing):
                   in config/stress.yaml order,
     "commodity_scenarios": engine.stress.commodity_stress(conn, as_of) passed through
                   untouched ({as_of, available, config, scenarios [...], reasons}), on the same
-                  positions, spreads and research history,
+                  positions, spreads and price history,
     "position_risk": engine.risk.positions.position_risk (2026-09-29): the Book's open rows as
                   positions, each one's standalone VaR and historical component contribution to
                   the positions' book VaR, the diversification line, the correlation matrix and
@@ -344,11 +346,12 @@ def book_risk(conn: sqlite3.Connection, as_of: str, *, history: Optional[History
               commodity_history: Optional[CommodityHistory] = None,
               commodity_scenarios_path=None) -> Dict[str, Any]:
     """The Risk tab's numbers for `as_of` (module docstring for the shape). `history`,
-    `commodity_history` and `config` default to `load_history()`,
-    `load_commodity_history()` and `load_config()`; `commodity_scenarios_path` to
+    `commodity_history` and `config` default to `load_history(conn)`,
+    `load_commodity_history(conn)` (the book database's own Bloomberg price history) and
+    `load_config()`; `commodity_scenarios_path` to
     engine.stress's own `config/commodity_stress.yaml`."""
-    history = history if history is not None else load_history()
-    commodity_history = commodity_history if commodity_history is not None else load_commodity_history()
+    history = history if history is not None else load_history(conn)
+    commodity_history = commodity_history if commodity_history is not None else load_commodity_history(conn)
     config = config if config is not None else load_config()
     config = dict(config)
     config["stress_cap_usd"] = float(config["vol_target_usd"]) * float(config["stress_pct"]) / 100.0
@@ -374,8 +377,8 @@ def book_risk(conn: sqlite3.Connection, as_of: str, *, history: Optional[History
                 coverage = (f"history ends {_iso(used_to)}, before {as_of}: metrics on the history "
                             f"to {_iso(used_to)} (the book's positions are {as_of}'s)")
         else:
-            coverage = f"no history on or before {as_of} (the file starts {history.files['spot']['first_date']})"
-    notes = [n for n in (history.note, coverage) if n]      # the copies seen (history.py), then the coverage
+            coverage = f"no history on or before {as_of} (the FX closes start {history.files['spot']['first_date']})"
+    notes = [n for n in (history.note, coverage) if n]      # the FX closes on file (history.py), then the coverage
     if not hist_status["carry"] and history.available:
         notes.append("carry not included: " + (history.files.get("yields", {}).get("reason") or f"{YIELDS_FILE} not loaded"))
     hist_status["note"] = "; ".join(notes)
@@ -519,9 +522,11 @@ def _commodity_positions(conn: sqlite3.Connection, as_of: str) -> Tuple[Optional
 def _commodity_status(commodity_history: CommodityHistory, cm_series: Dict[str, pd.Series], as_of: str,
                       curve: Optional[dict]) -> Tuple[dict, Optional[pd.Timestamp], str]:
     """(the commodity history block, its lag-2 date, the coverage sentence). The lag-2 date is
-    the last settlement on or before as_of among the book's commodity series, less 2
-    business days: the FX rule on the research history."""
+    the last close on or before as_of among the book's commodity series, less 2
+    business days: the FX rule on the Bloomberg price history."""
     status = commodity_history.status()
+    for key in ("source_kind", "source_note", "source_providers", "source_jobs"):   # always Bloomberg's
+        status.pop(key, None)
     status.update({"used_to": None, "lag2_date": None, "positions_note": (curve or {}).get("note", "")})
     lag2: Optional[pd.Timestamp] = None
     coverage = ""
@@ -534,7 +539,7 @@ def _commodity_status(commodity_history: CommodityHistory, cm_series: Dict[str, 
             coverage = (f"commodity history ends {_iso(used_to)}, before {as_of}: metrics on the history to "
                         f"{_iso(used_to)} (the book's positions are {as_of}'s)")
     elif commodity_history.available and commodity_history.first_date and commodity_history.first_date > as_of:
-        coverage = f"no commodity history on or before {as_of} (the database starts {commodity_history.first_date})"
+        coverage = f"no commodity history on or before {as_of} (the price history starts {commodity_history.first_date})"
     status["note"] = "; ".join(n for n in (commodity_history.note, coverage) if n)
     return status, lag2, coverage
 
@@ -553,7 +558,7 @@ def _commodity_delta_reason(cm_parts: List[Dict[str, Any]], curve: Optional[dict
 def _commodity_scenarios(conn: sqlite3.Connection, as_of: str, path, curve: Optional[dict],
                          spreads: Optional[dict], commodity_history: CommodityHistory) -> Dict[str, Any]:
     """engine.stress.commodity_stress, passed through untouched (commodity-stress's figures),
-    on the same positions, spreads and research history as the rows."""
+    on the same positions, spreads and price history as the rows."""
     try:
         from engine.stress import commodity_stress
         return commodity_stress(conn, as_of, path, positions=curve, spreads=spreads,

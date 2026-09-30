@@ -16,7 +16,7 @@ leg settles after as_of. Inside a position the trades are netted per contract; a
 position holds flat adds nothing.
 
 A position's daily USD P&L is the same series the book VaR already uses, held constant across
-history (`commodity.py`: the research app's settlement changes x our multiplier x lots x USD
+history (`commodity.py`: Bloomberg's daily close changes x our multiplier x lots x USD
 per quote unit, `engine.risk.commodity_history`): each of its contracts at its lots in the
 position times curve-positions' delta per lot (`delta_factor`: 1 for a future or an LME
 prompt, the shrinking share of an averaging contract, an option's official DELTA mark), summed
@@ -29,9 +29,8 @@ with no series is left out alone, and the position is kept on its other legs, wi
 True, `partial_reason` ("<hedge> hedge not in this figure: no price history; the figure is
 without the hedge") and `hedges_left_out`; the book-level `partial_note` names every such
 position. A position made only of such hedges is left out. An FX trade has no series here:
-`book_positions` gives the currency delta per currency, not per trade, and the nm-dashboard FX
-history is absent on a PC without it; a precious-metal pair (not a hedge) therefore leaves its
-position out.
+`book_positions` gives the currency delta per currency, not per trade; a precious-metal pair
+(not a hedge) therefore leaves its position out.
 
 Definitions (parameters in `config/risk.yaml`):
 
