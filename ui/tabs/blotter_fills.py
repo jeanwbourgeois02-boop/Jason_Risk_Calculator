@@ -3,10 +3,9 @@
 The design doc's "Table specs", Blotter (no shared filter bar; its own search and filters; nothing
 editable; a correction is a re-upload):
 
-- **Last upload**: one line (file · time · rows · new · updated · removed as cancelled · not
-  loaded, amber when any and a click opens the table · prices converted), then the rows that did
-  not become trades (Row in file · Trade Id · Symbol as written · Reason in plain words · What to
-  do) and the file-level warnings.
+- **Last upload**: one line (file · time · rows · new · updated · removed as cancelled · the
+  trades' problems as one link, "2 need a fix: see Trades on the Data tab" · prices converted).
+  The rows themselves are listed on the Data tab's Trades card only (2026-09-30).
 - **Every fill**, newest trade date first, eight columns: Date, Trade, Contract (our name with the
   exchange), Side, Lots, Price (as in the file), Trade Id, Landed in (the trade on the Book with
   its type). Fills in no trade are pinned to the top under an amber line. Filters: Trade, Landed
@@ -36,7 +35,7 @@ import datetime as dt
 import logging
 import re
 import sqlite3
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from dash import ALL, MATCH, Input, Output, State, dcc, html
@@ -49,8 +48,7 @@ from ui.tabs.trade_filter import (
 )
 from ui.tabs.formatting import (
     cap, cap_parts, tidy,
-    MISSING, amount_words, compact, day_text, fx_name, is_fx_pair, missing_cell, parse_contract_id, plain_ids,
-    plain_words,
+    MISSING, amount_words, compact, day_text, fx_name, is_fx_pair, missing_cell, parse_contract_id, plain_words,
     price_text, quoted_unit, price_decimals, decimals_of, strike_text,
 )
 from ui.tabs.header import AS_OF_STORE_ID
@@ -76,8 +74,6 @@ CLEAR_ID = "blotter-fills-clear"
 CHIP_CLEAR_ID = "blotter-fills-chip-clear"
 SORT_TYPE = "blotter-fill-sort"
 LAST_UPLOAD_ID = "blotter-last-upload"
-NOT_LOADED_LINK_ID = "blotter-not-loaded-link"
-REJECTS_ID = "blotter-rejects"
 HISTORY_ID = "blotter-upload-history"
 HIST_ROW_TYPE = "blotter-hist-row"
 HIST_IDS_TYPE = "blotter-hist-ids"
@@ -130,7 +126,7 @@ def _num(value) -> Optional[float]:
     return None if f != f else f
 
 
-def _ny_stamp(iso):
+def _stamp_in(iso, zone: str):
     from zoneinfo import ZoneInfo
     try:
         stamp = dt.datetime.fromisoformat(str(iso))
@@ -138,19 +134,31 @@ def _ny_stamp(iso):
         return None
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=dt.timezone.utc)
-    return stamp.astimezone(ZoneInfo("America/New_York"))
+    return stamp.astimezone(ZoneInfo(zone))
 
 
 def ny_time(iso) -> str:
-    """'Mon 28 Sep 21:34 NY' from a UTC timestamp; the text as it is when it does not parse."""
-    local = _ny_stamp(iso)
+    """'Fri 18 Sep 17:00 NY' from a timestamp (a naive one is UTC): kept for a mark's close stamp
+    (the Book's mark hover), which is New York time by rule. The text as it is when it does not parse."""
+    local = _stamp_in(iso, "America/New_York")
     if local is None:
         return str(iso or "")
     return f"{_WEEKDAYS[local.weekday()]} {local.day} {_MONTHS[local.month - 1]} {local:%H:%M} NY"
 
 
-def ny_day(iso) -> str:
-    local = _ny_stamp(iso)
+def hk_time(iso) -> str:
+    """'Tue 29 Sep 09:34 HK' from an upload's UTC timestamp (a naive one is UTC), the form of every
+    pull time (`feed_controls.pull_time`; 2026-09-30, the upload times in Hong Kong like the pulls).
+    The text as it is when it does not parse."""
+    local = _stamp_in(iso, "Asia/Hong_Kong")
+    if local is None:
+        return str(iso or "")
+    return f"{_WEEKDAYS[local.weekday()]} {local.day} {_MONTHS[local.month - 1]} {local:%H:%M} HK"
+
+
+def hk_day(iso) -> str:
+    """'29 Sep': an upload's day in Hong Kong."""
+    local = _stamp_in(iso, "Asia/Hong_Kong")
     return str(iso or "") if local is None else f"{local.day} {_MONTHS[local.month - 1]}"
 
 
@@ -403,8 +411,8 @@ def _build_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, Li
         if history:
             trail = trade_upload_trail(conn, tid)
             if trail:
-                uploads = f"{trail[0]['action']} {ny_day(trail[0]['uploaded_at'])}"
-                uploads_tip = "\n".join(f"{ny_time(x['uploaded_at'])} · {x['filename']} · {x['action']}" for x in trail)
+                uploads = f"{trail[0]['action']} {hk_day(trail[0]['uploaded_at'])}"
+                uploads_tip = "\n".join(f"{hk_time(x['uploaded_at'])} · {x['filename']} · {x['action']}" for x in trail)
             else:
                 uploads_tip = "on file before the upload history began: no recorded upload names it"
         else:
@@ -817,18 +825,36 @@ def _of_upload(issue: dict, report: Optional[dict]) -> bool:
     return not at or not report.get("uploaded_at") or at[:16] == str(report.get("uploaded_at"))[:16]
 
 
-def last_upload_line(report: dict, n_rejects: int, need_fix: Optional[int] = None, older: int = 0) -> list:
-    """The one line: file · time · rows · new · updated · removed as cancelled · N rows need a fix
-    (red, a link to the list, when any) · not loaded (amber, only when an older upload left some) ·
-    prices converted; every figure's detail on hover. `need_fix` None: an upload recorded before
-    every row loaded, said in the old words."""
+TRADES_POINTER = "see Trades on the Data tab"
+TRADES_LINK_IDX = "blotter-trade-problems"
+
+
+def trades_pointer(problems: str, fix: bool) -> html.Button:
+    """'2 need a fix · 1 warning: see Trades on the Data tab', a link to the Data tab (the Trades
+    card lists every problem with the trades in full, 2026-09-30); red when a trade needs a fix."""
+    from ui.tabs.formatting import DATA_TAB_KEY, tab_link
+    link = tab_link(f"{problems}: {TRADES_POINTER}", DATA_TAB_KEY, TRADES_LINK_IDX,
+                    title="Every problem with the trades on file, in full, is listed under Trades on the Data tab: "
+                          "click to open it",
+                    className="cell-red" if fix else "cell-amber")
+    link.style = {"opacity": 1, "fontSize": "inherit"}
+    return link
+
+
+def last_upload_line(report: dict, n_rejects: int, need_fix: Optional[int] = None, older: int = 0,
+                     problems: str = "", fix: bool = False) -> list:
+    """The one line: file · time · rows · new · updated · removed as cancelled · the trades'
+    problems as one link to the Data tab's Trades card ('2 need a fix · 1 warning: see Trades on the
+    Data tab', `problems`, the Data tab's own count; red when `fix`) or '0 need a fix' · prices
+    converted; every figure's detail on hover. The rows themselves are listed only on the Data tab
+    (2026-09-30)."""
     loaded = _in_file(report)
     excluded = int(report.get("excluded_rows") or 0)
     rows = loaded + n_rejects + excluded + (need_fix or 0)
     parts: list = [
         html.Span(str(report.get("filename") or "(no file name)"), className="tk-bold",
                   title=plain_words(report.get("summary")) or None),
-        html.Span(ny_time(report.get("uploaded_at")), title=f"{report.get('uploaded_at')} (UTC)"),
+        html.Span(hk_time(report.get("uploaded_at")), title=f"{report.get('uploaded_at')} (UTC)"),
         html.Span(_plural(rows, "row"), title=f"{loaded:,} became trades, "
                                               + (f"{need_fix:,} on file needing a fix, " if need_fix else "")
                                               + f"{n_rejects:,} not loaded, {excluded:,} left "
@@ -840,29 +866,10 @@ def last_upload_line(report: dict, n_rejects: int, need_fix: Optional[int] = Non
         html.Span(f"{int(report.get('removed') or 0):,} removed as cancelled",
                   title="Rows whose status is cancelled, void, deleted, rejected or failed: those trades were removed"),
     ]
-    if need_fix is None:
-        if n_rejects:
-            parts.append(html.A(f"{n_rejects:,} not loaded", id=NOT_LOADED_LINK_ID, href=f"#{REJECTS_ID}", n_clicks=0,
-                                className="cell-amber", title="Rows of the file that did not become trades: click for "
-                                                              "the list"))
-        else:
-            parts.append(html.Span("0 not loaded", title="Every row of the file became a trade or was left out by the "
-                                                         "book filter"))
+    if problems:
+        parts.append(trades_pointer(problems, fix))
     else:
-        if need_fix:
-            parts.append(html.A(f"{need_fix:,} row{'s' if need_fix != 1 else ''} need{'s' if need_fix == 1 else ''} a fix",
-                                id=NOT_LOADED_LINK_ID, href=f"#{REJECTS_ID}", n_clicks=0, className="cell-red",
-                                title="Rows on file as trades whose contract the app does not recognise: their P&L is "
-                                      "blank until the symbol is added to the contract list. Click for the list."))
-        else:
-            parts.append(html.Span("0 need a fix", title="Every row of the file was recognised"))
-        if older:
-            parts.append(html.A(f"+ {older:,} older on file need{'s' if older == 1 else ''} a fix", href=f"#{REJECTS_ID}",
-                                className="cell-red", title="Trades from earlier uploads still on file whose contract "
-                                                            "the app does not recognise: listed below"))
-        if n_rejects:
-            parts.append(html.Span(f"{n_rejects:,} not loaded", className="cell-amber",
-                                   title="Rows an older parser did not turn into trades: listed below"))
+        parts.append(html.Span("0 need a fix", title="Every row of the file was recognised and loaded cleanly"))
     found = _CONVERTED_RE.search(str(report.get("summary") or ""))
     if found:
         what = found.group(2).strip()
@@ -880,77 +887,24 @@ def last_upload_line(report: dict, n_rejects: int, need_fix: Optional[int] = Non
     return out
 
 
-def rejects_table(rows: List[dict], need_fix: Sequence[dict] = (), warnings: Sequence[dict] = ()) -> html.Details:
-    """The rows of the last upload that need the user: those on file needing a fix (a contract not
-    recognised: red, their Trade Id set), those not loaded (an older parser's) and the row-level
-    warnings (loaded on the primary field: amber). Row in file · Trade Id · Symbol as written ·
-    Reason · What to do; a fold under the line, opened by its link (or its own title)."""
-    cols: Tuple[kit.Column, ...] = (
-        ("row", "Row in file", "", "The row's number in the file, the header row not counted.", False),
-        ("trade_id", "Trade Id", "l", "The row's Trade Id.", False),
-        ("symbol", "Symbol as written", "l", "The file's Symbol cell as written.", False),
-        ("reason", "Reason", "l", "What is wrong with the row, in plain words.", False),
-        ("todo", "What to do", "l", "What would fix it, or why nothing needs doing.", False),
-    )
-    body = []
-    for i in need_fix:
-        body.append(html.Tr([
-            kit.td(str(i.get("row_no") or MISSING)),
-            kit.td(str(i.get("trade_id") or "") or missing_cell(NO_TRADE_ID), left=True),
-            kit.td(html.Span(str(i.get("symbol") or "") or MISSING, className="cell-red"), left=True),
-            kit.td(reason_words(plain_ids(i.get("reason") or "")), left=True,
-                   title=f"On file as a trade; its P&L is blank until the contract is mapped. As recorded: "
-                         f"{i.get('reason') or ''}"),
-            kit.td("Check the symbol; if it is right, add the contract to the contract list. The trade then prices "
-                   "without a new upload.", left=True),
-        ]))
-    for i in rows:
-        kind = str(i.get("kind") or "")
-        body.append(html.Tr([
-            kit.td(str(i.get("row_no") or MISSING)),
-            kit.td(str(i.get("trade_id") or "") or missing_cell(NO_TRADE_ID), left=True),
-            kit.td(str(i.get("symbol") or "") or missing_cell("the row has no symbol"), left=True),
-            kit.td(reason_words(i.get("reason")), left=True,
-                   title="could not be read" if kind == "REJECTED" else "a kind of row the app does not load"),
-            kit.td(what_to_do(kind, str(i.get("reason") or "")), left=True),
-        ]))
-    for i in warnings:
-        body.append(html.Tr([
-            kit.td(str(i.get("row_no") or MISSING)),
-            kit.td(str(i.get("trade_id") or "") or missing_cell(NO_TRADE_ID), left=True),
-            kit.td(str(i.get("symbol") or "") or missing_cell("the row has no symbol"), left=True),
-            kit.td(html.Span(reason_words(i.get("reason")), className="cell-amber"), left=True,
-                   title="loaded, on the primary field"),
-            kit.td("Check the two cells in the file; nothing to do if the loaded value is right.", left=True),
-        ]))
-    # the fold's title: each kind of row with its count in a level chip (one chevron, drawn by the kit)
-    heads = [(label, n, level) for label, n, level in (
-        ("Rows that need a fix", len(need_fix), "red"), ("Rows not loaded", len(rows), "amber"),
-        ("Row warnings", len(warnings), "amber")) if n]
-    summary: list = []
-    for label, n, level in heads:
-        if summary:
-            summary.append(html.Span("·", className="data-status-sep"))
-        summary += [html.Span(label, className="blotter-fold-title"), kit.chip(f"{n:,}", level)]
-    return html.Details(id=REJECTS_ID, open=False, className="book-fold tk-fold-block blotter-rejects-fold", children=[
-        html.Summary(summary, title="The rows of the file that need you: click to open the list"),
-        kit.table(kit.head(cols, None, SORT_TYPE + "-none"), body, className="tk-small"),
-    ])
-
-
 def last_upload_block(conn: sqlite3.Connection) -> html.Div:
-    """The last upload: its line, the rows that need a fix or did not load (with the row-level
-    warnings), the file-level warnings."""
+    """The last upload in one line. The rows that need a fix, did not load or carry a warning are
+    counted on it as one link to the Data tab's Trades card, where they are listed in full
+    (2026-09-30, user: "any issue with the trades it shows up in a trade pull section in the data
+    tab"); the count is the Data tab's own (`data_checks.trade_problem_rows`)."""
     try:
+        from data.bloomberg.inventory import unrecognised as read_unrecognised
         from data.ingest.upload import last_upload_issues, last_upload_report
+        from ui.tabs.data_checks import trade_problem_rows, trade_problem_words
         report, issues = last_upload_report(conn), last_upload_issues(conn)
+        problem_rows = trade_problem_rows(issues, read_unrecognised(conn))
     except Exception as exc:  # noqa: BLE001
         return html.Div(id=LAST_UPLOAD_ID, className="book-section-head", children=[
             html.Span("Last upload", className="book-section-title"), " ",
             missing_cell(f"the upload record could not be read ({type(exc).__name__}: {exc})")])
     title = html.Span("Last upload", className="book-section-title",
-                      title="What the last blotter upload did, as it was recorded: the merge by Trade Id and every "
-                            "row of the file that needs a fix.")
+                      title="What the last blotter upload did, as it was recorded: the merge by Trade Id. The rows "
+                            "that need a fix are listed under Trades on the Data tab.")
     if report is None and not issues:
         return html.Div(id=LAST_UPLOAD_ID, className="blotter-last-upload-section",
                         children=[html.Div([title, html.Span(cap(NO_HISTORY), className="book-section-meta")],
@@ -958,26 +912,21 @@ def last_upload_block(conn: sqlite3.Connection) -> html.Div:
     kinds = [str(i.get("kind") or "") for i in issues]
     need = [i for i, k in zip(issues, kinds) if k == UNRECOGNISED]
     rejects = [i for i, k in zip(issues, kinds) if k not in ("WARNING", UNRECOGNISED)]
-    warnings = [i for i, k in zip(issues, kinds) if k == "WARNING"]
-    row_warnings = [w for w in warnings if w.get("row_no") or w.get("trade_id")]
-    file_warnings = [w for w in warnings if not (w.get("row_no") or w.get("trade_id"))]
     n_fix = need_fix_count(report, issues)
     n_older = sum(1 for i in need if not _of_upload(i, report))
-    children: list = []
+    problems = trade_problem_words(problem_rows)
+    fix = any(r["status"] == "NOT RECOGNISED" for r in problem_rows)
     if report is not None:
-        children.append(html.Div([title, *last_upload_line(report, len(rejects), n_fix, n_older)],
-                                 className="blotter-upload-line"))
+        line = html.Div([title, *last_upload_line(report, len(rejects), n_fix, n_older, problems, fix)],
+                        className="blotter-upload-line")
     else:
-        children.append(html.Div([title, html.Span("No summary recorded", className="book-section-meta",
-                                                   title="The upload that loaded these trades kept no summary: the "
-                                                         "next upload records one")],
-                                 className="blotter-upload-line"))
-    if need or rejects or row_warnings:
-        children.append(rejects_table(rejects, need, row_warnings))
-    for w in file_warnings:
-        children.append(html.Div([html.Span("About the file", className="marker marker--amber"), " ",
-                                  plain_words(w.get("reason"))], className="blotter-file-warning"))
-    return html.Div(id=LAST_UPLOAD_ID, className="blotter-last-upload-section", children=children)
+        line = html.Div([title, html.Span("No summary recorded", className="book-section-meta",
+                                          title="The upload that loaded these trades kept no summary: the next "
+                                                "upload records one"),
+                         *([html.Span(" · ", className="data-status-sep"), trades_pointer(problems, fix)]
+                           if problems else [])],
+                        className="blotter-upload-line")
+    return html.Div(id=LAST_UPLOAD_ID, className="blotter-last-upload-section", children=[line])
 
 
 # ---- the upload history
@@ -1003,7 +952,7 @@ def history_fold(conn: sqlite3.Connection) -> Optional[html.Details]:
     if not history:
         return html.Details([summary], id=HISTORY_ID, className="book-fold tk-fold-block")
     cols: Tuple[kit.Column, ...] = (
-        ("when", "Time", "l", "When the upload was made, New York time.", False),
+        ("when", "Time", "l", "When the upload was made, Hong Kong time.", False),
         ("file", "File", "l", "The file uploaded; its summary on hover.", False),
         ("new", "New", "", "Trade Ids added.", False),
         ("updated", "Updated", "", "Trade Ids already on file, replaced by the file's rows.", False),
@@ -1025,7 +974,7 @@ def history_fold(conn: sqlite3.Connection) -> Optional[html.Details]:
             not_loaded = (html.Span(str(n_rejects), className="cell-amber" if n_rejects else None)
                           if h.get("id") == latest else missing_cell("recorded for the last upload only"))
         body.append(html.Tr(id={"type": HIST_ROW_TYPE, "idx": hid}, n_clicks=0, className="tk-row", children=[
-            kit.td([html.Span("▸ ", className="tk-chev"), ny_time(h.get("uploaded_at"))], left=True),
+            kit.td([html.Span("▸ ", className="tk-chev"), hk_time(h.get("uploaded_at"))], left=True),
             kit.td(str(h.get("filename") or ""), left=True, title=h.get("summary")),
             kit.td(f"{int(h.get('added') or 0):,}"), kit.td(f"{int(h.get('replaced') or 0):,}"),
             kit.td(f"{removed:,}"), kit.td(not_loaded),
@@ -1188,11 +1137,5 @@ def register(app, get_db_path: Callable[[], object]) -> None:
         Output({"type": HIST_IDS_TYPE, "idx": MATCH}, "style"),
         Input({"type": HIST_ROW_TYPE, "idx": MATCH}, "n_clicks"),
         State({"type": HIST_IDS_TYPE, "idx": MATCH}, "style"),
-        prevent_initial_call=True,
-    )
-    app.clientside_callback(
-        """function(n) { return n ? true : window.dash_clientside.no_update; }""",
-        Output(REJECTS_ID, "open"),
-        Input(NOT_LOADED_LINK_ID, "n_clicks"),
         prevent_initial_call=True,
     )

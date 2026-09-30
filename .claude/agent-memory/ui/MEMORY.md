@@ -51,3 +51,4 @@
 - [Data Bloomberg + Parsing cards 2026-09-30](data-bloomberg-parsing-cards-2026-09-30.md) — pull problems only in card `market-data-bloomberg`, background check runner, parse card, funnel kit, heredoc trap
 - [Quiet terminal 2026-09-30](quiet-terminal-2026-09-30.md) — one INFO line per upload, warm-up at DEBUG, WARNING only for real failures; research DB absent = not available
 - [Bloomberg errors in one place 2026-09-30](bloomberg-errors-one-place-2026-09-30.md) — pull/backfill errors only on the Data tab card; elsewhere a state + DATA_POINTER link; bar_state counts pull_problems
+- [Trades card + HK pull time 2026-09-30](trades-card-hk-pull-time-2026-09-30.md) — Data Trades card owns every trade problem (parse check inside), Blotter links to it; pull_time HK; render 15 outputs

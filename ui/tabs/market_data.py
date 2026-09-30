@@ -22,8 +22,10 @@ screen, it is trustworthy). Top to bottom (`build_layout`, filled by `render`):
      "Run Bloomberg check" (a background run, `ui/diagnostics_runner.py`: the connection and data
      checks, then the book's own tickers asked of Bloomberg) and its results, and "Details" folded
      (the Bloomberg library, the feed status step by step, everything the last pull recorded).
-  7. Parsing (a card, `PARSE_CARD_ID`): "Check a blotter file" reads a file as an upload would
-     (`data.ingest.parse_check.check_file`) and lists every row; nothing is saved.
+  7. Trades (a card, `TRADES_CARD_ID`, 2026-09-30): the last upload in one line, "Trade problems (N)"
+     (every contract not recognised, row not loaded and warning, `data_checks.trade_problem_rows`:
+     the one place the trades' problems are written out), then "Check a blotter file", which reads a
+     file as an upload would (`data.ingest.parse_check.check_file`) and lists every row; nothing is saved.
 Then the one Data issues drawer.
 
 Removed on 2026-09-29: the tab's own Pull now (the top bar's Pull Bloomberg now is the one
@@ -71,7 +73,17 @@ BBG_DOWNLOAD_ID = "market-data-bbg-check-download"
 BBG_SORT_TYPE = "data-tick-sort"
 BBG_COL_TYPE = "md-tick-col"
 BBG_POLL_MS = 1000
-PARSE_CARD_ID = "market-data-parsing"
+PARSE_CARD_ID = "market-data-parsing"            # retired 2026-09-30: the check sits in the Trades card
+TRADES_CARD_ID = "market-data-trades"            # the Trades card: another tab links here (tab key "market-data")
+TRADES_HEAD_ID = "market-data-trades-head"       # the last upload's line and "Trade problems (N)"
+TRADES_SLOT_ID = "market-data-trades-slot"
+TRADES_STORE_ID = "market-data-trades-rows"
+TRADES_FSTORE_ID = "market-data-trades-fstore"
+TRADES_SORT_ID = "market-data-trades-sort"
+TRADES_CSV_ID = "market-data-trades-csv"
+TRADES_DOWNLOAD_ID = "market-data-trades-download"
+TRADES_SORT_TYPE = "data-trade-sort"
+TRADES_COL_TYPE = "md-trade-col"
 PARSE_UPLOAD_ID = "market-data-parse-upload"   # never "report-file": the real upload's id
 PARSE_STORE_ID = "market-data-parse-result"
 PARSE_RESULTS_ID = "market-data-parse-results"
@@ -1692,10 +1704,10 @@ def _hover_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict]
 # ---- Phase G (round 2, 2026-09-29): the checks. The tables are drawn through `ui.tabs.data_kit`
 # and their rows built by `ui.tabs.data_checks` (the problems, the marks check, the pull steps).
 PROBLEMS_TITLE = "Problems"
-PROBLEMS_ABOUT = ("Every price the book needs that is missing or failed a check, every contract not recognised and "
-                  "any trade left out of the P&L, each with what it does to the figures. A flagged price stays the "
-                  "official price: the Book marks the figures it touches. The Bloomberg pull's own problems are in "
-                  "the Bloomberg section below.")
+PROBLEMS_ABOUT = ("Every price the book needs that is missing or failed a check, and any trade left out of the "
+                  "P&L, each with what it does to the figures. A flagged price stays the official price: the Book "
+                  "marks the figures it touches. The Bloomberg pull's own problems are in the Bloomberg section "
+                  "below, the trades' own (a contract not recognised, a row not loaded) in the Trades section.")
 MARKS_ABOUT = ("Every official price the book uses on the date, missing and flagged first, each checked four ways: "
                "it arrived (an official price dated the as-of is on file), it is fresh (the date's own price, not one "
                "carried), its move since the previous close is sane, and its units agree with the fills it prices. "
@@ -1720,14 +1732,14 @@ def _link(text: str, target: str, hover: str = "", warn: bool = False) -> html.A
 
 # ---- 1. the status line
 def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, int], closes: List[dict],
-                dates: Tuple[int, int]) -> list:
+                dates: Tuple[int, int], trades: Optional[Tuple[int, List[dict]]] = None) -> list:
     """Last pull (ok / N problems) · Marks 43 of 47 · Reference closes Daily ✓ 5d ✓ MTD ✓ YTD ✗ ·
     Contract dates 9 from Bloomberg, 2 estimated: each green or amber, each a jump to its detail,
     the full sentence on hover."""
-    from ui.feed_controls import short_state, short_time
+    from ui.feed_controls import pull_time, short_state
     line = top_bar_status(status)
     state = short_state(line)
-    when = short_time((status or {}).get("time")) if status else ""
+    when = pull_time((status or {}).get("time")) if status else ""
     if not status or state == "no pull yet":
         pull = _link("No Bloomberg pull yet", BBG_CARD_ID, line, warn=True)
     else:
@@ -1762,12 +1774,97 @@ def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, in
                            + (f"; {estimated} on the contract master's estimate until a pull stores Bloomberg's."
                               if estimated else "."),
                            warn=bool(estimated))
+    parts = [pull]
+    if trades is not None:
+        parts.append(trades_link(*trades))
+    parts += [marks_link, ref, dates_link]
     out: list = []
-    for part in (pull, marks_link, ref, dates_link):
+    for part in parts:
         if out:
             out.append(html.Span(" · ", className="data-status-sep"))
         out.append(part)
     return out
+
+
+def trades_link(n_trades: int, rows: List[dict]) -> html.A:
+    """'Trades 89 · 1 warning' (amber with any problem, 'Trades 89 · ok' without), a jump to the
+    Trades card; the counts in full on hover."""
+    words = data_checks.trade_problem_words(rows)
+    head = f"Trades {n_trades:,}" if n_trades else "No trades on file"
+    if words:
+        return _link(f"{head} · {words}", TRADES_CARD_ID,
+                     f"{len(rows):,} problem{'' if len(rows) == 1 else 's'} with the trades on file: {words}. "
+                     "Listed in full in the Trades section.", warn=True)
+    return _link(f"{head} · ok" if n_trades else head, TRADES_CARD_ID,
+                 "Every trade on file is recognised and the last upload loaded every row cleanly." if n_trades
+                 else "No blotter uploaded yet: press Upload blotter.", warn=not n_trades)
+
+
+TRADES_TITLE = "Trades"
+TRADES_ABOUT = ("The last blotter upload, every problem with the trades on file in full (a contract not recognised, "
+                "a row not loaded, a warning on a row or on the file), and a check of a file before you upload it. "
+                "The one place the trades' problems are written out.")
+TRADE_PROBLEMS_TITLE = "Trade problems"
+TRADE_PROBLEMS_ABOUT = ("Every problem with the trades on file, problems first: the trades whose contract is not "
+                        "recognised (on file with no P&L until mapped), the rows an upload did not load, the row "
+                        "warnings and the lines about the file. Sort on a title, filter from the Status funnel.")
+
+
+def _hk_upload_time(iso) -> str:
+    """'Wed 30 Sep 11:22 HK' from the upload's UTC stamp (a naive stamp is UTC); '' when unreadable."""
+    from ui.feed_controls import pull_time
+    try:
+        when = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return pull_time(when.isoformat())
+
+
+def trades_upload_line(report: Optional[dict], n_trades: int) -> Tuple[str, str]:
+    """(the last upload in one line, its summary for the hover): "Last upload template PnL tool.csv ·
+    Wed 30 Sep 11:22 HK · 12 added, 77 replaced, 0 removed · 89 trades on file"."""
+    if not report:
+        if n_trades:
+            return (f"No upload recorded on this database · {n_trades:,} trades on file",
+                    "The upload that loaded these trades kept no summary: the next upload records one.")
+        return "No blotter uploaded yet", "Press Upload blotter to load Jason's file."
+    name = str(report.get("filename") or "file name not recorded")
+    when = _hk_upload_time(report.get("uploaded_at"))
+    counts = (f"{int(report.get('added') or 0):,} added, {int(report.get('replaced') or 0):,} replaced, "
+              f"{int(report.get('removed') or 0):,} removed")
+    on_file = f"{n_trades:,} trade{'' if n_trades == 1 else 's'} on file"
+    line = " · ".join(x for x in (f"Last upload {name}", when, counts, on_file) if x)
+    return line, plain_words(report.get("summary")) or line
+
+
+def trades_head(report: Optional[dict], n_trades: int, rows: List[dict]) -> html.Div:
+    """The Trades card's first two blocks: the last upload in one line, then "Trade problems (N)"."""
+    words, hover = trades_upload_line(report, n_trades)
+    line = html.Div(html.Span(words, title=hover or None), className="tk-headline data-bbg-line")
+    return html.Div([line, html.Div(kit.strip_title(f"{TRADE_PROBLEMS_TITLE} ({len(rows)})", TRADE_PROBLEMS_ABOUT),
+                                    className="data-bbg-subhead")])
+
+
+def trade_facts(conn: sqlite3.Connection) -> Tuple[Optional[dict], int, List[dict]]:
+    """(the last upload's report, the trades on file, the trade problems) for the Trades card."""
+    from data.bloomberg.inventory import unrecognised as read_unrecognised
+    from data.ingest.upload import last_upload_issues, last_upload_report
+    try:
+        n_trades = int(conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0])
+    except sqlite3.Error:
+        n_trades = 0
+    report = last_upload_report(conn)
+    rows = data_checks.trade_problem_rows(last_upload_issues(conn), read_unrecognised(conn))
+    return report, n_trades, rows
+
+
+def trades_view(rows: Optional[List[dict]], fstate: Optional[dict], sort: Optional[dict]) -> html.Table:
+    """The trade problems table for the rows in the store (filtered: its first row says how many)."""
+    rows = rows or []
+    shown = data_checks.filter_rows(rows, fstate, data_checks.TRADE_FIELDS)
+    return data_checks.trade_problems_table(shown, sort, TRADES_SORT_TYPE, fstate, TRADES_COL_TYPE, len(rows), rows)
 
 
 # ---- 4. Reference closes
@@ -2004,17 +2101,18 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
     """The body callback's outputs for `as_of_date` (the header's as-of): the status line, the
     problems (rows for the store) and the card's style, the marks-check rows (store), its
     sector / commodity options, its empty line and its bar's style, the reference closes, the
-    contract dates, the diagnostics body, the Data issues drawer. A block that fails says so
+    contract dates, the diagnostics body, the Data issues drawer, the Bloomberg card's line and
+    pull problems, the Trades card's head (13) and its problem rows (14, for the store). A block that fails says so
     where it would be; the rest still renders."""
     blank = html.Div()
     if not as_of_date:
         return (message_box("No as-of date available."), [], _HIDDEN, [], [], blank, _HIDDEN, blank, blank, blank,
-                blank, blank, blank)
+                blank, blank, blank, blank, [])
     try:
         conn = _connect_readonly(db_path)
     except sqlite3.OperationalError as exc:
         return (message_box(f"Database not available ({exc})."), [], _HIDDEN, [], [], blank, _HIDDEN, blank, blank,
-                blank, blank, blank, blank)
+                blank, blank, blank, blank, blank, [])
     import logging
     log = logging.getLogger(__name__)
     issues: list = []
@@ -2082,15 +2180,25 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
             dates_panel, dates = _failed_panel(CONTRACT_DATES_TITLE, exc), (0, 0)
 
         diag = safe_panel(DIAG_TITLE, lambda: diagnostics_body(conn, as_of_date, feed_status)) if diag else blank
+        try:
+            report, n_trades, trade_rows = trade_facts(conn)
+            trades_block = trades_head(report, n_trades, trade_rows)
+            trades_part: Optional[Tuple[int, List[dict]]] = (n_trades, trade_rows)
+        except Exception as exc:  # noqa: BLE001 -- the rest of the tab still renders
+            log.exception("Data tab: the trades' problems could not be read")
+            trade_rows, trades_part = [], None
+            trades_block = html.Div(missing_cell(f"the last upload could not be read ({type(exc).__name__}: {exc})"),
+                                    className="data-bbg-line")
+            issues.append((TRADES_TITLE, f"The trades' problems could not be read ({type(exc).__name__}: {exc})."))
         arrived = sum(1 for r in mark_rows if r["arrived"])
-        line = status_line(feed_status, n_pull, (len(mark_rows), arrived), closes, dates)
+        line = status_line(feed_status, n_pull, (len(mark_rows), arrived), closes, dates, trades_part)
     finally:
         conn.close()
     drawer = issues_drawer(issues, id=f"{ISSUES_ID}-drawer") or blank
     bbg_line, pull_panel = bloomberg_head(feed_status, pulls)
-    tidy([line, marks_empty, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel])
+    tidy([line, marks_empty, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel, trades_block])
     return (line, problems, {} if problems else _HIDDEN, mark_rows, marks_filter_options(mark_rows), marks_empty,
-            tools_style, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel)
+            tools_style, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel, trades_block, trade_rows)
 
 
 PULL_PROBLEMS_TITLE = "Pull problems"
@@ -2105,7 +2213,7 @@ def bloomberg_head(status: Optional[dict], pulls: List[dict]) -> Tuple[html.Div,
     words, hover = data_checks.bloomberg_line(status, no_pull=no_pull)
     warn = no_pull or bool(pulls) or (status or {}).get("connected") is False
     line = html.Div(html.Span(words, className="cell-amber" if warn else None, title=plain_words(hover) or None),
-                    className="data-bbg-line")
+                    className="tk-headline data-bbg-line")
     panel = html.Div([
         html.Div(kit.strip_title(f"{PULL_PROBLEMS_TITLE} ({len(pulls)})", PULL_PROBLEMS_ABOUT),
                  className="data-bbg-subhead"),
@@ -2176,7 +2284,7 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         html.Div(id=PAST_CLOSES_PANEL_ID, className="data-block"),
         html.Div(id=CONTRACT_DATES_PANEL_ID, className="data-block"),
         bloomberg_card(),
-        parsing_card(),
+        trades_card(),
         html.Div(id=ISSUES_ID),
     ])
 
@@ -2185,7 +2293,7 @@ BBG_TITLE = "Bloomberg"
 BBG_ABOUT = ("The last Bloomberg pull, its problems in full, and a check you can run at any time: the connection and "
              "data checks, then the book's own tickers asked of Bloomberg and compared with ours.")
 BBG_CHECK_NOTE = "Asks Bloomberg for the book's own tickers only; writes nothing."
-PARSE_TITLE = "Parsing"
+PARSE_TITLE = "Check a file before uploading"
 PARSE_ABOUT = ("Check a blotter file before uploading it: every row read exactly as an upload would read it, what it "
                "would be read as and what the upload would do with it against the book on file. Nothing is saved.")
 PARSE_NOTE = "Reads the file as an upload would; nothing is saved."
@@ -2220,23 +2328,43 @@ def bloomberg_card() -> html.Div:
     ])
 
 
-def parsing_card() -> html.Div:
-    """The Parsing card: a file dropped here is read, never loaded."""
-    return kit.card(id=PARSE_CARD_ID, className="data-parse-card data-block", children=[
-        kit.strip([kit.strip_title(PARSE_TITLE, PARSE_ABOUT),
-                   html.Button("Clear", id=PARSE_CLEAR_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
-                               title="Clear the file's check"),
-                   html.Button("Download CSV", id=PARSE_CSV_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
-                               title="Every row of the check, every field"),
-                   dcc.Download(id=PARSE_DOWNLOAD_ID)]),
+def parse_block() -> html.Div:
+    """The check of a blotter file, at the bottom of the Trades card: a file dropped here is read,
+    never loaded. Its Clear and Download CSV sit static in its own heading, hidden by style."""
+    return html.Div(className="data-parse-block", children=[
+        html.Div(className="data-bbg-subhead data-parse-head", children=[
+            kit.strip_title(PARSE_TITLE, PARSE_ABOUT),
+            html.Button("Clear", id=PARSE_CLEAR_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
+                        title="Clear the file's check"),
+            html.Button("Download CSV", id=PARSE_CSV_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
+                        title="Every row of the file's check, every field"),
+            dcc.Download(id=PARSE_DOWNLOAD_ID)]),
+        dcc.Upload(id=PARSE_UPLOAD_ID, className="data-parse-upload", accept=".csv,.xlsx,.xls", multiple=False,
+                   max_size=25 * 1024 * 1024,
+                   children=html.Button("Check a blotter file", className="btn", n_clicks=0, title=PARSE_NOTE)),
+        dcc.Loading(type="dot", color="#1f5fbf", children=html.Div(id=PARSE_RESULTS_ID)),
+        dcc.Store(id=PARSE_STORE_ID),
+        dcc.Store(id=PARSE_FSTORE_ID, storage_type="session"),
+        dcc.Store(id=PARSE_SORT_ID, storage_type="session"),
+    ])
+
+
+def trades_card() -> html.Div:
+    """The Trades card (static; its head and table filled by the body callback and the table's
+    own): the last upload in one line, "Trade problems (N)" with its funnels, then the check of a
+    blotter file."""
+    return kit.card(id=TRADES_CARD_ID, className="data-trades-card data-block", children=[
+        kit.strip([kit.strip_title(TRADES_TITLE, TRADES_ABOUT),
+                   html.Button("Download CSV", id=TRADES_CSV_ID, n_clicks=0, className="btn btn--ghost",
+                               title="Every trade problem, every column, with the upload's own sentences"),
+                   dcc.Download(id=TRADES_DOWNLOAD_ID)]),
         html.Div(className="data-card-body", children=[
-            dcc.Upload(id=PARSE_UPLOAD_ID, className="data-parse-upload", accept=".csv,.xlsx,.xls", multiple=False,
-                       max_size=25 * 1024 * 1024,
-                       children=html.Button("Check a blotter file", className="btn", n_clicks=0, title=PARSE_NOTE)),
-            dcc.Loading(type="dot", color="#1f5fbf", children=html.Div(id=PARSE_RESULTS_ID)),
-            dcc.Store(id=PARSE_STORE_ID),
-            dcc.Store(id=PARSE_FSTORE_ID, storage_type="session"),
-            dcc.Store(id=PARSE_SORT_ID, storage_type="session"),
+            html.Div(id=TRADES_HEAD_ID),
+            html.Div(id=TRADES_SLOT_ID, className=kit.SLOT_CLASS),
+            dcc.Store(id=TRADES_STORE_ID, data=[]),
+            dcc.Store(id=TRADES_FSTORE_ID, storage_type="session"),
+            dcc.Store(id=TRADES_SORT_ID, storage_type="session"),
+            parse_block(),
         ]),
     ])
 
@@ -2261,6 +2389,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(ISSUES_ID, "children"),
         Output(BBG_LINE_ID, "children"),
         Output(BBG_PULL_PROBLEMS_ID, "children"),
+        Output(TRADES_HEAD_ID, "children"),
+        Output(TRADES_STORE_ID, "data"),
         Input(HEADER_AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
         Input(BOOK_REVISION_ID, "data"),
@@ -2272,8 +2402,25 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         out[3] = marks_token(as_of_date, len(out[3] or []))
         del out[9]          # the Diagnostics body: its own callback
         del out[4]          # the commodity / sector choices: the Price funnel, drawn with the table
-        return tuple(x if isinstance(x, (list, dict)) and i in (1, 2, 3, 5) else compact(x)
+        return tuple(x if isinstance(x, (list, dict)) and i in (1, 2, 3, 5, 12) else compact(x)
                      for i, x in enumerate(out))
+
+    @app.callback(Output(TRADES_SLOT_ID, "children"),
+                  Input(TRADES_STORE_ID, "data"), Input(TRADES_FSTORE_ID, "data"), Input(TRADES_SORT_ID, "data"))
+    def _trades(rows, fstate, sort):
+        return compact(trades_view(rows, fstate, sort))
+
+    @app.callback(Output(TRADES_DOWNLOAD_ID, "data"), Input(TRADES_CSV_ID, "n_clicks"),
+                  State(TRADES_STORE_ID, "data"), State(TRADES_FSTORE_ID, "data"), State(TRADES_SORT_ID, "data"),
+                  prevent_initial_call=True)
+    def _trades_csv(n_clicks, rows, fstate, sort):
+        if not n_clicks:
+            return dash.no_update
+        shown = kit.sort_records(data_checks.filter_rows(rows or [], fstate, data_checks.TRADE_FIELDS), sort,
+                                 data_checks.TRADE_SORT)
+        cols = data_checks.TRADE_CSV_COLUMNS
+        frame = pd.DataFrame([{c: r.get(c, "") for c in cols} for r in shown], columns=cols)
+        return dcc.send_data_frame(frame.to_csv, "trade_problems.csv", index=False)
 
     @app.callback(Output(DIAG_BODY_ID, "children"), Input(DIAG_SUMMARY_ID, "n_clicks"),
                   State(HEADER_AS_OF_STORE_ID, "data"), prevent_initial_call=True)
@@ -2385,6 +2532,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     _sorter(BBG_SORT_ID, BBG_SORT_TYPE)
     _sorter(PARSE_SORT_ID, PARSE_SORT_TYPE)
+    _sorter(TRADES_SORT_ID, TRADES_SORT_TYPE)
 
     def _list_filter(store_id: str, col_type: str, fields: Tuple[str, ...]) -> None:
         @app.callback(Output(store_id, "data"), Input({"type": col_type, "part": ALL}, "value"),
@@ -2402,6 +2550,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     _list_filter(BBG_FSTORE_ID, BBG_COL_TYPE, data_checks.TICKER_FIELDS)
     _list_filter(PARSE_FSTORE_ID, PARSE_COL_TYPE, data_checks.PARSE_FIELDS)
+    _list_filter(TRADES_FSTORE_ID, TRADES_COL_TYPE, data_checks.TRADE_FIELDS)
 
     # ---- "Run Bloomberg check" (2026-09-30): a background run, polled while it goes
     @app.callback(Output(BBG_RUN_STORE_ID, "data"), Input(BBG_CHECK_BUTTON_ID, "n_clicks"),
@@ -2487,15 +2636,16 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
 # ---- the Bloomberg check's and the parsing check's views (2026-09-30)
 def _utc_words(iso) -> str:
-    """'30 Sep 09:12' in this PC's local time from a UTC ISO stamp ('' when unreadable)."""
+    """'Wed 30 Sep 09:12 HK' from a UTC ISO stamp, the date and Hong Kong time as every pull time
+    (`feed_controls.pull_time`; '' when unreadable)."""
+    from ui.feed_controls import pull_time
     try:
         when = datetime.fromisoformat(str(iso))
     except (TypeError, ValueError):
         return ""
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
-    local = when.astimezone()
-    return f"{short_date(local.date().isoformat())} {local:%H:%M}"
+    return pull_time(when.isoformat())
 
 
 def _sub(title: str, hover: str, extra=None) -> html.Div:

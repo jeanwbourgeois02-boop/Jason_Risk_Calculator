@@ -484,7 +484,31 @@ def _ensure_fx_instruments(conn: sqlite3.Connection, pairs) -> List[str]:
     return created
 
 
-def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
+def needed_live(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+    """The library rows a live pull on `as_of_date` reads, unrequestable ones included (each
+    row carries `requestable`), in one read: `library.needed_on(..., include_unrequestable=
+    True)`. `pull_once` reads it once per cycle, after the contract dates moved the futures,
+    and hands it to build_requests, not_requestable_futures and the LME, curves and vol
+    steps, which each read the library on their own before (2026-09-30). The requestable
+    rows are exactly `needed_on`'s default list, in the same order."""
+    from data.bloomberg import library
+    try:
+        return list(library.needed_on(conn, as_of_date, include_unrequestable=True))
+    except TypeError:                       # an older library: every row it gives is asked for
+        return list(library.needed_on(conn, as_of_date))
+
+
+def _requestable(needed: List[dict]) -> List[dict]:
+    """`needed_live`'s rows a pull may ask for: `library.needed_on`'s default list."""
+    return [r for r in needed if r.get("requestable", True)]
+
+
+def _live_keys(needed: List[dict], kind: str) -> List[str]:
+    """`library.keys` off the cycle's one read: the sorted distinct keys of one kind."""
+    return sorted({r["key"] for r in _requestable(needed) if r["kind"] == kind})
+
+
+def build_requests(conn: sqlite3.Connection, as_of_date: str, needed: Optional[List[dict]] = None) -> list:
     """RequestRows per BUILD_PLAN.md section 2: one SPOT per open FX pair, one
     FWD_OUTRIGHT per (pair, open leg's own settle_date) -- no shared workbook maturity --
     one FUTURE_PX per open future at its own settle_date (expiry), (2026-09-17) one
@@ -509,11 +533,15 @@ def build_requests(conn: sqlite3.Connection, as_of_date: str) -> list:
     prompts off that curve, so nothing here asks the cash a second time or reads 'LME:CA'
     as a currency pair. An option on a commodity future's rows are the futures' own shape
     (FUTURE_PX on the option, and on its underlying future, role UNDERLYING) and are asked
-    for with the futures."""
+    for with the futures.
+
+    `needed` (2026-09-30): the cycle's one library read (`needed_live`); read here when not
+    given."""
     from data.bloomberg import library
     from data.bloomberg.pull_marks import RequestRow
     is_lme = getattr(library, "is_lme_row", lambda r: False)
-    needed = [r for r in library.needed_on(conn, as_of_date) if not is_lme(r)]
+    rows_in_force = library.needed_on(conn, as_of_date) if needed is None else _requestable(needed)
+    needed = [r for r in rows_in_force if not is_lme(r)]
     _ensure_fx_instruments(conn, [r["key"] for r in needed if r["kind"] in ("SPOT", "FWD_OUTRIGHT")])
     out, seen = [], set()
 
@@ -780,18 +808,21 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
     return _done()
 
 
-def not_requestable_futures(conn: sqlite3.Connection, as_of_date: str) -> List[dict]:
+def not_requestable_futures(conn: sqlite3.Connection, as_of_date: str,
+                            needed: Optional[List[dict]] = None) -> List[dict]:
     """The futures the library lists on `as_of_date` that it marks not requestable (no
     verified Bloomberg ticker): never asked for, and listed here instead, one entry per
     contract, {instrument_id, settle_date, trade_ids, reason}, the reason the library's own.
-    Never raises: a library that cannot say gives []."""
+    Never raises: a library that cannot say gives []. `needed`: the cycle's one library
+    read (`needed_live`, 2026-09-30); read here when not given."""
     from data.bloomberg import library
-    try:
-        needed = library.needed_on(conn, as_of_date, include_unrequestable=True)
-    except TypeError:                       # an older library: every row it gives is asked for
-        return []
-    except Exception:  # noqa: BLE001
-        return []
+    if needed is None:
+        try:
+            needed = library.needed_on(conn, as_of_date, include_unrequestable=True)
+        except TypeError:                   # an older library: every row it gives is asked for
+            return []
+        except Exception:  # noqa: BLE001
+            return []
     out: Dict[str, dict] = {}
     for r in needed:
         if r.get("kind") != "FUTURE_PX" or r.get("requestable", bool(r.get("bbg_ticker"))):
@@ -814,7 +845,13 @@ def not_requestable_futures(conn: sqlite3.Connection, as_of_date: str) -> List[d
 # for any reason but a timeout is asked again one ticker at a time, so one ticker that breaks
 # a request leaves the others standing. What is asked is unchanged: the same tickers and
 # fields the library lists, in more requests (hard rule 8).
-REQUEST_CHUNK = {"spot": 10, "forwards": 5, "futures": 10}
+# 2026-09-30 (user at the Bloomberg PC: "the bloomberg pull is quite slow and looks wasteful"):
+# spot and futures 10 -> 50 tickers a request, the backfill's HISTORY_CHUNK. A
+# ReferenceDataRequest takes hundreds of securities, and a bad ticker comes back as that
+# security's own error, never as a raise, so a chunk only splits when the whole request broke.
+# Jason's 20 futures were two requests (and up to two PX_SETTLE fallbacks), now one. The
+# forwards stay at 5: each pair's FWD_CURVE answer is a bulk table.
+REQUEST_CHUNK = {"spot": 50, "forwards": 5, "futures": 50}
 # After this many timeouts in a row the rest of the marks chunks are not sent: each timeout
 # costs pull_marks.EVENT_TIMEOUT_MS, and a Bloomberg that stopped answering would otherwise
 # hold the press for minutes. Every row not asked is failed with that reason.
@@ -1000,19 +1037,27 @@ class _Progress:
         self.block["sentence"] = progress_sentence(self.block)
         set_progress(self.db_path, dict(self.block))
 
-    def step(self, name: str) -> None:
+    def step(self, name: str, publish: bool = True) -> None:
+        """The step now running. `publish=False` (2026-09-30) for a step with nothing to
+        ask, which ends at once: the block moves on, the file is not rewritten for it."""
         if name not in self.steps:
             self.steps.append(name)
             self.block["step_count"] = len(self.steps)
         self.block.update(step=name, step_label=STEP_LABELS.get(name, name), step_index=self.steps.index(name) + 1)
-        self.publish()
+        if publish:
+            self.publish()
 
     def set_total(self, n: int) -> None:
+        if int(n) == int(self.block["total"]):
+            return                      # nothing new to say: no rewrite (2026-09-30)
         self.block["total"] = int(n)
         self.publish()
 
     def add_done(self, n: int) -> None:
-        self.block["done"] = min(int(self.block["done"]) + int(n), int(self.block["total"]) or 10 ** 9)
+        done = min(int(self.block["done"]) + int(n), int(self.block["total"]) or 10 ** 9)
+        if done == int(self.block["done"]):
+            return                      # nothing new to say: no rewrite (2026-09-30)
+        self.block["done"] = done
         self.publish()
 
     def final(self, outcome: str, sentence: str) -> dict:
@@ -1339,7 +1384,7 @@ def write_marks(conn: sqlite3.Connection, rows: List[dict], rejected: Optional[L
 
 
 def _curves_step(conn: sqlite3.Connection, today: date, host: str, port: int, rates_source=None,
-                 shared: Optional[_SharedSession] = None) -> dict:
+                 shared: Optional[_SharedSession] = None, ccys: Optional[List[str]] = None) -> dict:
     """Pull the OIS curve quotes of every currency the Bloomberg library lists under
     OIS_CURVE today (both currencies of every open FX option: engine/options needs a
     domestic AND a foreign discount curve, engine/options/inputs.py::resolve_market_inputs)
@@ -1360,11 +1405,14 @@ def _curves_step(conn: sqlite3.Connection, today: date, host: str, port: int, ra
     written to curve_quotes), nodes (curve nodes bootstrapped into `curves`, 0 when not
     bootstrapped), error ('' when none)}}, bootstrapped (how many currencies have a curve
     today), seconds: {bloomberg, bootstrap}}, plus "skipped" (no FX option needs a curve)
-    or "error" (the step could not run at all)."""
+    or "error" (the step could not run at all). `ccys` (2026-09-30): the OIS_CURVE keys off
+    the cycle's one library read; read here when not given."""
     out: dict = {"currencies": {}, "bootstrapped": 0, "as_of_date": today.isoformat()}
     step_started = time.perf_counter()
-    from data.bloomberg import library
-    ccys = sorted(library.keys(conn, today.isoformat(), "OIS_CURVE"))
+    if ccys is None:
+        from data.bloomberg import library
+        ccys = library.keys(conn, today.isoformat(), "OIS_CURVE")
+    ccys = sorted(ccys)
     if not ccys:
         out["skipped"] = "no FX_OPTION needs an OIS curve"
         return out
@@ -1447,7 +1495,7 @@ def _curves_step(conn: sqlite3.Connection, today: date, host: str, port: int, ra
 
 
 def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_source=None,
-              shared: Optional[_SharedSession] = None) -> dict:
+              shared: Optional[_SharedSession] = None, pairs: Optional[List[str]] = None) -> dict:
     """Pull the FX vol smile (ATM/RR/BF) for every pair with an open FX_OPTION into
     `vol_quotes`, so engine/options has something to resolve from (2026-09-17 fix): this
     pull never ran at all before -- live.py had no call into
@@ -1467,8 +1515,10 @@ def _vol_step(conn: sqlite3.Connection, today: date, host: str, port: int, vol_s
     # only options still open. It used to be every FX_OPTION instrument ever on file
     # (vm.vol_pairs_needed; instruments outlive an upload), 45 tickers a pair, as long as
     # the book held one option of any age -- and three default pairs when it found none.
-    from data.bloomberg import library
-    pairs = library.keys(conn, today.isoformat(), "VOL_SMILE")
+    # `pairs` (2026-09-30): the VOL_SMILE keys off the cycle's one library read.
+    if pairs is None:
+        from data.bloomberg import library
+        pairs = library.keys(conn, today.isoformat(), "VOL_SMILE")
     if not pairs:
         out["skipped"] = "no FX_OPTION trades to price"
         return out
@@ -1572,6 +1622,14 @@ def futures_options_sentence(n: int) -> str:
     return f"{n} option{'s' if n != 1 else ''} on futures priced" if n else ""
 
 
+def _option_trade_count(conn: sqlite3.Connection, today: date) -> int:
+    """How many option trades (PRICED_OPTION_PRODUCTS) dealt on or before `today` are on
+    file: none, and the options step has nothing to price."""
+    return int(conn.execute(f"SELECT COUNT(*) FROM trades_official WHERE product IN "
+                            f"({', '.join('?' for _ in PRICED_OPTION_PRODUCTS)}) AND trade_date <= ?",
+                            PRICED_OPTION_PRODUCTS + (today.isoformat(),)).fetchone()[0])
+
+
 def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Optional[List[dict]] = None) -> dict:
     """Price every FX option and every option on a commodity future through engine/options
     (PREMIUM + Greeks; options-store's price_all_and_store prices both). Never raises. The
@@ -1586,10 +1644,7 @@ def _options_step(conn: sqlite3.Connection, today: date, vol_diagnostics: Option
     under `futures_options_summary` ("N options on futures priced") when there are any."""
     out: dict = {"priced": 0, "skipped": [], "closed_out": [], "as_of_date": today.isoformat(),
                  "futures_options_priced": 0}
-    n = conn.execute(f"SELECT COUNT(*) FROM trades_official WHERE product IN "
-                     f"({', '.join('?' for _ in PRICED_OPTION_PRODUCTS)}) AND trade_date <= ?",
-                     PRICED_OPTION_PRODUCTS + (today.isoformat(),)).fetchone()[0]
-    if not n:
+    if not _option_trade_count(conn, today):
         out["skipped"] = "no option trades to price"
         return out
     try:
@@ -1641,19 +1696,31 @@ def lme_summary(block: dict) -> str:
     return text
 
 
-def _lme_open_prompts(conn: sqlite3.Connection, today: str) -> Dict[str, List[str]]:
+def _lme_open_prompts(conn: sqlite3.Connection, today: str,
+                      needed: Optional[List[dict]] = None) -> Dict[str, List[str]]:
     """{root id: its open LME forwards' prompt dates, sorted}, from the library's in-force
-    FWD_OUTRIGHT rows of the LME product (each ticket's own prompt)."""
+    FWD_OUTRIGHT rows of the LME product (each ticket's own prompt). `needed`: the cycle's
+    one library read (`needed_live`, 2026-09-30); read here when not given."""
     from data.bloomberg import library
     lme_products = tuple(getattr(library, "LME_PRODUCTS", ("LME_FWD",)))
     out: Dict[str, set] = {}
-    for r in library.needed_on(conn, today):
+    for r in (library.needed_on(conn, today) if needed is None else _requestable(needed)):
         if r.get("product") in lme_products and r.get("kind") == "FWD_OUTRIGHT":
             out.setdefault(r["key"], set()).add(r["settle_date"])
     return {k: sorted(v) for k, v in out.items()}
 
 
-def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snapped: Optional[str] = None) -> dict:
+def _has_lme_curve(needed: List[dict]) -> bool:
+    """Does the cycle's library read (`needed_live`) hold an LME curve a pull may ask for?"""
+    try:
+        from data.bloomberg.library import LME_CURVE
+    except ImportError:
+        LME_CURVE = "LME_CURVE"
+    return any(r["kind"] == LME_CURVE for r in _requestable(needed))
+
+
+def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snapped: Optional[str] = None,
+              needed: Optional[List[dict]] = None) -> dict:
     """The LME curves of the book's open LME forwards (2026-09-24, commodity conversion
     Phase 5): for each metal the library lists (`library.lme_curves_needed`: in force,
     requestable, its pillars trimmed to the furthest open prompt), Bloomberg's PX_LAST and
@@ -1675,7 +1742,11 @@ def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snap
     rows written), interp_written (of which BBG_INTERP), missing ([{root_id, ticker,
     settle_date, reason}]: a pillar Bloomberg gave no price for, ticker '' for an open
     prompt left without a forward), reasons (lme_curve_marks' own reasons, each opened by
-    its metal), summary (`lme_summary`)}, plus "error" when the step stopped."""
+    its metal), summary (`lme_summary`)}, plus "error" when the step stopped.
+
+    `needed` (2026-09-30): the cycle's one library read (`needed_live`). With no LME curve
+    in it the step ends before reading anything else; otherwise the metals' pillars are
+    read as before (`library.lme_curves_needed`) and the open prompts off `needed`."""
     block: dict = {"roots": [], "written": 0, "interp_written": 0, "missing": [], "reasons": []}
 
     def _done() -> dict:
@@ -1685,8 +1756,10 @@ def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snap
     today_iso = today.isoformat()
     try:
         from data.bloomberg import library
+        if needed is not None and not _has_lme_curve(needed):
+            return _done()                  # no LME forward open: nothing to read or ask
         needs = list(library.lme_curves_needed(conn, today_iso)) if hasattr(library, "lme_curves_needed") else []
-        open_prompts = _lme_open_prompts(conn, today_iso) if needs else {}
+        open_prompts = _lme_open_prompts(conn, today_iso, needed) if needs else {}
     except Exception as exc:  # noqa: BLE001
         block["error"] = f"LME curves not read from the library: {exc!r}"
         return _done()
@@ -1881,7 +1954,13 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     chunk (`set_progress`, the rest of the file untouched); `done` / `total` are the marks
     of the request list settled so far / asked (`total` is 0 until the list is built). The
     final status carries it with running false, finished_at, outcome (ok | partial |
-    failed) and the closing sentence."""
+    failed) and the closing sentence.
+
+    Less waste per press (2026-09-30, user at the Bloomberg PC): the library is read once
+    after the contract dates (`needed_live`) and handed to every later step; spot and futures
+    go 50 tickers a request (REQUEST_CHUNK); a step known to have nothing to ask still runs
+    and is recorded, but the progress line is not rewritten for it, nor for a count that did
+    not move. What is asked, written and stamped is unchanged."""
     from data.ingest.schema import connect
     clock_started = time.perf_counter()
     started = _now_iso()
@@ -1910,12 +1989,15 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         steps.append({"step": name, "label": STEP_LABELS.get(name, name), "outcome": outcome,
                       "detail": str(detail or "")[:500], "seconds": round(max(seconds, 0.0), 1)})
 
-    def _run(name: str, book: dict, key: str, fn, *args, judge: Optional[Callable] = None, **kwargs):
+    def _run(name: str, book: dict, key: str, fn, *args, judge: Optional[Callable] = None, quiet: bool = False,
+             **kwargs):
         """(True, result) or (False, the exception): one step, timed under book[key], its
         writes committed when it returns and rolled back when it raises, its outcome
         recorded (`judge(result)` -> (outcome, detail), else `_step_outcome`). A
-        SessionUnavailable is recorded and raised on."""
-        progress.step(name)
+        SessionUnavailable is recorded and raised on. `quiet` (2026-09-30): the step is
+        known to have nothing to ask, so the progress line is not rewritten for it; it runs
+        and is recorded as ever."""
+        progress.step(name, publish=not quiet)
         step_started = time.perf_counter()
         try:
             result = _timed(book, key, fn, *args, **kwargs)
@@ -2025,9 +2107,23 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 net.raised.append({"step": "contract_dates", "reason": asked_failed[0]["reason"], "traceback": ""})
             no_session = bool(shared.open_error)
 
-            done, requests = _run("requests", other, "build_requests", build_requests, conn, as_of_date,
+            # The library, read once for the cycle (2026-09-30), after the contract dates
+            # moved the futures: the request list, the futures with no ticker, and the LME,
+            # curves and vol steps all work off this one read. None when it could not be
+            # read, and then each reads the library itself, as before.
+            needed: Optional[List[dict]] = None
+
+            def _build() -> list:
+                nonlocal needed
+                needed = needed_live(conn, as_of_date)
+                return build_requests(conn, as_of_date, needed)
+
+            done, requests = _run("requests", other, "build_requests", _build,
                                   judge=lambda got: ("ok", f"{len(got)} marks to ask") if got
                                   else ("skipped", "no open FX leg or future to price"))
+            # The later steps price and ask as of `today`: the read serves them when it is
+            # of the same date (always, but for a --as-of run of the command line).
+            today_needed = needed if as_of_date == today.isoformat() else None
             requests_built = done
             if not done:
                 status["requests_error"] = _plain_error(requests)
@@ -2036,7 +2132,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             progress.set_total(len(requests))
             # A future the library lists with no Bloomberg ticker is never asked for; it is
             # listed here with its reason (2026-09-24).
-            status["not_requestable"] = not_requestable_futures(conn, as_of_date)
+            status["not_requestable"] = not_requestable_futures(conn, as_of_date, needed)
             for entry in status["not_requestable"]:
                 warnings.append(f"FUTURE_PX {entry['instrument_id']} not requested: {entry['reason']}")
             snapped = _now_iso()  # live pull: the real press time, never the 17:00 close stamp
@@ -2057,7 +2153,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             else:
                 try:
                     done, spot = _run("spot", timings, "spot", _ask_in_chunks, "spot", spot_reqs, REQUEST_CHUNK["spot"],
-                                      _ask_spot, net, progress, judge=_marks_judge(len(spot_reqs)))
+                                      _ask_spot, net, progress, judge=_marks_judge(len(spot_reqs)),
+                                      quiet=not spot_reqs)
                     spot = spot if done else _all_failed(spot_reqs, spot)
                 except SessionUnavailable:
                     no_session = True
@@ -2087,7 +2184,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 try:
                     done, forwards = _run("forwards", timings, "forwards", _ask_in_chunks, "forwards", fwd_reqs,
                                           REQUEST_CHUNK["forwards"], _ask_forwards, net, progress,
-                                          judge=_marks_judge(len(fwd_reqs)))
+                                          judge=_marks_judge(len(fwd_reqs)), quiet=not fwd_reqs)
                     forwards = forwards if done else _all_failed(fwd_reqs, forwards)
                 except SessionUnavailable:
                     no_session = True
@@ -2122,7 +2219,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 try:
                     done, futures = _run("futures", timings, "futures", _ask_in_chunks, "futures", fut_reqs,
                                          REQUEST_CHUNK["futures"], _ask_futures, net, progress,
-                                         judge=_marks_judge(len(fut_reqs)))
+                                         judge=_marks_judge(len(fut_reqs)), quiet=not fut_reqs)
                     futures = futures if done else _all_failed(fut_reqs, futures)
                 except SessionUnavailable:
                     no_session = True
@@ -2168,7 +2265,9 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             if no_session:
                 _skip("lme", f"no Bloomberg session ({shared.open_error})")
             else:
-                done, lme = _run("lme", timings, "forwards", _lme_step, conn, today, shared.get, snapped)
+                no_lme = today_needed is not None and not _has_lme_curve(today_needed)
+                done, lme = _run("lme", timings, "forwards", _lme_step, conn, today, shared.get, snapped,
+                                 today_needed, quiet=no_lme)
                 status["lme"] = lme if done else {"roots": [], "written": 0, "interp_written": 0, "missing": [],
                                                   "reasons": [], "error": _plain_error(lme)}
                 if not done:
@@ -2192,8 +2291,9 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 _skip("curves", f"no Bloomberg session ({shared.open_error})")
                 _skip("vol", f"no Bloomberg session ({shared.open_error})")
             else:
+                ccys = _live_keys(today_needed, "OIS_CURVE") if today_needed is not None else None
                 done, got = _run("curves", timings, "curves", _curves_step, conn, today, host, port, rates_source,
-                                 shared=shared)
+                                 shared=shared, ccys=ccys, quiet=ccys == [])
                 status["curves"] = got if done else {"currencies": {}, "bootstrapped": 0,
                                                      "as_of_date": today.isoformat(), "error": _plain_error(got)}
                 if any((e or {}).get("quotes") for e in (status["curves"].get("currencies") or {}).values()):
@@ -2201,7 +2301,9 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 warnings.extend(f"OIS {ccy}: {e['left_out_summary']}"
                                 for ccy, e in sorted((status["curves"].get("currencies") or {}).items())
                                 if (e or {}).get("left_out_summary"))
-                done, got = _run("vol", timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared)
+                pairs = _live_keys(today_needed, "VOL_SMILE") if today_needed is not None else None
+                done, got = _run("vol", timings, "vol", _vol_step, conn, today, host, port, vol_source, shared=shared,
+                                 pairs=pairs, quiet=pairs == [])
                 status["vol"] = got if done else {"pairs": {}, "written": 0, "diagnostics": [],
                                                   "as_of_date": today.isoformat(), "error": _plain_error(got)}
                 if status["vol"].get("written"):
@@ -2220,8 +2322,12 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 _record("recalc", "failed" if status["recalc"].get("error") else "ok", status["recalc_summary"],
                         time.perf_counter() - step_started)
             else:
+                try:
+                    no_options = not _option_trade_count(conn, today)
+                except Exception:  # noqa: BLE001 -- the step itself then says what went wrong
+                    no_options = False
                 done, got = _run("options", timings, "options", _options_step, conn, today,
-                                 (status.get("vol") or {}).get("diagnostics"))
+                                 (status.get("vol") or {}).get("diagnostics"), quiet=no_options)
                 status["options"] = got if done else {"priced": 0, "skipped": [], "closed_out": [],
                                                       "as_of_date": today.isoformat(), "futures_options_priced": 0,
                                                       "error": _plain_error(got)}

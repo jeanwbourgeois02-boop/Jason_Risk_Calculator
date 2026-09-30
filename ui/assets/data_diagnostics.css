@@ -1,10 +1,11 @@
-/* The Data tab's Bloomberg and Parsing cards (2026-09-30): the last pull, its problems in full, the
+/* The Data tab's Bloomberg and Trades cards (2026-09-30): the last pull, its problems in full, the
    on-demand Bloomberg check and the blotter parsing check. The tables are the one kit's
    (style.css "Phase G: the trade kit"); only the card's own lines are styled here. */
-.market-data .data-bbg-card, .market-data .data-parse-card { margin-top: 14px; }
+.market-data .data-bbg-card, .market-data .data-trades-card { margin-top: 14px; }
 .market-data .data-card-body { padding: 8px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
 .market-data .data-card-note { font-size: 12px; color: var(--muted); margin-top: -4px; }
 .market-data .data-bbg-line { font-size: 13px; color: var(--ink-2, #374151); }
+.market-data .data-bbg-line.tk-headline { margin: 0; padding: 0; font-weight: 400; }
 .market-data .data-bbg-subhead { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .market-data .data-bbg-subhead .tk-title { font-size: 13px; }
 .market-data .data-bbg-subhead .btn--ghost { margin-left: auto; padding: 4px 12px; font-size: 12px; }
@@ -23,3 +24,7 @@
 .market-data .data-ticker-table td:last-child { white-space: normal; min-width: 240px; }
 .market-data .data-pull-problems td { white-space: normal; }
 .market-data .data-bbg-card > .data-card-body > .data-fold { margin-top: 4px; }
+/* The Trades card: every trade problem in full, then the check of a file before uploading it. */
+.market-data .data-trade-table td:nth-child(5), .market-data .data-trade-table td:nth-child(6) { white-space: normal; min-width: 220px; }
+.market-data .data-parse-block { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--line, #e5e7eb); }

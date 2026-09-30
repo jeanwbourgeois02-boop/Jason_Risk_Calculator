@@ -2,9 +2,9 @@
 
 2026-09-29 (user): "What did I load, and did it load right?" The tab is the audit trail of the
 uploaded file and shows NO P&L, mark, Greek or period figure (the Book is the one place for
-them). One view, `blotter_view`: the last upload (one line, then the rows that did not become
-trades and the file-level warnings, `data.ingest.upload.last_upload_report` /
-`last_upload_issues`; this block left the Data tab that day), every fill as uploaded (one table,
+them). One view, `blotter_view`: the last upload (one line, `data.ingest.upload.last_upload_report`;
+since 2026-09-30 the rows that need a fix, did not load or carry a warning are only counted on it,
+as a link to the Data tab's Trades card, which lists them in full), every fill as uploaded (one table,
 one row per trade on file: Trade Id, trade date, side, quantity with its unit, the broker's
 description as written, our contract, the broker's price and ours with a grey x100 where the
 broker's price units were converted, the trade name, the type and the Book position the trade

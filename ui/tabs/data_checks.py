@@ -22,6 +22,7 @@ asks Bloomberg for anything or writes a mark.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -266,9 +267,9 @@ def pull_problems(status: Optional[dict]) -> List[dict]:
     out: List[dict] = []
     if not status:
         return out
-    from ui.feed_controls import short_time
+    from ui.feed_controls import pull_time
     when = str(status.get("time") or "")
-    stamp = f" (pull of {short_time(when)})" if when else ""
+    stamp = f" (pull of {pull_time(when)})" if when else ""
     steps = status.get("steps") or []
     errors = status.get("step_errors") or {}
     if steps:
@@ -332,47 +333,20 @@ def pull_problems(status: Optional[dict]) -> List[dict]:
     return out
 
 
-def unrecognised_problems(unrecognised: Optional[List[dict]]) -> Tuple[List[dict], set]:
-    """(one red problem per symbol the parser could not identify, the trade ids they cover) from
-    `data.bloomberg.inventory.unrecognised(conn)`: the trade is on file (every row loads) with no
-    P&L until the symbol is added to the contract list; the trades on hover."""
-    by_symbol: Dict[str, List[dict]] = {}
-    for u in unrecognised or []:
-        by_symbol.setdefault(str(u.get("broker_symbol") or u.get("instrument_id") or "?"), []).append(u)
-    out, covered = [], set()
-    for sym, items in sorted(by_symbol.items()):
-        covered.update(str(u.get("trade_id")) for u in items)
-        reasons = list(dict.fromkeys(str(u.get("reason") or "") for u in items if u.get("reason")))
-        blocks = list(dict.fromkeys(str(u.get("blocks_what") or "") for u in items if u.get("blocks_what")))
-        trades = [f"{u.get('trade_id')} ({u.get('trade_name') or 'no trade name'}, {u.get('trade_date')}, "
-                  f"{_num(u.get('quantity')) if _num(u.get('quantity')) is not None else '?'} at "
-                  f"{u.get('price')})" for u in items]
-        names = sorted({str(u.get("trade_name") or "") for u in items} - {""})
-        # the chip already says "Not recognised": the cell starts at what is wrong with the symbol
-        words = plain_words(reasons[0]) if reasons else ""
-        if words.lower().startswith("contract not recognised: "):
-            words = words[len("contract not recognised: "):]
-        out.append(_problem("red", "Not recognised", sym, cap(words) or "Contract not recognised",
-                            cap((plain_words(blocks[0]) if blocks else "no P&L: contract not recognised")
-                                + (f" · {', '.join(names)}" if names else "")),
-                            price_tip=f"The file's symbol as written; {len(items)} trade{'' if len(items) == 1 else 's'}",
-                            problem_tip="; ".join(reasons), blocks_tip="Trades: " + "; ".join(trades), rank=0.5))
-    return out, covered
-
-
 def problem_rows(mark_records: List[dict], status: Optional[dict], unpriced: Dict[str, Tuple[str, str]],
                  as_of: str, today: str, unrecognised: Optional[List[dict]] = None) -> List[dict]:
-    """Every per-mark and per-trade problem: the missing and flagged marks (missing first), the
-    contracts the parser could not identify (`unrecognised`, red) and the trades left out of the P&L
-    that nothing above explains; red before amber. The pull's and the backfill's failures are not
+    """Every per-mark and per-trade problem: the missing and flagged marks (missing first) and the
+    trades left out of the P&L that nothing above explains; red before amber. The trades whose
+    contract is not recognised (`unrecognised`) are the Trades card's (`trade_problem_rows`), left
+    out here. The pull's and the backfill's failures are not
     here (2026-09-30, user: "all in one place"): they are the Bloomberg card's "Pull problems"
     (`pull_problems`); `status` is kept in the signature for the callers."""
     del status
     out: List[dict] = []
     covered: set = set()
-    unrec, unrec_ids = unrecognised_problems(unrecognised)
-    out += unrec
-    covered |= unrec_ids
+    # The contracts not recognised are the Trades card's (2026-09-30): their trades are left out
+    # here too, so they are not listed again as "No P&L".
+    covered |= {str(u.get("trade_id")) for u in unrecognised or []}
     for r in mark_records:
         if r["status"] not in ("MISSING", "CHECK"):
             continue
@@ -395,8 +369,7 @@ def problem_rows(mark_records: List[dict], status: Optional[dict], unpriced: Dic
 
 PROBLEM_COLUMNS: Tuple[kit.Column, ...] = (
     ("label", "Status", "l", "Missing: no official price for the date. Check: a price arrived but failed a check. "
-                             "No P&L: a trade nothing can price. Not recognised: a "
-                             "row of the blotter whose contract the app does not know (on file, no P&L until mapped).", True),
+                             "No P&L: a trade nothing can price. A contract not recognised is under Trades.", True),
     ("price", "Price", "l", "The price with its exchange, or the trade.", True),
     ("problem", "Problem", "l", "What is wrong, in plain words; the full sentence on hover.", True),
     ("blocks", "What it blocks", "l", "What the problem does to the book's figures, and which trades.", True),
@@ -650,11 +623,11 @@ def steps_table(status: Optional[dict]) -> Optional[html.Table]:
 
 def pull_facts(status: Optional[dict], no_pull: bool = False) -> Tuple[str, str]:
     """(the last pull in a few words, its detail for the hover) for the Diagnostics facts:
-    "Mon 28 Sep 14:32 NY · 9 steps, all ok"; "None yet" with no status file or `no_pull` (the
+    "Mon 28 Sep 14:32 HK · 9 steps, all ok"; "None yet" with no status file or `no_pull` (the
     status file says no pull has run: its time is then the status's own, not a pull's)."""
-    from ui.feed_controls import short_time
+    from ui.feed_controls import pull_time
     s = status or {}
-    when = short_time(s.get("time")) if s.get("time") else ""
+    when = pull_time(s.get("time")) if s.get("time") else ""
     if not s or no_pull:
         return "None yet", "No Bloomberg pull has run with this database: press Pull Bloomberg now."
     steps = s.get("steps") or []
@@ -765,14 +738,14 @@ def left_out_block(status: Optional[dict]) -> Optional[html.Table]:
 # in the bloomberg diagnostics section in the data tab please - all in one place". The last pull in
 # one line, its failures in full ("Pull problems"), the on-demand check's results.
 def bloomberg_line(status: Optional[dict], no_pull: bool = False) -> Tuple[str, str]:
-    """(the last pull in one line, its detail for the hover): "Last pull Wed 30 Sep 09:12 · 45 marks
+    """(the last pull in one line, its detail for the hover): "Last pull Wed 30 Sep 09:12 HK · 45 marks
     written, 2 failed · Past closes: history complete"."""
-    from ui.feed_controls import short_time
+    from ui.feed_controls import pull_time
     s = status or {}
     if not s or no_pull:
         return ("No Bloomberg pull yet with this book",
                 "No Bloomberg pull has run with this database: press Pull Bloomberg now.")
-    when = short_time(s.get("time")) if s.get("time") else ""
+    when = pull_time(s.get("time")) if s.get("time") else ""
     head = f"Last pull {when}" if when else "Last pull"
     if s.get("connected") is False:
         reason = plain_words(s.get("reason")) or "reason not recorded"
@@ -1061,3 +1034,173 @@ def parse_table(rows: List[dict], sort: Optional[dict], sort_type: str, state: O
             html.Td(cap_parts(str(r.get("message") or "")), className="l data-parse-note"),
         ]))
     return tidy(kit.table(head, body, className="tk-small data-parse-table"))
+
+
+# ---- the Trades card (2026-09-30, user: "any issue with the trades it shows up in a trade pull
+# section in the data tab"): every problem with the trades on file in one table, problems first.
+TRADE_ORDER = {"NOT RECOGNISED": 0, "NOT LOADED": 1, "WARNING": 2, "FILE": 3, "SKIPPED": 4}
+TRADE_WORDS = {"NOT RECOGNISED": "Needs a fix", "NOT LOADED": "Not loaded", "WARNING": "Warning",
+               "FILE": "About the file", "SKIPPED": "Skipped"}
+TRADE_LEVEL = {"NOT RECOGNISED": "red", "NOT LOADED": "amber", "WARNING": "amber", "FILE": "amber", "SKIPPED": "grey"}
+TRADE_COLUMNS: Tuple[kit.Column, ...] = (
+    ("status", "Status", "l", "Needs a fix: on file as a trade whose contract the app does not recognise, no P&L until "
+                              "it is mapped. Not loaded: a row an older upload could not read. Warning: loaded, but "
+                              "two cells disagreed or one was doubtful. About the file: a line about the whole file. "
+                              "Skipped: a kind of row the app does not load (a retired product, a cash movement).",
+     True),
+    ("row", "Row", "", "The row's number in the file, the header row not counted.", True),
+    ("trade_id", "Trade Id", "l", "The row's Trade Id; the trade's name on hover.", True),
+    ("symbol", "Symbol", "l", "The file's Symbol cell as written.", True),
+    ("problem", "What is wrong", "l", "What is wrong, in plain words; the upload's own sentence on hover.", True),
+    ("affects", "What it affects", "l", "What it does to the book's figures; what to do about it on hover.", True),
+)
+TRADE_LISTS = {"status": ("status", "Status")}
+TRADE_FIELDS = ("status",)
+TRADE_SORT: Dict[str, Callable[[dict], Any]] = {
+    "status": lambda r: (TRADE_ORDER.get(str(r.get("status")), 9), r.get("row_no") or 0),
+    "row": lambda r: r.get("row_no"),
+    **{k: _text_key(k) for k in ("trade_id", "symbol", "problem", "affects")},
+}
+TRADE_CSV_COLUMNS = ["status", "row_no", "trade_id", "trade_name", "symbol", "problem", "reason", "affects", "todo",
+                     "filename", "uploaded_at"]
+_FIX_TODO = ("Check the symbol; if it is right, add the contract to the contract list. The trade then prices "
+             "without a new upload.")
+
+
+_PB_ROOT_RE = re.compile(r"'?\b[A-Z]+\d+(?:\.(\d))?_([A-Za-z0-9]+)\b'?")
+_PB_TYPE_WORDS = {"3": "cross-exchange", "4": "cross-product", "5": "term structure"}
+
+
+def pb_root_words(text: str) -> str:
+    """The broker's raw PBRoot cells in a sentence of the upload's ('JSHY10_ZNA1', 'JSHY10.3_ZNA1')
+    as the trade's name, with the type its decimal marks ("ZNA1", "ZNA1 marked cross-exchange"):
+    plain words on screen, the raw cells kept in the CSV."""
+    def one(m: "re.Match") -> str:
+        kind = _PB_TYPE_WORDS.get(m.group(1) or "", f"type .{m.group(1)}" if m.group(1) else "")
+        return f"{m.group(2)} marked {kind}" if kind else m.group(2)
+    return _PB_ROOT_RE.sub(one, str(text or ""))
+
+
+def _trade_row(status: str, issue: dict, problem: str, affects: str, todo: str, reason: str = "",
+               trade_name: str = "") -> dict:
+    row_no = issue.get("row_no")
+    try:
+        row_no = int(row_no) if row_no not in (None, "") else None
+    except (TypeError, ValueError):
+        row_no = None
+    return {"status": status, "row_no": row_no or None, "trade_id": str(issue.get("trade_id") or ""),
+            "trade_name": trade_name, "symbol": str(issue.get("symbol") or ""),
+            "problem": cap(pb_root_words(problem)), "reason": str(reason or ""),
+            "reason_words": cap(pb_root_words(plain_words(reason))), "affects": cap(affects), "todo": cap(todo),
+            "filename": str(issue.get("filename") or ""), "uploaded_at": str(issue.get("uploaded_at") or "")}
+
+
+def trade_problem_rows(issues: Optional[List[dict]], unrecognised: Optional[List[dict]]) -> List[dict]:
+    """Every problem with the trades on file, problems first: the trades whose contract is not
+    recognised (`data.bloomberg.inventory.unrecognised`, each with its row of the upload that
+    loaded it when `last_upload_issues` still holds it), the rows an older upload did not load,
+    the rows skipped, the row warnings and the lines about the file (row 0). Read as recorded,
+    nothing recomputed."""
+    from ui.tabs.blotter_fills import what_to_do
+    issues = [i for i in issues or [] if isinstance(i, dict)]
+    need_rows = {str(i.get("trade_id")): i for i in issues
+                 if str(i.get("kind") or "") == "UNRECOGNISED" and i.get("trade_id")}
+    out: List[dict] = []
+    seen: set = set()
+    for u in unrecognised or []:
+        tid = str(u.get("trade_id") or "")
+        seen.add(tid)
+        issue = dict(need_rows.get(tid) or {})
+        issue["trade_id"] = tid
+        issue["symbol"] = issue.get("symbol") or u.get("broker_symbol") or ""
+        why = plain_words(u.get("reason") or issue.get("reason") or "")
+        if why.lower().startswith("contract not recognised: "):
+            why = why[len("contract not recognised: "):]
+        name = str(u.get("trade_name") or "")
+        named = f" ({name})" if name and name != tid else ""
+        out.append(_trade_row("NOT RECOGNISED", issue, why or "The contract is not in the app's contract list",
+                              f"No P&L for this trade{named}: left out of every total", _FIX_TODO,
+                              reason=str(u.get("reason") or ""), trade_name=name))
+    for i in issues:
+        kind = str(i.get("kind") or "")
+        reason = str(i.get("reason") or "")
+        if kind == "UNRECOGNISED":
+            tid = str(i.get("trade_id") or "")
+            if not tid:       # a table from before trade ids were kept: listed from the upload's own row
+                out.append(_trade_row("NOT RECOGNISED", i, plain_words(reason) or "Contract not recognised",
+                                      "No P&L for this trade: left out of every total", _FIX_TODO, reason=reason))
+            continue          # with a Trade Id: listed above while still not recognised, else mapped since
+        if kind == "WARNING":
+            file_level = not (i.get("row_no") or i.get("trade_id"))
+            if file_level:
+                out.append(_trade_row("FILE", i, plain_words(reason) or "A doubtful line in the file",
+                                      "The whole file: read it before the next upload",
+                                      "Nothing, if the file is as meant.", reason=reason))
+            else:
+                out.append(_trade_row("WARNING", i, plain_words(reason) or "A doubtful cell",
+                                      "Loaded on the primary field: its P&L uses that value",
+                                      "Check the two cells in the file; nothing to do if the loaded value is right.",
+                                      reason=reason))
+            continue
+        todo = what_to_do(kind, reason)
+        skipped = kind == "NOT LOADED" and todo.startswith("Nothing")
+        out.append(_trade_row("SKIPPED" if skipped else "NOT LOADED", i, plain_words(reason) or "The row was not read",
+                              "Not in the book: nothing of it is counted" if skipped
+                              else "Not in the book: its P&L and exposure are missing from every figure",
+                              todo, reason=reason))
+    out.sort(key=lambda r: (TRADE_ORDER.get(r["status"], 9), r["row_no"] or 0, r["trade_id"]))
+    return out
+
+
+def trade_problem_words(rows: Optional[List[dict]]) -> str:
+    """'2 need a fix · 1 warning' ('' with none): the Data tab's status line and the Blotter's."""
+    c: Dict[str, int] = {}
+    for r in rows or []:
+        c[r["status"]] = c.get(r["status"], 0) + 1
+    fix, lost = c.get("NOT RECOGNISED", 0), c.get("NOT LOADED", 0) + c.get("SKIPPED", 0)
+    warn = c.get("WARNING", 0) + c.get("FILE", 0)
+    parts = []
+    if fix:
+        parts.append(f"{fix:,} need{'s' if fix == 1 else ''} a fix")
+    if lost:
+        parts.append(f"{lost:,} not loaded")
+    if warn:
+        parts.append(f"{warn:,} warning{'' if warn == 1 else 's'}")
+    return " · ".join(parts)
+
+
+def trade_problems_table(rows: List[dict], sort: Optional[dict], sort_type: str, state: Optional[dict],
+                         col_type: str, total: int, all_rows: Optional[List[dict]] = None) -> html.Table:
+    """The trade problems, problems first, the Status funnel in its heading; a row per trade or
+    file row, each sentence in full (the upload's own words on hover)."""
+    every = all_rows if all_rows is not None else rows
+    options = {"status": list_options(every, "status", TRADE_ORDER, TRADE_WORDS)}
+    head = funnel_head(TRADE_COLUMNS, sort, sort_type, state, col_type, TRADE_LISTS, options, "data-trade")
+    body = []
+    if not total:
+        body.append(kit.note_row("No problem with the trades on file: every row of the last upload loaded cleanly.",
+                                 len(TRADE_COLUMNS), "cell-pos"))
+    elif not rows:
+        body.append(kit.note_row("No problem matches the filter.", len(TRADE_COLUMNS), "cell-missing"))
+    elif len(rows) != total:
+        body.append(kit.total_row([html.Td(f"Filtered · {len(rows):,} of {total:,} problems",
+                                           colSpan=len(TRADE_COLUMNS), className="l")]))
+    for r in kit.sort_records(rows, sort, TRADE_SORT):
+        st = r["status"]
+        if r.get("row_no"):
+            row_cell = f"{r['row_no']:,}"
+        elif st == "FILE":
+            row_cell = "File"
+        else:
+            row_cell = missing_cell("the upload that loaded it kept no row number")
+        whole = "a line about the whole file, not one row"
+        tid = r["trade_id"] or missing_cell(whole if st == "FILE" else "the upload recorded no Trade Id")
+        body.append(html.Tr([
+            kit.td(kit.chip(TRADE_WORDS.get(st, cap(st)), TRADE_LEVEL.get(st, "grey")), left=True),
+            kit.td(row_cell),
+            kit.td(tid, left=True, title=cap(r.get("trade_name") or "") or None),
+            kit.td(r["symbol"] or missing_cell(whole if st == "FILE" else "the row has no symbol"), left=True),
+            kit.td(cap_parts(r["problem"]), left=True, title=r.get("reason_words") or None),
+            kit.td(cap_parts(r["affects"]), left=True, title=r.get("todo") or None),
+        ]))
+    return tidy(kit.table(head, body, className="tk-small data-trade-table"))

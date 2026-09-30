@@ -153,6 +153,22 @@ def _latest_as_of(conn: sqlite3.Connection) -> str:
     return _today_ny()
 
 
+def _hk_time(iso) -> str:
+    """A pull's stored ISO time ('2026-09-30T13:36:39+08:00') as the date and Hong Kong
+    time the user reads it in ('Wed 30 Sep 13:36 HK'), converted from the stored offset
+    whatever the PC's own zone. Anything that is not an offset-carrying ISO time (a naive
+    stamp, 'an unknown time') is returned as it stands, never guessed."""
+    try:
+        from zoneinfo import ZoneInfo
+        stamp = datetime.fromisoformat(str(iso))
+        if stamp.tzinfo is None:
+            return str(iso)
+        hk = stamp.astimezone(ZoneInfo("Asia/Hong_Kong"))
+    except Exception:
+        return str(iso)
+    return f"{hk:%a} {hk.day} {hk:%b %H:%M} HK"
+
+
 # --------------------------------------------------------------------------- 0. what the screens show
 _FILL_NOTE_RE = re.compile(r"no price on (\S+): value of the (\S+) close")
 
@@ -1029,7 +1045,7 @@ def check_option_coverage(conn: sqlite3.Connection, as_of: str, db_path: Optiona
 
 
 # --------------------------------------------------------------------------- 5d. unverified assumptions
-def check_unverified_assumptions(db_path: Optional[Path]) -> List[Check]:
+def check_unverified_assumptions(db_path: Optional[Path], as_of: Optional[str] = None) -> List[Check]:
     """The FX vol feed (data/bloomberg/vol_marketdata.py) was written without Terminal
     access and lists every ticker / field / request-shape guess as 'UNVERIFIED' in its
     docstring. Since 2026-09-17, data/bloomberg/live.py's `_vol_step` requests every one
@@ -1044,7 +1060,9 @@ def check_unverified_assumptions(db_path: Optional[Path]) -> List[Check]:
     (SECURITY_ERROR / FIELD_EXCEPTION / a value outside the plausible vol-points range);
     WARNING "not yet exercised" when no live pull with options in the book has ever
     written anything to vol_ticker_checks (nothing to report on yet), or when only some
-    assumptions have evidence so far."""
+    assumptions have evidence so far. With no record and no open FX option in the book
+    (expiry on or after `as_of`, default the book date), PASS: nothing to check, as the OIS
+    and FX option coverage checks say."""
     try:
         import data.bloomberg.vol_marketdata as vm
     except Exception as exc:
@@ -1059,12 +1077,21 @@ def check_unverified_assumptions(db_path: Optional[Path]) -> List[Check]:
         conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
     except sqlite3.Error as exc:
         return [_row("FX vol ticker assumptions", "warning", f"Could not open {db_path} read-only ({exc}).")]
+    open_fx_options: Optional[int] = None
     try:
         checked = vm.read_vol_ticker_checks(conn)
+        try:
+            open_fx_options = conn.execute(
+                "SELECT COUNT(*) FROM trades_official t JOIN instruments i USING (instrument_id) "
+                "WHERE t.product = 'FX_OPTION' AND i.expiry_date >= ?", (as_of or _today_ny(),)).fetchone()[0]
+        except sqlite3.Error:
+            open_fx_options = None     # cannot tell: keep the warning below
     finally:
         conn.close()
 
     if not checked:
+        if open_fx_options == 0:
+            return [_row("FX vol ticker assumptions", "pass", "No FX options in the book; nothing to check.")]
         return [_row("FX vol ticker assumptions", "warning",
                      "not yet exercised: no live pull with options in the book has run.")]
 
@@ -1077,7 +1104,7 @@ def check_unverified_assumptions(db_path: Optional[Path]) -> List[Check]:
         last_checked = next(iter(failed.values()))["last_checked"]
         return [_row("FX vol ticker assumptions", "fail",
                      f"{len(failed)} of {len(expected)} FX vol ticker/field assumptions were rejected by "
-                     f"Bloomberg on the last live pull ({last_checked}): " + "; ".join(parts))]
+                     f"Bloomberg on the last live pull ({_hk_time(last_checked)}): " + "; ".join(parts))]
 
     if not_yet:
         return [_row("FX vol ticker assumptions", "warning",
@@ -1088,7 +1115,7 @@ def check_unverified_assumptions(db_path: Optional[Path]) -> List[Check]:
     return [_row("FX vol ticker assumptions", "pass",
                  f"All {len(expected)} FX vol ticker/field assumptions (ATM/RR/BF ticker shapes, PX_LAST "
                  f"field, 'ON' tenor, request type, vol-point scale) were confirmed by a real Bloomberg "
-                 f"response on the last live pull with options in the book ({last_checked}).")]
+                 f"response on the last live pull with options in the book ({_hk_time(last_checked)}).")]
 
 
 # --------------------------------------------------------------------------- 5e. clock
@@ -1178,11 +1205,11 @@ def check_last_pull(db_path: Optional[Path], as_of: Optional[str] = None) -> Lis
             stale_reason = None  # cannot verify freshness right now; report the plain status below
         if stale_reason:
             return [_row("Last marks pull", "fail",
-                         f"Last pull at {status.get('time', 'an unknown time')} looks stale: {stale_reason}")]
+                         f"Last pull {_hk_time(status.get('time', 'an unknown time'))} looks stale: {stale_reason}")]
         curve_points = status.get("curve_points_written") or 0
         extra = f" plus {curve_points} standard-tenor forward curve points" if curve_points else ""
         return [_row("Last marks pull", "pass",
-                     f"Last pull at {status.get('time', 'an unknown time')} wrote "
+                     f"Last pull {_hk_time(status.get('time', 'an unknown time'))} wrote "
                      f"{status.get('written', 0)} of {status.get('requested', 0)} requested marks{extra}.")]
     if status.get("connected"):
         # Item 3a (2026-09-17): "2 of 27 failed" alone forces the user to open the Market
@@ -1255,7 +1282,7 @@ def check_last_pull_commodity_blocks(db_path: Optional[Path]) -> List[Check]:
     status = read_status(db_path)
     if not status:
         return [_row(name, "warning", "not yet exercised: no Bloomberg pull has run on this database.")]
-    when = status.get("time", "an unknown time")
+    when = _hk_time(status.get("time", "an unknown time"))
     if not status.get("connected"):
         return [_row(name, "warning",
                      f"not yet exercised: the last pull ({when}) did not connect "
@@ -1392,7 +1419,7 @@ def run_bloomberg_diagnostics(db_path: Optional[str] = None, as_of: Optional[str
         conn.close()
         _safe("PC clock / New York date", check_clock, resolved_as_of)
 
-    _safe("FX vol ticker assumptions", check_unverified_assumptions, resolved_db)
+    _safe("FX vol ticker assumptions", check_unverified_assumptions, resolved_db, resolved_as_of)
 
     _safe("Last marks pull", check_last_pull, resolved_db, resolved_as_of)
     _safe("Past closes (backfill)", check_backfill_report, resolved_db)

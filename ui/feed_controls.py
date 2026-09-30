@@ -177,6 +177,24 @@ def short_time(text, now: Optional[datetime] = None) -> str:
     return f"{local:%a} {local.day} {local:%b} {local:%H:%M} NY"
 
 
+def _hk(moment: datetime) -> datetime:
+    from zoneinfo import ZoneInfo
+    return moment.astimezone(ZoneInfo("Asia/Hong_Kong"))
+
+
+def pull_time(text) -> str:
+    """When a Bloomberg pull (or a check, or a request) ran, as the user reads it from Hong Kong
+    (user, 2026-09-30: "for the last pull i would like the date and the time in hong kong"):
+    'Wed 30 Sep 13:36 HK', always with the date; the raw text when it is not a timestamp. A naive
+    value is this machine's local time (`_parse_time`). Exchange closes keep their 17:00 New York
+    stamp elsewhere (the Marks chip): this is only the time a press or a run happened."""
+    parsed = _parse_time(text)
+    if parsed is None:
+        return str(text or "")
+    local = _hk(parsed)
+    return f"{local:%a} {local.day} {local:%b} {local:%H:%M} HK"
+
+
 def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None,
                   feed_running: Optional[bool] = None, now: Optional[datetime] = None,
                   say_on_request: bool = True, say_recalc: bool = True) -> str:
@@ -198,7 +216,7 @@ def feed_headline(status: Optional[dict], interval_seconds: Optional[int] = None
         tail = f" · {ON_REQUEST_WORDS}" if say_on_request else ""
     if not status:
         return f"Bloomberg: no pull recorded yet{tail}"
-    when = short_time(status.get("time"), now)
+    when = pull_time(status.get("time"))
     if not status.get("connected"):
         line = f"Bloomberg: not connected — {status.get('reason') or 'unknown reason'}"
         recalc = recalc_words(status) if say_recalc else ""
@@ -264,8 +282,8 @@ def _joined(*parts: str) -> str:
 
 
 def _hhmm(text) -> str:
-    """The top bar's 'Last pull …' time: `short_time` ('09:14 NY' today, the day before it otherwise)."""
-    return short_time(text) if _parse_time(text) is not None else ""
+    """The top bar's 'Last pull …' time: `pull_time`, the date and Hong Kong time ('Wed 30 Sep 13:36 HK')."""
+    return pull_time(text) if _parse_time(text) is not None else ""
 
 
 def pull_problem_count(status: Optional[dict]) -> int:
@@ -299,10 +317,10 @@ def bar_state(status: Optional[dict], line: str) -> Tuple[str, str, str]:
     text (user, 2026-09-30: the pull errors "all in one place", the Data tab's Bloomberg card):
       - 'Pulling 31 of 47 marks…' while a pull runs (the progress sentence as given on hover);
       - 'No pull yet', 'Not connected' (red, the pointer on hover);
-      - 'Last pull 09:14 NY · 2 problems' after a failed (red) or partial (amber) pull, or a clean
+      - 'Last pull Wed 30 Sep 13:36 HK · 2 problems' after a failed (red) or partial (amber) pull, or a clean
         pull whose backfill reported problems (amber), hover '2 pull problems: see Bloomberg on
         the Data tab';
-      - 'Last pull 09:14 NY' (green) after a clean one.
+      - 'Last pull Wed 30 Sep 13:36 HK' (green) after a clean one.
     `line` (the status line, `feed_headline` or a click's) decides only the short state."""
     prog = progress_of(status)
     if prog and prog.get("running"):
@@ -490,7 +508,7 @@ def poll_outcome(status: Optional[dict], pending: Optional[dict], feed=None,
         return headline, True, True
     waited = seconds_waited(pending, now)
     if waited > PULL_TIMEOUT_SECONDS:
-        return (f"{NO_REPORT_HEAD}{short_time(pending.get('requested_at'), now)} after "
+        return (f"{NO_REPORT_HEAD}{pull_time(pending.get('requested_at'))} after "
                 f"{PULL_TIMEOUT_SECONDS} s"), True, False
     return f"Bloomberg: pull requested... {waited} s", False, False
 
