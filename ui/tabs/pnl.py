@@ -1041,6 +1041,7 @@ def _switch(id_: str, options: Sequence[Tuple[str, str]], default: str) -> dcc.R
 
 def layout(default_date: Optional[str] = None) -> html.Div:
     return html.Div(className="pnl-tab", children=[
+        html.Div(html.H2("P&L", className="tab-title"), className="tab-header"),
         html.Div(id=BODY_ID, children=[message_box("Loading the P&L...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
             html.Div(className="tk-strip tk-strip--controls", children=[

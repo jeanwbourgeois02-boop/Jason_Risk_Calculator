@@ -1909,6 +1909,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     table card with its strip (Expand all, Collapse all, Download CSV) and the footer; the session
     stores and the risk poll."""
     return html.Div(className="book-tab", children=[
+        html.Div(html.H2("Book", className="tab-title"), className="tab-header"),
         html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
             html.Div(className="book-card book-main tk-card", children=[

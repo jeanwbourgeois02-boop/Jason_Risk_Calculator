@@ -1099,6 +1099,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     """The shell: the message slot, then (hidden with no book) the bar, the headline, the table
     card, the folds and the footer; the session stores and the risk poll."""
     return html.Div(className="risk-tab", children=[
+        html.Div(html.H2("Risk", className="tab-title"), className="tab-header"),
         html.Div(id=BODY_ID, children=[message_box("Loading the risk figures...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
             html.Div(id=HEADLINE_ID),

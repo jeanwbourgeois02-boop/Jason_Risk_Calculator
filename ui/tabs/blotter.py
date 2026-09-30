@@ -1831,8 +1831,10 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     but hidden unless the book holds an open option (`_update` shows it), the banners, the
     trade-set store, the content (the last upload; the Options sub-tab when chosen), the fills
     card (static: its bar and table are drawn by `blotter_fills`' callbacks), the upload history
-    and the Data issues drawer. No title row and no date picker: the as-of is the header's store."""
+    and the Data issues drawer. The tab's name as its title (look pass 2026-09-30), no date picker:
+    the as-of is the header's store."""
     return html.Div(className="blotter", children=[
+        html.Div(html.H2("Blotter", className="tab-title"), className="tab-header"),
         dcc.Tabs(id=SUBTABS_ID, value=SCOPE_ORDER[0], className="subtabs", style=SUBTABS_HIDDEN, children=[
             dcc.Tab(label=SCOPE_LABELS[s], value=s, className="subtab",
                     selected_className="subtab--selected")

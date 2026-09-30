@@ -612,12 +612,13 @@ p { margin: 8px 0; }
    6px 10px cells, tabular numbers right-aligned, a hairline outline with an 8px radius (the card's, or
    the table's own when it stands alone), totals on #f1f3f8 under a 2px navy rule. */
 .book-card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.book-table { width: 100%; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; font-size: 12.5px;
+.book-table { width: 100%; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; font-size: 13px;
   background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
 .book-card:not(.card-pad) > .book-table, .blotter-fills-scroll > .book-table { border: none; }
 .blotter-fills-scroll { border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
-.book-table th { background: var(--navy); color: #fff; font-weight: 700; font-size: 12px; text-transform: none; letter-spacing: 0;
-  text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--navy); white-space: nowrap; }
+.book-table th { background: var(--navy); color: #fff; font-weight: 700; font-size: 13px; text-transform: none; letter-spacing: 0;
+  text-align: right; padding: 10px 12px; border-bottom: 1px solid var(--navy); border-right: 1px solid rgba(255,255,255,.14);
+  white-space: nowrap; }
 .book-table thead tr:first-child th:first-child { border-top-left-radius: 7px; }
 .book-table thead tr:first-child th:last-child { border-top-right-radius: 7px; }
 .book-table tbody tr:last-child td:first-child { border-bottom-left-radius: 7px; }
@@ -629,7 +630,10 @@ p { margin: 8px 0; }
 .book-table td.book-spark-cell { padding-top: 3px; padding-bottom: 3px; }
 .book-spark { display: block; margin-left: auto; width: 90px; height: 18px; }
 .book-table th.l, .book-table td.l { text-align: left; }
-.book-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; color: var(--text); }
+.book-table td { padding: 8px 12px; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); text-align: right;
+  white-space: nowrap; color: var(--text); }
+/* the hairline between columns, as the reference's dash_table draws it; none after the last column */
+.book-table th:last-child, .book-table td:last-child { border-right: none; }
 .book-table tbody tr:last-child td { border-bottom: none; }
 .book-table :where(tbody tr:nth-child(even)) td { background: var(--zebra); }  /* low weight: a row tint wins */
 .book-table tbody tr:hover td { background: var(--hover); }
@@ -741,7 +745,7 @@ p { margin: 8px 0; }
    with the Book line first and sticky under the heads, the footer (the pre-pull line, the last load, the
    Data issues drawer opening below it). No clipping box on the book card, so the heads stick under the
    top bar while the page scrolls. */
-.book-main { overflow: visible; margin: 0 0 16px; --book-head-h: 32px; }
+.book-main { overflow: visible; margin: 0 0 16px; --book-head-h: 40px; }
 .book-strip { padding: 10px 14px; border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; background: var(--card); }
 .book-strip-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .book-strip-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
@@ -763,11 +767,11 @@ p { margin: 8px 0; }
    the Book line sticky under the top bar */
 .book-main .book-table.book-grid { border: none; border-radius: 0; }
 .book-main .book-table.book-grid thead tr th, .book-main .book-table.book-grid tbody tr td { border-radius: 0; }
-.book-table.book-grid thead th { position: sticky; top: var(--top-bar-h); z-index: 3; line-height: 17px; height: var(--book-head-h, 32px); }
-.book-table.book-grid tr.book-total td { position: sticky; top: calc(var(--top-bar-h) + var(--book-head-h, 32px)); z-index: 2;
+.book-table.book-grid thead th { position: sticky; top: var(--top-bar-h); z-index: 3; line-height: 19px; height: var(--book-head-h, 40px); }
+.book-table.book-grid tr.book-total td { position: sticky; top: calc(var(--top-bar-h) + var(--book-head-h, 40px)); z-index: 2;
   border-top: none; border-bottom: 2px solid var(--navy); }
 .book-table.book-grid tr.book-total:hover td { background: var(--total-bg); }
-.book-table.book-grid td, .book-table.book-grid th { padding-left: 8px; padding-right: 8px; }
+.book-table.book-grid td, .book-table.book-grid th { padding-left: 12px; padding-right: 12px; }
 .book-table.book-grid th.book-sortable { user-select: none; }
 .book-table.book-grid th.book-sortable:hover { background: var(--navy-2); }
 /* the column filters (2026-09-29, spreadsheet style): the title sorts, the funnel opens its panel under the
@@ -1249,3 +1253,93 @@ p { margin: 8px 0; }
 .tk-table td.tk-size .tk-more { margin-left: 5px; }
 .tk-table td.tk-flags-cell { text-align: left; white-space: nowrap; }
 .tk-table .tk-flags-more { font-weight: 600; }
+
+/* ---------------------------------------------------------------- look pass 2 (2026-09-30)
+   User, on two shots of ../risk-monitor (its Ladder and Blotter): "the characters and tables - the
+   colours - i want the same vibe here - the same". The reference's type and air over the one kit, look
+   only (no column, section or control moves): hairline rules between columns, 13px navy heads with
+   room and 13px rows at 8px 12px (edited in the kit above), a sort glyph in every sortable heading at
+   all times (replacing "sort arrows on hover only"), the solid gold button, segmented switches as tall
+   and as bold as it, the tab's name as a large navy title, card titles as the reference's uppercase
+   section heading in ink, a header strip at the reference's sizes, and no secondary text below 11px. */
+
+/* the tab's name as its title (the reference's "Cash ladder" / "Blotter"): large, navy, top left */
+.tab-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px; margin: 4px 0 18px; min-height: 36px; }
+.tab-header .tab-title { margin: 0; font-size: 26px; font-weight: 600; line-height: 1.2; color: var(--navy);
+  letter-spacing: -.01em; text-transform: none; }
+.tab-header .tab-title .about-mark { font-size: 14px; vertical-align: 5px; }
+.market-data .tab-header .data-status-line { margin: 0; font-size: 13px; }
+
+/* the section heading of a card (the reference's h4 "CASH LADDER: ..."): uppercase, bold, ink */
+.tk-strip .tk-title, .book-section-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text); }
+.tk-strip .tk-title .about-mark, .book-section-title .about-mark { text-transform: none; }
+.tk-strip { padding: 10px 16px; gap: 8px 14px; min-height: 54px; }
+.pnl-chart-card .card-head { padding: 12px 14px 0; }
+/* the folds keep their sentence-case titles, at the heading's size and weight */
+.risk-fold-title, .blotter-fold-title { font-size: 14px; }
+.risk-fold-head { padding: 12px 16px; }
+.issues-drawer > summary, .details > summary { font-size: 13.5px; }
+
+/* the sort glyph (the reference's dash_table icon): muted, before every sortable title, always there */
+.book-table th .tk-sort::before { content: ""; display: inline-block; width: 7px; height: 11px; margin-right: 7px; vertical-align: -1px;
+  background: rgba(255,255,255,.5);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 12'%3E%3Cpath d='M4 0l4 5H0zM4 12L0 7h8z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 12'%3E%3Cpath d='M4 0l4 5H0zM4 12L0 7h8z'/%3E%3C/svg%3E") center / contain no-repeat; }
+.book-table th .tk-sort:hover::before { background: var(--gold); }
+.book-table th .book-sort-arrow { font-size: 10px; }
+.book-funnel { color: rgba(255,255,255,.6); }
+.dash-spreadsheet-container .dash-spreadsheet-inner th .column-actions,
+.dash-spreadsheet-container .dash-spreadsheet-inner th .sort { opacity: .6; }
+
+/* dash_table (the Options sub-tab): the same type and air as the kit */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td,
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th { font-size: 13px; }
+.dash-spreadsheet-container .dash-spreadsheet-inner th { padding: 10px 12px; font-size: 13px; }
+.dash-spreadsheet-container .dash-spreadsheet-inner td { padding: 8px 12px; }
+
+/* the buttons of a table's strip (Download CSV, Expand all, Collapse all): the reference's solid gold
+   button, bold navy text; the From-the-Book chip stays a quiet outline */
+.book-download, .tk-strip .btn--ghost:not(.blotter-from-book) { height: 32px; padding: 0 16px; border: none; border-radius: 6px;
+  background: var(--gold); color: var(--navy); font-family: inherit; font-size: 12.5px; font-weight: 700; line-height: 32px;
+  align-self: center; white-space: nowrap; cursor: pointer; transition: background .1s ease; }
+.book-download:hover, .tk-strip .btn--ghost:not(.blotter-from-book):hover { background: #b6911f; color: var(--navy); border: none; }
+.book-download:focus-visible, .tk-strip .btn--ghost:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+/* a segmented switch: as tall and as bold as the buttons, the chosen segment navy with its gold rule */
+.book-switch { font-size: 12.5px; font-weight: 700; border-color: #cfd5de; }
+.book-switch label { height: 32px; padding: 0 14px; color: var(--ink-2); }
+.tf-bar .book-switch, .tk-strip .book-switch { height: auto; }
+.tk-strip .tk-k, .tk-facts .tk-k, .tf-tools .tk-k { font-size: 11px; color: var(--text); }
+/* the search boxes at the same height, the reference's 13px */
+.tf-tools .tf-search, .blotter-filter-search, #blotter-fills-f-search { height: 32px; font-size: 13px; }
+.book-link-button { font-size: 12.5px; }
+
+/* the header strip at the reference's sizes: 11px uppercase titles at 65 %, 18px bold values */
+.header-figure-title { font-size: 11px; }
+.header-figure-value { font-size: 18px; font-weight: 700; }
+.header-chip { font-size: 12px; }
+.header-trades { font-size: 12px; color: rgba(255,255,255,.7); }
+.top-bar .sample-book-link, .top-bar .feed-pull-status { font-size: 12px; }
+
+/* secondary text: never below 11px, never washed out */
+.cell-unit { font-size: 11px; color: var(--muted); }
+.marker { font-size: 11px; color: var(--ink-2); }
+.tk-table .tk-sub, .book-coverage, .name-sub, .book-table .book-note, .book-leftover { font-size: 12px; }
+.book-section-meta, .book-strip-meta, .risk-fold-count, .risk-reach, .book-foot, .book-foot .issues-drawer > summary { font-size: 13px; }
+.tk-head-k { font-size: 11px; }
+.tk-head-v { font-size: 14px; font-weight: 700; }
+.tk-headline { gap: 6px 28px; margin-bottom: 14px; }
+.level-chip { font-size: 11px; }
+.tk-table.tk-legs, .tk-table.tk-legs tr.tk-leg td, .tk-table.tk-legs tfoot td { font-size: 12.5px; }
+.tk-table.tk-kv { font-size: 12.5px; }
+.tk-table.tk-kv td { padding: 6px 12px; }
+.issues-table { font-size: 12.5px; }
+.book-table.book-grid td.book-d0 { padding-left: 12px; }
+.subtab { font-size: 13.5px; }
+/* a wide screen (Jason's): What it is shows whole rather than clipped at the 1680 px width */
+@media (min-width: 2000px) {
+  .tk-table td.tk-what { max-width: 560px; }
+  .tk-table td.tk-what .tk-clip { max-width: 540px; }
+  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 400px; }
+}
+.blotter-upload-line .book-section-title { font-size: 11px; }

@@ -2145,9 +2145,12 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
     closed fold, the connection check button static inside it), the Data issues drawer. Every
     container is filled by the callbacks of `register_callbacks`."""
     return html.Div(className="market-data", children=[
-        about(TAB_TITLE, TAB_ABOUT, level="h3"),
-        # BODY_ID holds the one status line (the first output of the body callback)
-        html.Div(id=BODY_ID, className="status-line data-status-line", children=message_box("Loading...")),
+        # the tab's name as its title, the one status line beside it (look pass 2026-09-30);
+        # BODY_ID holds the status line (the first output of the body callback)
+        html.Div(className="tab-header", children=[
+            about(TAB_TITLE, TAB_ABOUT, level="h2", className="tab-title"),
+            html.Div(id=BODY_ID, className="status-line data-status-line", children=message_box("Loading...")),
+        ]),
         kit.card(id=MISSING_PANEL_ID, style=_HIDDEN, children=[
             kit.strip([kit.strip_title(PROBLEMS_TITLE, PROBLEMS_ABOUT),
                        html.Span(id=PROBLEMS_META_ID, className="book-section-meta"),

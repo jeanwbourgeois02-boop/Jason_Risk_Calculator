@@ -45,4 +45,5 @@
 - [Last screens pass 2026-09-29](last-screens-pass-2026-09-29.md) — Data fold titles sentence case, tables span cards, Blotter Size (fin_type lots, oz), leg_name strikes
 - [Column funnels 2026-09-29](column-funnels-2026-09-29.md) — filters only as heading funnels (trade_filter kit), no bar above tables; triggered-only sync; JS re-open; ui_check names kept
 - [Book headline/size/flags 2026-09-30](book-headline-size-flags-2026-09-30.md) — no line above the card (total row carries Gross/Net/flags), signed Size form, flag names, readable muted colours
+- [Look pass 2 2026-09-30](look-pass-2-2026-09-30.md) — risk-monitor vibe: 13px kit + column hairlines, sort glyph, gold buttons, tab titles; brackets/full figures refused
 - [No date picker 2026-09-30](no-date-picker-2026-09-30.md) — as-of = today NY; ?as_of= URL query for ui_check; hidden store keeps the poll's output shape
