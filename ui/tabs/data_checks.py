@@ -362,9 +362,12 @@ def unrecognised_problems(unrecognised: Optional[List[dict]]) -> Tuple[List[dict
 
 def problem_rows(mark_records: List[dict], status: Optional[dict], unpriced: Dict[str, Tuple[str, str]],
                  as_of: str, today: str, unrecognised: Optional[List[dict]] = None) -> List[dict]:
-    """Every problem: the missing and flagged marks (missing first), the contracts the parser could
-    not identify (`unrecognised`, red), the pull's and the backfill's failures, and the trades left
-    out of the P&L that nothing above explains; red before amber."""
+    """Every per-mark and per-trade problem: the missing and flagged marks (missing first), the
+    contracts the parser could not identify (`unrecognised`, red) and the trades left out of the P&L
+    that nothing above explains; red before amber. The pull's and the backfill's failures are not
+    here (2026-09-30, user: "all in one place"): they are the Bloomberg card's "Pull problems"
+    (`pull_problems`); `status` is kept in the signature for the callers."""
+    del status
     out: List[dict] = []
     covered: set = set()
     unrec, unrec_ids = unrecognised_problems(unrecognised)
@@ -386,19 +389,15 @@ def problem_rows(mark_records: List[dict], status: Optional[dict], unpriced: Dic
         out.append(_problem("red", "No P&L", name, plain_words(reason) or "no price from any source",
                             "Its P&L is left out of every total (excl. on the Book)", price_tip=tid,
                             problem_tip=reason, rank=1))
-    pulls = pull_problems(status)
-    if not mark_records:          # nothing needed: "no pull yet" blocks nothing
-        pulls = [p for p in pulls if p["label"] != "No pull"]
-    out += pulls
     out.sort(key=lambda p: (p["rank"], p["price"]))
     return out
 
 
 PROBLEM_COLUMNS: Tuple[kit.Column, ...] = (
     ("label", "Status", "l", "Missing: no official price for the date. Check: a price arrived but failed a check. "
-                             "Failed / Partial: a step of the last pull. No P&L: a trade nothing can price. Not recognised: a "
+                             "No P&L: a trade nothing can price. Not recognised: a "
                              "row of the blotter whose contract the app does not know (on file, no P&L until mapped).", True),
-    ("price", "Price", "l", "The price with its exchange, or the pull step.", True),
+    ("price", "Price", "l", "The price with its exchange, or the trade.", True),
     ("problem", "Problem", "l", "What is wrong, in plain words; the full sentence on hover.", True),
     ("blocks", "What it blocks", "l", "What the problem does to the book's figures, and which trades.", True),
 )
@@ -759,3 +758,306 @@ def left_out_block(status: Optional[dict]) -> Optional[html.Table]:
     return kit.table(kit.head(cols, None, "data-left-none"), [html.Tr([
         kit.td(what, left=True), kit.td(words, left=True, title=items or None)]) for what, words, items in rows],
         className="tk-small")
+
+
+# ---------------------------------------------------------------------------- the Bloomberg card (2026-09-30)
+# User, 2026-09-30: "this error thing for the bloomberg pull i see it everywhere ... lets all have it
+# in the bloomberg diagnostics section in the data tab please - all in one place". The last pull in
+# one line, its failures in full ("Pull problems"), the on-demand check's results.
+def bloomberg_line(status: Optional[dict], no_pull: bool = False) -> Tuple[str, str]:
+    """(the last pull in one line, its detail for the hover): "Last pull Wed 30 Sep 09:12 · 45 marks
+    written, 2 failed · Past closes: history complete"."""
+    from ui.feed_controls import short_time
+    s = status or {}
+    if not s or no_pull:
+        return ("No Bloomberg pull yet with this book",
+                "No Bloomberg pull has run with this database: press Pull Bloomberg now.")
+    when = short_time(s.get("time")) if s.get("time") else ""
+    head = f"Last pull {when}" if when else "Last pull"
+    if s.get("connected") is False:
+        reason = plain_words(s.get("reason")) or "reason not recorded"
+        body = f"not connected: {reason}"
+    else:
+        written = int(s.get("written") or 0)
+        body = f"{written:,} mark{'' if written == 1 else 's'} written, {int(s.get('failed') or 0):,} failed"
+    fill_words, fill_hover = backfill_facts(s)
+    line = f"{head} · {body} · Past closes: {fill_words[:1].lower() + fill_words[1:]}"
+    steps_words, steps_hover = pull_facts(s)
+    return line, "; ".join(x for x in (steps_hover or steps_words, fill_hover) if x)
+
+
+PULL_PROBLEM_COLUMNS: Tuple[kit.Column, ...] = (
+    ("label", "Status", "l", "Failed or Partial: a step of the last pull or of its backfill of past closes. Check: a "
+                             "value Bloomberg sent that is not a number.", False),
+    ("price", "What", "l", "The step of the pull, or the past close.", False),
+    ("problem", "Problem", "l", "What went wrong, in Bloomberg's or the pull's own words.", False),
+    ("blocks", "What it blocks", "l", "What it leaves the book's figures with.", False),
+)
+
+
+def pull_problems_table(rows: List[dict]) -> html.Table:
+    """The pull's and the backfill's problems (`pull_problems`), each in its full sentence: the one
+    place in the app a pull or backfill error is written out."""
+    if not rows:
+        return kit.table(kit.head(PULL_PROBLEM_COLUMNS, None, "data-pull-none"), [kit.note_row(
+            "No failed or partial step in the last pull or its backfill.", len(PULL_PROBLEM_COLUMNS),
+            "cell-missing")], className="tk-small")
+    body = []
+    for p in sorted(rows, key=lambda r: (r["rank"], r["price"])):
+        full = p["problem_tip"] if p["problem_tip"] and len(p["problem_tip"]) > len(p["problem"]) else p["problem"]
+        body.append(html.Tr([
+            kit.td(kit.chip(p["label"], p["level"]), left=True),
+            kit.td(cap(p["price"]), left=True, title=p["price_tip"] or None),
+            kit.td(cap_parts(plain_words(full)), left=True),
+            kit.td(cap_parts(p["blocks"]), left=True, title=p["blocks_tip"] or None),
+        ]))
+    return tidy(kit.table(kit.head(PULL_PROBLEM_COLUMNS, None, "data-pull-none"), body,
+                          className="tk-small data-pull-problems"))
+
+
+def connection_table(checks: list) -> html.Table:
+    """The fast local checks (`tools.bbg_diagnostics.run_bloomberg_diagnostics`): Result · Check ·
+    What it found, failures first."""
+    cols: Tuple[kit.Column, ...] = (("result", "Result", "l", "Pass, warning or fail.", False),
+                                    ("name", "Check", "l", "What was checked.", False),
+                                    ("message", "What it found", "l", "The check's own sentence.", False))
+    if not checks:
+        return kit.table(kit.head(cols, None, "data-bbg-none"),
+                         [kit.note_row("No check was returned.", len(cols), "cell-missing")],
+                         className="tk-small data-bbg-results")
+    level = {"pass": "green", "warning": "amber", "fail": "red"}
+    words = {"pass": "Pass", "warning": "Warning", "fail": "Fail"}
+    order = {"fail": 0, "warning": 1, "pass": 2}
+    body = []
+    for c in sorted(checks, key=lambda c: order.get(str(c.get("status")), 1)):
+        status = str(c.get("status", "warning"))
+        body.append(html.Tr([kit.td(kit.chip(words.get(status, cap(status)), level.get(status, "grey")), left=True),
+                             kit.td(cap(str(c.get("name", ""))), left=True),
+                             kit.td(cap_parts(str(c.get("message", ""))), left=True)]))
+    return tidy(kit.table(kit.head(cols, None, "data-bbg-none"), body, className="tk-small data-bbg-results"))
+
+
+# One heading kit for the two diagnostic tables: every title sorts, the listed columns filter from a
+# tick list in their funnel (spreadsheet-style, as the marks check). `lists`: {column key: (the row's
+# field, the funnel's words)}; the filter state is {field: [values ticked]}.
+def list_options(rows: Optional[List[dict]], field: str, order: Optional[Dict[str, int]] = None,
+                 words: Optional[Dict[str, str]] = None) -> List[dict]:
+    """The values of `field` present in `rows`, each with its count, in `order` then by name."""
+    counts: Dict[str, int] = {}
+    for r in rows or []:
+        v = str(r.get(field) or "")
+        if v:
+            counts[v] = counts.get(v, 0) + 1
+    keys = sorted(counts, key=lambda k: ((order or {}).get(k, 99), k))
+    return [{"label": f"{(words or {}).get(k, k)} ({counts[k]:,})", "value": k} for k in keys]
+
+
+def filter_rows(rows: Optional[List[dict]], state: Optional[dict], fields: Tuple[str, ...]) -> List[dict]:
+    """The rows whose `fields` are among the values ticked (nothing ticked = all)."""
+    st = state or {}
+    picks = {f: {str(v) for v in st.get(f) or []} for f in fields}
+    return [r for r in rows or [] if all(not p or str(r.get(f) or "") in p for f, p in picks.items())]
+
+
+def normal_list_filter(state: Optional[dict], fields: Tuple[str, ...]) -> Dict[str, List[str]]:
+    st = state or {}
+    return {f: [str(v) for v in st.get(f) or [] if v is not None] for f in fields}
+
+
+def funnel_head(columns, sort: Optional[dict], sort_type: str, state: Optional[dict], col_type: str,
+                lists: Dict[str, Tuple[str, str]], options: Dict[str, List[dict]], prefix: str) -> html.Thead:
+    """The heads: each title sorts; the columns in `lists` filter from a tick list in their funnel."""
+    from ui.tabs.trade_filter import arrow_of, funnel, head_th, option_words, pop_list
+    st = state or {}
+    half = len(columns) // 2
+    cells = []
+    for i, (key, title, cls, tip, sortable) in enumerate(columns):
+        pop = None
+        if key in lists:
+            field, words = lists[key]
+            ticked = [str(v) for v in st.get(field) or []]
+            opts = options.get(field) or []
+            pop = funnel(f"{prefix}:{field}", pop_list({"type": col_type, "part": field}, words, opts, ticked),
+                         bool(ticked), f"{words}: {option_words(opts, ticked)}" if ticked else "")
+        cells.append(head_th(title, cls, tip, sort_id={"type": sort_type, "idx": key} if sortable else None,
+                             arrow=arrow_of(sort, key), pop=pop, right=i > half))
+    return html.Thead(html.Tr(cells))
+
+
+def _text_key(field: str) -> Callable[[dict], Any]:
+    return lambda r: str(r.get(field) or "").lower() or None
+
+
+# ---- "The book's tickers" (`data.bloomberg.ticker_check.check_book`)
+TICKER_ORDER = {"ERROR": 0, "CHECK": 1, "NO ANSWER": 2, "OK": 3}
+TICKER_WORDS = {"ERROR": "Error", "CHECK": "Check", "NO ANSWER": "No answer", "OK": "OK"}
+TICKER_LEVEL = {"ERROR": "red", "CHECK": "amber", "NO ANSWER": "amber", "OK": "green"}
+TICKER_COLUMNS: Tuple[kit.Column, ...] = (
+    ("status", "Status", "l", "OK: Bloomberg agrees with ours. Check: it answered something else. No answer: it did not "
+                              "answer for this ticker. Error: the request failed.", True),
+    ("area", "Area", "l", "What part of the book the ticker serves.", True),
+    ("what", "What", "l", "The contract, curve or conversion; its instrument on hover.", True),
+    ("ticker", "Ticker", "l", "The Bloomberg ticker asked.", True),
+    ("bloomberg", "Bloomberg", "l", "What Bloomberg answered.", True),
+    ("ours", "Ours", "l", "What the app holds for it.", True),
+    ("fix", "What to do", "l", "The finding, and what to change if anything; Bloomberg's field names kept.", True),
+)
+TICKER_LISTS = {"status": ("status", "Status"), "area": ("area", "Area")}
+TICKER_FIELDS = ("status", "area")
+TICKER_SORT: Dict[str, Callable[[dict], Any]] = {
+    "status": lambda r: (TICKER_ORDER.get(str(r.get("status")), 9), str(r.get("area") or "")),
+    **{k: _text_key(k) for k in ("area", "what", "ticker", "bloomberg", "ours", "fix")},
+}
+TICKER_CSV_COLUMNS = ["status", "area", "what", "instrument_id", "ticker", "bloomberg", "ours", "message", "fix"]
+
+
+def ticker_table(rows: List[dict], sort: Optional[dict], sort_type: str, state: Optional[dict], col_type: str,
+                 total: int, all_rows: Optional[List[dict]] = None) -> html.Table:
+    """The book's tickers against Bloomberg, problems first (the check's own order), the total row
+    first; Status and Area filter from their funnels."""
+    every = all_rows if all_rows is not None else rows
+    options = {"status": list_options(every, "status", TICKER_ORDER, TICKER_WORDS), "area": list_options(every, "area")}
+    head = funnel_head(TICKER_COLUMNS, sort, sort_type, state, col_type, TICKER_LISTS, options, "data-tick")
+    bad = sum(1 for r in rows if str(r.get("status")) != "OK")
+    label = f"All tickers · {total:,}" if len(rows) == total else f"Filtered · {len(rows):,} of {total:,} tickers"
+    label += f" · {bad:,} to look at" if bad else ""
+    body = [kit.total_row([html.Td(label, colSpan=len(TICKER_COLUMNS), className="l")])]
+    for r in kit.sort_records(rows, sort, TICKER_SORT):
+        st = str(r.get("status") or "")
+        message, fix = str(r.get("message") or ""), str(r.get("fix") or "")
+        todo = fix or message
+        body.append(html.Tr([
+            kit.td(kit.chip(TICKER_WORDS.get(st, cap(st)), TICKER_LEVEL.get(st, "grey"), message or None), left=True),
+            kit.td(cap(str(r.get("area") or "")) or MISSING, left=True),
+            kit.td(cap(str(r.get("what") or "")) or MISSING, left=True, title=str(r.get("instrument_id") or "") or None),
+            kit.td(str(r.get("ticker") or "") or missing_cell("no ticker asked"), left=True),
+            kit.td(cap(str(r.get("bloomberg") or "")) or missing_cell("no answer"), left=True),
+            kit.td(cap(str(r.get("ours") or "")) or MISSING, left=True),
+            kit.td(cap_parts(todo) or MISSING, left=True, title=message if fix and message else None),
+        ]))
+    return tidy(kit.table(head, body, className="tk-small data-ticker-table"))
+
+
+# ---- the parsing check (`data.ingest.parse_check.check_file`)
+PARSE_ORDER = {"NOT RECOGNISED": 0, "WARNING": 1, "CANCELS": 2, "EXCLUDED": 3, "OK": 4}
+PARSE_WORDS = {"NOT RECOGNISED": "Not recognised", "WARNING": "Warning", "CANCELS": "Cancels", "EXCLUDED": "Excluded",
+               "OK": "OK"}
+PARSE_LEVEL = {"NOT RECOGNISED": "red", "WARNING": "amber", "CANCELS": "grey", "EXCLUDED": "grey"}
+UPLOAD_WOULD = {"new": "New", "replaces": "Replaces", "removes": "Removes", "": "Nothing"}
+PARSE_COLUMNS: Tuple[kit.Column, ...] = (
+    ("row", "Row", "", "The row of the file (the header is row 1).", True),
+    ("trade_id", "Trade Id", "l", "The file's Trade Id, the upload's merge key.", True),
+    ("symbol", "Symbol", "l", "The Symbol cell as written in the file; its Fin Type on hover.", True),
+    ("read_as", "Read as", "l", "The contract the app reads it as; its id and Bloomberg ticker on hover.", True),
+    ("side", "Side", "l", "Buy or Sell, as the file says.", True),
+    ("size", "Size", "", "The quantity and its unit.", True),
+    ("price", "Price", "", "The Price cell as written; when the broker's units differ, the price used after it.", True),
+    ("expiry", "Expiry", "l", "The contract's expiry, prompt or value date.", True),
+    ("trade_type", "Trade type", "l", "The type the PBRoot decimal names.", True),
+    ("upload", "Upload would", "l", "What an upload of this file would do with the row against the book on file.", True),
+    ("status", "Status", "l", "OK, Warning (loads with a warning), Not recognised (loads with no P&L until the contract "
+                              "is known), Excluded (not a trade of this book), Cancels (removes the trade it names).",
+     True),
+    ("message", "Note", "l", "The parser's own sentence.", True),
+)
+PARSE_LISTS = {"read_as": ("product", "Product"), "upload": ("upload", "Upload would"), "status": ("status", "Status")}
+PARSE_FIELDS = ("product", "upload", "status")
+PARSE_CSV_COLUMNS = ["row_no", "trade_id", "symbol", "fin_type", "status", "product", "instrument_id", "bbg_ticker",
+                     "expiry", "trade_date", "side", "quantity", "unit", "price_in_file", "price_used", "price_factor",
+                     "strategy", "pb_root", "trade_type", "on_file", "message"]
+_FX_PRODUCTS = ("FX forward", "FX spot", "FX option", "FX swap")
+
+
+def _read_as(r: dict) -> str:
+    """'WTI Dec26 · Future', 'USDCNH · FX forward'; '' for a row not read as a contract."""
+    from ui.tabs.formatting import plain_ids
+    product = str(r.get("product") or "")
+    iid = str(r.get("instrument_id") or "")
+    if not iid or iid.startswith("UNRECOGNISED") or str(r.get("status")) == "NOT RECOGNISED":
+        return ""
+    name = iid[:6] if product in _FX_PRODUCTS and len(iid) >= 6 else plain_ids(iid)
+    return f"{name} · {product}" if product else name
+
+
+def _abs_qty(r: dict) -> Optional[float]:
+    try:
+        return abs(float(r["quantity"])) if r.get("quantity") is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+PARSE_SORT: Dict[str, Callable[[dict], Any]] = {
+    "row": lambda r: r.get("row_no"),
+    "status": lambda r: (PARSE_ORDER.get(str(r.get("status")), 9), r.get("row_no") or 0),
+    "read_as": lambda r: _read_as(r).lower() or None,
+    "size": _abs_qty,
+    "price": lambda r: r.get("price_used"),
+    "expiry": lambda r: str(r.get("expiry") or "") or None,
+    "upload": lambda r: str(r.get("upload") or ""),
+    **{k: _text_key(k) for k in ("trade_id", "symbol", "side", "trade_type", "message")},
+}
+
+
+def parse_records(result: Optional[dict]) -> List[dict]:
+    """The check's rows with the display field `upload` added, problems first then file order."""
+    out = []
+    for r in (result or {}).get("rows") or []:
+        rec = dict(r)
+        rec["upload"] = UPLOAD_WOULD.get(str(r.get("on_file") or ""), "Nothing")
+        out.append(rec)
+    out.sort(key=lambda r: (PARSE_ORDER.get(str(r.get("status")), 9), r.get("row_no") or 0))
+    return out
+
+
+def _figure(value) -> str:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return str(value or "")
+    return f"{v:,.0f}" if v == int(v) else f"{v:,.6g}"
+
+
+def parse_table(rows: List[dict], sort: Optional[dict], sort_type: str, state: Optional[dict], col_type: str,
+                total: int, all_rows: Optional[List[dict]] = None) -> html.Table:
+    """The file's rows as an upload would read them, problems first; Read as (its product), Upload
+    would and Status filter from their funnels."""
+    every = all_rows if all_rows is not None else rows
+    options = {"product": list_options(every, "product"),
+               "upload": list_options(every, "upload", {"New": 0, "Replaces": 1, "Removes": 2, "Nothing": 3}),
+               "status": list_options(every, "status", PARSE_ORDER, PARSE_WORDS)}
+    head = funnel_head(PARSE_COLUMNS, sort, sort_type, state, col_type, PARSE_LISTS, options, "data-parse")
+    bad = sum(1 for r in rows if str(r.get("status")) in ("NOT RECOGNISED", "WARNING"))
+    label = f"All rows · {total:,}" if len(rows) == total else f"Filtered · {len(rows):,} of {total:,} rows"
+    label += f" · {bad:,} to look at" if bad else ""
+    body = [kit.total_row([html.Td(label, colSpan=len(PARSE_COLUMNS), className="l")])]
+    for r in kit.sort_records(rows, sort, PARSE_SORT):
+        st = str(r.get("status") or "")
+        read = _read_as(r)
+        hover = " · ".join(x for x in (str(r.get("instrument_id") or ""), str(r.get("bbg_ticker") or "")) if x)
+        q = _abs_qty(r)
+        unit = str(r.get("unit") or "")
+        unit = f"({unit})" if " " in unit else unit          # "5 (as in the file)", "10 lots"
+        size = f"{_figure(q)} {unit}".strip() if q is not None else missing_cell("this row writes no trade")
+        price: Any = str(r.get("price_in_file") or "") or MISSING
+        factor = r.get("price_factor")
+        if r.get("price_used") is not None and factor not in (None, 1, 1.0):
+            price = html.Span([price, html.Span(f" → {_figure(r['price_used'])} (×{_figure(factor)})",
+                                                className="cell-unit")])
+        expiry = str(r.get("expiry") or "")
+        level = PARSE_LEVEL.get(st)
+        status = kit.chip(PARSE_WORDS.get(st, cap(st)), level) if level else PARSE_WORDS.get(st, cap(st))
+        body.append(html.Tr([
+            kit.td(str(r.get("row_no") or "")),
+            kit.td(str(r.get("trade_id") or "") or MISSING, left=True),
+            kit.td(str(r.get("symbol") or "") or MISSING, left=True, title=str(r.get("fin_type") or "") or None),
+            kit.td(read or missing_cell(r.get("message") or "not read as a contract"), left=True, title=hover or None),
+            kit.td(str(r.get("side") or "") or MISSING, left=True),
+            kit.td(size),
+            kit.td(price, title=f"Price used {_figure(r['price_used'])}" if r.get("price_used") is not None else None),
+            kit.td(short_date(expiry) if expiry else MISSING, left=True, title=expiry or None),
+            kit.td(cap(str(r.get("trade_type") or "")) or MISSING, left=True, title=str(r.get("pb_root") or "") or None),
+            kit.td(r.get("upload") or "Nothing", left=True),
+            kit.td(status, left=True),
+            html.Td(cap_parts(str(r.get("message") or "")), className="l data-parse-note"),
+        ]))
+    return tidy(kit.table(head, body, className="tk-small data-parse-table"))

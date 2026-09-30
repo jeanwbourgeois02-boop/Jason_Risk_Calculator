@@ -129,6 +129,7 @@ import math
 import numbers
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -277,6 +278,10 @@ _DAY_FIRST = True
 # Set by parse() for the duration of one file: the connection whose stored Bloomberg contract
 # dates (data.contracts' contract_static) replace the estimated expiry, or None.
 _CONTRACT_CONN: Optional[sqlite3.Connection] = None
+# Held for the whole of parse() (so load() and resolve_stored() are covered too): the two globals
+# above belong to one file at a time, and the Dash callbacks that parse (an upload, the Data tab's
+# parsing check) run in threads that can overlap. Re-entrant, so a parse inside a parse is fine.
+_PARSE_LOCK = threading.RLock()
 # Free-text markers of a non-vanilla payoff, matched as whole words on the Description /
 # FxOption Type / Notes text. Order matters: the first hit wins.
 _PAYOFF_KEYWORDS = (
@@ -939,7 +944,13 @@ def parse(source: Union[str, Path, bytes, pd.DataFrame], filename: Optional[str]
     """Pure parse of a blotter (path, bytes or an already-read DataFrame). Never writes;
     never coerces a contradictory row. ``book`` is the row filter: a ``BookFilter``, a path
     to a book.yaml, or None for ``config/book.yaml``. ``conn`` (read only) lets a future's
-    stored Bloomberg contract dates replace the estimated expiry."""
+    stored Bloomberg contract dates replace the estimated expiry. One parse at a time
+    (``_PARSE_LOCK``: the file's date order and contract connection are module globals)."""
+    with _PARSE_LOCK:
+        return _parse_locked(source, filename, book=book, conn=conn)
+
+
+def _parse_locked(source, filename, *, book, conn) -> ParseResult:
     df = source if isinstance(source, pd.DataFrame) else read_table(source, filename)
     df = canonicalize_columns(df).reset_index(drop=True)
     res = ParseResult()

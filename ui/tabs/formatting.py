@@ -664,6 +664,13 @@ def head_info(reasons):
 # "ladder", "market-data"; never the label). An unknown key does nothing when clicked.
 TAB_LINK_TYPE = "tab-link"
 
+# The one pointer to where a Bloomberg pull or backfill problem is written out (user, 2026-09-30:
+# "lets all have it in the bloomberg diagnostics section in the data tab please - all in one
+# place"): every other screen says this at most, never the error itself. The Data tab's key and
+# the id of its Bloomberg card, for a link to it.
+DATA_POINTER = "See Bloomberg on the Data tab"
+DATA_TAB_KEY = "market-data"
+
 
 def tab_link_id(tab_key: str, idx: str) -> dict:
     """The pattern-matching id of a tab link: {"type": "tab-link", "tab": <key>, "idx": <idx>}."""

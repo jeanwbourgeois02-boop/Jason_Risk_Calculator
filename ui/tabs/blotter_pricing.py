@@ -737,14 +737,13 @@ def _nothing_priced_reason(unpriced: pd.DataFrame, day: str) -> str:
 def _reference_missing_reason(b_unpriced: pd.DataFrame, ref_day: str, n_blocked: int, n_open: int,
                               conn: Optional[sqlite3.Connection] = None) -> str:
     """Why a period difference cannot be formed: most trades open on `ref_day` are
-    unpriced there (mirrors `ui/tabs/header.py::_reference_reason`, row-scoped). Ends with
-    what the backfill itself reports about that date (the header's
-    `past_close_explanation`, read from the status file beside `conn`'s database), since a
-    past day's close only ever arrives that way and no screen has a control that runs it."""
-    from ui.tabs.header import backfill_status, past_close_explanation
+    unpriced there (mirrors `ui/tabs/header.py::_reference_reason`, row-scoped). Ends with the
+    pointer to the Data tab, the one place what the backfill reported is written (user,
+    2026-09-30); `conn` is kept for the callers that pass it."""
+    from ui.tabs.formatting import DATA_POINTER
     breakdown = _unpriced_breakdown(b_unpriced)
     return (f"needs the {ref_day} close: {n_blocked} of {n_open} trades open that day have no official mark there"
-            + (f" ({breakdown})" if breakdown else "") + " -- " + past_close_explanation(backfill_status(conn), ref_day))
+            + (f" ({breakdown})" if breakdown else "") + f". {DATA_POINTER}.")
 
 
 def _scoped_frame(conn: sqlite3.Connection, date: str, trade_ids) -> pd.DataFrame:

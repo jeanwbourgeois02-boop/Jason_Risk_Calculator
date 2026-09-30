@@ -175,7 +175,7 @@ from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import data_kit as kit
 from ui.tabs import ranking as rk
 from ui.tabs import trade_filter as tf
-from ui.tabs.formatting import (MINUS, MISSING, amount_words, cap, cap_lines, format_cell, fx_name,
+from ui.tabs.formatting import (DATA_POINTER, MINUS, MISSING, amount_words, cap, cap_lines, format_cell, fx_name,
                                 is_fx_pair, issues_drawer, km_text, plain_ids, plain_words, strike_text)
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -501,7 +501,9 @@ def _feed_step_error(step: dict) -> str:
     error = step.get("error")
     if not error:
         return ""
-    return f"the last Pull Bloomberg now ({step.get('as_of_date')}) failed in its options step: {error}"
+    # 2026-09-30 (user: the Bloomberg errors "all in one place"): the error itself is written on the
+    # Data tab only; here the leg says the step did not finish and where to look.
+    return f"the last Bloomberg pull's options step did not finish. {DATA_POINTER}"
 
 
 def _usd_greeks(conn: sqlite3.Connection, as_of: str, rec: dict, marks: dict) -> Tuple[dict, str]:

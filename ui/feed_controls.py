@@ -52,6 +52,7 @@ from typing import Callable, Optional, Tuple
 from dash import Input, Output, State, dcc, html, no_update
 
 from ui import revision
+from ui.tabs.formatting import DATA_POINTER
 
 PULL_BUTTON_ID = "feed-pull-now"
 PULL_STATUS_ID = "feed-pull-status"
@@ -267,44 +268,103 @@ def _hhmm(text) -> str:
     return short_time(text) if _parse_time(text) is not None else ""
 
 
+def pull_problem_count(status: Optional[dict]) -> int:
+    """How many pull and backfill problems the Data tab lists for this status file
+    (`ui.tabs.data_checks.pull_problems`, read, never re-worded here), less its "no pull yet"
+    row, which is a state, not a problem. 0 when it cannot be read."""
+    if not status:
+        return 0
+    try:
+        from ui.tabs.data_checks import pull_problems   # local: data_checks imports this module
+        rows = pull_problems(status)
+    except Exception:  # noqa: BLE001 -- the top bar must never fail on a problem count
+        return 0
+    return sum(1 for r in rows if isinstance(r, dict) and r.get("label") != "No pull")
+
+
+def problems_words(n: int) -> str:
+    return f"{n} {'problem' if n == 1 else 'problems'}"
+
+
+def problems_pointer(n: int) -> str:
+    """The top bar's hover for a pull that did not go cleanly: the count and where it is written."""
+    return f"{n} pull {'problem' if n == 1 else 'problems'}: see Bloomberg on the Data tab"
+
+
+NO_REPORT_HEAD = "Bloomberg: no report from the pull asked at "
+
+
 def bar_state(status: Optional[dict], line: str) -> Tuple[str, str, str]:
-    """(dot colour key, the two or three words, the hover) of the top bar (Phase G, 2026-09-29):
-    'Pulling 31 of 47 marks…' while a pull runs (the progress sentence AS GIVEN on hover, its first
-    clause in the bar; never re-worded here), 'Last pull 09:14' after one, 'Pull failed' / 'Pull
-    partial' with the final sentence when it ended so, else the short state of `line`."""
+    """(dot colour key, the few words, the hover) of the top bar. A state only, never an error
+    text (user, 2026-09-30: the pull errors "all in one place", the Data tab's Bloomberg card):
+      - 'Pulling 31 of 47 marks…' while a pull runs (the progress sentence as given on hover);
+      - 'No pull yet', 'Not connected' (red, the pointer on hover);
+      - 'Last pull 09:14 NY · 2 problems' after a failed (red) or partial (amber) pull, or a clean
+        pull whose backfill reported problems (amber), hover '2 pull problems: see Bloomberg on
+        the Data tab';
+      - 'Last pull 09:14 NY' (green) after a clean one.
+    `line` (the status line, `feed_headline` or a click's) decides only the short state."""
     prog = progress_of(status)
     if prog and prog.get("running"):
         sentence = str(prog.get("sentence") or "Pulling")
         head = sentence.split(" · ", 1)[0].strip() or "Pulling"
         return "pulling", head + "…", sentence
-    state = short_state(line)
-    if prog and prog.get("outcome") in ("failed", "partial"):
-        final = str(prog.get("sentence") or prog.get("final_sentence") or "")
-        word = "Pull failed" if prog.get("outcome") == "failed" else "Pull partly failed"
-        return ("not connected" if prog.get("outcome") == "failed" else "refused"), word, _joined(final, line)
-    if state == "connected":
-        when = _hhmm((status or {}).get("time"))
-        final = str((prog or {}).get("sentence") or "")
-        return "connected", (f"Last pull {when}" if when else "Connected"), _joined(line, final)
-    return state, state[:1].upper() + state[1:], line
+    text = str(line or "")
+    if text.startswith(NO_REPORT_HEAD):
+        return "refused", "No report yet", (text.replace("Bloomberg: no", "No", 1)
+                                             + f". {DATA_POINTER}.")
+    state = short_state(text)
+    if state == "no pull yet":
+        return state, "No pull yet", "No Bloomberg pull has run yet: press Pull Bloomberg now"
+    if state == "pulling":
+        return state, "Pulling…", "A Bloomberg pull was asked for and has not reported yet"
+    status = status or {}
+    n = pull_problem_count(status)
+    when = _hhmm(status.get("time"))
+    outcome = str((prog or {}).get("outcome") or "")
+    if state == "not connected" or (not status.get("connected") and status):
+        return "not connected", "Not connected", (problems_pointer(n) if n else
+                                                  f"Bloomberg is not connected. {DATA_POINTER}.")
+    if outcome in ("failed", "partial") or n:
+        key = "not connected" if outcome == "failed" else "refused"
+        head = f"Last pull {when}" if when else ("Pull failed" if outcome == "failed" else "Pull partly failed")
+        return key, (f"{head} · {problems_words(n)}" if n else head), (problems_pointer(n) if n else
+                                                                        f"{head}. {DATA_POINTER}.")
+    if state == "connected" or status.get("connected"):
+        hover = f"Last Bloomberg pull {when}" if when else "Bloomberg connected"
+        written = status.get("written")
+        if isinstance(written, int):
+            hover += f": {written:,} {'mark' if written == 1 else 'marks'} written"
+        took = seconds_words(pull_timings(status).get("total"))
+        if took:
+            hover += f", took {took}"
+        return "connected", (f"Last pull {when}" if when else "Connected"), hover
+    return state, state[:1].upper() + state[1:], f"{DATA_POINTER}."
+
+
+def _data_link(child, hover: str):
+    """The top bar's Bloomberg state as a link to the Data tab (`formatting.tab_link`, the one
+    pattern callback in `ui/app.py`), looking as before (the link's own faded text undone)."""
+    from ui.tabs.formatting import DATA_TAB_KEY, tab_link
+    link = tab_link(child, DATA_TAB_KEY, "top-feed-status", title=hover)
+    link.style = {"opacity": 1, "fontSize": "inherit", "color": "inherit"}
+    return link
 
 
 def bar_view(status: Optional[dict], line: str) -> Tuple[html.Span, str]:
-    """(the top bar's Bloomberg element, its hover) from the status file and the status line."""
+    """(the top bar's Bloomberg element, a link to the Data tab, and its hover) from the status
+    file and the status line."""
     key, words, hover = bar_state(status, line)
-    return html.Span(className="feed-state", children=[
+    return _data_link(html.Span(className="feed-state", children=[
         html.Span(className="header-dot", style={"background": _STATE_DOTS.get(key, "#f59e0b")}),
-        html.Span(words)]), hover
+        html.Span(words)]), hover), hover
 
 
 def not_connected_message(app, status: Optional[dict]) -> str:
-    """What a click says when there is no feed to wake. The reason is the one recorded
-    when the app tried to start the feed (`ui.app.create_app` keeps it on
-    `app.bloomberg_feed_reason`), else the status file's, else a plain default."""
-    reason = getattr(app, "bloomberg_feed_reason", "") or ""
-    if not reason and status and not status.get("connected"):
-        reason = status.get("reason") or ""
-    return f"Bloomberg is not connected on this machine: {reason or NO_FEED_REASON}"
+    """What a click says when there is no feed to wake: that Bloomberg is not connected and
+    where the reason is written (the Data tab's Bloomberg card, user 2026-09-30), never the
+    reason itself. `app` and `status` are kept for the callers that pass them."""
+    return f"Bloomberg: not connected · {DATA_POINTER}"
 
 
 # --------------------------------------------------------------------------- one request at a time
@@ -430,8 +490,8 @@ def poll_outcome(status: Optional[dict], pending: Optional[dict], feed=None,
         return headline, True, True
     waited = seconds_waited(pending, now)
     if waited > PULL_TIMEOUT_SECONDS:
-        return (f"Bloomberg: the pull requested at {short_time(pending.get('requested_at'), now)} has not reported "
-                f"after {PULL_TIMEOUT_SECONDS} s (feed busy or stopped). Last status: {headline}"), True, False
+        return (f"{NO_REPORT_HEAD}{short_time(pending.get('requested_at'), now)} after "
+                f"{PULL_TIMEOUT_SECONDS} s"), True, False
     return f"Bloomberg: pull requested... {waited} s", False, False
 
 
@@ -498,7 +558,14 @@ def register(app, get_db_path: Callable[[], object]) -> None:
         waiting = pending is not None
         # The button stays disabled while a request is outstanding, and while the sample
         # book is active (a refused press must not re-enable a locked button).
-        return status_view(line), line, pending, not waiting, waiting or pull_locked()
+        if line == locked_message():
+            # The sample-book lock: a sentence, not an error, and not a Data tab matter.
+            view, hover = html.Span(className="feed-state", children=[
+                html.Span(className="header-dot", style={"background": _STATE_DOTS["refused"]}),
+                html.Span("Nothing pulled")]), line
+        else:
+            view, hover = bar_view(read_feed_status(get_db_path()) if not waiting else None, line)
+        return view, hover, pending, not waiting, waiting or pull_locked()
 
     @app.callback(
         Output(PULL_STATUS_ID, "children", allow_duplicate=True),

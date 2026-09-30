@@ -17,8 +17,13 @@ screen, it is trustworthy). Top to bottom (`build_layout`, filled by `render`):
   4. Reference closes (`reference_close_rows`): Daily, 5d, MTD, YTD, each close's marks needed
      and present, the backfill's reason when incomplete, the trades that period leaves out.
   5. Contract dates (`contract_dates_line`): one line, the list on click.
-  6. Diagnostics, one closed fold: the Bloomberg library, the feed status in detail, the
-     Bloomberg connection check.
+  6. Bloomberg (a card, `BBG_CARD_ID`, 2026-09-30, user: "all in one place"): the last pull in one
+     line, "Pull problems (N)" (the one place in the app a pull or backfill error is written out),
+     "Run Bloomberg check" (a background run, `ui/diagnostics_runner.py`: the connection and data
+     checks, then the book's own tickers asked of Bloomberg) and its results, and "Details" folded
+     (the Bloomberg library, the feed status step by step, everything the last pull recorded).
+  7. Parsing (a card, `PARSE_CARD_ID`): "Check a blotter file" reads a file as an upload would
+     (`data.ingest.parse_check.check_file`) and lists every row; nothing is saved.
 Then the one Data issues drawer.
 
 Removed on 2026-09-29: the tab's own Pull now (the top bar's Pull Bloomberg now is the one
@@ -36,7 +41,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime, timezone
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from ui.tabs import ranking as rk
@@ -46,13 +51,37 @@ from ui.feed_controls import pull_timings, recalc_words, safety_refresh_ms, seco
 from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import data_checks
 from ui.tabs import data_kit as kit
-from ui.tabs.formatting import cap, cap_parts, compact, plain_ids, tidy
+from ui.tabs.formatting import cap, compact, plain_ids, tidy
 from ui.tabs.formatting import (MISSING, about, contract_name, fx_name, is_fx_pair, issues_drawer, lme_name,
                                 missing_cell, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
                                 short_root_name)
 
-BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"
+BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"   # "Run Bloomberg check" (2026-09-30: a background run)
 BBG_RESULTS_ID = "market-data-bbg-check-results"
+BBG_CARD_ID = "market-data-bloomberg"      # the Bloomberg card: another tab links here (tab key "market-data")
+BBG_LINE_ID = "market-data-bloomberg-line"
+BBG_PULL_PROBLEMS_ID = "market-data-pull-problems"
+BBG_PROGRESS_ID = "market-data-bbg-check-progress"
+BBG_POLL_ID = "market-data-bbg-check-poll"
+BBG_RUN_STORE_ID = "market-data-bbg-check-run"
+BBG_FSTORE_ID = "market-data-bbg-check-fstore"
+BBG_SORT_ID = "market-data-bbg-check-sort"
+BBG_CSV_ID = "market-data-bbg-check-csv"
+BBG_DOWNLOAD_ID = "market-data-bbg-check-download"
+BBG_SORT_TYPE = "data-tick-sort"
+BBG_COL_TYPE = "md-tick-col"
+BBG_POLL_MS = 1000
+PARSE_CARD_ID = "market-data-parsing"
+PARSE_UPLOAD_ID = "market-data-parse-upload"   # never "report-file": the real upload's id
+PARSE_STORE_ID = "market-data-parse-result"
+PARSE_RESULTS_ID = "market-data-parse-results"
+PARSE_FSTORE_ID = "market-data-parse-fstore"
+PARSE_SORT_ID = "market-data-parse-sort"
+PARSE_CSV_ID = "market-data-parse-csv"
+PARSE_DOWNLOAD_ID = "market-data-parse-download"
+PARSE_CLEAR_ID = "market-data-parse-clear"
+PARSE_SORT_TYPE = "data-parse-sort"
+PARSE_COL_TYPE = "md-parse-col"
 
 BODY_ID = "market-data-body"
 REFRESH_ID = "market-data-refresh"
@@ -634,63 +663,6 @@ def status_block(status: Optional[dict]):
     if timings:
         parts.append(html.Div(timings, id=PULL_TIMINGS_ID, className="status-line"))
     return parts + extras
-
-
-# ---------------------------------------------------------------------------
-# Bloomberg diagnostics button + panel
-# ---------------------------------------------------------------------------
-#
-# Moved here from ui/tabs/header.py on 2026-09-16 (user decision: the "Check Bloomberg
-# connection" button belongs on the Market Data tab only, not shown above every tab).
-#
-# The button runs `tools/bbg_diagnostics.py::run_bloomberg_diagnostics` through the
-# `data.bloomberg.bbg_diagnostics` shim: a list of dicts, each
-# {"name": str, "status": "pass" | "fail" | "warning", "message": str}, the message a
-# one-sentence plain-English explanation. This module never surfaces a traceback to the
-# page; see `run_bloomberg_diagnostics_safe` below for the failure path.
-
-
-_STATUS_LABELS = {"pass": "PASS", "fail": "FAIL", "warning": "WARNING"}
-
-
-def _render_bbg_results(checks: list) -> html.Div:
-    # layout wave 2 (2026-09-29): one small table (Result · Check · What it found), never loose rows
-    cols: Tuple[kit.Column, ...] = (("result", "Result", "l", "Pass, warning or fail.", False),
-                                    ("name", "Check", "l", "What was checked.", False),
-                                    ("message", "What it found", "l", "The check's own sentence.", False))
-    if not checks:
-        return kit.table(kit.head(cols, None, "data-bbg-none"),
-                         [kit.note_row("No diagnostic checks were returned.", len(cols), "cell-missing")],
-                         className="tk-small data-bbg-results")
-    level = {"pass": "green", "warning": "amber", "fail": "red"}
-    body = []
-    for c in checks:
-        status = str(c.get("status", "warning"))
-        label = _STATUS_LABELS.get(status, status.upper()).capitalize()
-        body.append(html.Tr([kit.td(kit.chip(label, level.get(status, "grey")), left=True),
-                             kit.td(cap(str(c.get("name", ""))), left=True),
-                             kit.td(cap_parts(str(c.get("message", ""))), left=True)]))
-    return tidy(kit.table(kit.head(cols, None, "data-bbg-none"), body, className="tk-small data-bbg-results"))
-
-
-def run_bloomberg_diagnostics_safe() -> list:
-    """Runs `tools/bbg_diagnostics.py::run_bloomberg_diagnostics` (through the
-    `data.bloomberg.bbg_diagnostics` shim) with a hard safety net: any exception, an
-    ImportError included, is caught here and turned into a single plain "could not reach
-    Bloomberg" row rather than a crash or a traceback on the page. The import is lazy, so
-    the module always imports; it only runs on button click and never blocks start-up."""
-    try:
-        from data.bloomberg.bbg_diagnostics import run_bloomberg_diagnostics
-        result = run_bloomberg_diagnostics()
-        if not isinstance(result, list):
-            raise TypeError("diagnostics function did not return a list")
-        return result
-    except Exception:
-        return [{
-            "name": "Bloomberg diagnostics",
-            "status": "fail",
-            "message": "Could not reach Bloomberg or run diagnostics.",
-        }]
 
 
 # --------------------------------------------------------------------------- whole-book checks (2026-09-21)
@@ -1720,9 +1692,10 @@ def _hover_table(table_id: str, columns: List[Tuple[str, str]], rows: List[dict]
 # ---- Phase G (round 2, 2026-09-29): the checks. The tables are drawn through `ui.tabs.data_kit`
 # and their rows built by `ui.tabs.data_checks` (the problems, the marks check, the pull steps).
 PROBLEMS_TITLE = "Problems"
-PROBLEMS_ABOUT = ("Every price the book needs that is missing or failed a check, every failed step of the last "
-                  "Bloomberg pull and of its backfill, and any trade left out of the P&L, each with what it does to "
-                  "the figures. A flagged price stays the official price: the Book marks the figures it touches.")
+PROBLEMS_ABOUT = ("Every price the book needs that is missing or failed a check, every contract not recognised and "
+                  "any trade left out of the P&L, each with what it does to the figures. A flagged price stays the "
+                  "official price: the Book marks the figures it touches. The Bloomberg pull's own problems are in "
+                  "the Bloomberg section below.")
 MARKS_ABOUT = ("Every official price the book uses on the date, missing and flagged first, each checked four ways: "
                "it arrived (an official price dated the as-of is on file), it is fresh (the date's own price, not one "
                "carried), its move since the previous close is sane, and its units agree with the fills it prices. "
@@ -1756,16 +1729,16 @@ def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, in
     state = short_state(line)
     when = short_time((status or {}).get("time")) if status else ""
     if not status or state == "no pull yet":
-        pull = _link("No Bloomberg pull yet", DIAGNOSTICS_ID, line, warn=True)
+        pull = _link("No Bloomberg pull yet", BBG_CARD_ID, line, warn=True)
     else:
         words = f"Last pull {when}" if when else "Last pull"
         if pull_problems:
-            pull = _link(f"{words} · {pull_problems} problem{'s' if pull_problems != 1 else ''}", MISSING_PANEL_ID,
+            pull = _link(f"{words} · {pull_problems} problem{'s' if pull_problems != 1 else ''}", BBG_CARD_ID,
                          line, warn=True)
         elif state == "not connected":
-            pull = _link(f"{words} · not connected", DIAGNOSTICS_ID, line, warn=True)
+            pull = _link(f"{words} · not connected", BBG_CARD_ID, line, warn=True)
         else:
-            pull = _link(f"{words} · ok", DIAGNOSTICS_ID, line)
+            pull = _link(f"{words} · ok", BBG_CARD_ID, line)
     total, arrived = marks
     if not total:
         marks_link = _link("Marks: none needed", MARKS_SECTION_ID, "The book needs no official price on this date.")
@@ -2036,12 +2009,12 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
     blank = html.Div()
     if not as_of_date:
         return (message_box("No as-of date available."), [], _HIDDEN, [], [], blank, _HIDDEN, blank, blank, blank,
-                blank)
+                blank, blank, blank)
     try:
         conn = _connect_readonly(db_path)
     except sqlite3.OperationalError as exc:
         return (message_box(f"Database not available ({exc})."), [], _HIDDEN, [], [], blank, _HIDDEN, blank, blank,
-                blank, blank)
+                blank, blank, blank, blank)
     import logging
     log = logging.getLogger(__name__)
     issues: list = []
@@ -2084,7 +2057,10 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
             log.exception("Data tab: the problems failed for %s", as_of_date)
             problems = []
             issues.append((PROBLEMS_TITLE, f"The problems could not be listed ({type(exc).__name__}: {exc})."))
-        n_pull = len(data_checks.pull_problems(feed_status))
+        pulls = data_checks.pull_problems(feed_status)
+        if not mark_rows:          # nothing needed: "no pull yet" blocks nothing
+            pulls = [p for p in pulls if p["label"] != "No pull"]
+        n_pull = len(pulls)
         if not mark_rows:
             marks_empty = kit.table(html.Thead(), [kit.note_row(
                 f"The book uses no official price on {short_date(as_of_date)}.", 1, "cell-missing")],
@@ -2111,9 +2087,30 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
     finally:
         conn.close()
     drawer = issues_drawer(issues, id=f"{ISSUES_ID}-drawer") or blank
-    tidy([line, marks_empty, closes_panel, dates_panel, diag, drawer])
+    bbg_line, pull_panel = bloomberg_head(feed_status, pulls)
+    tidy([line, marks_empty, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel])
     return (line, problems, {} if problems else _HIDDEN, mark_rows, marks_filter_options(mark_rows), marks_empty,
-            tools_style, closes_panel, dates_panel, diag, drawer)
+            tools_style, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel)
+
+
+PULL_PROBLEMS_TITLE = "Pull problems"
+PULL_PROBLEMS_ABOUT = ("Every failed or partial step of the last Bloomberg pull and of its backfill of past closes, in "
+                       "full, with what it leaves the book's figures with. The one place a pull's errors are written.")
+
+
+def bloomberg_head(status: Optional[dict], pulls: List[dict]) -> Tuple[html.Div, html.Div]:
+    """The Bloomberg card's first two blocks: the last pull in one line, then "Pull problems (N)"."""
+    from ui.feed_controls import short_state
+    no_pull = short_state(top_bar_status(status)) == "no pull yet"
+    words, hover = data_checks.bloomberg_line(status, no_pull=no_pull)
+    warn = no_pull or bool(pulls) or (status or {}).get("connected") is False
+    line = html.Div(html.Span(words, className="cell-amber" if warn else None, title=plain_words(hover) or None),
+                    className="data-bbg-line")
+    panel = html.Div([
+        html.Div(kit.strip_title(f"{PULL_PROBLEMS_TITLE} ({len(pulls)})", PULL_PROBLEMS_ABOUT),
+                 className="data-bbg-subhead"),
+        data_checks.pull_problems_table(pulls)])
+    return line, panel
 
 
 def marks_filter_options(rows: List[dict]) -> List[dict]:
@@ -2178,18 +2175,69 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
         ]),
         html.Div(id=PAST_CLOSES_PANEL_ID, className="data-block"),
         html.Div(id=CONTRACT_DATES_PANEL_ID, className="data-block"),
-        html.Details(id=DIAGNOSTICS_ID, className="book-fold tk-fold-block data-fold data-block", children=[
-            html.Summary(html.Span(DIAG_TITLE, className="book-section-title", title=DIAG_ABOUT), id=DIAG_SUMMARY_ID,
-                         n_clicks=0),
-            html.Div(id=DIAG_BODY_ID),
-            html.Div(className="bbg-check-block", children=[
-                html.Button("Check Bloomberg connection", id=BBG_CHECK_BUTTON_ID,
-                            n_clicks=0, className="bbg-check-button"),
-                dcc.Loading(type="dot", color="#1f5fbf",
-                            children=[html.Div(id=BBG_RESULTS_ID, className="bbg-check-results")]),
+        bloomberg_card(),
+        parsing_card(),
+        html.Div(id=ISSUES_ID),
+    ])
+
+
+BBG_TITLE = "Bloomberg"
+BBG_ABOUT = ("The last Bloomberg pull, its problems in full, and a check you can run at any time: the connection and "
+             "data checks, then the book's own tickers asked of Bloomberg and compared with ours.")
+BBG_CHECK_NOTE = "Asks Bloomberg for the book's own tickers only; writes nothing."
+PARSE_TITLE = "Parsing"
+PARSE_ABOUT = ("Check a blotter file before uploading it: every row read exactly as an upload would read it, what it "
+               "would be read as and what the upload would do with it against the book on file. Nothing is saved.")
+PARSE_NOTE = "Reads the file as an upload would; nothing is saved."
+
+
+def bloomberg_card() -> html.Div:
+    """The Bloomberg card (static; its blocks filled by the body callback and the check's own)."""
+    return kit.card(id=BBG_CARD_ID, className="data-bbg-card data-block", children=[
+        kit.strip([kit.strip_title(BBG_TITLE, BBG_ABOUT),
+                   html.Button("Download CSV", id=BBG_CSV_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
+                               title="Every ticker of the last Bloomberg check, every field"),
+                   dcc.Download(id=BBG_DOWNLOAD_ID)]),
+        html.Div(className="data-card-body", children=[
+            html.Div(id=BBG_LINE_ID),
+            html.Div(id=BBG_PULL_PROBLEMS_ID, className="data-bbg-pull"),
+            html.Div(className="data-bbg-run", children=[
+                html.Button("Run Bloomberg check", id=BBG_CHECK_BUTTON_ID, n_clicks=0, className="btn",
+                            title=BBG_CHECK_NOTE),
+                html.Span(id=BBG_PROGRESS_ID, className="data-bbg-progress"),
+            ]),
+            html.Div(id=BBG_RESULTS_ID, className="data-bbg-results"),
+            dcc.Interval(id=BBG_POLL_ID, interval=BBG_POLL_MS, disabled=True),
+            dcc.Store(id=BBG_RUN_STORE_ID),
+            dcc.Store(id=BBG_FSTORE_ID, storage_type="session"),
+            dcc.Store(id=BBG_SORT_ID, storage_type="session"),
+            html.Details(id=DIAGNOSTICS_ID, className="book-fold tk-fold-block data-fold", children=[
+                html.Summary(html.Span("Details", className="book-section-title", title=DIAG_ABOUT),
+                             id=DIAG_SUMMARY_ID, n_clicks=0),
+                html.Div(id=DIAG_BODY_ID),
             ]),
         ]),
-        html.Div(id=ISSUES_ID),
+    ])
+
+
+def parsing_card() -> html.Div:
+    """The Parsing card: a file dropped here is read, never loaded."""
+    return kit.card(id=PARSE_CARD_ID, className="data-parse-card data-block", children=[
+        kit.strip([kit.strip_title(PARSE_TITLE, PARSE_ABOUT),
+                   html.Button("Clear", id=PARSE_CLEAR_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
+                               title="Clear the file's check"),
+                   html.Button("Download CSV", id=PARSE_CSV_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
+                               title="Every row of the check, every field"),
+                   dcc.Download(id=PARSE_DOWNLOAD_ID)]),
+        html.Div(className="data-card-body", children=[
+            dcc.Upload(id=PARSE_UPLOAD_ID, className="data-parse-upload", accept=".csv,.xlsx,.xls", multiple=False,
+                       max_size=25 * 1024 * 1024,
+                       children=html.Button("Check a blotter file", className="btn", n_clicks=0, title=PARSE_NOTE)),
+            dcc.Loading(type="dot", color="#1f5fbf", children=html.Div(id=PARSE_RESULTS_ID)),
+            dcc.Store(id=PARSE_STORE_ID),
+            dcc.Store(id=PARSE_FSTORE_ID, storage_type="session"),
+            dcc.Store(id=PARSE_SORT_ID, storage_type="session"),
+        ]),
     ])
 
 
@@ -2211,6 +2259,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(PAST_CLOSES_PANEL_ID, "children"),
         Output(CONTRACT_DATES_PANEL_ID, "children"),
         Output(ISSUES_ID, "children"),
+        Output(BBG_LINE_ID, "children"),
+        Output(BBG_PULL_PROBLEMS_ID, "children"),
         Input(HEADER_AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
         Input(BOOK_REVISION_ID, "data"),
@@ -2333,13 +2383,202 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         frame = pd.DataFrame([{k: r.get(k) for k in cols} for r in shown], columns=cols)
         return dcc.send_data_frame(frame.to_csv, f"data-problems-{as_of_date or 'today'}.csv", index=False)
 
-    @app.callback(
-        Output(BBG_RESULTS_ID, "children"),
-        Input(BBG_CHECK_BUTTON_ID, "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def _on_bbg_check_click(n_clicks):
-        # Runs on click only (prevent_initial_call): a Bloomberg-unreachable machine never pays
-        # this cost just to load the page.
-        checks = run_bloomberg_diagnostics_safe()
-        return _render_bbg_results(checks)
+    _sorter(BBG_SORT_ID, BBG_SORT_TYPE)
+    _sorter(PARSE_SORT_ID, PARSE_SORT_TYPE)
+
+    def _list_filter(store_id: str, col_type: str, fields: Tuple[str, ...]) -> None:
+        @app.callback(Output(store_id, "data"), Input({"type": col_type, "part": ALL}, "value"),
+                      State(store_id, "data"), prevent_initial_call=True)
+        def _filter(_values, current):
+            """One heading's tick list into the store: only the control touched."""
+            from ui.tabs.trade_filter import triggered_values
+            cur = data_checks.normal_list_filter(current, fields)
+            new = dict(cur)
+            for ident, value in triggered_values():
+                part = str((ident or {}).get("part") or "") if isinstance(ident, dict) else ""
+                if part in fields:
+                    new[part] = [str(x) for x in value or []]
+            return dash.no_update if new == cur else new
+
+    _list_filter(BBG_FSTORE_ID, BBG_COL_TYPE, data_checks.TICKER_FIELDS)
+    _list_filter(PARSE_FSTORE_ID, PARSE_COL_TYPE, data_checks.PARSE_FIELDS)
+
+    # ---- "Run Bloomberg check" (2026-09-30): a background run, polled while it goes
+    @app.callback(Output(BBG_RUN_STORE_ID, "data"), Input(BBG_CHECK_BUTTON_ID, "n_clicks"),
+                  prevent_initial_call=True)
+    def _bbg_start(n_clicks):
+        if not n_clicks:
+            return dash.no_update
+        import time
+        from ui import diagnostics_runner
+        started, why = diagnostics_runner.start(get_db_path())
+        return {"at": time.time(), "started": started, "why": why}
+
+    @app.callback(Output(BBG_RESULTS_ID, "children"), Output(BBG_PROGRESS_ID, "children"),
+                  Output(BBG_POLL_ID, "disabled"), Output(BBG_CHECK_BUTTON_ID, "disabled"),
+                  Output(BBG_CSV_ID, "style"),
+                  Input(BBG_RUN_STORE_ID, "data"), Input(BBG_POLL_ID, "n_intervals"),
+                  Input(BBG_FSTORE_ID, "data"), Input(BBG_SORT_ID, "data"))
+    def _bbg_results(run, _ticks, fstate, sort):
+        from ui import diagnostics_runner
+        state = diagnostics_runner.state(get_db_path())
+        refused = (run or {}).get("why") if run and not run.get("started") else ""
+        results, progress = bbg_check_view(state, fstate, sort)
+        going = bool(state and state.get("running"))
+        if refused and not going:        # a pull running: the sentence; another run going: its progress
+            progress = html.Span(refused, className="cell-amber")
+        has_rows = bool(((state or {}).get("book") or {}).get("rows"))
+        return compact(results), progress, not going, going, ({} if has_rows else _HIDDEN)
+
+    @app.callback(Output(BBG_DOWNLOAD_ID, "data"), Input(BBG_CSV_ID, "n_clicks"),
+                  State(BBG_FSTORE_ID, "data"), State(BBG_SORT_ID, "data"), prevent_initial_call=True)
+    def _bbg_csv(n_clicks, fstate, sort):
+        from ui import diagnostics_runner
+        state = diagnostics_runner.state(get_db_path()) or {}
+        rows = ((state.get("book") or {}).get("rows")) or []
+        if not n_clicks or not rows:
+            return dash.no_update
+        shown = kit.sort_records(data_checks.filter_rows(rows, fstate, data_checks.TICKER_FIELDS), sort,
+                                 data_checks.TICKER_SORT)
+        cols = data_checks.TICKER_CSV_COLUMNS
+        frame = pd.DataFrame([{k: r.get(k) for k in cols} for r in shown], columns=cols)
+        stamp = str(state.get("finished_at") or "")[:10] or "today"
+        return dcc.send_data_frame(frame.to_csv, f"bloomberg-check-{stamp}.csv", index=False)
+
+    # ---- the Parsing card: "Check a blotter file"
+    @app.callback(Output(PARSE_STORE_ID, "data"), Output(PARSE_UPLOAD_ID, "contents"),
+                  Input(PARSE_UPLOAD_ID, "contents"), State(PARSE_UPLOAD_ID, "filename"),
+                  prevent_initial_call=True)
+    def _parse_file(contents, filename):
+        if not contents:
+            return dash.no_update, dash.no_update
+        # the Upload's contents go back to None, so the very same file can be checked again
+        return parse_upload(contents, filename, get_db_path()), None
+
+    @app.callback(Output(PARSE_STORE_ID, "data", allow_duplicate=True), Input(PARSE_CLEAR_ID, "n_clicks"),
+                  prevent_initial_call=True)
+    def _parse_clear(n_clicks):
+        return None if n_clicks else dash.no_update
+
+    @app.callback(Output(PARSE_RESULTS_ID, "children"), Output(PARSE_CLEAR_ID, "style"),
+                  Output(PARSE_CSV_ID, "style"),
+                  Input(PARSE_STORE_ID, "data"), Input(PARSE_FSTORE_ID, "data"), Input(PARSE_SORT_ID, "data"))
+    def _parse_results(result, fstate, sort):
+        if not result:
+            return html.Div(), _HIDDEN, _HIDDEN
+        shown = {} if result.get("rows") else _HIDDEN
+        return compact(parse_view(result, fstate, sort)), {}, shown
+
+    @app.callback(Output(PARSE_DOWNLOAD_ID, "data"), Input(PARSE_CSV_ID, "n_clicks"),
+                  State(PARSE_STORE_ID, "data"), State(PARSE_FSTORE_ID, "data"), State(PARSE_SORT_ID, "data"),
+                  prevent_initial_call=True)
+    def _parse_csv(n_clicks, result, fstate, sort):
+        rows = (result or {}).get("rows") or []
+        if not n_clicks or not rows:
+            return dash.no_update
+        recs = data_checks.parse_records(result)
+        shown = kit.sort_records(data_checks.filter_rows(recs, fstate, data_checks.PARSE_FIELDS), sort,
+                                 data_checks.PARSE_SORT)
+        cols = data_checks.PARSE_CSV_COLUMNS
+        frame = pd.DataFrame([{k: r.get(k) for k in cols} for r in shown], columns=cols)
+        name = str(result.get("filename") or "blotter").rsplit(".", 1)[0]
+        return dcc.send_data_frame(frame.to_csv, f"parse-check-{name}.csv", index=False)
+
+
+# ---- the Bloomberg check's and the parsing check's views (2026-09-30)
+def _utc_words(iso) -> str:
+    """'30 Sep 09:12' in this PC's local time from a UTC ISO stamp ('' when unreadable)."""
+    try:
+        when = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    local = when.astimezone()
+    return f"{short_date(local.date().isoformat())} {local:%H:%M}"
+
+
+def _sub(title: str, hover: str, extra=None) -> html.Div:
+    kids = [kit.strip_title(title, hover)]
+    if extra is not None:
+        kids.append(extra)
+    return html.Div(kids, className="data-bbg-subhead")
+
+
+def bbg_check_view(state: Optional[dict], fstate: Optional[dict], sort: Optional[dict]) -> Tuple[html.Div, Any]:
+    """(the results block, the progress words) of the Bloomberg check's latest run in this process
+    (`ui.diagnostics_runner.state`): nothing before the first press; while it runs the progress
+    ("Asking Bloomberg for 39 of the book's tickers: 2 of 4 requests") and the connection checks as
+    soon as they are in; after it the summary with its time, the connection checks and the book's
+    tickers (problems first, Status and Area funnels; their Download CSV in the card's strip)."""
+    if not state:
+        return html.Div(), ""
+    running = bool(state.get("running"))
+    checks = state.get("checks") or []
+    book = state.get("book") or {}
+    parts: list = []
+    if running:
+        done, total = int(state.get("done") or 0), int(state.get("total") or 0)
+        words = cap(str(state.get("words") or "Running"))
+        progress: Any = html.Span(f"{words}: {done} of {total} requests" if total else words,
+                                  className="data-bbg-running")
+    else:
+        when = _utc_words(state.get("finished_at"))
+        progress = f"Last run {when}" if when else ""
+    if book:
+        summary = cap(plain_words(book.get("summary") or book.get("reason") or ""))
+        when = _utc_words(book.get("finished_at") or state.get("finished_at"))
+        seconds = book.get("seconds")
+        tail = " · ".join(x for x in (when, f"{float(seconds):,.1f} s" if seconds else "") if x)
+        parts.append(html.Div([html.Span(summary or "The check finished.",
+                                         className=None if book.get("ok") else "cell-amber"),
+                               html.Span(f" · {tail}" if tail else "", className="cell-unit")],
+                              className="data-bbg-summary"))
+        if not book.get("ok") and book.get("reason") and book.get("reason") != book.get("summary"):
+            parts.append(html.Div(cap(plain_words(book["reason"])), className="data-bbg-summary cell-amber"))
+    if checks:
+        parts += [_sub("Connection and data checks", "The fast checks on this PC: the Bloomberg session, the official "
+                                                     "sources, the coverage of the book's marks, the last pull."),
+                  data_checks.connection_table(checks)]
+    rows = book.get("rows") or []
+    if rows:
+        shown = data_checks.filter_rows(rows, fstate, data_checks.TICKER_FIELDS)
+        parts += [_sub("The book's tickers", "Each ticker the book needs, asked of Bloomberg on the press and compared "
+                                             "with the app's own contract list: problems first."),
+                  data_checks.ticker_table(shown, sort, BBG_SORT_TYPE, fstate, BBG_COL_TYPE, len(rows), rows)]
+    return html.Div(parts), progress
+
+
+def parse_upload(contents, filename, db_path) -> dict:
+    """The parsing check of an uploaded file (`data.ingest.parse_check.check_file`); a file that
+    cannot be decoded comes back as {ok: False, error} like any other failure."""
+    try:
+        from data.ingest.parse_check import check_file
+        from data.ingest.upload import decode
+        return check_file(decode(contents), str(filename or "file"), db_path)
+    except Exception as exc:  # noqa: BLE001 -- the card says why
+        return {"ok": False, "error": str(exc) or type(exc).__name__, "filename": str(filename or ""),
+                "summary": "", "counts": {}, "merge": {}, "file_notes": [], "rows": []}
+
+
+def parse_view(result: Optional[dict], fstate: Optional[dict], sort: Optional[dict]) -> html.Div:
+    """The parsing check's summary sentence, the file's notes, the error in one line when the file
+    could not be read, and the rows (problems first; Read as, Upload would and Status funnels)."""
+    r = result or {}
+    parts: list = []
+    name = str(r.get("filename") or "")
+    if not r.get("ok"):
+        error = cap(plain_words(r.get("error") or "the file could not be read"))
+        parts.append(html.Div(f"{name}: {error}" if name else error, className="data-parse-summary cell-red"))
+    if r.get("summary"):
+        parts.append(html.Div([html.Span(name, className="data-parse-file"), html.Span(" · ", className="cell-unit"),
+                               html.Span(cap(r["summary"]))] if name else cap(r["summary"]),
+                              className="data-parse-summary"))
+    notes = [n for n in r.get("file_notes") or [] if n]
+    if notes:
+        parts.append(html.Ul([html.Li(cap(str(n))) for n in notes], className="data-parse-notes"))
+    recs = data_checks.parse_records(r)
+    if recs:
+        shown = data_checks.filter_rows(recs, fstate, data_checks.PARSE_FIELDS)
+        parts.append(data_checks.parse_table(shown, sort, PARSE_SORT_TYPE, fstate, PARSE_COL_TYPE, len(recs), recs))
+    return tidy(html.Div(parts, className="data-parse-results"))

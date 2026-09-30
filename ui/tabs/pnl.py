@@ -172,7 +172,7 @@ def period_rows(conn: sqlite3.Connection, as_of: str, key: str, df_today: pd.Dat
 
     holidays = load_holidays()
     ref_iso = period_reference_dates(as_of)[key]
-    backfill = header.backfill_status(conn)
+    backfill = None  # the reference-close reason says the P&L fact and points at the Data tab (2026-09-30)
     title = PERIOD_TITLES[key]
 
     def _book(iso: str) -> pd.DataFrame:

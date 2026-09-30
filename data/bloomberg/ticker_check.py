@@ -71,6 +71,11 @@ Outputs under ``reports/`` (git-ignored): ``bbg_check_<stamp>.txt`` (plain Engli
 (WORKSHEET_COLUMNS, the worksheet ``data.contracts.apply_fixes`` reads; ``apply`` is pre-filled
 'yes' only on an OK root's bbg_verified row, so the user decides the rest).
 
+``check_book(db_path, ...)`` (2026-09-30) is the Data tab's "Run Bloomberg check" button: the book
+part only (the roots the book holds, its futures, options on futures, LME curve and tickets, and
+conversion spots), no desk checks, search or option chains, no report file; it returns a dict of
+plain rows and never raises.
+
 Hard rule 8: nothing here runs unless the user runs it. It never writes ``marks``, never touches
 a trade and never edits ``config/contracts.csv``. blpapi is imported only when a real check
 connects, so the module and its tests run on a PC without it.
@@ -90,7 +95,7 @@ import sqlite3
 import sys
 import textwrap
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -1832,6 +1837,9 @@ class CheckResult:
     options: List[OptionRootResult] = field(default_factory=list)
     book_options: List[ContractResult] = field(default_factory=list)
     book_lme: List[LmeTicketResult] = field(default_factory=list)
+    # progress(done, total, words), called before each request goes out (``run_check(progress=)``)
+    progress: Optional[Callable[[int, int, str], None]] = field(default=None, repr=False, compare=False)
+    progress_total: int = 0
 
     def counts(self) -> Dict[str, int]:
         out = {v: 0 for v in ROOT_VERDICTS}
@@ -1862,10 +1870,27 @@ class CheckResult:
         return any(a.answered for _part, a in self.answers.values())
 
 
+_PART_WORDS = {"root": "contract roots", "lme": "LME curve tickers", "contract": "futures",
+               "book_option": "options on futures", "spot": "USD conversion spots", "option_chain": "option chains",
+               "option": "options"}
+
+
+def _tell(result: CheckResult, n: int, part: str) -> None:
+    """Report progress before a request goes out; a failing callback never stops the check."""
+    if result.progress is None:
+        return
+    words = f"Asking Bloomberg for {n} {_PART_WORDS.get(part, part)}"
+    try:
+        result.progress(result.requests_sent, max(result.progress_total, result.requests_sent + 1), words)
+    except Exception:  # noqa: BLE001 -- progress is display only
+        pass
+
+
 def _ask(client, tickers: Sequence[str], fields: Sequence[str], batch_size: int, result: CheckResult,
          part: str) -> Dict[str, Answer]:
     out: Dict[str, Answer] = {}
     for batch in _chunks(list(tickers), max(1, batch_size)):
+        _tell(result, len(batch), part)
         result.requests_sent += 1
         got = client.reference(batch, fields) or {}
         by_upper = {str(k).upper(): v for k, v in got.items()}
@@ -1884,6 +1909,7 @@ def _ask_bulk(client, tickers: Sequence[str], field_name: str, batch_size: int, 
     out: Dict[str, Answer] = {}
     ask = getattr(client, "bulk", None)
     for batch in _chunks(list(tickers), max(1, batch_size)):
+        _tell(result, len(batch), part)
         result.requests_sent += 1
         got = (ask(batch, field_name) if ask is not None else client.reference(batch, (field_name,))) or {}
         by_upper = {str(k).upper(): v for k, v in got.items()}
@@ -2108,11 +2134,14 @@ def _search_root(client, result: RootResult) -> None:
         result.search_status = f"no futures among {len(hits)} search result{'s' if len(hits) != 1 else ''}"
 
 
-def run_check(client, the_plan: Plan, *, log: Callable[[str], None] = print, host: str = "") -> CheckResult:
+def run_check(client, the_plan: Plan, *, log: Callable[[str], None] = print, host: str = "",
+              progress: Optional[Callable[[int, int, str], None]] = None) -> CheckResult:
     """Ask Bloomberg what ``the_plan`` lists, through ``client`` (``reference(securities, fields)``
     -> {security: Answer}; ``search(query, max_results)`` -> [(security, description)]), and
-    judge every answer. Writes nothing."""
-    result = CheckResult(the_plan, [], [], [], host=host)
+    judge every answer. Writes nothing. ``progress(done, total, words)``, when given, is called
+    before each request goes out (total: the plan's requests and its most option follow-ups)."""
+    result = CheckResult(the_plan, [], [], [], host=host, progress=progress,
+                         progress_total=the_plan.requests + the_plan.max_followup_requests)
     size = the_plan.batch_size
     root_answers = _ask(client, the_plan.root_tickers, ROOT_FIELDS, size, result, "root") if the_plan.asked else {}
     for root in the_plan.roots:
@@ -3626,6 +3655,319 @@ def write_reports(result: CheckResult, out_dir, *, now: datetime, desk: Optional
     paths["report"].write_text(render_text(result, now=now, paths=paths, desk=desk, not_run=not_run),
                                encoding="utf-8")
     return paths
+
+
+# --------------------------------------------------------------------------- the book check for the app (2026-09-30)
+#
+# The Data tab's "Run Bloomberg check" button (ui lane, from a background thread): does Bloomberg
+# answer for the book's own tickers? On the press only (hard rule 8): the roots the book holds on
+# their generic ticker, the book's futures and options on futures on their own tickers, the LME
+# curve of the metals it holds tickets in, and its USD conversion spots. No desk checks, no search,
+# no option chains, no universe-wide run; no report file, no marks, no trades.
+
+BOOK_CHECK_PARTS = (PART_ROOTS, PART_LME)
+ROW_OK, ROW_CHECK, ROW_NO_ANSWER, ROW_ERROR = "OK", "CHECK", "NO ANSWER", "ERROR"
+AREA_FUTURE, AREA_ROOT, AREA_SPOT, AREA_LME, AREA_OPTION = (
+    "Future", "Contract root", "FX spot", "LME", "Option on a future")
+# Verdicts where the ticker cannot price at all: the P&L it feeds has no mark.
+_ERROR_VERDICTS = frozenset({NOT_FOUND, NO_PRICE, NO_TICKER, NO_CURVE, NO_OPTIONS, OFF_CURVE})
+_ROW_ORDER = (ROW_ERROR, ROW_NO_ANSWER, ROW_CHECK, ROW_OK)
+_AREA_ORDER = (AREA_FUTURE, AREA_OPTION, AREA_LME, AREA_SPOT, AREA_ROOT)
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _row_status(verdict: str) -> str:
+    if verdict == OK:
+        return ROW_OK
+    if verdict == NO_ANSWER:
+        return ROW_NO_ANSWER
+    return ROW_ERROR if verdict in _ERROR_VERDICTS else ROW_CHECK
+
+
+def _plain_root_name(root: Optional[ContractRoot], fallback: str) -> str:
+    """'LME copper (third-Wednesday monthly prompts)' -> 'LME copper'."""
+    if root is None:
+        return fallback
+    return re.sub(r"\s*\([^)]*\)", "", root.name).strip() or root.root_id
+
+
+def _month_words(code: str, year_digits: str, ref_year: int) -> str:
+    try:
+        return f"{_MONTH_ABBR[month_from_code(code) - 1]}{expand_year(year_digits, ref_year) % 100:02d}"
+    except ValueError:
+        return f"{code}{year_digits}"
+
+
+def _future_words(fut: BookFuture, root: Optional[ContractRoot], ref_year: int) -> str:
+    """'COMEX copper Dec26'; an option: 'COMEX copper Dec26 call 450'."""
+    name = _plain_root_name(root, fut.root_id)
+    parts = parse_option_ticker(fut.instrument_id) if fut.kind == "CMDTY_OPTION" else None
+    if parts is not None:
+        _r, code, year, cp, strike, _k = parts
+        return f"{name} {_month_words(code, year, ref_year)} {'call' if cp == 'C' else 'put'} {strike}"
+    parts4 = parse_bbg_ticker(fut.instrument_id)
+    if parts4 is not None:
+        return f"{name} {_month_words(parts4[1], parts4[2], ref_year)}"
+    return f"{name} {fut.instrument_id}"
+
+
+def _side_words(quantity: float, unit: str) -> str:
+    """'Long 200 lots', 'Short 700 t', 'Flat'."""
+    if not quantity:
+        return "Flat"
+    return f"{'Long' if quantity > 0 else 'Short'} {_g(abs(quantity))} {unit}"
+
+
+def _answer_words(answer: Optional[Answer], shown: Sequence[Tuple[str, str]]) -> str:
+    """What Bloomberg returned, short: its refusal in its own words, or the fields asked."""
+    if answer is None:
+        return "Not asked"
+    if not answer.answered:
+        return f"No answer ({answer.security_error})" if answer.security_error else "No answer"
+    if answer.security_error:
+        return f'Refused: "{answer.security_error}"'
+    bits = []
+    for label, key in shown:
+        value = answer.fields.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, (date, datetime)) or key.endswith("_DT") or "_DT_" in key \
+                or key == "FUT_NOTICE_FIRST":
+            text = _date_text(value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            text = _g(value)
+        else:
+            text = str(value).strip()
+        bits.append(f"{label} {text}")
+    return ", ".join(bits) if bits else "Answered with no value for the fields asked"
+
+
+def _findings_words(findings: Sequence[Finding]) -> Tuple[str, str]:
+    """(message, fix) from a row's findings: Bloomberg's words kept whole in the message."""
+    message = "; ".join(dict.fromkeys(f.evidence for f in findings if f.evidence))
+    fixes = []
+    for f in findings:
+        text = f.action
+        if f.owner and f.owner not in text:
+            text += f" (a code change: the housekeeper passes it to {f.owner})"
+        if text:
+            fixes.append(text)
+    fix = "; ".join(dict.fromkeys(fixes))
+    return (message[:1].upper() + message[1:]) if message else "", (fix[:1].upper() + fix[1:]) if fix else ""
+
+
+def _book_row(area: str, what: str, instrument_id: str, ticker: str, verdict: str, bloomberg: str, ours: str,
+              findings: Sequence[Finding]) -> dict:
+    status = _row_status(verdict)
+    message, fix = ("", "") if status == ROW_OK else _findings_words(findings)
+    return {"area": area, "what": what, "instrument_id": instrument_id, "ticker": ticker, "status": status,
+            "bloomberg": bloomberg, "ours": ours, "message": message, "fix": fix}
+
+
+def book_check_rows(result: CheckResult) -> Tuple[List[dict], Dict[str, int]]:
+    """(rows, stats) of a finished book check, rows problems first. The code findings
+    (``result.code_findings()``) come as extra 'Contract root' rows, status CHECK; they repeat an
+    LME row's finding, so stats (checked, ok, attention, no_answer; asked and answered: the
+    tickers asked and how many Bloomberg answered; code) count them apart."""
+    roots = load_roots()
+    ref_year = result.plan.today.year
+    rows: List[Tuple[dict, bool]] = []          # (row, a ticker that was asked)
+
+    for c in result.contracts + result.book_options:
+        fut = c.future
+        root = roots.get(fut.root_id)
+        if fut.kind == "CMDTY_OPTION":
+            area = AREA_OPTION
+            said = _answer_words(c.answer, (("price", "PX_LAST"), ("expiry", "OPT_EXPIRE_DT"), ("style", "OPT_EXER_TYP")))
+            ours = (f"{_side_words(fut.net_lots, 'lots')}, average fill "
+                    f"{_g(round(fut.avg_fill, 4)) if fut.avg_fill is not None else '-'}, expiry {fut.expiry}")
+        else:
+            area = AREA_FUTURE
+            said = _answer_words(c.answer, (("price", "PX_LAST"), ("last trade", "FUT_LAST_TRADE_DT"),
+                                            ("first notice", "FUT_NOTICE_FIRST")))
+            ours = (f"{_side_words(fut.net_lots, 'lots')}, average fill "
+                    f"{_g(round(fut.avg_fill, 4)) if fut.avg_fill is not None else '-'}, expiry {fut.expiry}")
+            if fut.stored:
+                ours += (f"; Bloomberg's dates stored: last trade {fut.stored.get('last_trade_date') or '-'}, "
+                         f"first notice {fut.stored.get('first_notice_date') or 'none'}")
+        rows.append((_book_row(area, _future_words(fut, root, ref_year), fut.instrument_id, fut.ticker, c.verdict,
+                               said if fut.ticker else "Not asked: no Bloomberg ticker", ours, c.findings),
+                     bool(fut.ticker)))
+
+    for s in result.spots:
+        need = s.need
+        n = len(need.trade_ids)
+        rows.append((_book_row(AREA_SPOT, f"{need.instrument_id} spot", need.instrument_id, need.ticker, s.verdict,
+                               _answer_words(s.answer, (("price", "PX_LAST"),)),
+                               f"Converts {n} trade{'s' if n != 1 else ''} to USD", s.findings), True))
+    book = result.plan.book
+    if book is not None and book.spot_error:
+        rows.append((_book_row(AREA_SPOT, "USD conversion spots", "", "", NOT_FOUND, "Not asked",
+                               "The Bloomberg library's conversion spots",
+                               [Finding(NOT_FOUND, f"The conversion spots were not checked: {book.spot_error}",
+                                        "open the Data tab's diagnostics; the library is rebuilt at the next upload")]),
+                     False))
+
+    for m in result.lme:
+        name = _plain_root_name(m.root, m.root.root_id)
+        if m.error:
+            rows.append((_book_row(AREA_LME, f"{name} curve", m.root.root_id, "", NOT_FOUND, "Not asked",
+                                   "The metal's cash, 3M and monthly tickers",
+                                   [Finding(NOT_FOUND, m.error, "tell the housekeeper", owner=LME_OWNER)]), False))
+            continue
+        for p in m.pillars:
+            said = _answer_words(p.answer, (("price", "PX_LAST"), ("currency", "CRNCY"),
+                                            ("prompt date", lme_prompt_field()))) if p.asked else p.why_not_asked
+            ours = "Prompt " + (p.expected[0].isoformat() if p.expected else "-") + ", USD per tonne"
+            rows.append((_book_row(AREA_LME, f"{name} {p.label}", m.root.root_id, p.ticker, p.verdict, said, ours,
+                                   p.findings), p.asked))
+    metals = {m.root.root_id: m for m in result.lme}
+    for t in result.book_lme:
+        tk = t.ticket
+        name = _plain_root_name(roots.get(tk.root_id), tk.root_id)
+        metal = metals.get(tk.root_id)
+        cash = next((p for p in metal.pillars if p.kind == "CASH"), None) if metal is not None else None
+        said = (f"Cash price {_g(cash.px_last)}" if cash is not None and cash.px_last is not None
+                else "No cash price") + (f"; the prompt sits {t.position}" if t.position else "")
+        ours = f"{_side_words(tk.tonnes, 't')} at {_g(tk.fill)}, prompt {tk.prompt}"
+        rows.append((_book_row(AREA_LME, f"{name} ticket {tk.trade_id}, prompt {tk.prompt}", tk.root_id, "",
+                               t.verdict, said, ours, t.findings), False))
+
+    for r in result.roots:
+        root = r.root
+        said = _answer_words(r.answer, (("name", "NAME"), ("exchange", "EXCH_CODE"), ("currency", "CRNCY"),
+                                        ("contract size", "FUT_CONT_SIZE"), ("1.0 move worth", "FUT_VAL_PT"),
+                                        ("price", "PX_LAST"))) if r.asked else "Not asked: placeholder root"
+        ours = (f"{root.exchange}, {root.currency}, contract size {_g(root.contract_size)} {root.size_unit}, "
+                f"1.0 move worth {_g(root.multiplier)}, price scale {_g(root.price_scale)}")
+        rows.append((_book_row(AREA_ROOT, _plain_root_name(root, root.root_id), root.root_id, r.ticker, r.verdict,
+                               said, ours, r.findings), r.asked))
+
+    code_rows = []
+    for lane, subject, f in result.code_findings():
+        message, fix = _findings_words([f])
+        rid, _sp, rest = subject.partition(" ")
+        label = rest.split(" [", 1)[0]
+        code_rows.append({"area": AREA_ROOT, "what": f"{_plain_root_name(roots.get(rid), rid)} {label}: code change",
+                          "instrument_id": rid,
+                          "ticker": subject[subject.find("[") + 1:subject.rfind("]")] if "[" in subject else "",
+                          "status": ROW_CHECK, "bloomberg": "", "ours": f"Code owned by {lane}",
+                          "message": message, "fix": fix})
+
+    asked = [row for row, was_asked in rows if was_asked]
+    plain = [row for row, _a in rows]
+    n_ok = sum(1 for row in plain if row["status"] == ROW_OK)
+    n_none = sum(1 for row in plain if row["status"] == ROW_NO_ANSWER)
+    stats = {"checked": len(plain), "ok": n_ok, "attention": len(plain) - n_ok - n_none, "no_answer": n_none,
+             "asked": len(asked), "answered": sum(1 for row in asked if row["status"] != ROW_NO_ANSWER),
+             "code": len(code_rows)}
+    out = plain + code_rows
+    out.sort(key=lambda row: (_ROW_ORDER.index(row["status"]), _AREA_ORDER.index(row["area"]), row["what"]))
+    return out, stats
+
+
+def check_book(db_path=None, host: str = "localhost", port: int = 8194,
+               on_progress: Optional[Callable[[int, int, str], None]] = None,
+               client_factory: Optional[Callable[[str, int], object]] = None,
+               today: Optional[date] = None) -> dict:
+    """The book's own tickers against Bloomberg, for the Data tab's "Run Bloomberg check" button.
+
+    Asks, on the press only (hard rule 8), for the roots the book holds (their generic ticker),
+    the book's open futures and options on futures on their own tickers, the LME curve of the
+    metals it holds tickets in, and its USD conversion spots; nothing else. Writes no report,
+    no marks and no trades; never raises. ``client_factory(host, port)`` replaces the Bloomberg
+    session (a fake for a call without a terminal; the reachability probe is then skipped).
+    ``today`` is the book's day and the LME's (default: ``live.book_today`` and London's today).
+    ``on_progress(done, total, words)`` is called before each request goes out and once at the end.
+
+    Returns {ok, reachable, reason, started_at, finished_at, seconds, requests_sent, summary,
+    counts {checked, ok, attention, no_answer}, rows [...]}: ``ok`` True when the check ran and
+    Bloomberg answered (the findings are in ``rows``), False with ``reason`` otherwise."""
+    started = datetime.now().astimezone()
+    out: dict = {"ok": False, "reachable": False, "reason": "", "started_at": "", "finished_at": "", "seconds": 0.0,
+                 "requests_sent": 0, "summary": "", "counts": {"checked": 0, "ok": 0, "attention": 0, "no_answer": 0},
+                 "rows": []}
+
+    def finish(summary: str = "", reason: str = "") -> dict:
+        ended = datetime.now().astimezone()
+        out["started_at"] = started.astimezone(timezone.utc).isoformat(timespec="seconds")
+        out["finished_at"] = ended.astimezone(timezone.utc).isoformat(timespec="seconds")
+        out["seconds"] = round((ended - started).total_seconds(), 1)
+        out["reason"] = reason
+        out["summary"] = summary or reason
+        return out
+
+    def tell(done: int, total: int, words: str) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(done, total, words)
+        except Exception:  # noqa: BLE001 -- progress is display only
+            pass
+
+    where = f"{host}:{port}"
+    client = None
+    try:
+        if client_factory is None:
+            from data.bloomberg.live import availability
+            ok, why = availability(host, port)
+            if not ok:
+                return finish(reason=f"Bloomberg could not be reached: {why}. Is the Bloomberg Terminal running and "
+                                     "logged in on this PC?")
+        out["reachable"] = True
+        as_of = today or _book_day()
+        roots = load_roots()
+        try:
+            book = load_book(Path(db_path) if db_path else default_db_path(), as_of, roots)
+        except BookError as exc:
+            return finish(reason=f"The book could not be read: {exc}.")
+        the_plan = plan(roots, book=book, book_only=True, parts=BOOK_CHECK_PARTS, today=today or lme_today())
+        if not the_plan.securities:
+            unaskable = sum(1 for f in the_plan.futures + the_plan.book_options if not f.ticker)
+            if not unaskable and not the_plan.book_lme and not book.spot_error:
+                out["ok"] = True
+                return finish("The book holds nothing to check with Bloomberg: no open futures, options on futures, "
+                              "LME tickets or conversion spots.")
+        total = the_plan.requests
+        if the_plan.securities:
+            tell(0, total, f"Asking Bloomberg for {the_plan.securities} of the book's tickers in {total} "
+                           f"request{'s' if total != 1 else ''}")
+            try:
+                client = (client_factory or BlpapiClient)(host, port)
+            except BloombergUnavailable as exc:
+                out["reachable"] = False
+                return finish(reason=f"Bloomberg could not be reached: {exc}")
+        result = run_check(client, the_plan, log=lambda _s: None, host=where, progress=tell)
+        out["requests_sent"] = result.requests_sent
+        rows, stats = book_check_rows(result)
+        out["rows"] = rows
+        out["counts"] = {k: stats[k] for k in ("checked", "ok", "attention", "no_answer")}
+        n_att = stats["attention"]
+        if the_plan.securities:
+            tell(result.requests_sent, max(result.requests_sent, 1), "Done")
+        if the_plan.securities and not result.any_answered:
+            return finish(reason=f"Bloomberg did not answer any request on {where}; nothing to judge. Run the check "
+                                 "again.")
+        out["ok"] = True
+        summary = (f"Bloomberg answered for {stats['answered']} of {stats['asked']} of the book's tickers; "
+                   + (f"{n_att} need{'s' if n_att == 1 else ''} attention" if n_att else "none needs attention"))
+        code = stats["code"]
+        if code:
+            summary += f"; {code} finding{'s are' if code != 1 else ' is'} a code change for the housekeeper"
+        return finish(summary + ".")
+    except BloombergUnavailable as exc:
+        out["ok"] = False
+        out["reachable"] = False
+        return finish(reason=f"Bloomberg could not be reached: {exc}")
+    except Exception as exc:  # noqa: BLE001 -- the button must never crash: said in plain words
+        out["ok"] = False
+        return finish(reason=f"The Bloomberg check stopped on an error ({type(exc).__name__}: {exc}).")
+    finally:
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 -- closing never masks the outcome
+                pass
 
 
 # --------------------------------------------------------------------------- command line

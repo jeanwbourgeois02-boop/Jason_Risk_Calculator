@@ -7,3 +7,4 @@
 - Older blotter notes (field quirks, IRS direction, NDF tickers) are in `.claude/agent-memory/data-ingest/` (the lane before the 2026-09-24 split)
 - [Broker raw cells](broker-raw-cells.md) — Trade.broker_symbol / broker_price (2026-09-29): Symbol and Price as written, the empty rule
 - [Parser logging level](feedback-parser-logging.md) — file-content findings log at DEBUG only; WARNING/ERROR reserved for app or environment faults (user, 2026-09-28)
+- [Parse check](parse-check.md) — 2026-09-30 Data tab dry run of an upload (read-only), _PARSE_LOCK in blotter.parse, per-row recompute choices

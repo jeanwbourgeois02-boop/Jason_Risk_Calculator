@@ -201,3 +201,7 @@ Guesses the parser makes on the way:
 - An UNRECOGNISED trade with no readable date (TradeDate, Settle Date, CreateDate, LastModified) has trade_date ''.
 - Without a stored Fin Type, `resolve_stored` infers the kind of a stored row from its symbol's shape.
 - Cancelled / void / deleted / rejected / failed rows still remove the trade they name; pending / draft / error rows are still not trades (listed with their status). A row outside `config/book.yaml`'s filter lists does not load (all three lists are empty).
+
+## The parsing check (2026-09-30)
+
+- The parsing check (`data/ingest/parse_check.py::check_file`, the Data tab's "Check a blotter file") is a dry run of an upload: the same reader, book filter and merge rule, read-only on the database, nothing saved. It works out book-filter exclusions and superseded versions per row itself, because the parser only counts them. `blotter.parse` holds a module lock for the whole parse, so a check and an upload never share the date-order and contract-connection globals.

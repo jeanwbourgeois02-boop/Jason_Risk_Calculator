@@ -106,7 +106,9 @@ Design choices (no one to ask, so noted here):
   `past_close_explanation`): filling now with the days remaining, what it recorded for
   that date (no closes from Bloomberg, or the marks it could not fill and why), the
   terminal not being reachable, or that it has not reached the date yet. Text only: no
-  figure changes.
+  figure changes. Since 2026-09-30 (user: the Bloomberg errors "all in one place") the
+  caption keeps the P&L fact and ends "See Bloomberg on the Data tab."; `past_close_explanation`
+  is read by the Data tab alone.
 
   Commodity strip (commodity conversion Phase 3, 2026-09-24): gross commodity notional and
   net outright (book-positions' `commodities` block, the sectors on hover), open spreads and
@@ -152,7 +154,7 @@ from typing import Callable, Optional
 from dash import Input, Output, dcc, html
 
 from ui.tabs.controls import today_ny
-from ui.tabs.formatting import MISSING, marker, plain_words, short_money, tidy
+from ui.tabs.formatting import DATA_POINTER, DATA_TAB_KEY, MISSING, marker, plain_words, short_money, tab_link, tidy
 
 HEADER_ID = "header-block"
 # The LTD chart's ids (the chart is on the P&L tab since 2026-09-28, `ui/tabs/pnl.py`; these
@@ -376,8 +378,8 @@ def _missing_marks_reason(conn: sqlite3.Connection, as_of: str,
     if not needed or not missing:
         return ""
     mark_types = " / ".join(sorted({plain_words(m["mark_type"]).lower() for m in missing}))
-    return (f"no official {mark_types} for {as_of} "
-            f"({len(missing)} of {needed} needed marks) — {action}")
+    tail = f" — {action}" if action else ""
+    return f"no official {mark_types} for {as_of} ({len(missing)} of {needed} needed marks){tail}"
 
 
 def needed_marks(conn: sqlite3.Connection, as_of: str) -> tuple:
@@ -511,13 +513,15 @@ def _reference_reason(conn: sqlite3.Connection, ref_iso: str, period_title: str,
     that date (`past_close_explanation`), since a past day's close only ever arrives that
     way (the live pull only writes today's marks). `backfill` is the status block when the
     caller has already read it (one read for all the cards), else it is read here."""
-    explanation = past_close_explanation(backfill_status(conn) if backfill is None else backfill, ref_iso)
-    detail = _missing_marks_reason(conn, ref_iso, explanation)
+    # 2026-09-30 (user: the Bloomberg errors "all in one place"): the P&L fact only, then the
+    # pointer; what the backfill or the pull reported is written on the Data tab alone.
+    # `backfill` is kept for the callers that still pass it and is not read.
+    detail = _missing_marks_reason(conn, ref_iso, "")
 
     def build(n_blocked: int, n_open: int) -> str:
         head = (f"{period_title} needs the {ref_iso} close: {n_blocked} of {n_open} trades open that day "
                 f"have no official mark dated {ref_iso}")
-        return f"{head} ({detail})" if detail else f"{head} — {explanation}"
+        return f"{head} ({detail}). {DATA_POINTER}." if detail else f"{head}. {DATA_POINTER}."
     return build
 
 
@@ -785,7 +789,7 @@ def _build_figures(conn: sqlite3.Connection, as_of: str) -> list:
         "ytd": _last_business_day_of_prev_year(d, holidays).isoformat(),
     }
     entries = {}
-    backfill = backfill_status(conn)  # one read of the status file for every card's missing-close reason
+    backfill = None  # the missing-close reasons no longer read the status file (the Data tab says it)
     # A reference close with no value steps back to the previous business day that has
     # one (user decision 2026-09-21, engine.pnl.reference): the date the period is
     # measured from moves and the card says so ("ref 16 Sep"); no mark is copied for any trade.
@@ -972,7 +976,6 @@ _LEVEL_STYLES = {
 _MUTED_CHIP = {"color": "rgba(255,255,255,.6)"}
 _EXPIRY_ROWS_ON_HOVER = 5
 _SPREAD_NAMES_ON_HOVER = 30
-_MISSING_MARKS_ON_HOVER = 12
 
 
 def _chip_style(colours: dict) -> dict:
@@ -1312,20 +1315,22 @@ def marks_chip(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple], n_t
     needed, missing = needs
     if not missing:
         return _chip(f"Marks: {when} \u00b7 complete", "green",
-                     f"Latest official close the book uses: {latest[0]}, stamped {latest[1]}. Every one of the "
-                     f"{needed:,} marks the book needs on {as_of} is on file (official).")
-    by_type: dict = {}
-    for m in missing:
-        by_type[m["mark_type"]] = by_type.get(m["mark_type"], 0) + 1
-    kinds = ", ".join(f"{n} {plain_words(t).lower()}" for t, n in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0])))
-    shown = missing[:_MISSING_MARKS_ON_HOVER]
-    lines = [f"Latest official close the book uses: {latest[0]}, stamped {latest[1]}.",
-             f"{len(missing):,} of {needed:,} marks the book needs on {as_of} have no official mark ({kinds}):"]
-    lines += [f"- {m['instrument_id']} {plain_words(m['mark_type']).lower()} {m['settle_date']}" for m in shown]
-    if len(missing) > len(shown):
-        lines.append(f"- and {len(missing) - len(shown)} more")
-    lines.append("The Data tab lists each one; the figures say which trades they leave out.")
-    return _chip(f"Marks: {when} \u00b7 {len(missing):,} missing", "amber", "\n".join(lines))
+                     f"Latest official close the book uses: {when}. Every one of the "
+                     f"{needed:,} prices the book needs on {as_of} is on file.")
+    # 2026-09-30 (user: the Bloomberg problems "all in one place"): the count and a link to the
+    # Data tab, which lists each missing price; never the list here.
+    n = len(missing)
+    hover = (f"Latest official close the book uses: {when}.\n"
+             f"{n:,} {'price' if n == 1 else 'prices'} missing: see the Data tab.")
+    return _data_link(_chip(f"Marks: {when} \u00b7 {n:,} missing", "amber", hover), "header-marks", hover)
+
+
+def _data_link(child, idx: str, hover: str):
+    """`child` as a link to the Data tab (`formatting.tab_link`, the one pattern callback in
+    `ui/app.py`), looking as it did: the link's own smaller, faded text is undone inline."""
+    link = tab_link(child, DATA_TAB_KEY, idx, title=hover)
+    link.style = {"opacity": 1, "fontSize": "inherit", "color": "inherit"}
+    return link
 
 
 # ------------------------------------------------------------------ the risk chip (Phase B)
