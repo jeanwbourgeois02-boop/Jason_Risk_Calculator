@@ -118,7 +118,10 @@ lists; the UI renders it and recomputes nothing):
     "position_risk": engine.risk.positions.position_risk (2026-09-29): the Book's open rows as
                   positions, each one's standalone VaR and historical component contribution to
                   the positions' book VaR, the diversification line, the correlation matrix and
-                  the positions left out (that module's docstring has the shape),
+                  the positions left out (that module's docstring has the shape); since
+                  2026-09-30 the FX trades and the settled currency cash are positions too, on
+                  this function's own FX history, so its book VaR equals `book.var95_1d_usd`
+                  whenever no position is left out,
     "missing": [plain-language reasons: rows left out of the book series or the
                 scenarios, positions the Blotter could not price, ...]
   }
@@ -481,7 +484,7 @@ def book_risk(conn: sqlite3.Connection, as_of: str, *, history: Optional[History
                                                commodity_history)
     try:
         by_position = position_risk(conn, as_of, spreads=spreads, curve=curve, per_lot=per_lot, config=config,
-                                    headline_var=book["var95_1d_usd"],
+                                    headline_var=book["var95_1d_usd"], fx_history=history,
                                     fx_history_reason="" if history.available else (history.reason or "not on file"))
     except Exception as exc:  # noqa: BLE001 -- the blocks by position never take the tab down
         by_position = {"available": False, "reason": f"risk by position could not be computed "

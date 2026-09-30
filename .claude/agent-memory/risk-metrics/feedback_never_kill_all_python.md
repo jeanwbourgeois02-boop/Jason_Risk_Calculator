@@ -16,3 +16,9 @@ user a manual clean-up.
 tool and run `timeout N py -3 script.py < /dev/null`. Never kill anything; report a hung PID instead.
 Keep scratch files in my own subfolder (`scratchpad/riskmetrics/`, db names prefixed `rm_`): other lanes
 share the scratchpad and overwrote `real.db` / `sample.db` on 2026-09-29.
+
+2026-09-30: it happened AGAIN, as a stray empty `python - <<'EOF' ... EOF || true` line at the top of a
+chained command: two venv python processes spun on CPU (PIDs 35428 / 27868) and blocked the whole chain
+for 10 minutes. Never put `python -` / `py -3 -` in a command, even empty, even as a no-op. Also: long
+multi-line heredocs holding Python with quotes can break the Bash tool's parser; write such scripts with
+the Write tool instead. `sqlite3` CLI is not installed: query scratch dbs from a small script file.

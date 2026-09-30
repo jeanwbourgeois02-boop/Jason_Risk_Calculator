@@ -8,7 +8,15 @@ positions, their daily USD P&L and the component VaR are `positions.py::position
 once and read here (its `detail` hook hands over the series behind its figures), so a trade's
 share of the book is exactly the Risk tab's by-position contribution, and a position with no
 history follows its rules: left out whole, or kept "without hedge" when only a currency hedge
-(the SGX USD/CNH future) has no history (user yes 2026-09-29, `partial_reason`).
+(the SGX USD/CNH future) has no history (user yes 2026-09-29, `partial_reason`). Since
+2026-09-30 an FX trade (a forward or spot hedge inside a commodity trade, an FX option, a metal
+forward such as XAUUSD) has a series too: its USD delta per currency, the exposure path's, times
+the currency's daily move on the FX history `book_risk` reads (`positions.py`), and settled
+currency cash is its own row ('CASH-SETTLED'). So `subset_var` over every trade is the same daily
+P&L as `book_risk`'s headline VaR and equals it (to rounding) unless a trade is left out. A
+trade made only of currency trades (an FX option structure) takes them as its legs, one side
+per pair: one pair is an outright for hedge % ("one leg: nothing hedges it"); a currency side
+has no lots, so no best-fit ratio in lots.
 
 Per trade (parameters in `config/risk.yaml`; W = `trade_window_bd`, 252; a figure needs at least
 `trade_min_days`, 60, and is None with its reason otherwise; None is "cannot be computed", never 0):
@@ -78,6 +86,7 @@ from data.contracts import load_roots
 from engine.risk.commodity import _PerLot, _sum_series, lme_history_contract
 from engine.risk.commodity_history import FX_TOLERANCE_DAYS, load_commodity_history
 from engine.risk.config import load_config
+from engine.risk.history import load_history
 from engine.risk.positions import _contract_name, position_risk, var_of
 from engine.spreads.levels import LevelSpec, converted, spec_from_dict
 
@@ -129,7 +138,8 @@ def _asof(conv: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
 
 
 # --------------------------------------------------------------------------- the block (memoised)
-def _memo_key(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, Any]) -> Optional[tuple]:
+def _memo_key(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, Any], fx_history=None
+              ) -> Optional[tuple]:
     """(database file, mtime, size, as_of, history identity, parameters), or None for a database
     with no file (in memory): computed afresh on every call then."""
     try:
@@ -143,7 +153,8 @@ def _memo_key(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, A
         "var_window_bd", "var_confidence", "var_contribution_days", "correlation_min_days", "trade_window_bd",
         "trade_min_days", "level_window_bd", "level_min_days", "asian_close_countries"))
     return (os.path.normcase(os.path.abspath(path)), st.st_mtime_ns, st.st_size, str(as_of), id(history),
-            getattr(history, "path", ""), getattr(history, "last_date", None), params)
+            getattr(history, "path", ""), getattr(history, "last_date", None), id(fx_history),
+            getattr(fx_history, "last_date", None), params)
 
 
 def _levels_key(book_levels: Optional[Dict[str, dict]]) -> tuple:
@@ -154,10 +165,11 @@ def _levels_key(book_levels: Optional[Dict[str, dict]]) -> tuple:
                          str((lv or {}).get("mode") or "")) for pid, lv in book_levels.items()))
 
 
-def _base_block(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, Any]) -> Optional[dict]:
+def _base_block(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, Any], fx_history=None
+                ) -> Optional[dict]:
     """The latest block built for this database, as_of, history and parameters, whatever Book
     levels it was given: its series and component VaR do not depend on them (subset_var)."""
-    key = _memo_key(conn, as_of, history, config)
+    key = _memo_key(conn, as_of, history, config, fx_history)
     if key is None:
         return None
     with _LOCK:
@@ -165,10 +177,10 @@ def _base_block(conn: sqlite3.Connection, as_of: str, history, config: Dict[str,
 
 
 def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve: Optional[dict], history,
-           config: Dict[str, Any], book_levels: Optional[Dict[str, dict]] = None) -> dict:
+           config: Dict[str, Any], book_levels: Optional[Dict[str, dict]] = None, fx_history=None) -> dict:
     """{rows (one per trade, the full book), series {position_id: daily USD P&L}, position_risk,
     missing}: kept in process per `_memo_key` and the Book's levels (`_levels_key`)."""
-    base = _memo_key(conn, as_of, history, config)
+    base = _memo_key(conn, as_of, history, config, fx_history)
     key = None if base is None else base + (_levels_key(book_levels),)
     if key is not None:
         with _LOCK:
@@ -181,7 +193,8 @@ def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve:
         history.prefetch_roots({str(r.get("root_id")) for r in (curve or {}).get("rows") or [] if r.get("root_id")})
     per_lot = _PerLot(history, as_of)
     detail: Dict[str, Any] = {}
-    pr = position_risk(conn, as_of, spreads=spreads, curve=curve, per_lot=per_lot, config=config, detail=detail)
+    pr = position_risk(conn, as_of, spreads=spreads, curve=curve, per_lot=per_lot, config=config, detail=detail,
+                       fx_history=fx_history)
     series: Dict[str, pd.Series] = detail.get("series") or {}
     leg_series: Dict[str, Dict[str, pd.Series]] = detail.get("leg_series") or {}
     by_contract: Dict[str, dict] = detail.get("by_contract") or {}
@@ -201,7 +214,7 @@ def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve:
     # kept under the key read after the build as well: a first `book_spreads` on a database
     # creates its own tables, which moves the file's mtime, so the key read before it never
     # matches again
-    after = _memo_key(conn, as_of, history, config)
+    after = _memo_key(conn, as_of, history, config, fx_history)
     bases = [k for k in dict.fromkeys((base, after)) if k is not None]
     if bases:
         with _LOCK:
@@ -311,17 +324,23 @@ def _sides(ctx: _Ctx) -> Tuple[List[dict], bool, str]:
     """(the trade's sides, 2-day moves?, why there are none). Its legs with a series, currency
     hedges apart, one side per root when they cover two roots or more, else per contract; each
     {key, name, contracts, lots (delta lots summed), series}."""
-    legs = [lg for lg in ctx.row.get("legs") or []
-            if lg.get("in_series") and not lg.get("hedge") and lg["contract_id"] in ctx.parts]
+    all_legs = ctx.row.get("legs") or []
+    legs = [lg for lg in all_legs if lg.get("in_series") and not lg.get("hedge") and lg["contract_id"] in ctx.parts]
+    if not legs and all_legs and all(lg.get("hedge") for lg in all_legs):
+        # a trade made of currency trades only (an FX option structure): they are its legs, not a hedge
+        legs = [lg for lg in all_legs if lg.get("in_series") and lg["contract_id"] in ctx.parts]
     if not legs:
         return [], False, (ctx.row.get("reason") or "no leg besides currency hedges has a history series")
-    roots = {ctx.root_of(lg["contract_id"]) for lg in legs}
+    roots = {lg.get("pair") or ctx.root_of(lg["contract_id"]) for lg in legs}
     by_root = len(roots) >= 2
     sides: "OrderedDict[str, dict]" = OrderedDict()
     for lg in legs:
         cid = lg["contract_id"]
-        key = ctx.root_of(cid) if by_root else cid
-        if by_root:
+        pair = lg.get("pair")
+        key = pair or (ctx.root_of(cid) if by_root else cid)      # an FX trade's side: its pair
+        if pair:
+            name = str(pair)
+        elif by_root:
             name = str(getattr(ctx.roots.get(key), "name", "") or key)
         else:
             name = _contract_name(ctx.by_contract.get(cid) or {"contract_id": cid})
@@ -332,7 +351,8 @@ def _sides(ctx: _Ctx) -> Tuple[List[dict], bool, str]:
     for side in sides.values():
         side["series"] = _sum_series(side.pop("parts"))
     asian = set(ctx.config.get("asian_close_countries") or [])
-    in_series = [lg["contract_id"] for lg in ctx.row.get("legs") or [] if lg.get("in_series")]
+    # the exchanges' closes decide 1- or 2-day moves; an FX trade (Bloomberg's New York close) is left out
+    in_series = [lg["contract_id"] for lg in all_legs if lg.get("in_series") and not lg.get("pair")]
     regions = {ctx.country_of(cid) in asian for cid in in_series}
     return [s for s in sides.values() if s["series"] is not None], len(regions) > 1, ""
 
@@ -344,7 +364,10 @@ def _hedge(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str) -> dict:
     if w is None or not sides:
         out["hedge_reason"] = why or side_why
         return out
-    hedged = any(lg.get("hedge") and lg.get("in_series") for lg in ctx.row.get("legs") or [])
+    in_sides = {c for s in sides for c in s["contracts"]}
+    hedges = [lg for lg in ctx.row.get("legs") or []
+              if lg.get("hedge") and lg.get("in_series") and lg["contract_id"] not in in_sides]
+    hedged = bool(hedges)
     if len(sides) == 1 and ctx.row.get("partial"):
         out["hedge_reason"] = (f"one leg, and its currency hedge has no price history "
                                f"({ctx.row.get('partial_reason')}): nothing to measure")
@@ -354,7 +377,9 @@ def _hedge(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str) -> dict:
         out["hedge_reason"] = "one leg: nothing hedges it"
         return out
     if len(sides) >= 2 and any(abs(sd["lots"]) < 1e-9 for sd in sides):
-        return _hedge_calendars(ctx, w, sides, hedged, out)
+        # an FX trade's hedge is left out of the within-calendar measure (it never enters it)
+        return _hedge_calendars(ctx, w, sides, any(not lg.get("pair") for lg in hedges), out,
+                                fx_hedges=[str(lg.get("name") or lg["contract_id"]) for lg in hedges if lg.get("pair")])
     out["hedge_method"] = "trade" if len(sides) >= 2 else "one leg against its currency hedge"
     frame = pd.DataFrame({_TRADE: w, **{s["key"]: s["series"].reindex(w.index).fillna(0.0) for s in sides}})
     m = _moves(frame, two_day)
@@ -378,7 +403,8 @@ def _hedge(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str) -> dict:
     return out
 
 
-def _hedge_calendars(ctx: _Ctx, w: pd.Series, sides: List[dict], hedged: bool, out: dict) -> dict:
+def _hedge_calendars(ctx: _Ctx, w: pd.Series, sides: List[dict], hedged: bool, out: dict,
+                     fx_hedges: Sequence[str] = ()) -> dict:
     """hedge % of a trade whose commodities include one that nets to zero lots (calendars on it:
     SCO1's iron ore Oct/Feb and Nov/Mar). Between commodities there is then no "other side": the
     bigger commodity's P&L is already a hedged strip. So the hedge is measured WITHIN each
@@ -388,7 +414,8 @@ def _hedge_calendars(ctx: _Ctx, w: pd.Series, sides: List[dict], hedged: bool, o
     (= the sd-weighted mean of each commodity's own 1 - sd / sd_big). A commodity held in one
     month (an outright) enters at 0 %: sd = its bigger month's. Not value-weighted: a value needs
     a price, and the history's prices are context, not ours. A currency hedge with a series would
-    not fit this split, so such a trade is None with its reason."""
+    not fit this split, so such a trade is None with its reason; a hedge made of FX trades
+    (forwards, options) is left out of this measure and named in the reason."""
     out.update(hedge_method="within calendars (risk-weighted)", hedge_moves="1-day")
     if hedged:
         out["hedge_reason"] = ("a commodity nets to zero lots (calendars) and the trade holds a currency hedge: "
@@ -414,7 +441,8 @@ def _hedge_calendars(ctx: _Ctx, w: pd.Series, sides: List[dict], hedged: bool, o
                      + (" (one month: unhedged)" if len(cids) == 1 else ""))
     out.update(hedge_pct=(1.0 - num / den) * 100.0, hedge_days=days,
                hedge_leg=", ".join(sd["name"] for sd in sides),
-               hedge_reason="measured within each commodity's months, weighted by risk: " + "; ".join(parts))
+               hedge_reason="measured within each commodity's months, weighted by risk: " + "; ".join(parts)
+               + (f"; the currency hedge ({', '.join(fx_hedges)}) is not in this measure" if fx_hedges else ""))
     return out
 
 
@@ -433,6 +461,10 @@ def _best_fit(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str, spec: 
         return out
     a, b = _order_sides(ctx, sides, spec)
     out.update(ratio_legs=[a["name"], b["name"]], lots_a=a["lots"], lots_b=b["lots"])
+    fx = [s["name"] for s in (a, b) if not math.isfinite(s["lots"])]
+    if fx:
+        out["best_fit_reason"] = f"{', '.join(fx)} is a currency position (USD delta, no lots): no ratio in lots"
+        return out
     zero = [s["name"] for s in (a, b) if abs(s["lots"]) < 1e-9]
     if zero:
         out["best_fit_reason"] = f"{', '.join(zero)} nets to zero lots, so it has no P&L per lot"
@@ -471,8 +503,10 @@ def _leg_risk(ctx: _Ctx, sides: List[dict], two_day: bool) -> dict:
     out: List[dict] = []
     for lg in ctx.row.get("legs") or []:
         cid = lg["contract_id"]
-        row = {"contract_id": cid, "name": _contract_name(ctx.by_contract.get(cid) or {"contract_id": cid}),
+        row = {"contract_id": cid,
+               "name": str(lg.get("name") or _contract_name(ctx.by_contract.get(cid) or {"contract_id": cid})),
                "hedge": bool(lg.get("hedge")), "side": side_of.get(cid), "lots": _num(lg.get("delta_lots")),
+               "usd_delta": _num(lg.get("usd_delta")),
                "daily_risk_usd": None, "daily_risk_reason": "", "corr_other_side": None, "corr_with": "",
                "corr_reason": "", "days": 0, "moves": "2-day" if two_day else "1-day"}
         out.append(row)
@@ -488,7 +522,7 @@ def _leg_risk(ctx: _Ctx, sides: List[dict], two_day: bool) -> dict:
         row["daily_risk_usd"], row["days"] = _std(own), int(len(own))
         if row["daily_risk_usd"] is None:
             row["daily_risk_reason"] = "the daily P&L has no standard deviation"
-        others = _other_side(ctx, sides, cid, bool(lg.get("hedge")))
+        others = _other_side(ctx, sides, cid, bool(lg.get("hedge")) and cid not in side_of)
         if others is None:
             row["corr_reason"] = "no other leg with a history series"
             continue
@@ -505,7 +539,7 @@ def _leg_risk(ctx: _Ctx, sides: List[dict], two_day: bool) -> dict:
 def _other_side(ctx: _Ctx, sides: List[dict], cid: str, hedge: bool) -> Optional[Tuple[str, pd.Series]]:
     """(what the leg is correlated with, its daily USD P&L) or None."""
     if hedge:
-        parts = [ctx.parts[c] for s in sides for c in s["contracts"] if c in ctx.parts]
+        parts = [ctx.parts[c] for s in sides for c in s["contracts"] if c in ctx.parts and c != cid]
         label = "the trade's legs besides its hedges"
     elif len(sides) == 2:
         other = next((s for s in sides if cid not in s["contracts"]), None)
@@ -806,11 +840,13 @@ def _move_sigma(book_level: Optional[dict], kind: str, sd: Optional[float], sd_w
 
 
 # --------------------------------------------------------------------------- public
-def _defaults(conn: sqlite3.Connection, history, config):
-    """The caller's history and config, else the book database's own price history and
-    config/risk.yaml."""
+def _defaults(conn: sqlite3.Connection, history, config, fx_history=None):
+    """The caller's histories and config, else the book database's own price history (the
+    commodity reader and the FX history derived from it, `engine.risk.history.load_history`,
+    the one `book_risk` reads) and config/risk.yaml."""
     return (history if history is not None else load_commodity_history(conn),
-            config if config is not None else load_config())
+            config if config is not None else load_config(),
+            fx_history if fx_history is not None else load_history(conn))
 
 
 def _select(rows: List[dict], trade_names: Optional[Iterable[str]]) -> Tuple[List[dict], List[str]]:
@@ -907,7 +943,7 @@ def _vs_target(block: dict, trade_names: Optional[Iterable[str]], config: Dict[s
 
 def subset_var(conn: sqlite3.Connection, as_of: str, trade_names: Optional[Iterable[str]] = None, *,
                spreads: Optional[dict] = None, curve: Optional[dict] = None, history=None,
-               config: Optional[Dict[str, Any]] = None) -> dict:
+               config: Optional[Dict[str, Any]] = None, fx_history=None) -> dict:
     """The VaR and daily risk of the chosen trades together (module docstring). `trade_names`:
     trade names or position ids; None = the whole book. Returns {trades (the names chosen),
     trades_in (with a series), left_out [{trade, reason}], not_found, partial (counted without
@@ -919,8 +955,9 @@ def subset_var(conn: sqlite3.Connection, as_of: str, trade_names: Optional[Itera
     vol_note, vol_vs_target_pct (the engine's definition: blended annual vol / target, percent),
     var_vs_target_pct (1-day VaR / target, percent), vs_target_reason}. None with its reason
     where a figure cannot be computed."""
-    history, config = _defaults(conn, history, config)
-    block = _base_block(conn, as_of, history, config) or _block(conn, as_of, spreads, curve, history, config)
+    history, config, fx_history = _defaults(conn, history, config, fx_history)
+    block = (_base_block(conn, as_of, history, config, fx_history)
+             or _block(conn, as_of, spreads, curve, history, config, fx_history=fx_history))
     out = _subset(block, trade_names, config)
     out.update(_vs_target(block, trade_names, config, out["var_usd"]))
     return out
@@ -928,11 +965,13 @@ def subset_var(conn: sqlite3.Connection, as_of: str, trade_names: Optional[Itera
 
 def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] = None,
                curve: Optional[dict] = None, trade_names: Optional[Sequence[str]] = None, history=None,
-               config: Optional[Dict[str, Any]] = None, trade_book: Optional[dict] = None) -> dict:
+               config: Optional[Dict[str, Any]] = None, trade_book: Optional[dict] = None,
+               fx_history=None) -> dict:
     """Risk by trade for `as_of` (module docstring). `spreads` / `curve`: `book_spreads` and
     `curve_positions` of the same as-of when the caller has them (else computed); `history`: a
     `CommodityHistory` (default `load_commodity_history(conn)`, the book database's own Bloomberg
-    price history); `trade_names`: only those rows
+    price history); `fx_history`: the FX closes the FX trades move on (default
+    `engine.risk.history.load_history(conn)`, book_risk's); `trade_names`: only those rows
     (trade names or position ids), the shares still of the whole book, plus `subset` =
     `subset_var` of them; `trade_book`: spreads-engine's `trade_book(conn, as_of)` when the
     caller holds it: each trade's `level.spec` is then THE level (read before this module's own
@@ -964,10 +1003,10 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
               left out),
       excluded_count, partial_note, missing, subset (only with trade_names), not_found}.
     Every figure a number or None with its reason."""
-    history, config = _defaults(conn, history, config)
+    history, config, fx_history = _defaults(conn, history, config, fx_history)
     book_levels = ({str(t.get("position_id")): (t.get("level") or {}) for t in (trade_book or {}).get("trades") or []
                     if t.get("position_id")} if trade_book is not None else None)
-    block = _block(conn, as_of, spreads, curve, history, config, book_levels)
+    block = _block(conn, as_of, spreads, curve, history, config, book_levels, fx_history)
     pr = block["position_risk"] or {}
     rows, not_found = _select(block["rows"], trade_names)
     out = {

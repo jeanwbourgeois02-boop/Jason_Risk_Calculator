@@ -28,9 +28,25 @@ never copied: the SGX USD/CNH future, an FX spot / forward / swap / option on a 
 with no series is left out alone, and the position is kept on its other legs, with `partial`
 True, `partial_reason` ("<hedge> hedge not in this figure: no price history; the figure is
 without the hedge") and `hedges_left_out`; the book-level `partial_note` names every such
-position. A position made only of such hedges is left out. An FX trade has no series here:
-`book_positions` gives the currency delta per currency, not per trade; a precious-metal pair
-(not a hedge) therefore leaves its position out.
+position. A position made only of such hedges is left out.
+
+An FX trade (spot, forward, swap, FX option, a metal pair such as XAUUSD; 2026-09-30) is one
+leg per trade, its contract id the pair and value date ('USDCNH 2026-11-18', an option its
+instrument id), and its daily USD P&L is exactly what the headline VaR's currency and metal
+rows hold for it (`metrics.py`, the dashboard's FX rows): each non-USD currency's USD delta x
+that currency's daily move (`metrics.unit_moves`: dln of Bloomberg's USD-per-unit close from
+the book database's `price_history`, spot move alone). The USD delta per trade is the
+exposure path's own (`fx_exposure`: the records `book_positions` sums per currency,
+`exposure_records_from_db`, each at its currency's official spot from `build_exposure`, an FX
+option at its official DELTA mark), split by trade, never recomputed: summed over the trades
+it is `book_positions`' `usd_delta` per currency. An FX option with no DELTA mark (or no spot
+to convert it) has no series, with the exposure path's reason. A deliverable leg already
+settled is cash, which still carries its currency's delta in the headline (the exposure
+path's settled-cash records): it is a leg "<ticket> (settled cash)" of the open position of
+its trade name (the hedge of a trade stays under it, `_attach_settled_cash`), or, with no
+open position of that name, one position of its own, 'CASH-SETTLED' ("Settled currency
+cash"). So the positions' book is over the same daily P&L as the headline VaR's parts, and
+the two VaRs agree (to rounding) whenever every part has a series.
 
 Definitions (parameters in `config/risk.yaml`):
 
@@ -39,9 +55,12 @@ Definitions (parameters in `config/risk.yaml`):
                    fewer, with the reason.
   book_var         the same definition on the included positions' series summed day by day (a
                    day one position has no settlement counts it as 0, the book series' rule).
-                   It is NOT the Risk tab's headline VaR (`book.var95_1d_usd`), which is over
-                   every underlyer, currencies and metals included: both are returned
-                   (`book_var` and `headline_var`), with a sentence saying which is which.
+                   The headline VaR (`book.var95_1d_usd`) is over the underlyers' series; with
+                   the FX trades and the settled currency cash as positions they are the same
+                   daily P&L, so the two agree unless a position is left out (a leg with no
+                   series leaves its whole position out, where the headline drops only that
+                   underlyer's contract): both are returned (`book_var` and `headline_var`),
+                   with a sentence saying whether and by how much they differ.
   contribution_var historical component VaR. Over the book's last 252 days, the days whose rank
                    is nearest the 5th-percentile quantile are the book's tail scenarios: with 252
                    days and 5 tail days (`var_contribution_days`) they are the 12th to 16th worst
@@ -169,6 +188,8 @@ class _Position:
         self.trade_ids = sorted({str(t) for t in trade_ids})
         # (contract_id, product, quantity as booked, a currency hedge?)
         self.exposures: List[Tuple[str, str, float, bool]] = []
+        # an FX trade's leg: (contract_id, name, pair, {ccy: USD delta}, a currency hedge?, why no exposure)
+        self.fx_legs: List[Tuple[str, str, str, Dict[str, float], bool, str]] = []
         self.reasons: List[str] = []           # a leg with no series: the whole position is left out
         self.hedges_out: List[Tuple[str, str]] = []   # (hedge name, why): a hedge leg with no series, left out alone
 
@@ -184,10 +205,66 @@ def _contract_of(tid: str, f: dict, by_trade: Dict[str, dict]) -> str:
     return f"{inst} {f.get('value_date')}" if f.get("product") == _LME else inst
 
 
-def open_positions(conn: sqlite3.Connection, as_of: str, spreads: dict, curve: dict, fx_why: str
-                   ) -> List[_Position]:
+def fx_exposure(conn: sqlite3.Connection, as_of: str) -> Dict[str, Any]:
+    """The USD delta of the FX trades, per trade and currency, from the exposure path
+    `book_positions` sums per currency (`engine.ladder.positions.fx_positions`: the records of
+    `exposure_records_from_db`, each currency at its official spot through `build_exposure`,
+    OK or STALE; a currency with no usable rate is NaN with its reason). Nothing is recomputed:
+    each record's local amount times its currency's rate, so the trades' figures add up to
+    `book_positions`' `usd_delta` per currency. USD itself is left out (it does not move).
+
+    Returns {"by_trade": {trade_id: {ccy: USD delta}} (open legs), "settled_by_trade": {trade_id:
+    {ccy: USD delta}} (the settled-cash records of deliverable tickets: cash, still delta),
+    "unresolved": {trade_id: why it has no record} (an FX option with no DELTA mark or no
+    spot), "rate_reason": {ccy: why its rate is not usable}, "reason": '' or why none could be
+    read}."""
+    out: Dict[str, Any] = {"by_trade": {}, "settled_by_trade": {}, "unresolved": {}, "rate_reason": {}, "reason": ""}
+    try:
+        from data.bloomberg.live import rates_from_marks
+        from engine.ladder.exposure import build_exposure
+        from engine.ladder.exposure_adapter import SETTLED, exposure_records_from_db
+        records, unresolved = exposure_records_from_db(conn, as_of)
+        result = build_exposure(records, rates_from_marks(conn))
+    except Exception as exc:  # noqa: BLE001 -- the exposure path's error is a reason, never a crash
+        out["reason"] = f"the currency exposure could not be read ({type(exc).__name__}: {exc})"
+        return out
+    rate: Dict[str, float] = {}
+    messages = ({r["currency"]: r["message"] for r in result.status.to_dict("records")}
+                if not result.status.empty else {})
+    for s in result.summary.to_dict("records"):
+        ccy = str(s["currency"])
+        fx = _num(s.get("fx_rate"))
+        if s.get("status") in ("OK", "STALE") and not _isnan(fx):
+            rate[ccy] = fx
+        else:
+            out["rate_reason"][ccy] = str(messages.get(ccy) or s.get("status") or f"no rate for {ccy}")
+    for r in records:
+        ccy = str(r.get("currency") or "")
+        if not ccy or ccy == "USD":
+            continue
+        usd = float(r["local_amount"]) * rate[ccy] if ccy in rate else NAN
+        which = "settled_by_trade" if r.get("settlement_date") == SETTLED else "by_trade"
+        target = out[which].setdefault(str(r["trade_id"]), {})
+        target[ccy] = target.get(ccy, 0.0) + usd
+    out["unresolved"] = {str(u.trade_id): str(u.reason) for u in unresolved}
+    return out
+
+
+def _fx_contract(f: dict) -> str:
+    """An FX trade's leg id: an FX option its own instrument (one per option), anything else
+    '<pair> <value date>' ('USDCNH 2026-11-18'), so two forwards on the same date net."""
+    inst = str(f.get("instrument_id") or "")
+    if f.get("product") == "FX_OPTION":
+        return inst
+    return f"{inst} {f.get('value_date') or ''}".strip()
+
+
+def open_positions(conn: sqlite3.Connection, as_of: str, spreads: dict, curve: dict, fx_why: str,
+                   fx: Optional[Dict[str, Any]] = None) -> List[_Position]:
     """The Book's positions (module docstring) with their open trades, each trade's contract and
-    booked quantity, or the reason it has no series."""
+    booked quantity, or the reason it has no series. `fx`: `fx_exposure`'s output, which gives
+    each FX trade its USD delta per currency (None, or no FX history: `fx_why` is the FX
+    trades' reason)."""
     _by_contract, by_trade = _rows_by_contract(curve)
     facts = _trade_facts(conn)
     open_ids = set(by_trade) | {t for t, f in facts.items()
@@ -212,11 +289,19 @@ def open_positions(conn: sqlite3.Connection, as_of: str, spreads: dict, curve: d
             f = facts.get(tid) or {}
             hedge = _is_hedge(f, roots)
             if f.get("product") in FX_PRODUCTS:
-                why = f"{tid} ({f.get('instrument_id')}): {fx_why}"
-                if hedge:
-                    pos.hedges_out.append((_fx_name(f), why))
+                inst = str(f.get("instrument_id") or "")
+                if fx is None:
+                    why = f"{tid} ({inst}): {fx_why}"
+                    ccys: Dict[str, float] = {}
+                elif tid in fx["by_trade"]:
+                    why, ccys = "", fx["by_trade"][tid]
+                elif tid in fx["unresolved"]:
+                    why, ccys = f"{tid} ({inst}): {fx['unresolved'][tid]}", {}
+                elif fx.get("reason"):
+                    why, ccys = f"{tid} ({inst}): {fx['reason']}", {}
                 else:
-                    pos.reasons.append(why)
+                    continue            # no open currency exposure (a closed-out option, a leg in USD only)
+                pos.fx_legs.append((_fx_contract(f), _fx_name(f), inst[:6], dict(ccys), hedge, why))
                 continue
             q = _num(f.get("quantity"))
             if _isnan(q):
@@ -224,7 +309,77 @@ def open_positions(conn: sqlite3.Connection, as_of: str, spreads: dict, curve: d
                 continue
             pos.exposures.append((_contract_of(tid, f, by_trade), str(f.get("product") or ""), q, hedge))
         out.append(pos)
+    if fx is not None and fx["settled_by_trade"]:
+        _attach_settled_cash(out, fx["settled_by_trade"], facts, roots)
     return out
+
+
+def _attach_settled_cash(positions: List[_Position], settled: Dict[str, Dict[str, float]],
+                         facts: Dict[str, dict], roots: Dict[str, Any]) -> None:
+    """The settled cash of a deliverable ticket (a forward that has delivered: cash in its
+    currency, still that currency's delta in the headline) goes to the open position of its
+    trade: the one holding the ticket itself (a swap's far leg still open), else the one holding
+    an open trade of the same trade name (`trades.strategy`, the PBRoot name: the hedge of a trade
+    stays under it). Cash whose trade name has no open position is one position of its own,
+    'CASH-SETTLED'."""
+    by_trade: Dict[str, _Position] = {}
+    by_name: Dict[str, _Position] = {}
+    for pos in positions:
+        for t in pos.trade_ids:
+            by_trade.setdefault(t, pos)
+            name = (facts.get(t) or {}).get("strategy") or ""
+            if name:
+                by_name.setdefault(name, pos)
+    left: Dict[str, float] = {}
+    left_ids: List[str] = []
+    for tid, ccys in sorted(settled.items()):
+        f = facts.get(tid) or {}
+        pos = by_trade.get(tid) or by_name.get(str(f.get("strategy") or ""))
+        if pos is None:
+            for ccy, usd in ccys.items():
+                left[ccy] = left.get(ccy, 0.0) + usd
+            left_ids.append(tid)
+            continue
+        cid = f"{_fx_contract(f)} settled cash"
+        pos.fx_legs.append((cid, f"{_fx_name(f)} (settled cash)", str(f.get("instrument_id") or "")[:6], dict(ccys),
+                            _is_hedge(f, roots), ""))
+    if left:
+        cash = _Position(SETTLED_CASH_ID, "cash", SETTLED_CASH_NAME, left_ids)
+        cash.fx_legs.append(("settled cash", SETTLED_CASH_NAME, "", left, False, ""))
+        positions.append(cash)
+
+
+SETTLED_CASH_ID = "CASH-SETTLED"
+SETTLED_CASH_NAME = "Settled currency cash"
+
+
+def _live_ccys(ccys: Dict[str, float]) -> Dict[str, float]:
+    """The currencies of an FX leg that carry delta: USD and exact zeros apart (NaN kept)."""
+    return {c: v for c, v in ccys.items() if c != "USD" and v != 0.0}
+
+
+def _fx_series(ccys: Dict[str, float], fx_history, as_of: str, memo: Dict[str, tuple],
+               rate_reason: Dict[str, str]) -> Tuple[Optional[pd.Series], str, str]:
+    """(an FX leg's daily USD P&L, a note, why None): each non-USD currency's USD delta x its
+    daily move, `metrics.unit_moves` (the headline VaR's currency and metal rows, the same
+    line); a currency with no usable rate or no history leaves the leg with no series."""
+    from engine.risk.metrics import KIND_FX, unit_moves
+    parts: List[pd.Series] = []
+    notes: List[str] = []
+    for ccy, usd in sorted(_live_ccys(ccys).items()):
+        if _isnan(_num(usd)):
+            return None, "", f"{ccy}: no USD delta ({rate_reason.get(ccy) or 'no official spot usable'})"
+        if ccy not in memo:
+            memo[ccy] = unit_moves(fx_history, KIND_FX, ccy, as_of)
+        moves, note, why = memo[ccy]
+        if moves is None:
+            return None, "", f"{ccy}: {why}"
+        parts.append(moves * float(usd))
+        if note:
+            notes.append(note)
+    if not parts:
+        return None, "", "no open non-USD exposure"
+    return _sum_series(parts), "; ".join(dict.fromkeys(notes)), ""
 
 
 def _fx_name(f: dict) -> str:
@@ -236,7 +391,9 @@ def _fx_name(f: dict) -> str:
 
 
 def _position_series(pos: _Position, by_contract: Dict[str, dict], per_lot: _PerLot, as_of: str,
-                     parts_out: Optional[Dict[str, pd.Series]] = None) -> Tuple[List[dict], Optional[pd.Series]]:
+                     parts_out: Optional[Dict[str, pd.Series]] = None, fx_history=None,
+                     fx_memo: Optional[Dict[str, tuple]] = None, rate_reason: Optional[Dict[str, str]] = None
+                     ) -> Tuple[List[dict], Optional[pd.Series]]:
     """(its legs' detail, its daily USD P&L) or None with `pos.reasons` filled: the trades netted
     per contract, each contract at its lots x curve-positions' delta per lot, on its contract's
     held-constant history. A contract the position holds flat is skipped. A currency-hedge leg
@@ -281,6 +438,43 @@ def _position_series(pos: _Position, by_contract: Dict[str, dict], per_lot: _Per
                 continue
         if hedge:
             pos.hedges_out.append((_contract_name(row) if row else cid, leg["reason"]))
+        else:
+            pos.reasons.append(leg["reason"])
+    # the FX trades: one leg per contract (pair and value date, an option's own id), netted
+    fx_booked: Dict[str, dict] = {}
+    for cid, name, pair, ccys, hedge, why in pos.fx_legs:
+        b = fx_booked.setdefault(cid, {"name": name, "pair": pair, "ccys": {}, "hedge": hedge, "why": []})
+        for ccy, usd in ccys.items():
+            b["ccys"][ccy] = b["ccys"].get(ccy, 0.0) + usd
+        if why:
+            b["why"].append(why)
+    memo = fx_memo if fx_memo is not None else {}
+    for cid, b in fx_booked.items():
+        live = _live_ccys(b["ccys"])
+        if not b["why"] and not live:
+            continue                                          # no open currency exposure: holds nothing
+        usd_total = _num(sum(live.values())) if live else NAN
+        leg = {"contract_id": cid, "name": b["name"], "pair": b["pair"], "lots": NAN, "delta_lots": NAN,
+               "usd_delta": usd_total, "usd_delta_by_ccy": {c: _num(v) for c, v in live.items()},
+               "history_contract": ", ".join(sorted(live)) or None, "days": 0, "in_series": False,
+               "hedge": b["hedge"], "reason": "", "note": ""}
+        legs.append(leg)
+        if b["why"]:
+            leg["reason"] = "; ".join(dict.fromkeys(b["why"]))
+        elif fx_history is None:
+            leg["reason"] = f"{b['name']}: no FX price history"
+        else:
+            s, note, why = _fx_series(live, fx_history, as_of, memo, rate_reason or {})
+            if s is None:
+                leg["reason"] = f"{b['name']}: {why}"
+            else:
+                leg.update(in_series=True, days=int(len(s)), note=note)
+                parts.append(s)
+                if parts_out is not None:
+                    parts_out[cid] = s
+                continue
+        if b["hedge"]:
+            pos.hedges_out.append((b["name"], leg["reason"]))
         else:
             pos.reasons.append(leg["reason"])
     if pos.reasons:
@@ -334,11 +528,14 @@ def _correlation(included: List[dict], series: Dict[str, pd.Series], config: Dic
 
 def position_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict], curve: Optional[dict],
                   per_lot: _PerLot, config: Dict[str, Any], headline_var: float = NAN,
-                  fx_history_reason: str = "", detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  fx_history_reason: str = "", detail: Optional[Dict[str, Any]] = None,
+                  fx_history=None) -> Dict[str, Any]:
     """Risk by position for `as_of` (module docstring). `spreads` / `curve`: `book_spreads` and
     `curve_positions` of the same as-of (book_risk's, not computed twice); `per_lot`: the
     commodity rows' per-lot series cache; `headline_var`: `book.var95_1d_usd`, returned beside
-    the position book's VaR; `fx_history_reason`: why the FX history is absent, '' when on file.
+    the position book's VaR; `fx_history_reason`: why the FX history is absent, '' when on file;
+    `fx_history`: the `engine.risk.history.History` the FX trades move on (book_risk's own, so
+    both VaRs read the same closes; None = `load_history(conn)`).
     `detail`, when given, receives the series behind the figures (never in the returned dict,
     which stays JSON-friendly): `series` {position_id: daily USD P&L}, `leg_series`
     {position_id: {contract_id: its leg's daily USD P&L}}, `by_contract` {contract_id:
@@ -352,7 +549,9 @@ def position_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dic
                      'pinned', 'calendar', a template id, 'outright', or a trade's product in lower
                      case), name, trade_ids (its open trades),
                      legs [{contract_id, lots, delta_lots, history_contract, days, in_series, hedge,
-                     reason}], included (bool), reason ('' when included), partial (bool: counted
+                     reason}; an FX trade's leg adds name, pair, usd_delta (its USD delta, NaN
+                     lots) and usd_delta_by_ccy, history_contract the currencies it moves on],
+                     included (bool), reason ('' when included), partial (bool: counted
                      without a currency hedge that has no history), partial_reason ('' unless
                      partial), hedges_left_out [{name, reason}], days, first_date, last_date,
                      standalone_var, standalone_reason, contribution_var, contribution_share,
@@ -394,11 +593,17 @@ def position_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dic
         out["reason"] = out["correlation_reason"] = "the book's positions could not be read (see the missing list)"
         return out
     history = per_lot.history
-    fx_why = ("an FX trade: " + (f"no FX market history ({fx_history_reason})" if fx_history_reason else
-                                 "book_positions gives the currency delta per currency, not per trade, so its "
-                                 "risk is in the currency rows of the headline VaR"))
+    if fx_history is None and not fx_history_reason:
+        from engine.risk.history import load_history
+        fx_history = load_history(conn)
+    fx_ok = fx_history is not None and bool(getattr(fx_history, "available", False)) and not fx_history_reason
+    if not fx_history_reason and not fx_ok:
+        fx_history_reason = getattr(fx_history, "reason", "") or "not on file"
+    fx_why = f"an FX trade: no FX market history ({fx_history_reason})"
+    fx = fx_exposure(conn, as_of) if fx_ok else None
     by_contract, _by_trade = _rows_by_contract(curve)
-    positions = open_positions(conn, as_of, spreads, curve, fx_why)
+    positions = open_positions(conn, as_of, spreads, curve, fx_why, fx)
+    fx_memo: Dict[str, tuple] = {}
     series: Dict[str, pd.Series] = {}
     leg_series: Dict[str, Dict[str, pd.Series]] = {}
     if detail is not None:
@@ -406,7 +611,8 @@ def position_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dic
     rows: List[dict] = []
     for pos in positions:
         parts: Dict[str, pd.Series] = {}
-        legs, s = _position_series(pos, by_contract, per_lot, as_of, parts)
+        legs, s = _position_series(pos, by_contract, per_lot, as_of, parts, fx_history if fx_ok else None, fx_memo,
+                                   (fx or {}).get("rate_reason"))
         if s is not None and pos.id not in leg_series:
             leg_series[pos.id] = parts
         partial = s is not None and bool(pos.hedges_out)
