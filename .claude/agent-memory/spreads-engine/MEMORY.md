@@ -11,3 +11,4 @@
 - [Value sizing, one spread per name](value-sizing-one-spread.md) — 2026-09-29: value between commodities, physical for same commodity / cracks; one spread per name; leftover on front leg
 - [Trade book](trade-book.md) — 2026-09-29 Phase G: type rule (roll-aware day calendars), converted CN/West ratio, no-marks hedge fallback
 - [Level gaps filled](level-gaps.md) — 2026-09-30: near-marks entry spot with estimated flags, 3-leg template levels, options net premium level
+- [Locked in / open split](locked-open-split.md) — 2026-09-30: LTD split per trade and leg, the per-leg avg rule, the linearity check, non-USD locked moves with spot

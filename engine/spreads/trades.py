@@ -649,6 +649,93 @@ def _unrecognised_row(book, cid: str, ids: List[str], symbols: Dict[str, str]) -
     }
 
 
+# the products value_book values as quantity x (mark - fill) with no multiplier (the FX rule, an
+# LME ticket, an FX option on its premium)
+_NO_MULTIPLIER = st.FX_PRODUCTS + ("LME_FWD", "FX_OPTION")
+
+
+def _split_leg(book, row: dict) -> Tuple[Optional[float], Optional[float], str]:
+    """(open, locked in, why when None) of one leg's P&L since entry (user yes under hard rule 7,
+    2026-09-30): a split of the leg's LTD, never a new figure.
+
+    open = the open net x multiplier x (the as-of mark - the open lots' average entry) x the as-of
+    USD spot, the average by ``strategies._entry_value``'s rule (the leg's ``avg_fill``: an add
+    averages in, a reduction leaves the average, a day netting to zero changes nothing); locked in
+    = the leg's LTD - open, so the two add up to the LTD exactly. A leg with nothing open is all
+    locked in. The mark and spot are the ones the leg's own ``value_book`` rows carry, and every
+    open row must be exactly quantity x multiplier x (mark - fill) x spot on them (the check that
+    the open lots are priced on the average's terms); a leg that is not (a metal option dealt per
+    ounce, open fills marked at two closes) is not split, with the reason, never guessed. Locked
+    in then equals -sum(q x fill) + open net x average (times the spot): it does not move with the
+    mark, and on a leg never reduced it is zero."""
+    ltd = (row.get("pnl_usd") or {}).get("ltd")
+    if row.get("unrecognised"):
+        return None, None, row.get("unrecognised_reason") or "contract not recognised"
+    if ltd is None:
+        return None, None, (row.get("pnl_reasons") or {}).get("ltd") or "no P&L since entry"
+    if row["status"] != "open":
+        return 0.0, float(ltd), ""
+    name = row.get("name") or row.get("contract_id")
+    avg, mark = row.get("avg_fill"), row.get("mark")
+    if avg is None:
+        return None, None, f"{name}: no average entry of the open lots ({row.get('avg_fill_reason') or 'not known'})"
+    if mark is None:
+        return None, None, f"{name}: no mark ({row.get('mark_reason') or 'not valued'})"
+    t = book.by_id[row["open_trade_ids"][0]]
+    mult = 1.0 if t["product"] in _NO_MULTIPLIER else _num(t["multiplier"])
+    if mult is None:
+        return None, None, f"{name}: its multiplier is not a number"
+    spots, marks = set(), set()
+    for tid in row["open_trade_ids"]:
+        r = book.today.get(tid) or {}
+        q, f = book.lots(tid), _num(book.by_id[tid]["price"])
+        m, s, p = _num(r.get("mark")), _num(r.get("spot")), _num(r.get("pnl_usd"))
+        if q is None or f is None or m is None or s is None or p is None:
+            return None, None, f"{name}: {tid} has no mark, spot or P&L to split on"
+        if abs(q * mult * (m - f) * s - p) > max(0.005, 1e-9 * abs(p)):
+            return None, None, (f"{name}: {tid}'s P&L is not lots x multiplier x (mark - fill) x spot, "
+                                f"so its open lots cannot be split from what was taken off")
+        spots.add(s)
+        marks.add(m)
+    if max(marks) - min(marks) > 1e-9 * max(1.0, abs(mark)) or max(spots) - min(spots) > 1e-12 * max(1.0, max(spots)):
+        return None, None, f"{name}: its open fills are marked at different closes, so the open lots are not split"
+    s, m = spots.pop(), marks.pop()
+    if not _unwound(book, row):
+        # never reduced: all of it is open (locked in is exactly 0 in theory; float dust never shows)
+        return float(ltd), 0.0, ""
+    opened = float(row["quantity"]) * mult * (m - float(avg)) * s
+    return opened, float(ltd) - opened, ""
+
+
+def _split_trade(rows: List[dict], ltd, ltd_why: str = "") -> Tuple[Optional[float], Optional[float], str]:
+    """(open, locked in, why when None) of a trade: open = its legs' open summed, locked in = the
+    trade's LTD - open, so the two add up to the LTD the Book shows. None both, with the first
+    leg's reason, when any leg cannot be split; a closed trade is all locked in."""
+    if ltd is None:
+        return None, None, ltd_why or "no P&L since entry"
+    bad = [r for r in rows if r.get("pnl_open") is None]
+    if bad:
+        why = "; ".join(str(r.get("pnl_split_reason") or f"{r.get('name')}: not split") for r in bad)
+        return None, None, f"not split into locked in and open: {why}"
+    opened = float(sum(float(r["pnl_open"]) for r in rows))
+    locked = float(ltd) - opened
+    if abs(locked) < 0.005:
+        # float dust of the legs' sum: nothing locked in (open + locked still = LTD exactly)
+        locked = 0.0
+    return float(ltd) - locked, locked, ""
+
+
+def _unwound(book, row: dict) -> bool:
+    """Some lots of this leg were taken off (a reduction, a roll out of it, a close, an expiry or
+    settlement): the leg has locked-in P&L. A leg never reduced has not."""
+    if row.get("unrecognised"):
+        return False
+    if row["status"] != "open":
+        return bool(row.get("trade_ids"))
+    gross = sum(abs(book.lots(i) or 0.0) for i in row["trade_ids"])
+    return gross > abs(float(row["quantity"])) + 1e-6 * max(1.0, gross)
+
+
 def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str], prev_day: str = "",
               prev_rows: Optional[Dict[str, dict]] = None) -> List[dict]:
     """One row per contract of the trade (an LME ticket per prompt, an FX trade per value date):
@@ -672,7 +759,9 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str], p
         ids = sorted(ids, key=lambda i: (str(book.by_id[i]["trade_date"]), i))
         t = book.by_id[ids[0]]
         if t["product"] == UNRECOGNISED:
-            rows.append(_unrecognised_row(book, cid, ids, symbols))
+            bad = _unrecognised_row(book, cid, ids, symbols)
+            bad.update(pnl_open=None, pnl_locked=None, pnl_split_reason=bad["unrecognised_reason"], unwound=False)
+            rows.append(bad)
             continue
         root = book.roots.get(str(t["base_ccy"] or ""))
         month, prompt = meta[cid]
@@ -772,6 +861,8 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str], p
                    roll_down=None, roll_down_unit="", roll_down_usd_per_month=None, horizon_months=None,
                    roll_down_reason="a hedge: no roll-down" if hedge else "",
                    unrecognised=False, unrecognised_reason="")
+        p_open, p_locked, p_why = _split_leg(book, row)
+        row.update(pnl_open=p_open, pnl_locked=p_locked, pnl_split_reason=p_why, unwound=_unwound(book, row))
         rows.append(row)
     order = {"open": 0, UNRECOGNISED.lower(): 1, "flat": 2, "closed": 2}
     rows.sort(key=lambda r: (r["hedge"], order[r["status"]], r["root_id"], r["month"], r["prompt"], r["contract_id"]))
@@ -1509,6 +1600,8 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         if nxt is not None:
             nxt = {**nxt, "hedge": False}
     pnl = entry.get("pnl_usd") or {}
+    pnl_open, pnl_locked, pnl_split_reason = _split_trade(rows, pnl.get("ltd"),
+                                                          (entry.get("pnl_reasons") or {}).get("ltd"))
     return {
         "trade": name, "trade_ids": sorted(tids), "position_id": f"POSITION-{entry['spread_id']}",
         "status": "open" if any(r["status"] in ("open", UNRECOGNISED.lower()) for r in rows) else "closed",
@@ -1529,6 +1622,8 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
                 "split_reason": "" if split_ok else (split.get("reason") or "no Daily split")},
         "gross_usd": entry.get("gross_usd"), "net_usd": entry.get("net_usd"),
         "notional_reason": entry.get("notional_reason", ""),
+        "pnl_open": pnl_open, "pnl_locked": pnl_locked, "pnl_split_reason": pnl_split_reason,
+        "unwound": any(r.get("unwound") for r in rows),
         "flags": flags,
     }
 
@@ -1679,6 +1774,12 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
     - ``pnl``: {daily, ltd (the strategy position's, ``value_book`` rows summed), periods,
       reasons, notes, ref_dates, split ({spread, fx, hedge, new_trades, realised, other}, or None
       with ``split_reason``)}; ``gross_usd`` / ``net_usd`` / ``notional_reason``.
+    - ``pnl_open`` / ``pnl_locked`` / ``pnl_split_reason`` (2026-09-30, user yes under hard rule
+      7): the LTD split into the P&L on the lots still held and the P&L locked in from lots taken
+      off (``_split_leg``, ``_split_trade``): open + locked = ``pnl['ltd']`` exactly; both None
+      with the reason when a leg cannot be split; a closed trade is all locked in. ``unwound``
+      (bool): some lots were taken off (a reduction, a roll, a close, an expiry). Each leg carries
+      the same four keys (``pnl_open`` + ``pnl_locked`` = its ``pnl_usd['ltd']``).
     - ``flags``: [{code ('unbalanced' | 'hedge_oversized' | 'type_mismatch' |
       'leg_without_price' | 'unrecognised'), label, sentence, severity ('red' on 'unrecognised', else 'amber')}].
     - A row the parser could not identify (product UNRECOGNISED, hard rule 6) stays in its trade as

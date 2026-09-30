@@ -126,3 +126,6 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 - `tests/test_ui_risk.py`: its 11 tests of the old Risk layout (the two cards and worst-day line, the
   margin and limits tables, the not-set drawer) are deleted, not re-pinned; the Risk parts of
   `tests/test_ui_curve.py` likewise. `tests/test_ui_smoke.py` still calls `risk.render` (kept).
+
+## Add (2026-09-30)
+- `tests/test_spreads.py`: the open / locked-in split of `trade_book`: open + locked = LTD per leg and trade; a partial reduction, a cross through zero and a same-day buy and sell against a hand average-cost figure; a never-reduced leg's locked in exactly 0; an unrecognised leg gives None with its reason; a closed trade all locked in.

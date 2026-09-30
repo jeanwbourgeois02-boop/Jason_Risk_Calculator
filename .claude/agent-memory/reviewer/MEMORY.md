@@ -20,3 +20,4 @@
 - [Daily split review 2026-09-28](review-findings-daily-split-2026-09-28.md) — spreads daily_split/strategies: no criticals; settled hedge misbucketed, hedge set too wide, prev-frame fallback, no tests
 - [Series + period explain 2026-09-29, 2 passes](review-findings-series-explain-2026-09-29.md) — pass-1 items closed; open: scorecard closed+open != LTD on flat non-USD ideas, doc drift
 - [Closed-out FX options out of delta 2026-09-29](review-findings-closed-out-delta-2026-09-29.md) — no criticals; CLAUDE.md SQL drift, curve.py fx_sources count, golden 09-18 pin moves
+- [Locked/open split 2026-09-30](review-findings-locked-open-split-2026-09-30.md) — trade_book pnl_open/pnl_locked: no criticals; float-dust red 0, FX-option sell-back by id; HEAD-diff recipe
