@@ -51,8 +51,8 @@ from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
     cap, cap_parts, tidy,
     MINUS, MISSING, about, compact, contract_name, day_text, format_cell, full_signed, fx_name, is_fx_pair,
-    issues_drawer, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text, quoted_unit,
-    row_info, sign_class, sum_known, z_text,
+    issues_drawer, km_cell, km_text, marker, missing_cell, paren, pct_text, plain_words, price_text,
+    quoted_unit, row_info, sign_class, sum_known, z_text,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -155,16 +155,21 @@ def unit_words(unit: Optional[str]) -> str:
 
 
 def level_text(value: Any, level: dict, signed: bool = False) -> str:
-    """A level in its own format: a ratio at 4 decimals, a price difference at the unit's tick."""
+    """A level in its own format: a ratio at 4 decimals, a price difference at the unit's tick,
+    with a real minus. `signed`: a move of the level (the Move column), a fall in brackets and a
+    rise plain (the money rule of 2026-09-30, which the user asked for on the Move column too)."""
     v = _num(value)
     if v is None:
         return MISSING
     if level.get("mode") == "ratio" or level.get("unit") == "ratio":
         body = f"{abs(v):.4f}"
-        sign = MINUS if v < 0 and float(body) else ("+" if signed and v > 0 and float(body) else "")
-        return sign + body
-    text = price_text(v, str(level.get("unit") or ""))
-    return ("+" + text) if signed and v > 0 and not text.startswith(MINUS) and text.strip("0.,") else text
+        if signed:
+            return paren(body, v < 0 and bool(float(body)))
+        return (MINUS if v < 0 and float(body) else "") + body
+    if signed:
+        body = price_text(abs(v), str(level.get("unit") or ""))
+        return paren(body, v < 0 and bool(body.strip("0.,")))
+    return price_text(v, str(level.get("unit") or ""))
 
 
 def _level_cell(value: Any, level: dict, reason: str, hover: str = "", estimated: bool = False,
@@ -619,13 +624,12 @@ NOTIONAL_PRODUCTS = {"FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION"}      # sized i
 
 
 def signed_count(n: float, money: bool = False) -> str:
-    """'+30', '−4', '+1,000'; with `money` a currency amount in k / m ('+2.0m', '−250k')."""
+    """'+30', '−4', '+1,000'; with `money` a currency amount in full ('+2,000,000', '−250,000'):
+    a size keeps its real minus, and no k / m since 2026-09-30."""
     f = float(n)
     v = abs(f)
-    if money and v >= 1e6:
-        body = f"{v / 1e6:,.1f}m"
-    elif money and v >= 1000:
-        body = f"{v / 1e3:,.0f}k" if v == round(v / 1e3) * 1e3 else f"{v / 1e3:,.1f}k"
+    if money and v >= 1000:
+        body = f"{v:,.0f}"
     else:
         body = f"{abs(f):,.2f}".rstrip("0").rstrip(".")
     if body == "0":
@@ -858,7 +862,7 @@ def _today_td(t: dict, r: Optional[dict] = None, ready: bool = True, check: Sequ
     hover = _lines(since, f"Worth {full_signed(effect)} USD to the trade" if effect is not None else "",
                    sigma_words(r, ready, level), *(f"Price to check: {x}" for x in check))
     text = level_text(ch, level, signed=True)
-    if not text.strip("+" + MINUS + "0.,"):
+    if not text.strip("+()" + MINUS + "0.,"):
         # nothing moved at the level's precision: one dash for the whole column, never 0.0000 / 0.00 / 0.0
         return html.Td(missing_cell(_lines(f"No move {since[0].lower()}{since[1:]}", *(f"Price to check: {x}" for x in check))))
     unit = unit_words(level.get("unit"))
@@ -1343,7 +1347,7 @@ def leg_tr(data: dict, leg: dict, level_note: str) -> html.Tr:
     if lots is None:
         lots_text = MISSING
     elif product.startswith("FX"):
-        lots_text = f"{km_text(lots)} {leg.get('root_id') or ''}".strip()
+        lots_text = f"{signed_count(lots, money=True)} {leg.get('root_id') or ''}".strip()
     else:
         lots_text = (MINUS if lots < 0 else "+") + f"{abs(lots):,.0f}" if lots else "0"
     lots_hover, fill_hover = _fills_hover(data, leg)

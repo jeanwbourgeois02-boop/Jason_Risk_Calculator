@@ -30,7 +30,7 @@ from dash import dcc, html
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
     cap, cap_parts, plain_ids, MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words, price_text,
-    short_date, sum_known, contract_name, is_fx_pair, quoted_unit,
+    short_date, sum_known, contract_name, is_fx_pair, quoted_unit, count_text,
 )
 
 log = logging.getLogger(__name__)
@@ -443,8 +443,10 @@ def _grid_td(cell: Optional[tuple], unit: str, word: str) -> html.Td:
     if v is None:
         return html.Td(missing_cell(why))
     cls = "risk-grid-long" if v > 0 else ("risk-grid-short" if v < 0 else "")
-    full = format_cell(v) if unit != "lots" else lots_text(v)
-    return html.Td([html.Span(_grid_text(v, unit, word), title=plain_words(_lines(f"{full} {word}", *names[:8]))),
+    # money in full is the cell itself (2026-09-30): its hover names the unit; a quantity keeps its figure
+    full = "" if unit == "usd" else (lots_text(v) if unit == "lots" else count_text(v))
+    return html.Td([html.Span(_grid_text(v, unit, word),
+                              title=plain_words(_lines(f"{full} {word}".strip(), *names[:8]))),
                     marker(f"Excl. {n_excl}", _lines(f"Excludes {_plural(n_excl, 'contract')} with no figure", why),
                            "marker--small") if n_excl else None], className=cls or None)
 
@@ -845,7 +847,7 @@ def fx_positions_block(pos: Optional[dict], error: str, filtered: bool) -> html.
         rows.append(html.Tr([
             html.Td(html.Span(ccy, className="tk-name", title=f"At the day's official spot{f' ({rate})' if rate else ''}"),
                     className="l"),
-            html.Td(html.Span(_local_text(local), title=(f"{ccy} {format_cell(local)}" if local is not None
+            html.Td(html.Span(_local_text(local), title=(f"The delta in {ccy}" if local is not None
                                                          else reason or "no local delta"))),
             html.Td(km_cell(usd, reason=reason or "no USD delta", hover=rate, colour=False)),
         ]))
@@ -856,7 +858,7 @@ def fx_positions_block(pos: Optional[dict], error: str, filtered: bool) -> html.
         why = plain_words(m.get("reason") or "a metal's delta is reported apart: not in the FX net or gross")
         rows.append(html.Tr([
             html.Td(html.Span(str(m.get("ccy") or ""), className="tk-name", title=cap(why)), className="l"),
-            html.Td(html.Span(f"{format_cell(units)} {unit}", title=cap(why)) if units is not None
+            html.Td(html.Span(f"{count_text(units)} {unit}", title=cap(why)) if units is not None
                     else missing_cell(why)),
             html.Td(html.Span("Not in the net", className="tk-sub", title=cap(why)))]))
     if not rows:
@@ -867,12 +869,12 @@ def fx_positions_block(pos: Optional[dict], error: str, filtered: bool) -> html.
     net, gross = _num(fx.get("net_usd")), _num(fx.get("gross_usd"))
     net_words = ("" if net is None else "Long USD" if net > 0.5 else "Short USD" if net < -0.5 else "Flat")
     net_cell = (missing_cell(plain_words(fx.get("reason") or "") or "no FX net") if net is None
-                else html.Span(km_text(net), title=f"USD {format_cell(net)}: + = long USD, FX options' delta included"))
+                else html.Span(km_text(net), title="Long USD when plain, short USD in brackets; FX options' delta included"))
     totals = [html.Tr([html.Td("Net USD", className="l"), html.Td(net_words, className="tk-sub"), html.Td(net_cell)])]
     if gross is not None:
         totals.append(html.Tr([html.Td("Gross", className="l"), html.Td(""),
                                html.Td(html.Span(km_text(gross, signed=False),
-                                                 title=f"USD {format_cell(gross)}: the sum of each pair's |USD delta|"))]))
+                                                 title="The sum of each pair's |USD delta|"))]))
     headrow = html.Thead(html.Tr([html.Th("Currency", className="l"),
                                   html.Th("Delta (local)", title="The currency's delta in its own units."),
                                   html.Th("Delta (USD)", title="The same at the day's official spot.")]))

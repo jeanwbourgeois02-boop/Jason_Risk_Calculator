@@ -175,7 +175,7 @@ from ui.revision import BOOK_REVISION_ID, DATA_REVISION_ID
 from ui.tabs import data_kit as kit
 from ui.tabs import ranking as rk
 from ui.tabs import trade_filter as tf
-from ui.tabs.formatting import (MINUS, MISSING, amount_words, cap, cap_lines, format_cell, full_signed, fx_name,
+from ui.tabs.formatting import (MINUS, MISSING, amount_words, cap, cap_lines, format_cell, fx_name,
                                 is_fx_pair, issues_drawer, km_text, plain_ids, plain_words, strike_text)
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -1039,7 +1039,7 @@ _FRAME_COLUMNS = ["level", "group_key", "parent_key", "label", "leg_count", "pri
 # browser): whole units with thousands separators and negatives in parentheses -- the
 # app's `format_cell` look -- for amounts; up to six decimals, trailing zeros trimmed, for
 # premiums and rates, so a fill reads as the blotter wrote it (0.00579, 0.121, 152).
-AMOUNT_FORMAT = Format(precision=0, scheme=Scheme.fixed, group=Group.yes, sign=Sign.default)
+AMOUNT_FORMAT = Format(precision=0, scheme=Scheme.fixed, group=Group.yes, sign=Sign.parantheses)
 RATE_FORMAT = Format(precision=6, scheme=Scheme.fixed, group=Group.yes, trim=Trim.yes)
 # The Greeks: up to two decimals, trailing zeros trimmed -- an option on a future's delta is a
 # few futures lots (5.5 lots must not read as 6), an FX option's a USD amount.
@@ -1132,7 +1132,7 @@ def delta_text(value, unit: str) -> str:
         return ""
     sign = MINUS if v < 0 else ("+" if v > 0 else "")
     if unit == FX_GREEK_UNITS["delta"]:
-        return f"{sign}{abs(v):,.0f} USD"
+        return f"{format_cell(v)} USD"    # money: a short delta in brackets (2026-09-30)
     if unit.endswith("futures lots"):
         return f"{sign}{abs(v):,.2f}".rstrip("0").rstrip(".") + " lots"
     return ""
@@ -1549,7 +1549,7 @@ def headline_strip(totals: dict, filtered: bool = False):
                                 ("pnl_usd", "P&L USD", "The book's own per-trade P&L, summed")):
         v = totals.get(field)
         items.append((label, km_text(v, signed=field == "pnl_usd"),
-                      f"{hover}: {full_signed(v) if field == 'pnl_usd' else format_cell(v)}" if v is not None
+                      hover if v is not None
                       else "None of the options shown has this figure"))
     by_unit = totals.get("delta_by_unit") or {}
     if len(by_unit) == 1:

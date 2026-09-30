@@ -721,9 +721,9 @@ def panel_tr(data: dict, t: dict, r: Optional[dict]) -> html.Tr:
     if r is not None:
         alone, contrib = _num(r.get("standalone_var")), _num(r.get("contribution_var"))
         fact("VaR alone", km_text(alone, signed=False) if alone is not None else NA,
-             format_cell(alone) if alone is not None else (r.get("standalone_reason") or "not given"))
+             "" if alone is not None else (r.get("standalone_reason") or "not given"))
         fact("Its part of the book's VaR", km_text(contrib) if contrib is not None else NA,
-             format_cell(contrib) if contrib is not None else (r.get("share_reason") or "not given"))
+             "" if contrib is not None else (r.get("share_reason") or "not given"))
         legs = r.get("ratio_legs") or []
         corr = _num(r.get("leg_correlation"))
         if legs:

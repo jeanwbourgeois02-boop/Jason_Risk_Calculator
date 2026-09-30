@@ -74,3 +74,8 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 
 - Delete, don't re-pin (pinned to rebuilt screens): tests/test_ui_formatting.py 80-105 (drawer `Li` / `issue-label` structure; the drawer is now a Kind | Where | Reason table); tests/test_ui_risk.py (old headline, the not-set `Li` list, price-check "What it means" column; :480 drawer `Li` rows); tests/test_ui_market_data.py (library summary, missing_panel, diagnostics_panel, "ticker(s)"); tests/test_ui_blotter.py 253-369 (`blotter-strip-options`, "Portfolio Totals"); tests/test_ui_options.py 401, 409, 527, 937, 1249-1263, 1335, 1676, 2056 (old DISPLAY_COLUMNS, headline cards, "Portfolio Totals").
 - New coverage owed: `py 2_launcher.py ui-check` exit 0 as a smoke test (strict layout included); formatting.issues_drawer triples and same-reason merge; row_info / head_info; P&L split cells blank when empty; options Status / Size / Delta text.
+
+## Book, header and look pass (2026-09-30, e666153, 8c2f0f0 and the brackets commit): owed, not run
+
+- Re-pin or delete: tests pinning "+42.1k" / "−$51.0k" / "USD −6,928" money text, k / m size words ("2.0m USD") and the old Data title (tests/test_header.py, tests/test_ui_smoke.py, tests/test_ui_formatting.py); tests reading `layout().children[0]` of book / pnl / risk / blotter (each now opens on a `tab-header` title).
+- New coverage owed: `formatting.paren` / `count_text`; money in brackets, no "+", full figures; CSV keeps plain "-"; the 17:00 NY roll `header.as_of_after_tick` (its picker test was deleted) and `header.as_of_from_query` (`?as_of=`); Book `size_text` forms and `flag_name`.

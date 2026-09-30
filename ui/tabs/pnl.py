@@ -454,7 +454,7 @@ def _money_td(fig: Tuple[Optional[float], int, List[str]], hover: str = "", full
     m = marker(f"Excl. {n}", left_out, "marker--small") if n and badge else None
     tip = _lines(hover, "" if badge else left_out)
     if full:
-        title = cap(plain_words(_lines(f"USD {full_signed(v)}" if n else "", tip))) or None
+        title = cap(plain_words(tip)) or None
         return html.Td([html.Span(full_signed(v), className=sign_class(v) or None, title=title), m])
     return html.Td([km_cell(v, hover=tip or None), m])
 
@@ -713,11 +713,11 @@ def chart_figure(b: dict, p: dict, state: Optional[dict]) -> dict:
             ids = set(fills_of(trades))
             ys = [sum(v for t, v in d["by_trade"].items() if t in ids) for d in days]
             traces.append({"x": xs, "y": ys, "type": "bar", "name": value, "marker": {"color": _PALETTE[n % 6]},
-                           "hovertemplate": f"{value} " + "%{y:$,.0f}<extra></extra>"})
+                           "hovertemplate": f"{value} " + "%{y:($,.0f}<extra></extra>"})
     else:
         traces.append({"x": xs, "y": daily_tot, "type": "bar", "name": "Daily P&L",
                        "marker": {"color": ["#1a7f4b" if (v or 0) >= 0 else "#c0392b" for v in daily_tot]},
-                       "hovertemplate": "Daily %{y:$,.0f}<extra></extra>"})
+                       "hovertemplate": "Daily %{y:($,.0f}<extra></extra>"})
     traces.append({"x": xs, "y": cum_tot, "type": "scatter", "mode": "lines+markers" if len(xs) < 3 else "lines",
                    "name": "Cumulative", "line": {"color": "#0f1f3d", "width": 2}, "text": texts, "yaxis": "y",
                    "hovertemplate": "%{text}<extra></extra>"})
@@ -726,11 +726,11 @@ def chart_figure(b: dict, p: dict, state: Optional[dict]) -> dict:
     xaxis = ({"type": "category", "tickvals": xs, "ticktext": [_day_label(d) for d in xs]} if len(xs) <= 3
              else {"type": "date", "tickformat": "%d %b"})
     return {"data": traces, "layout": {
-        "height": CHART_HEIGHT, "barmode": "relative", "margin": {"l": 56, "r": 16, "t": 10, "b": 28},
+        "height": CHART_HEIGHT, "barmode": "relative", "margin": {"l": 84, "r": 16, "t": 10, "b": 28},
         "hovermode": "x unified", "showlegend": group != tf.GROUP_NONE and 1 < len(items) <= 6,
         "legend": {"orientation": "h", "y": 1.02, "yanchor": "bottom", "x": 0, "font": {"size": 11}},
         "xaxis": xaxis, "bargap": 0.35 if len(xs) > 3 else 0.7,
-        "yaxis": {"tickformat": "~s", "zeroline": True, "zerolinecolor": "#c9ced8"},
+        "yaxis": {"tickformat": "(,.0f", "automargin": True, "zeroline": True, "zerolinecolor": "#c9ced8"},
         "plot_bgcolor": "#fff", "paper_bgcolor": "#fff"}}
 
 

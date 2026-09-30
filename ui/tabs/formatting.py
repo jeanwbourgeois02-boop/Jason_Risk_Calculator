@@ -3,8 +3,8 @@
 Display only: nothing here computes P&L, delta or a sum -- per CLAUDE.md ("ui/ ... never
 recomputes P&L or delta itself"), storage/precision stay in engine/ and data/.
 
-- `format_cell` / `format_frame`: whole units with separators, a negative with a real minus.
-- `short_money`: a money figure in k / m / bn for summary screens ("1.65m").
+- `format_cell` / `format_frame`: money in whole units with separators, a loss in brackets.
+- `short_money`: a money figure in full with an optional symbol ("($1,650,590)"); no k / m.
 - `about`: a section title whose definitions sit on hover of the title (screens redesign,
   user 2026-09-25: "never as a paragraph above the table").
 - `marker`: a short visible marker ("excl. 3", "n/a", "filled 2") with its sentence on hover.
@@ -120,10 +120,18 @@ def _cap_tooltips(value):
     return cap_lines(value) if isinstance(value, str) else value
 
 
+def paren(body: str, negative: bool) -> str:
+    """A money figure's sign (user, 2026-09-30: "i like it henry's way", "yeah i confirm this";
+    CLAUDE.md "Tabs as views"): a loss in brackets, '(61,000,520)', a gain plain, never a leading
+    "+". Prices, levels, z-scores, percentages and signed sizes keep a real minus; every CSV keeps
+    plain numbers."""
+    return f"({body})" if negative else body
+
+
 def format_cell(value) -> str:
-    """Format a single numeric cell: round to whole units, thousands separators, a negative
-    with a real minus sign (U+2212, never parentheses: the display rule of 2026-09-28), blank
-    ("") for NaN/None."""
+    """Format a single money cell: whole units, thousands separators, a negative in brackets
+    ('(6,928)', since 2026-09-30, replacing the real minus of 2026-09-28), blank ("") for
+    NaN/None."""
     if value is None:
         return ""
     try:
@@ -132,9 +140,16 @@ def format_cell(value) -> str:
     except TypeError:
         pass
     rounded = round(float(value))
-    if rounded < 0:
-        return f"{MINUS}{abs(rounded):,}"
-    return f"{rounded:,}"
+    return paren(f"{abs(rounded):,}", rounded < 0)
+
+
+def count_text(value) -> str:
+    """A signed quantity in whole units with separators and a real minus ('−1,200'): a size or a
+    physical amount, never money (money takes `format_cell`'s brackets). '' for NaN/None."""
+    if _is_missing(value):
+        return ""
+    rounded = round(float(value))
+    return (MINUS if rounded < 0 else "") + f"{abs(rounded):,}"
 
 
 def format_frame(df: pd.DataFrame, label_col: str = "ccy") -> pd.DataFrame:
@@ -166,13 +181,12 @@ def sig_digits(magnitude: float, digits: int = 3) -> Tuple[str, int]:
     return f"{scaled:,.{decimals}f}", group
 
 
-def short_money(value, symbol: str = "", parens: bool = False) -> str:
-    """A money figure for a summary screen in k / m / bn to about 3 significant figures:
-    51,018 -> "51.0k", 1,650,590 -> "1.65m", 395 -> "395", 0 -> "0", 2.4e9 -> "2.40bn".
-    Rounded to whole units first, so float noise never prints. None / NaN -> "" (the caller
-    shows the reason); a string that is not a number is returned as it is. A negative takes a
-    real minus sign ("-$51.0k" with U+2212), or parentheses with `parens` ("($51.0k)"); the
-    `symbol` sits after the sign. Trade rows keep full figures (`format_cell`)."""
+def short_money(value, symbol: str = "", parens: bool = True) -> str:
+    """A money figure in full since 2026-09-30 (user: "i like it henry's way", no k / m on any
+    screen): whole units with separators, 51,018 -> "51,018", -1,650,590 -> "(1,650,590)",
+    0 -> "0". Rounded to whole units first, so float noise never prints. None / NaN -> "" (the
+    caller shows the reason); a string that is not a number is returned as it is. A negative in
+    brackets with the `symbol` inside ("($51,018)"); a real minus with `parens=False`."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -191,12 +205,7 @@ def short_money(value, symbol: str = "", parens: bool = False) -> str:
         return (MINUS if f < 0 else "") + symbol + "inf"
     whole = abs(round(f))
     negative = round(f) < 0
-    if whole < 1000:
-        body = f"{whole:d}"
-    else:
-        mantissa, group = sig_digits(float(whole))
-        body = mantissa + _SHORT_SUFFIXES[group]
-    text = symbol + body
+    text = symbol + f"{whole:,d}"
     if not negative:
         return text
     return f"({text})" if parens else MINUS + text
@@ -740,12 +749,11 @@ def _is_missing(value) -> bool:
 
 
 def signed_money(value, symbol: str = "") -> str:
-    """'+15.3k' / '−39.4k' / '0' (short_money, a leading "+" on a gain): a P&L on a summary
-    screen. None / NaN -> the em dash text."""
+    """'15,312' / '(39,418)' / '0' (short_money: a loss in brackets, no "+" on a gain, since
+    2026-09-30). None / NaN -> the em dash text."""
     if _is_missing(value):
         return MISSING
-    text = short_money(value, symbol)
-    return text if text.startswith(MINUS) or text in ("0", f"{symbol}0") else "+" + text
+    return short_money(value, symbol)
 
 
 def signed_number(value, decimals: int = 2) -> str:
@@ -770,19 +778,18 @@ def sign_class(value) -> str:
 
 
 def full_money(value, ccy: str = "USD") -> str:
-    """'USD −6,928': the full figure behind a k / m cell."""
+    """'USD (6,928)': a figure with its currency, for a sentence."""
     return f"{ccy} {format_cell(value)}"
 
 
 def money_cell(value, reason: Optional[str] = None, hover: Optional[str] = None, ccy: str = "USD",
                className: str = ""):
-    """A summary money cell: k / m with its sign and colour, the full figure (and `hover`) on
-    hover; the em dash with `reason` when missing."""
+    """A summary money cell: the full figure with its colour (a loss in brackets), `hover` on
+    hover (the figure is not repeated there); the em dash with `reason` when missing."""
     if _is_missing(value):
         return missing_cell(reason, className)
     classes = " ".join(c for c in (sign_class(value), className) if c)
-    title = "\n".join(t for t in (full_money(value, ccy), hover) if t)
-    return html.Span(signed_money(value), className=classes or None, title=cap(title))
+    return html.Span(signed_money(value), className=classes or None, title=cap(hover) or None)
 
 
 # --- prices at tick precision
@@ -1152,20 +1159,18 @@ def type_cell(trade_type, type_source: str = "", type_note: str = "", className:
 
 # --- sizes in words
 def amount_words(value: float, ccy: str = "") -> str:
-    """'2.0m USD', '250k EUR', '100 oz', '5,000 bbl': a size with its unit, k / m for money."""
+    """'2,000,000 USD', '250,000 EUR', '100 oz', '5,000 bbl': a size with its unit, money in full
+    (no k / m on any screen since 2026-09-30)."""
     v = abs(float(value))
     if ccy and len(ccy) == 3 and ccy.isupper() and v >= 1000:
-        if v >= 1e6:
-            body = f"{v / 1e6:.1f}m"
-        else:
-            body = f"{v / 1e3:.0f}k" if v == round(v / 1e3) * 1e3 else f"{v / 1e3:.1f}k"
+        body = f"{v:,.0f}"
     else:
         body = f"{v:,.2f}".rstrip("0").rstrip(".")
     return f"{body} {ccy}".strip()
 
 
 def size_words(quantity, unit: str = "lots", ccy: str = "", capital: bool = True) -> str:
-    """'Long 15 lots', 'Short 30 lots', 'Long 5,000 bbl', 'Long 100 t', 'Long 2.0m USD', 'Short
+    """'Long 15 lots', 'Short 30 lots', 'Long 5,000 bbl', 'Long 100 t', 'Long 2,000,000 USD', 'Short
     1 lot': the sign as a word, never a signed number; lowercase ('long 15 lots') with
     `capital=False`, for use inside a sentence."""
     if _is_missing(quantity):
@@ -1234,46 +1239,32 @@ def unit_suffix(unit: str):
 # hover; leg rows at full figures ("+42,118"); percent at 0 decimals, 1 below 10 % ("92 %",
 # "4.5 %"); a z-score signed at 1 decimal; dates "22 Sep", the year only outside the current year.
 def km_text(value, signed: bool = True) -> str:
-    """'+42.1k', '−1.2m', '+950', '0'; unsigned ('42.1k') with `signed=False`. None / NaN -> the em
-    dash text."""
-    if _is_missing(value):
-        return MISSING
-    f = float(value)
-    a = abs(f)
-    if round(a) < 1000:
-        body = f"{round(a):,.0f}"
-    elif a < 999_950:
-        body = f"{a / 1e3:,.1f}k"
-    elif a < 999_950_000:
-        body = f"{a / 1e6:,.1f}m"
-    else:
-        body = f"{a / 1e9:,.1f}bn"
-    if body == "0":
-        return "0"
-    if f < 0:
-        return MINUS + body
-    return ("+" + body) if signed else body
+    """A money figure in full (since 2026-09-30: no k / m on any screen): '42,118', '(1,204,337)',
+    '0'. `signed` is kept for the callers and changes nothing: a gain never takes a "+". None /
+    NaN -> the em dash text."""
+    return full_signed(value)
 
 
 def full_signed(value) -> str:
-    """'+42,118' / '−6,928' / '0': a full figure with its sign (leg rows)."""
+    """'42,118' / '(6,928)' / '0': a full money figure, a loss in brackets, no "+" on a gain."""
     if _is_missing(value):
         return MISSING
     f = round(float(value))
     if f == 0:
         return "0"
-    return (MINUS if f < 0 else "+") + f"{abs(f):,.0f}"
+    return paren(f"{abs(f):,.0f}", f < 0)
 
 
 def km_cell(value, reason: Optional[str] = None, hover: Optional[str] = None, signed: bool = True,
             colour: bool = True, className: str = ""):
-    """A trade-table money cell: `km_text`, green / red by sign when `colour`, the full figure (and
-    `hover`) on hover; the em dash with `reason` when missing."""
+    """A trade-table money cell: the full figure (`km_text`, a loss in brackets), green / red by
+    sign when `colour`, `hover` on hover (the figure itself is not repeated there); the em dash
+    with `reason` when missing."""
     if _is_missing(value):
         return missing_cell("\n".join(t for t in (reason, hover) if t) or None, className)
     classes = " ".join(c for c in ((sign_class(value) if colour else ""), className) if c)
-    title = "\n".join(t for t in (f"USD {full_signed(value) if signed else format_cell(value)}", hover) if t)
-    return html.Span(km_text(value, signed), className=classes or None, title=cap(plain_words(title)))
+    title = cap(plain_words(hover)) if hover else None
+    return html.Span(km_text(value, signed), className=classes or None, title=title or None)
 
 
 def pct_text(fraction, signed: bool = False) -> str:

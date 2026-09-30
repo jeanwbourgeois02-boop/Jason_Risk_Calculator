@@ -606,9 +606,8 @@ def render_headline_strip(headline: dict, hidden: tuple = (), caption: str = "")
                                  title=cap(reason) or "Unavailable")
         else:
             colour = "var(--pos)" if value >= 0 else "var(--neg)"
-            full = f"{format_cell(value)} USD" + (f", {ref_date}" if ref_date else "")
             value_div = html.Div(short_money(value), className="card-value", style={"color": colour},
-                                 title=full)
+                                 title=f"USD, {ref_date}" if ref_date else "USD")
         markers = []
         if available:
             ref_note = entry.get("ref_note")

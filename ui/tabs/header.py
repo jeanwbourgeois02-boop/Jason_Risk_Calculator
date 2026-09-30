@@ -116,8 +116,8 @@ Design choices (no one to ask, so noted here):
   one plain "Commodities: none" card with its reason on hover.
 
   Slim header (screens redesign plan, Phase A, user 2026-09-25): one row, one title line and
-  one value line per card (`_header_card`). The seven P&L figures in k / m (`short_money`,
-  "−$51.0k", the full figure on hover), the trade count small, then the commodity strip,
+  one value line per card (`_header_card`). The P&L figures in full (`short_money`,
+  "($51,018)" for a loss, since 2026-09-30), the trade count small, then the commodity strip,
   then a "Data" chip counting the marks the book needs on the as-of date with no official
   mark (`_marks_card`, from `needed_marks`, read once per render and memoised on the
   database revision). Every sentence that used to be a visible caption is now a short marker
@@ -232,7 +232,7 @@ _PERIOD_TITLES = {
 # left out, filled or stepped back, a third child holding its short markers ("excl. 3",
 # "filled 2", "ref 16 Sep") with the sentence on hover. The card is a two-column grid so the
 # markers sit beside the value, on the value's line: the row stays one title line and one
-# value line high. Money is `short_money` ("−$51.0k"), the full figure on the value's hover.
+# value line high. Money is `short_money`, in full with a loss in brackets ("($51,018)").
 _CARD_STYLE = {"display": "grid", "gridTemplateColumns": "auto auto", "justifyContent": "start",
                "alignItems": "baseline", "minWidth": "0", "whiteSpace": "nowrap"}
 _TITLE_STYLE = {"gridColumn": "1 / -1"}
@@ -275,8 +275,7 @@ def _figure_card(title: str, value_text: str, caption: str = "") -> html.Div:
 def _fmt_usd(value: float) -> str:
     if value != value:  # NaN
         return "Unavailable"
-    sign = "-" if value < 0 else ""
-    return f"{sign}${abs(value):,.0f}"
+    return short_money(value, "$")   # a loss in brackets, "($6,928)" (2026-09-30)
 
 
 def _sign_class(value: float) -> str:
@@ -309,8 +308,8 @@ def _entry_markers(entry: dict) -> list:
 
 def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
     """One header figure for a P&L-shaped `{value, available, reason}` entry: the value in
-    k / m (`short_money`, "−$51.0k"), green / red / white by sign when `colour` (False for a
-    figure that is not a P&L, always neutral), the full figure on hover. Unavailable: a muted
+    full (`short_money`, "($51,018)"), green / red / white by sign when `colour` (False for a
+    figure that is not a P&L, always neutral). Unavailable: a muted
     "n/a" with the reason on hover, never a blank cell and never a zero.
 
     Since the screens redesign (user, 2026-09-25: "a short visible marker ... with its
@@ -326,7 +325,7 @@ def _pnl_card(title: str, entry: dict, colour: bool = True) -> html.Div:
     value = entry["value"]
     cls = _sign_class(value) if colour else "neutral"
     return _header_card(title, short_money(value, "$"), f"header-figure-value header-figure-value--{cls}",
-                        hover=_joined(_fmt_usd(value), entry.get("value_hover")),
+                        hover=_joined(entry.get("value_hover")),
                         markers=_entry_markers(entry))
 
 
@@ -985,15 +984,11 @@ def _sector_label(sector: str) -> str:
 
 
 def _fmt_compact(value) -> str:
-    """'+12.3m', '−4.1m', '+812k', the em dash for None / NaN: the sector line's short form."""
+    """'12,300,000', '(4,100,000)', the em dash for None / NaN: the sector line's figure, in full
+    with a loss in brackets (2026-09-30, no k / m on any screen)."""
     if value is None or value != value:
         return MISSING
-    a = abs(float(value))
-    sign = "+" if value > 0 else ("−" if value < 0 else "")
-    for div, suffix in ((1e9, "b"), (1e6, "m"), (1e3, "k")):
-        if round(a / div, 1) >= 1:
-            return f"{sign}{a / div:.1f}{suffix}"
-    return f"{sign}{a:.0f}"
+    return short_money(value)
 
 
 def _fmt_usd_or_na(value) -> str:
