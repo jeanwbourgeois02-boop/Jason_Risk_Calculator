@@ -7,7 +7,10 @@ second press while one runs is refused with a sentence). The thread runs, in ord
    local checks (session, official sources, coverage, last pull), on the database the screens
    show, and
 2. `data.bloomberg.ticker_check.check_book(db_path=..., on_progress=...)`: the book's own
-   tickers asked of Bloomberg, its progress published as it goes.
+   tickers asked of Bloomberg, its progress published as it goes, then
+3. `diagnosis_text`: the one plain-text report the Data tab's Diagnosis card shows, copies and
+   downloads (2026-09-30), kept in the state as `report` with its time `report_at`. The card's
+   "Build diagnosis report" and the Bloomberg check fold's "Run Bloomberg check" start the same run.
 
 The latest result per database path is kept in memory (never on disk) with its start and
 finish times and the progress; the Data tab polls `state(db_path)` while a run is going. A run
@@ -26,6 +29,7 @@ runs. Their state is in memory per database (`fix_state`).
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 import subprocess
@@ -145,9 +149,318 @@ def _run(db_path) -> None:
             log.warning("Bloomberg check: the book's tickers failed (%s: %s)", type(exc).__name__, exc)
             book = {"ok": False, "reachable": False, "reason": f"The check could not run ({type(exc).__name__}: {exc}).",
                     "summary": "", "counts": {}, "rows": []}
-        _update(key, book=book)
+        _update(key, book=book, phase="report", words="Writing the diagnosis report")
+        try:
+            text = diagnosis_text(db_path, checks, book)
+        except Exception as exc:  # noqa: BLE001 -- the report says it could not be built
+            log.warning("Diagnosis report: could not be built (%s: %s)", type(exc).__name__, exc)
+            text = f"The diagnosis report could not be built ({type(exc).__name__}: {exc}).\n"
+        _update(key, report=text, report_at=_now())
     finally:
         _update(key, running=False, phase="done", finished_at=_now())
+
+
+# ---- the diagnosis report (2026-09-30, user: "a diagnosis tab for bloomberg - tells you everything i
+# will then paste into claude code"): one plain text, built after every run of the check, from the
+# check's own results and what is on file. Read-only; every section is built on its own, so one that
+# fails says so and the rest are still written.
+RULE = "=" * 78
+SUMMARY_LINES = 5
+
+
+def _section(title: str, body: List[str]) -> List[str]:
+    return ["", RULE, title, RULE, *(body or ["(nothing)"])]
+
+
+def _safe(label: str, fn, failed: List[str]) -> List[str]:
+    try:
+        return list(fn() or [])
+    except Exception as exc:  # noqa: BLE001 -- one section's failure is its line
+        failed.append(f"{label}: {type(exc).__name__}: {exc}")
+        return [f"Could not be read: {type(exc).__name__}: {exc}"]
+
+
+def _ro(db_path):
+    import sqlite3
+    return sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True, timeout=10)
+
+
+def _hk_now() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(timezone.utc)
+        hk, ny = now.astimezone(ZoneInfo("Asia/Hong_Kong")), now.astimezone(ZoneInfo("America/New_York"))
+        return f"{hk:%a %d %b %Y %H:%M} Hong Kong ({ny:%a %d %b %H:%M} New York)"
+    except Exception:  # noqa: BLE001
+        return _now()
+
+
+def no_bloomberg(checks: List[dict], book: Optional[dict]) -> bool:
+    """True when this PC could not reach Bloomberg: the session check failed, or the book check
+    says Bloomberg was not reachable."""
+    for c in checks or []:
+        name = str(c.get("name") or "").lower()
+        if "session" in name and str(c.get("status") or "").lower() == "fail":
+            return True
+    return bool(book) and book.get("reachable") is False
+
+
+def _check_lines(checks: List[dict]) -> List[str]:
+    width = max((len(str(c.get("name", ""))) for c in checks or []), default=0)
+    return [f"[{str(c.get('status', '')).upper():7s}] {str(c.get('name', '')):{width}s}  {c.get('message', '')}"
+            for c in checks or []]
+
+
+def _book_lines(book: Optional[dict]) -> List[str]:
+    book = book or {}
+    out = [f"ok: {book.get('ok')}, reachable: {book.get('reachable')}, requests sent: {book.get('requests_sent')}, "
+           f"seconds: {book.get('seconds')}"]
+    for key in ("summary", "reason"):
+        if book.get(key):
+            out.append(f"{key}: {book[key]}")
+    if book.get("counts"):
+        out.append("counts: " + json.dumps(book["counts"]))
+    if book.get("unverified_roots"):
+        out.append("roots not verified on a terminal: " + ", ".join(str(r) for r in book["unverified_roots"]))
+    text = str(book.get("report_text") or "").rstrip()
+    if text:
+        out += ["", text]
+    else:
+        rows = book.get("rows") or []
+        if rows:
+            out.append(f"rows ({len(rows)}):")
+            for r in rows:
+                out.append("  " + " | ".join(str(r.get(c, "")) for c in ("status", "area", "what", "instrument_id",
+                                                                          "ticker", "bloomberg", "ours", "message",
+                                                                          "fix")))
+    return out
+
+
+def _cache_lines(status: Optional[dict]) -> List[str]:
+    backfill = (status or {}).get("backfill") if isinstance((status or {}).get("backfill"), dict) else {}
+    cache = backfill.get("cache") if isinstance(backfill.get("cache"), dict) else None
+    out: List[str] = []
+    if cache is None:
+        out.append("No cache block in the status file (no pull with the backfill has run on this code yet).")
+    else:
+        if cache.get("error"):
+            out.append(f"error: {cache['error']}")
+        if cache.get("sentence"):
+            out.append(str(cache["sentence"]))
+        for k in ("updated_at", "closes_stored", "history_rows_stored", "history_securities_stored",
+                  "history_days_stored", "asked", "skipped_stored", "empty", "known_empty"):
+            if k in cache:
+                out.append(f"{k}: {cache[k]}")
+        if cache.get("days"):
+            out.append("days: " + json.dumps(cache["days"]))
+        if cache.get("empty_tickers"):
+            out.append("came back empty: " + ", ".join(str(t) for t in cache["empty_tickers"]))
+        for step, entry in (cache.get("steps") or {}).items():
+            out.append(f"step {step}: " + json.dumps(entry))
+    dates = (status or {}).get("contract_dates")
+    if isinstance(dates, dict):
+        keys = ("asked", "on_file", "empty", "known_empty", "summary")
+        out.append("contract dates: " + ", ".join(f"{k} {dates[k]}" for k in keys if k in dates))
+        if dates.get("empty_tickers"):
+            out.append("contract dates came back empty: " + ", ".join(str(t) for t in dates["empty_tickers"]))
+    return out
+
+
+def _library_lines(db_path, as_of: str) -> List[str]:
+    from data.bloomberg import library
+    conn = _ro(db_path)
+    try:
+        s = library.summary(conn, as_of)
+        out = [f"Tickers a pull asks on {as_of}: {s.get('tickers')} for {s.get('trades')} trades; "
+               f"{s.get('not_requestable')} needs with no ticker to ask; library synced {s.get('synced_at') or '?'}"]
+        counts: Dict[str, int] = {}
+        gaps: List[str] = []
+        for r in library.needed_on(conn, as_of, include_unrequestable=True):
+            k = f"{r.get('kind')}/{r.get('role')}/{r.get('product')}"
+            counts[k] = counts.get(k, 0) + 1
+            if not r.get("requestable", True):
+                gaps.append(f"  not requestable: {r.get('trade_id')} {r.get('kind')} {r.get('key')} "
+                            f"{r.get('settle_date')}: {r.get('reason') or r.get('used_for') or ''}".rstrip(": "))
+        out += [f"  {k}: {n} rows" for k, n in sorted(counts.items())]
+        return out + gaps
+    finally:
+        conn.close()
+
+
+def _missing_lines(db_path, as_of: str) -> List[str]:
+    from ui.tabs.data_checks import check_frame, mark_rows
+    conn = _ro(db_path)
+    try:
+        rows = mark_rows(conn, as_of, check_frame(conn, as_of))
+    finally:
+        conn.close()
+    bad = [r for r in rows if r["status"] != "OK"]
+    out = [f"Official prices the book uses on {as_of}: {len(rows)}; missing "
+           f"{sum(1 for r in rows if r['status'] == 'MISSING')}; to check {sum(1 for r in rows if r['status'] == 'CHECK')}"]
+    for r in bad:
+        why = "; ".join(x for x in (r.get("arrived_reason"), r.get("fresh_reason") if r.get("fresh") is False else "",
+                                    r.get("sane_reason") if r.get("sane") is False else "",
+                                    r.get("units_reason") if r.get("units_ok") is False else "") if x)
+        out.append(f"  {r['status']} {r['instrument_id']} {r['mark_type']} {r['settle_date']} "
+                   f"(requestable {r.get('requestable')}; trades {r.get('trades') or '-'}): {why}")
+    return out
+
+
+def _upload_lines(db_path) -> List[str]:
+    from data.ingest.upload import last_upload_outcome, possible_duplicates
+    conn = _ro(db_path)
+    try:
+        outcome = last_upload_outcome(conn)
+        dups = possible_duplicates(conn) if outcome is None else outcome.get("possible_duplicates") or []
+        n_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    finally:
+        conn.close()
+    try:
+        from data.bloomberg.inventory import unrecognised
+        conn = _ro(db_path)
+        try:
+            unrec = unrecognised(conn)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        unrec = [{"trade_id": "?", "reason": f"could not be read: {exc}"}]
+    out = [f"Trades on file: {n_trades}", f"Trades not recognised (on file, no P&L until mapped): {len(unrec)}"]
+    out += [f"  not recognised: {u.get('trade_id')} {u.get('broker_symbol') or ''}: {u.get('reason') or ''}"
+            for u in unrec]
+    if outcome is None:
+        out.append("No upload recorded on this database.")
+    else:
+        rep = outcome.get("report") or {}
+        out.append(f"Last upload: {rep.get('filename')} at {rep.get('uploaded_at')} (UTC)")
+        out.append("counts: " + json.dumps(outcome.get("counts") or {}))
+        out.append("loaded by kind: " + json.dumps(outcome.get("loaded_by_kind") or {}))
+        for key in ("need_fix", "not_loaded", "cancelled", "warnings"):
+            for r in outcome.get(key) or []:
+                out.append(f"  {key}: row {r.get('row_no')} trade {r.get('trade_id')} {r.get('symbol')}: "
+                           f"{r.get('reason')}")
+    out.append(f"Possible duplicates: {len(dups)}")
+    for g in dups:
+        out.append(f"  {g.get('kind')}: {g.get('sentence')}")
+    return out
+
+
+def _summary(checks, book, status, sections: Dict[str, List[str]]) -> List[str]:
+    """What is wrong, most blocking first, one line each."""
+    out: List[str] = []
+    if no_bloomberg(checks, book):
+        why = str((book or {}).get("reason") or "").strip().rstrip(".?!")
+        out.append("No Bloomberg connection on this PC" + (f": {why}" if why else "") + ".")
+    if not status:
+        out.append("No Bloomberg pull has run against this database yet (no status file).")
+    try:
+        from tools.bbg_report import last_pull_problems
+        out += list(last_pull_problems(status))
+    except Exception:  # noqa: BLE001 -- the report's own summary then leaves this out
+        pass
+    fails = [c for c in checks or [] if str(c.get("status") or "").lower() == "fail"
+             and "session" not in str(c.get("name") or "").lower()]
+    out += [f"Check failed: {c.get('name')}: {c.get('message')}" for c in fails]
+    warned = [str(c.get("name") or "") for c in checks or [] if str(c.get("status") or "").lower() == "warning"]
+    if warned:
+        out.append(f"{len(warned)} data checks warn: " + "; ".join(warned[:6]) + ("; ..." if len(warned) > 6 else ""))
+    counts = (book or {}).get("counts") or {}
+    if counts.get("attention") or counts.get("no_answer"):
+        out.append(f"Ticker check: {counts.get('attention', 0)} tickers need attention, "
+                   f"{counts.get('no_answer', 0)} got no answer, of {counts.get('checked', 0)} checked.")
+    missing = sections.get("missing") or []
+    if missing and len(missing) > 1:
+        out.append(missing[0])
+    upload = sections.get("upload") or []
+    for line in upload:
+        if line.startswith("counts: "):
+            try:
+                c = json.loads(line[len("counts: "):])
+            except ValueError:
+                continue
+            bits = [f"{c[k]} {w}" for k, w in (("need_fix", "need a fix"), ("not_loaded", "not loaded"),
+                                               ("possible_duplicates", "possible duplicates")) if c.get(k)]
+            if bits:
+                out.append("Last upload: " + ", ".join(bits) + ".")
+        elif line.startswith("Trades not recognised") and not line.endswith(": 0"):
+            out.append(line + ".")
+    if not out:
+        out.append("Nothing wrong found: Bloomberg answered, the last pull and the checks are clean.")
+    return out
+
+
+def diagnosis_text(db_path, checks: List[dict], book: Optional[dict]) -> str:
+    """The one plain-text report to paste into Claude Code: a summary of what is wrong first (at
+    most five lines), then the environment (code version, database and its counts), the connection
+    and data checks, the book's ticker check, the last pull (every step, the backfill's errors),
+    what Bloomberg stored and what the pull asked (the cache block), the library, the missing marks,
+    the last upload's outcome, and the status file in full. Works with no Bloomberg on this PC."""
+    from data.bloomberg.live import book_today
+    as_of = book_today().isoformat()
+    failed: List[str] = []
+    db = Path(str(db_path)) if db_path else Path("")
+    try:
+        from data.bloomberg.live import read_status
+        status = read_status(db_path)
+    except Exception as exc:  # noqa: BLE001
+        status = None
+        failed.append(f"status file: {type(exc).__name__}: {exc}")
+
+    def env():
+        from tools.bbg_report import environment_lines
+        return environment_lines(db)
+
+    def pull():
+        if not status:
+            return ["No pull status on file: no Bloomberg pull has run against this database yet."]
+        from tools.bbg_report import last_pull_lines
+        return last_pull_lines(status)
+
+    sections = {
+        "env": _safe("environment", env, failed),
+        "checks": _check_lines(checks) or ["The connection and data checks did not run."],
+        "book": _book_lines(book),
+        "pull": _safe("last pull", pull, failed),
+        "cache": _safe("cache", lambda: _cache_lines(status), failed),
+        "library": _safe("library", lambda: _library_lines(db_path, as_of), failed),
+        "missing": _safe("missing marks", lambda: _missing_lines(db_path, as_of), failed),
+        "upload": _safe("last upload", lambda: _upload_lines(db_path), failed),
+    }
+    problems = _summary(checks, book, status, sections)
+    head = problems[:SUMMARY_LINES]
+    if len(problems) > SUMMARY_LINES:
+        head.append(f"(and {len(problems) - SUMMARY_LINES} more, below)")
+    lines = ["Risk monitor diagnosis report", f"Built: {_hk_now()}", f"Book date: {as_of}",
+             f"Database: {db}", "", "WHAT IS WRONG (first)"]
+    lines += [f"{i}. {p}" for i, p in enumerate(head, 1) if not p.startswith("(and ")]
+    lines += [p for p in head if p.startswith("(and ")]
+    if len(problems) > SUMMARY_LINES:
+        lines += _section("EVERY PROBLEM FOUND", [f"- {p}" for p in problems])
+    lines += _section("ENVIRONMENT (code version, PC, database)", sections["env"])
+    lines += _section("CONNECTION AND DATA CHECKS (tools/bbg_diagnostics.py)", sections["checks"])
+    lines += _section("THE BOOK'S TICKERS (data/bloomberg/ticker_check.py check_book)", sections["book"])
+    lines += _section("LAST PULL (status file: every step, marks not written, backfill errors)", sections["pull"])
+    lines += _section("WHAT IS STORED AND WHAT THE LAST PULL ASKED (backfill cache block)", sections["cache"])
+    lines += _section("BLOOMBERG LIBRARY (what the book needs)", sections["library"])
+    lines += _section("MISSING OR FLAGGED MARKS", sections["missing"])
+    lines += _section("LAST BLOTTER UPLOAD", sections["upload"])
+    if failed:
+        lines += _section("SECTIONS THAT COULD NOT BE READ", failed)
+    raw = json.dumps(status, indent=1, default=str) if status else "No status file."
+    lines += _section("STATUS FILE IN FULL (JSON)", raw.splitlines())
+    return "\n".join(str(x) for x in lines) + "\n"
+
+
+def report_filename(state_: Optional[dict]) -> str:
+    """'diagnosis_20260930_1412.txt' on this PC's clock, from the report's time."""
+    stamp = str((state_ or {}).get("report_at") or "")
+    try:
+        when = datetime.fromisoformat(stamp)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        when = when.astimezone()
+    except (TypeError, ValueError):
+        when = datetime.now()
+    return f"diagnosis_{when:%Y%m%d_%H%M}.txt"
 
 
 # ---- the check's suggested fixes, applied from the Data tab (2026-09-30)

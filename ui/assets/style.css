@@ -1457,3 +1457,32 @@ p { margin: 8px 0; }
   .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 320px; }
   .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 310px; }
 }
+/* the Book's legs always showing under their trade (2026-09-30, user: "the regular book not expanded to show me
+   both legs with their pnl"): the trade row stays the bold summary line on white; its legs lighter and
+   smaller on a faint tint, indented, hedges last in italics, a closed leg grey; a hairline only under the
+   last row of a trade. No zebra on this table (it would stripe legs and trades alike). */
+.book-table.tk-trades :where(tbody tr) td { background: #fff; }
+.book-table.tk-trades :where(tbody tr.tk-leg-row, tbody tr.tk-part-row) td { background: #fafbfd; }
+.book-table.tk-trades tr.tk-row td { border-bottom-color: #eceef3; }
+.book-table.tk-trades tr.tk-leg-row td, .book-table.tk-trades tr.tk-part-row td { font-size: 12px; font-weight: 400;
+  color: var(--ink-2); padding-top: 4px; padding-bottom: 4px; border-bottom-color: #f1f2f6; }
+.book-table.tk-trades tr.tk-leg-row--last td { border-bottom-color: var(--line); }
+.book-table.tk-trades tr.tk-leg-row td.tk-leg-name { padding-left: 30px; }
+.book-table.tk-trades tr.tk-part-row td.tk-part-name { padding-left: 22px; font-weight: 600; color: var(--navy); }
+.book-table.tk-trades tr.tk-leg-row--hedge td { font-style: italic; }
+.book-table.tk-trades tr.tk-leg-row--flat td { color: var(--muted); }
+.book-table.tk-trades tr.tk-leg-row .tk-leg-tag { margin-left: 8px; font-size: 10.5px; font-weight: 600; color: var(--muted);
+  font-style: normal; letter-spacing: .02em; }
+.book-table.tk-trades tr.tk-leg-row .tk-leg-tag--red { color: var(--neg); }
+.book-table.tk-trades tr.tk-leg-row .marker { font-size: 10px; }
+/* the summary card above the table: its title, the Break down by switch and the open-trades line in one row */
+.book-summary .tk-strip .book-view-switch { display: inline-flex; align-items: center; gap: 8px; }
+.book-summary .tk-strip .tk-headline.book-summary-count { margin: 0; gap: 0; font-size: 12.5px; font-weight: 600;
+  color: var(--ink-2); align-items: baseline; }
+.book-summary .tk-strip .book-summary-count .tk-k { margin-right: 4px; }
+.book-summary .book-table.book-summary-table { border: none; border-radius: 0; }
+.book-summary .book-summary-table th.l, .book-summary .book-summary-table td.l { width: 36%; }
+/* the open-trades line reads as one sentence (a flex line would drop the spaces around its separator), and the
+   opened trade's value table no wider than its three columns need */
+.book-summary .tk-strip .tk-headline.book-summary-count { display: inline-block; white-space: nowrap; }
+.book-main .tk-panel-legs .tk-table.tk-legs { max-width: 760px; }

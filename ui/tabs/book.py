@@ -16,10 +16,15 @@ is set, the rows' MTD and YTD (no Group switch, no Expand / Collapse all since 2
 table's first row is the total ("Book · 6 trades", "Filtered · 3 of 6"), sticky, with the count of
 trades to check in its Check cell, equal unfiltered to
 the top bar's Daily, MTD and LTD to the cent; the fully flat trades are in the closed fold at the
-bottom. A click on a trade opens its panel under it: the flags, the legs (hedges last, in italics;
-a Mixed trade's legs under its sub-spreads), the trade's footer (totals, USD per 1-unit move of the
-level, the hedge line), the level since the first fill with its entry dashed and its rolls
-marked, and links to its fills (Blotter), its P&L history and its risk, each filtered to it.
+bottom. Under every trade row its legs always show (user, 2026-09-30), lighter and indented, hedges
+last in italics, a trade of several spreads with a head row per part (`leg_rows`): each leg's size in
+words, average fill, mark, P&L today, Open, Locked in and P&L since entry, the legs adding up to
+their trade. A click on a trade opens its panel after its legs: the flags, what the leg rows do not
+carry (each open leg's value in USD and roll-down, the trade's gross and carry), the facts, the
+hedge line, the level since the first fill with its entry dashed and its rolls marked, and links to
+its fills (Blotter), its P&L history and its risk, each filtered to it. Above the table, one summary
+card (`summary_card`): the whole book broken down by spread type, commodity family or commodity,
+each group's trades, P&L today, P&L since entry and share of it, the Book row the header's figures.
 
 What is read, never recomputed:
   - `engine.spreads.trade_book` (`blotter_pricing.shared_trade_book`, once per database revision
@@ -57,8 +62,8 @@ from ui.tabs.formatting import (
     cap, cap_parts, tidy,
     EN_DASH, MINUS, MISSING, about, compact, contract_name, day_text, format_cell, full_signed, fx_name, is_fx_pair,
     issues_drawer, km_cell, km_text, marker, missing_cell, month_label, parse_contract_id, pct_text,
-    plain_words, price_text, quoted_unit, row_info, short_date, short_root_name, sign_class, strike_text, sum_known,
-    z_text,
+    plain_words, price_text, quoted_unit, row_info, short_date, short_root_name, sign_class, size_words, strike_text,
+    sum_known, z_text,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -94,7 +99,9 @@ TAB_KEYS = {"Book": "book", "P&L": "pnl", "Risk": "risk", "Blotter": "blotter", 
 
 # The columns: key, title, alignment class ('l' = left), the title's one-sentence definition.
 COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
-    ("trade", "Trade", "l", "Jason's trade name, the text after the underscore of the PBRoot; click a row for its legs."),
+    ("trade", "Trade", "l", "Jason's trade name, the text after the underscore of the PBRoot, its legs on the lighter "
+                            "rows under it (hedges last, in italics); click a trade for its hedge, facts, level since "
+                            "entry and links."),
     ("what", "What it is", "l", "The position in plain words, the long side first, the exchange only where it "
                                 "tells the sides apart, a cross's months after a comma, and \"+ 1 more spread\" when "
                                 "the trade holds more than one. The value per side, the balance and the USD per 1-unit "
@@ -128,9 +135,8 @@ TITLE_ID = "book-title"                      # the strip's title: "Trades" or "C
 CARD_ID = "book-main-card"                   # the table card; a class names the view (the CSS hides Group by contract)
 CARD_CLASS = "book-card book-main tk-card"
 CONTRACT_COL = "c-"                          # the By contract view's own column filters (ui/tabs/book_contracts.py)
-LEG_COLUMNS = (("leg", "Leg", "l"), ("side", "Side", "l"), ("lots", "Lots", ""), ("value", "Value USD", ""),
-               ("fill", "Avg fill", ""), ("mark", "Mark", ""), ("daily", "P&L today", ""), ("open", "Open", ""),
-               ("locked", "Locked in", ""), ("ltd", "P&L since entry", ""), ("roll", "Roll-down / mo", ""))
+# the opened trade's table of what the leg rows under the trade do not carry (2026-09-30)
+LEG_COLUMNS = (("leg", "Leg", "l"), ("value", "Value USD", ""), ("roll", "Roll-down / mo", ""))
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -1655,7 +1661,7 @@ def _parts_td(t: dict, n: int, opened: bool) -> html.Td:
     columns (the row opens on click, its panel lists each part with its level); the parts on hover."""
     subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
     word = "parts" if any(str(x.get("type") or "") == "OUTRIGHT" for x in subs) else "spreads"
-    hover = _lines(f"{n} {word}, each with its own level: click the row to see them",
+    hover = _lines(f"{n} {word}, each with its own level on its row under the trade",
                    *(part_level_words(x) for x in subs))
     return html.Td(html.Span(f"{n} {word} " + ("\u25be" if opened else "\u25b8"), className="tk-sub tk-parts",
                              title=plain_words(hover)), colSpan=2, className="tk-level tk-parts-cell")
@@ -2038,133 +2044,171 @@ def value_hover(data: dict, leg: dict, rows: pd.DataFrame) -> str:
     return _lines(*lines)
 
 
-def leg_tr(data: dict, leg: dict, level_note: str) -> html.Tr:
-    ids = [str(i) for i in leg.get("trade_ids") or []]
-    hedge = bool(leg.get("hedge"))
-    check = leg_check_lines(data, leg)
-    unrec = bool(leg.get("unrecognised"))
-    unit = "" if unrec else _leg_unit(data, leg)
-    lots = _num(leg.get("lots"))
-    product = str(leg.get("product") or "")
-    if lots is None:
-        lots_text = MISSING
-    elif product.startswith("FX"):
-        lots_text = f"{signed_count(lots, money=True)} {leg.get('root_id') or ''}".strip()
-    else:
-        lots_text = (MINUS if lots < 0 else "+") + f"{abs(lots):,.0f}" if lots else "0"
-    lots_hover, fill_hover = _fills_hover(data, leg)
-    rows = _df_rows(data, ids)
-    value = _num(leg.get("value_usd"))
-    v_hover = value_hover(data, leg, rows)
-    value_cell = (html.Span(full_signed(value), title=plain_words(v_hover) or None)
-                  if value is not None else missing_cell(_lines(leg.get("value_reason") or "no value",
-                                                                "" if unrec else v_hover)))
-    fill = _num(leg.get("avg_fill"))
-    fill_cell = (html.Span(price_text(fill, unit, fill), title=plain_words(fill_hover) or None) if fill is not None
-                 else missing_cell(leg.get("avg_fill_reason") or "no open lots"))
-    mark = _num(leg.get("mark"))
-    est = is_estimated_mark(leg.get("mark_source"))
-    m_hover = mark_hover(data, leg, unit, fill, level_note)
-    if check:
-        m_hover = _lines(m_hover, *(f"Price to check: {x}" for x in check))
-    mark_cell = (html.Span(("≈ " if est or check else "") + price_text(mark, unit, fill), title=plain_words(m_hover),
-                           className=("cell-estimated" if est else "") + (" cell-amber" if check else "") or None)
-                 if mark is not None else missing_cell(_lines(leg.get("mark_reason") or "no mark",
-                                                              "" if unrec else m_hover)))
-    daily = fill_sum(data, "daily", ids)
-    ltd = fill_sum(data, "ltd", ids)
-    local = None
-    if not rows.empty and leg.get("currency") not in ("", "USD") and "pnl_local" in rows:
-        loc = [(_num(v), "") for v in rows["pnl_local"]]
-        local = sum_known(loc)[0]
-    realised = sum_known((_num(v), "") for v, s in zip(rows.get("pnl_usd", []), rows.get("status", [])) if s == "SETTLED")[0] \
-        if not rows.empty else None
-    ltd_hover = _lines(f"Local: {leg.get('currency')} {full_signed(local)}" if local is not None else "",
-                       f"Realised: {full_signed(realised)} USD" if realised is not None else "")
-
-    def full_td(tot, hover=""):
-        v, n, reasons = tot
-        if v is None:
-            return html.Td(missing_cell(_lines(*reasons[:6]) or "no figure"))
-        v = _cents(v)
-        return html.Td([html.Span(full_signed(v), className=sign_class(v) or None, title=plain_words(hover) or None),
-                        marker(f"excl. {n}", _lines(*reasons[:6]), "marker--small") if n else None])
-
-    def split_leg_td(kind):
-        v, why = split_value(leg, kind)
-        if v is None:
-            return html.Td(missing_cell(why))
-        v = _cents(v)
-        hover = _lines(SPLIT_WORDS[kind], NON_USD_LOCKED if kind == "locked" and non_usd(leg) else "")
-        return html.Td(html.Span(full_signed(v), className=sign_class(v) or None, title=hover))
-
-    roll = _num(leg.get("roll_down_usd_per_month"))
-    roll_hover = _lines(f"{price_text(leg.get('roll_down'))} {leg.get('roll_down_unit') or ''} a month over "
-                        f"{leg.get('horizon_months') or ''} months on the Bloomberg history's curve"
-                        if _num(leg.get("roll_down")) is not None else "")
-    roll_cell = (html.Span(full_signed(roll), title=plain_words(roll_hover) or None) if roll is not None
-                 else missing_cell(leg.get("roll_down_reason") or "no roll-down"))
-    side = str(leg.get("side") or "")
-    name = str(leg.get("name") or leg.get("contract_id") or "")
-    if unrec:
-        name_cell = html.Span([name, html.Span(" not recognised", className="tk-red")],
-                              title=plain_words(_lines(leg.get("unrecognised_reason") or "contract not recognised",
-                                                       _leg_hover(data, leg))))
-    else:
-        name_cell = html.Span(name + (" (hedge)" if hedge else ""), title=plain_words(_leg_hover(data, leg)))
-    return html.Tr([
-        html.Td(name_cell, className="l"),
-        html.Td(cap(side), className="l"),
-        html.Td(html.Span(lots_text, title=plain_words(lots_hover))),
-        html.Td(value_cell), html.Td(fill_cell), html.Td(mark_cell),
-        full_td(daily), split_leg_td("open"), split_leg_td("locked"), full_td(ltd, ltd_hover), html.Td(roll_cell),
-    ], className="tk-leg" + (" tk-leg--hedge" if hedge else "") + (" tk-leg--flat" if side == "flat" else "")
-       + (" tk-leg--unrec" if unrec else ""))
-
-
-def _leg_head() -> html.Thead:
-    """The legs' heads."""
-    return html.Thead(html.Tr([html.Th(title, className=cls or None) for _k, title, cls in LEG_COLUMNS]))
-
-
-def _split_sum_tds(legs: Sequence[dict]) -> List[html.Td]:
-    """The Open and Locked in cells of a part row: its legs' own figures summed (display), "excl. N"
+def _split_sum_td(legs: Sequence[dict], kind: str) -> html.Td:
+    """The Open or Locked in cell of a part row: its legs' own figures summed (display), "excl. N"
     with the reasons when a leg has none; the dash when none has."""
-    out = []
-    for kind in ("open", "locked"):
-        vals = [split_value(leg, kind) for leg in legs]
-        total, n, reasons = sum_known((v, why) for v, why in vals)
-        if total is None:
-            out.append(html.Td(missing_cell(_lines(*list(dict.fromkeys(reasons))[:4]) or SPLIT_MISSING)))
-        else:
-            out.append(html.Td([full_signed(total),
-                                marker(f"excl. {n}", _lines(*list(dict.fromkeys(reasons))[:4]), "marker--small")
-                                if n else None]))
+    total, n, reasons = sum_known(split_value(leg, kind) for leg in legs)
+    if total is None:
+        return html.Td(missing_cell(_lines(*list(dict.fromkeys(reasons))[:4]) or SPLIT_MISSING))
+    return html.Td([km_cell(_cents(total), hover=SPLIT_WORDS[kind]),
+                    marker(f"excl. {n}", _lines(*list(dict.fromkeys(reasons))[:4]), "marker--small") if n else None])
+
+
+def _part_level_td(level: Optional[dict], end: str) -> html.Td:
+    """A part's own level at `end` ('entry' | 'now') from the engine, its unit on Now; blank when the
+    trade has one level for all its parts (it is on the trade's row)."""
+    if level is None:
+        return html.Td("")
+    ch = _num(level.get("change"))
+    hover = _lines("Level at entry" if end == "entry" else "Level now", level_unit_line(level),
+                   f"Move since the previous close: {level_text(ch, level, signed=True)}" if ch is not None else "",
+                   level.get("note") or "")
+    return html.Td(_level_cell(level.get(end), level, str(level.get(end + "_reason") or level.get("reason") or ""),
+                               hover, with_unit=end == "now"), className="tk-level")
+
+
+def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequence[str] = ()) -> html.Tr:
+    """A part's head row under a trade of several spreads (its legs follow it): what the part is, its
+    own level when the trade has none of its own, and its legs' P&L summed (display)."""
+    ids = [str(i) for leg in legs for i in leg.get("trade_ids") or []]
+    what = str(sub.get("what_it_is") or "")
+    kind = tf.type_label(sub.get("type") or "").lower() if sub.get("type") else ""
+    text = what if not kind or kind.split("-")[0] in what.lower() else f"{what} · {kind}"
+    level = sub.get("level") if parts_count(t) else None
+    cells: Dict[str, Any] = {
+        "trade": html.Td(cap(text), colSpan=2, className="l tk-part-name"),
+        "entry": _part_level_td(level, "entry"), "now": _part_level_td(level, "now"),
+        "daily": money_td(*fill_sum(data, "daily", ids), row=True),
+        "open": _split_sum_td(legs, "open"), "locked": _split_sum_td(legs, "locked"),
+        "ltd": money_td(*fill_sum(data, "ltd", ids), row=True),
+    }
+    return html.Tr([cells.get(key) or html.Td("") for key, *_ in columns(hidden) if key != "what"],
+                   className="tk-part-row")
+
+
+def leg_sequence(t: dict) -> List[Tuple[str, dict, List[dict]]]:
+    """The rows under a trade, in the order the opened trade listed them: its legs (side A then B, by
+    month, flat legs after; under a head row per part for a trade of several spreads, "Other legs"
+    for the rest), then its hedges. Each item ("part", sub-spread, its legs) or ("leg", leg, [])."""
+    legs = _leg_order(t)
+    if legs and all(leg.get("hedge") for leg in legs):
+        legs = [dict(leg, hedge=False) for leg in legs]     # a trade of hedges only: no leg is "the hedge" of another
+    plain = [leg for leg in legs if not leg.get("hedge")]
+    out: List[Tuple[str, dict, List[dict]]] = []
+    subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
+    if len(subs) > 1:
+        taken: set = set()
+        for sub in subs:
+            cids = {x.get("contract_id") for x in sub.get("legs") or []}
+            mine = [leg for leg in plain if leg.get("contract_id") not in taken and leg.get("contract_id") in cids]
+            if not mine:
+                continue
+            taken.update(leg.get("contract_id") for leg in mine)
+            out.append(("part", sub, mine))
+            out.extend(("leg", leg, []) for leg in mine)
+        rest = [leg for leg in plain if leg.get("contract_id") not in taken]
+        if rest:
+            out.append(("part", {"what_it_is": "Other legs"}, rest))
+            out.extend(("leg", leg, []) for leg in rest)
+    else:
+        out.extend(("leg", leg, []) for leg in plain)
+    out.extend(("leg", leg, []) for leg in legs if leg.get("hedge"))
     return out
 
 
-def _sub_tr(text: str, ids: Sequence[str], data: dict, level: Optional[dict] = None,
-            legs: Sequence[dict] = ()) -> html.Tr:
-    """A part's head row in the legs table; with `level` (a trade of several spreads) the part's own
-    level from the engine, its entry under Avg fill and now under Mark, the move on hover."""
-    if level is not None:
-        unit = unit_words(level.get("unit"))
-        ch = _num(level.get("change"))
-        hover = _lines(level_unit_line(level), f"Move since the previous close: {level_text(ch, level, signed=True)}"
-                       if ch is not None else "", level.get("note") or "")
-        entry = (html.Span(level_text(level.get("entry"), level), title=plain_words(_lines("Level at entry", hover)))
-                 if _num(level.get("entry")) is not None else missing_cell(level.get("entry_reason") or level.get("reason")
-                                                                           or "no level"))
-        now = (html.Span(level_text(level.get("now"), level) + (f" {unit}" if unit else ""),
-                         title=plain_words(_lines("Level now", hover)))
-               if _num(level.get("now")) is not None else missing_cell(level.get("now_reason") or level.get("reason")
-                                                                       or "no level"))
-        return html.Tr([html.Td(cap(text), className="l tk-subhead", colSpan=4), html.Td(entry), html.Td(now),
-                        html.Td(full_signed(fill_sum(data, "daily", ids)[0])), *_split_sum_tds(legs),
-                        html.Td(full_signed(fill_sum(data, "ltd", ids)[0])), html.Td("")], className="tk-legsub")
-    return html.Tr([html.Td(cap(text), className="l tk-subhead", colSpan=6),
-                    html.Td(full_signed(fill_sum(data, "daily", ids)[0])), *_split_sum_tds(legs),
-                    html.Td(full_signed(fill_sum(data, "ltd", ids)[0])), html.Td("")], className="tk-legsub")
+def leg_qty_words(leg: dict) -> str:
+    """A leg's size in words, the side first: 'Long 4 lots', 'Short 1,500,000 USD', 'Short 100 oz', 'Flat'."""
+    q = _num(leg.get("lots"))
+    if q is None:
+        return ""
+    if str(leg.get("product") or "") in NOTIONAL_PRODUCTS:
+        unit, money = _base_unit(leg)
+        return size_words(q, ccy=unit) if money else size_words(q, unit)
+    return size_words(q, "lots")
+
+
+def _leg_split_td(data: dict, t: dict, leg: dict, kind: str, check: Sequence[str]) -> html.Td:
+    """A leg row's Open / Locked in, the engine's per-leg split; a closed trade's legs carry no Open
+    (nothing held), as its own row."""
+    if kind == "open" and t.get("status") == "closed":
+        return html.Td("")
+    v, why = split_value(leg, kind)
+    if v is None:
+        return html.Td(missing_cell(why))
+    hover = _lines(SPLIT_WORDS[kind], NON_USD_LOCKED if kind == "locked" and non_usd(leg) else "")
+    return html.Td([check_mark(check), km_cell(_cents(v), hover=hover, colour=not check,
+                                               className="cell-estimated" if check else "")])
+
+
+def leg_row(data: dict, t: dict, leg: dict, hidden: Sequence[str] = (), last: bool = False) -> html.Tr:
+    """One leg under its trade, in the trade table's own columns: the leg's name with its exchange, its
+    size in words, its average fill and its mark at tick precision, then P&L today and since entry (its
+    fills' own figures summed, as the trade row's, so the legs add up to it) and the engine's Open and
+    Locked in; z, Next date and Check are the trade's."""
+    ids = [str(i) for i in leg.get("trade_ids") or []]
+    hedge = bool(leg.get("hedge"))
+    unrec = bool(leg.get("unrecognised"))
+    flat = not unrec and leg.get("status") != "open"
+    check = leg_check_lines(data, leg)
+    unit = "" if unrec else _leg_unit(data, leg)
+    name = str(leg.get("name") or contract_name(str(leg.get("contract_id") or "")) or leg.get("contract_id") or "")
+    lots_hover, fill_hover = _fills_hover(data, leg)
+    tag = ("Not recognised" if unrec else "Hedge" if hedge else "Closed" if flat else "")
+    tag_hover = (leg.get("unrecognised_reason") or "Contract not recognised") if unrec else (
+        "A currency hedge of the trade" if hedge else "Nothing held on this contract any more")
+    name_td = html.Td([html.Span(name, title=plain_words(_leg_hover(data, leg)) or None),
+                       html.Span(tag, className="tk-leg-tag" + (" tk-leg-tag--red" if unrec else ""),
+                                 title=plain_words(tag_hover)) if tag else None],
+                      colSpan=2, className="l tk-leg-name")
+    qty = leg_qty_words(leg)
+    qty_td = html.Td(html.Span(qty, title=plain_words(_lines(lots_hover, "As in the file" if unrec else "")) or None)
+                     if qty else missing_cell("no size read"), className="l tk-qty")
+    fill = _num(leg.get("avg_fill"))
+    entry_td = html.Td(html.Span(price_text(fill, unit, fill), title=plain_words(_lines("Average fill", fill_hover)))
+                       if fill is not None else missing_cell(leg.get("avg_fill_reason") or "no open lots"),
+                       className="tk-level")
+    mark = _num(leg.get("mark"))
+    est = is_estimated_mark(leg.get("mark_source"))
+    note = str((t.get("level") or {}).get("note") or "")
+    m_hover = _lines(mark_hover(data, leg, unit, fill, note), *(f"Price to check: {x}" for x in check))
+    now_td = html.Td(html.Span(("≈ " if est or check else "") + price_text(mark, unit, fill), title=plain_words(m_hover),
+                               className=("cell-estimated" if est else "") + (" cell-amber" if check else "") or None)
+                     if mark is not None else missing_cell(_lines(leg.get("mark_reason") or "no mark",
+                                                                  "" if unrec else m_hover)),
+                     className="tk-level")
+    rows = _df_rows(data, ids)
+    local = None
+    if not rows.empty and leg.get("currency") not in ("", "USD") and "pnl_local" in rows:
+        local = sum_known((_num(v), "") for v in rows["pnl_local"])[0]
+    realised = (sum_known((_num(v), "") for v, s in zip(rows.get("pnl_usd", []), rows.get("status", []))
+                          if s == "SETTLED")[0] if not rows.empty else None)
+    ltd_hover = _lines(f"Local: {leg.get('currency')} {full_signed(local)}" if local is not None else "",
+                       f"Realised: {full_signed(realised)} USD" if realised is not None else "")
+    cells: Dict[str, Any] = {
+        "trade": name_td, "qty": qty_td, "entry": entry_td, "now": now_td,
+        "daily": money_td(*fill_sum(data, "daily", ids), check=check, row=True),
+        "open": _leg_split_td(data, t, leg, "open", check), "locked": _leg_split_td(data, t, leg, "locked", check),
+        "ltd": money_td(*fill_sum(data, "ltd", ids), hover=ltd_hover, check=check, row=True),
+    }
+    return html.Tr([cells.get(key) or html.Td("") for key, *_ in columns(hidden) if key != "what"],
+                   className="tk-leg-row" + (" tk-leg-row--hedge" if hedge else "") + (" tk-leg-row--flat" if flat else "")
+                   + (" tk-leg-row--unrec" if unrec else "") + (" tk-leg-row--last" if last else ""))
+
+
+def leg_rows(data: dict, t: dict, hidden: Sequence[str] = ()) -> List[html.Tr]:
+    """Every row under a trade, always showing (user, 2026-09-30: "the regular book not expanded to show
+    me both legs with their pnl"): the part heads and the legs, hedges last; none for the fills on no
+    trade (their opened row lists each fill)."""
+    if t.get("pseudo"):
+        return []
+    seq = leg_sequence(t)
+    out = []
+    for n, (kind, item, legs) in enumerate(seq):
+        if kind == "part":
+            out.append(part_tr(data, t, item, legs, hidden))
+        else:
+            out.append(leg_row(data, t, item, hidden, last=n == len(seq) - 1))
+    return out
 
 
 def _leg_order(t: dict) -> List[dict]:
@@ -2183,56 +2227,43 @@ def _leg_order(t: dict) -> List[dict]:
     return sorted(t.get("legs") or [], key=key)
 
 
-def panel_legs(data: dict, t: dict) -> html.Table:
-    level = t.get("level") or {}
-    note = str(level.get("note") or "")
-    legs = _leg_order(t)
-    if legs and all(leg.get("hedge") for leg in legs):
-        legs = [dict(leg, hedge=False) for leg in legs]     # a trade of hedges only: no leg is "the hedge" of another
-    body: List[Any] = []
-    subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
-    if len(subs) > 1:
-        taken: set = set()
-        for sub in subs:
-            mine = [leg for leg in legs if not leg.get("hedge") and leg.get("contract_id") not in taken
-                    and leg.get("contract_id") in {x.get("contract_id") for x in sub.get("legs") or []}]
-            if not mine:
-                continue
-            taken.update(leg.get("contract_id") for leg in mine)
-            ids = [str(i) for leg in mine for i in leg.get("trade_ids") or []]
-            what = str(sub.get("what_it_is") or "")
-            kind = tf.type_label(sub.get("type") or "").lower()
-            body.append(_sub_tr(what if kind.split("-")[0] in what.lower() else f"{what} · {kind}", ids, data,
-                                sub.get("level") if parts_count(t) else None, mine))
-            body.extend(leg_tr(data, leg, note) for leg in mine)
-        rest = [leg for leg in legs if not leg.get("hedge") and leg.get("contract_id") not in taken]
-        if rest:
-            body.append(_sub_tr("Other legs", [str(i) for leg in rest for i in leg.get("trade_ids") or []], data,
-                                legs=rest))
-            body.extend(leg_tr(data, leg, note) for leg in rest)
-    else:
-        body.extend(leg_tr(data, leg, note) for leg in legs if not leg.get("hedge"))
-    hedges = [leg for leg in legs if leg.get("hedge")]
-    if hedges:
-        body.append(_sub_tr("Hedge", [str(i) for leg in hedges for i in leg.get("trade_ids") or []], data,
-                            legs=hedges))
-        body.extend(leg_tr(data, leg, note) for leg in hedges)
-    ids = [str(i) for i in t.get("trade_ids") or []]
+def panel_legs(data: dict, t: dict) -> Optional[html.Table]:
+    """What the legs' rows under the trade do not carry (2026-09-30: the legs now always show inline, so
+    the opened trade no longer repeats their sizes, prices and P&L): each open leg's value in USD (the
+    local value and the spot on hover) and its roll-down a month, the trade's gross value and carry in
+    the foot. None when nothing is open."""
+    legs = [leg for kind, leg, _l in leg_sequence(t) if kind == "leg" and leg.get("status") == "open"
+            and not leg.get("unrecognised")]
+    if not legs:
+        return None
+    body = []
+    for leg in legs:
+        value = _num(leg.get("value_usd"))
+        v_hover = value_hover(data, leg, _df_rows(data, [str(i) for i in leg.get("trade_ids") or []]))
+        value_cell = (html.Span(full_signed(value), title=plain_words(v_hover) or None)
+                      if value is not None else missing_cell(_lines(leg.get("value_reason") or "no value", v_hover)))
+        roll = _num(leg.get("roll_down_usd_per_month"))
+        roll_hover = _lines(f"{price_text(leg.get('roll_down'))} {leg.get('roll_down_unit') or ''} a month over "
+                            f"{leg.get('horizon_months') or ''} months on the Bloomberg history's curve"
+                            if _num(leg.get("roll_down")) is not None else "")
+        roll_cell = (html.Span(full_signed(roll), title=plain_words(roll_hover) or None) if roll is not None
+                     else missing_cell(leg.get("roll_down_reason") or "no roll-down"))
+        name = str(leg.get("name") or leg.get("contract_id") or "")
+        body.append(html.Tr([html.Td(name + (" (hedge)" if leg.get("hedge") else ""), className="l",
+                                     title=plain_words(_leg_hover(data, leg)) or None),
+                             html.Td(value_cell), html.Td(roll_cell)],
+                            className="tk-leg" + (" tk-leg--hedge" if leg.get("hedge") else "")))
     carry = _num(t.get("carry_per_month"))
     carry_cell = (html.Span(full_signed(carry), title="The legs' roll-down a month on one curve")
                   if carry is not None else html.Span("Not summed", className="tk-sub",
                                                       title=plain_words(str(t.get("carry_reason") or "not given"))))
     gross = _num(t.get("gross_usd"))
-    foot = [html.Tr([html.Td("Trade total", className="l", colSpan=3),
-                     html.Td(format_cell(gross) if gross is not None else missing_cell(t.get("notional_reason") or "no gross"),
-                             title="gross USD value of the open legs"),
-                     html.Td(""), html.Td(""),
-                     html.Td(full_signed(fill_sum(data, "daily", ids)[0])),
-                     *(html.Td(full_signed(v) if v is not None else missing_cell(why))
-                       for v, why in (trade_split(data, t, k) for k in ("open", "locked"))),
-                     html.Td(full_signed(fill_sum(data, "ltd", ids)[0])), html.Td(carry_cell)])]
-    return html.Table([_leg_head(), html.Tbody(body), html.Tfoot(foot)],
-                      className="book-table tk-table tk-legs")
+    foot = html.Tr([html.Td("Trade total", className="l"),
+                    html.Td(format_cell(gross) if gross is not None else missing_cell(t.get("notional_reason") or "no gross"),
+                            title="Gross USD value of the open legs"),
+                    html.Td(carry_cell)])
+    head = html.Thead(html.Tr([html.Th(title, className=cls or None) for _k, title, cls in LEG_COLUMNS]))
+    return html.Table([head, html.Tbody(body), html.Tfoot(foot)], className="book-table tk-table tk-legs")
 
 
 def panel_facts(t: dict, data: Optional[dict] = None, r: Optional[dict] = None, ready: bool = True,
@@ -2408,7 +2439,8 @@ def panel_tr(conn: sqlite3.Connection, data: dict, t: dict, span: int = len(COLU
         parts.append(pseudo_fills(data, t))
     else:
         parts.append(html.Div(className="tk-panel-body", children=[
-            html.Div([html.Div([panel_legs(data, t), hedge_line(t)], className="tk-legs-main"),
+            html.Div([html.Div([x for x in (panel_legs(data, t), hedge_line(t)) if x is not None] or None,
+                               className="tk-legs-main"),
                       panel_facts(t, data, r, ready, check_lines(data, [str(i) for i in t.get("trade_ids") or []]))],
                      className="tk-panel-legs"),
             panel_chart(conn, data, t)]))
@@ -2495,6 +2527,7 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
         name = str(t.get("trade") or "")
         is_open = name in opened_set
         body.append(trade_tr(data, t, rrows.get(name), ready, is_open, hidden))
+        body.extend(leg_rows(data, t, hidden))          # always showing, never behind a click (2026-09-30)
         if is_open:
             try:
                 body.append(panel_tr(conn, data, t, len(cols), rrows.get(name), ready))
@@ -2550,6 +2583,169 @@ def headline(data: dict, state: Optional[dict], risk: Optional[dict] = None) -> 
             marker(f"excl. {n}", _excl_hover(n, r), "marker--small") if n and v is not None else None])
 
     return html.Span([money("MTD", "mtd"), money("YTD", "ytd")], className="tk-strip-figs")
+
+
+# --------------------------------------------------------------------------- the summary
+# One card above the table (user, 2026-09-30, after the research app's Book: "a mix of this and what we
+# already have ... and then the summary"): the whole book broken down by spread type, commodity family or
+# commodity, each group's trades with their P&L today and since entry, the Book row equal to the top
+# bar's Daily and LTD. Sums of the trade rows' own figures (display), never filtered (like the top bar);
+# no gross or net and no figure the top bar already shows on its own.
+SUMMARY_CARD_ID = "book-summary-card"
+SUMMARY_SLOT_ID = "book-summary-slot"
+SUMMARY_COUNT_ID = "book-summary-count"
+SUMMARY_BY_ID = "book-summary-by"
+BY_TYPE, BY_FAMILY, BY_COMMODITY = "type", "family", "commodity"
+SUMMARY_OPTIONS = [{"label": "Spread type", "value": BY_TYPE}, {"label": "Commodity family", "value": BY_FAMILY},
+                   {"label": "Commodity", "value": BY_COMMODITY}]
+SUMMARY_ABOUT = ("The whole book, never filtered (like the top bar), broken down by spread type, commodity family or "
+                 "commodity: each group's trades, open and closed, with their P&L today and since entry added up from "
+                 "the trades' own rows. The Book row equals the top bar's Daily and LTD to the cent. A trade is never "
+                 "split across groups: one holding two commodities is a group of its own.")
+SUMMARY_GROUP_TIPS = {
+    BY_TYPE: "The trade's spread type, from its legs: calendar, cross-exchange, cross-product, mixed or outright.",
+    BY_FAMILY: "The trade's commodity family; a trade across two families is under Cross-product.",
+    BY_COMMODITY: "The commodities the trade holds, its currency hedges left out; a trade of two commodities is its "
+                  "own group.",
+}
+METAL_NAMES = {"XAU": "Gold", "XAG": "Silver", "XPT": "Platinum", "XPD": "Palladium"}
+
+
+def commodity_label(t: dict) -> str:
+    """The commodities a trade holds, hedges left out ('Copper', 'Soybean / soymeal / soyoil'); a precious
+    metal pair its metal, another currency pair 'FX'; 'Not recognised' when it holds nothing else."""
+    legs = [leg for leg in t.get("legs") or [] if not leg.get("hedge")] or list(t.get("legs") or [])
+    names: List[str] = []
+    unknown = False
+    for leg in legs:
+        if leg.get("unrecognised"):
+            unknown = True
+            continue
+        name = str(leg.get("commodity") or "")
+        if not name and str(leg.get("product") or "") in NOTIONAL_PRODUCTS:
+            base = str(leg.get("root_id") or leg.get("instrument_id") or "")[:3]
+            name = METAL_NAMES.get(base, "FX")
+        if name:
+            names.append(name.lower() if name != "FX" else name)
+    names = sorted(set(names))
+    if not names:
+        return "Not recognised" if unknown else "Other"
+    return cap(" / ".join(names))
+
+
+def summary_group(t: dict, by: str) -> str:
+    if t.get("pseudo"):
+        return tf.UNASSIGNED
+    if by == BY_FAMILY:
+        return tf.family_label(t)
+    if by == BY_COMMODITY:
+        return commodity_label(t)
+    return tf.trade_type_label(t)
+
+
+def summary_table(data: dict, by: str) -> html.Table:
+    """Group | Trades | P&L today | P&L since entry | % of P&L since entry, the largest P&L since entry
+    first, the fills on no trade last; the Book row first, its figures the header's (the fills' own
+    figures summed over every trade on file); the % never totalled."""
+    by = by if by in SUMMARY_GROUP_TIPS else BY_TYPE
+    trades = data.get("trades") or []
+    groups: Dict[str, List[dict]] = {}
+    for t in trades:
+        groups.setdefault(summary_group(t, by), []).append(t)
+    all_ids = [str(i) for t in trades for i in t.get("trade_ids") or []]
+    book_ltd = fill_sum(data, "ltd", all_ids)
+    whole = _num(book_ltd[0])
+
+    def ids_of(ts):
+        return [str(i) for t in ts for i in t.get("trade_ids") or []]
+
+    def count_td(ts):
+        named = [t for t in ts if not t.get("pseudo")]
+        if not named:
+            n = len(ids_of(ts))
+            return html.Td(html.Span(f"{n}", title=f"{_plural(n, 'fill')} on no trade"))
+        n_open = sum(1 for t in named if t.get("status") == "open")
+        return html.Td(html.Span(f"{len(named)}", title=_lines(f"{n_open} open, {len(named) - n_open} closed",
+                                                                *(str(t.get("trade")) for t in named[:20]))))
+
+    def share_td(v):
+        if v is None:
+            return html.Td(missing_cell("no P&L since entry for this group"))
+        if whole is None or abs(whole) < 0.005:
+            return html.Td(missing_cell("the book's P&L since entry is nil or not known: no share"))
+        return html.Td(html.Span(pct_text(v / whole), title=f"Its P&L since entry over the book's ({full_signed(whole)})"))
+
+    rows = []
+    for label, ts in groups.items():
+        ids = ids_of(ts)
+        daily, ltd = fill_sum(data, "daily", ids), fill_sum(data, "ltd", ids)
+        rows.append((label, ts, daily, ltd))
+    rows.sort(key=lambda r: (r[0] == tf.UNASSIGNED, r[3][0] is None, -abs(r[3][0] or 0.0), r[0]))
+    body = [html.Tr([html.Td(html.Span("Book", title="Every trade on file; P&L today and since entry equal the top "
+                                                     "bar's Daily and LTD to the cent"), className="l"),
+                     count_td([t for t in trades if not t.get("pseudo")] or trades),
+                     money_td(*fill_sum(data, "daily", all_ids)), money_td(*book_ltd),
+                     html.Td(html.Span("", title="A share is never totalled"))], className="tk-total book-total")]
+    for label, ts, daily, ltd in rows:
+        body.append(html.Tr([html.Td(label, className="l"), count_td(ts), money_td(*daily, row=True),
+                             money_td(*ltd, row=True), share_td(ltd[0])]))
+    group_title = next(o["label"] for o in SUMMARY_OPTIONS if o["value"] == by)
+    heads = ((group_title, "l", SUMMARY_GROUP_TIPS[by]), ("Trades", "", "The trades in the group, open and closed."),
+             ("P&L today", "", "Today's P&L in USD of the group's trades, their hedges included."),
+             ("P&L since entry", "", "The P&L since each trade opened, in USD, open plus locked in."),
+             ("% of P&L since entry", "", "The group's P&L since entry over the book's; never totalled."))
+    head = html.Thead(html.Tr([html.Th(about(t, tip, level="span"), className=cls or None) for t, cls, tip in heads]))
+    return html.Table([head, html.Tbody(body)], className="book-table tk-table book-summary-table")
+
+
+def summary_count(data: dict) -> html.Span:
+    """'Open trades 17 · 3 to check' for the summary's title row (the checks as on the total row)."""
+    named = [t for t in data.get("trades") or [] if not t.get("pseudo")]
+    n_open = sum(1 for t in named if t.get("status") == "open")
+    checks = _total_checks(totals(data, data.get("trades") or []))
+    return html.Span([html.Span("Open trades", className="tk-k"), f" {n_open}",
+                      html.Span(" · ", className="tk-total-sep") if checks else None, checks or None],
+                     className="tk-headline book-summary-count",
+                     title=f"{len(named)} trades on file: {n_open} open, {len(named) - n_open} closed")
+
+
+def summary_parts(as_of: Optional[str], db_path, by: Optional[str] = None) -> Tuple[Any, Any]:
+    """(the summary's table, its title-row count) for `as_of`, or (None, None) with no book."""
+    if not as_of:
+        return None, None
+    try:
+        conn = _open(db_path)
+    except sqlite3.OperationalError:
+        return None, None
+    try:
+        if trades_on_file(conn) == 0:
+            return None, None
+        data = gathered(conn, as_of)
+        tbl, count = summary_table(data, by or BY_TYPE), summary_count(data)
+    except Exception as exc:  # noqa: BLE001 -- the reason in the card, never a blank tab
+        log.exception("Book: the summary could not be built for %s", as_of)
+        tbl = html.Table(html.Tbody(html.Tr(html.Td(missing_cell(f"the summary could not be built "
+                                                                 f"({type(exc).__name__}: {exc})"), className="l"))),
+                         className="book-table tk-table")
+        count = None
+    finally:
+        conn.close()
+    return tidy(tbl), tidy(count) if count is not None else None
+
+
+def summary_card(table_: Any = None, count: Any = None) -> html.Div:
+    """The summary card: its title, the Break down by switch and the open-trades count in one row, the
+    table under it (filled by `_summary`)."""
+    return html.Div(id=SUMMARY_CARD_ID, className="book-card tk-card book-summary", children=[
+        html.Div(className="tk-strip", children=[
+            html.Div(className="tk-strip-lead", children=[
+                about("Summary", SUMMARY_ABOUT, level="span", className="tk-title"),
+                html.Span(className="book-view-switch", children=[
+                    html.Label("Break down by", className="tk-k"),
+                    dcc.RadioItems(id=SUMMARY_BY_ID, className="book-switch", options=SUMMARY_OPTIONS, value=BY_TYPE,
+                                   inline=True, persistence=True, persistence_type="session")])]),
+            html.Span(count, id=SUMMARY_COUNT_ID, className="tk-strip-figs")]),
+        html.Div(table_, id=SUMMARY_SLOT_ID, className="tk-table-slot")])
 
 
 ISSUE_KIND_WORDS = {"daily": "Daily", "ltd": "LTD"}
@@ -2685,7 +2881,8 @@ def render(as_of: Optional[str], db_path, state: Optional[dict] = None) -> html.
     p = render_parts(as_of, db_path, state, wait_risk=True)
     if not p["shown"]:
         return html.Div([p["body"]])
-    return html.Div([html.Div([html.Div(className="tk-strip", children=[p["title"], p["headline"]]),
+    return html.Div([summary_card(*summary_parts(as_of, db_path)),
+                     html.Div([html.Div(className="tk-strip", children=[p["title"], p["headline"]]),
                                p["table"]], className=CARD_CLASS), p["foot"]])
 
 
@@ -2701,9 +2898,10 @@ def options_of(as_of: str, db_path) -> Dict[str, List[dict]]:
 
 
 # --------------------------------------------------------------------------- layout and callbacks
-TRADES_ABOUT = ("One row per trade (a PBRoot name). Click a row for its legs, its hedge, its level since entry "
-                "and its links; the first row is the total of the rows showing, with what needs a check. Each "
-                "column filters from the funnel in its heading.")
+TRADES_ABOUT = ("One row per trade (a PBRoot name) with its legs on the lighter rows under it, hedges last; the "
+                "legs add up to their trade. Click a trade for its hedge, its facts, its level since entry and its "
+                "links; the first row is the total of the rows showing, with what needs a check. Each column "
+                "filters from the funnel in its heading, keeping or dropping whole trades.")
 CONTRACTS_ABOUT = ("One row per contract held, netted across every trade that holds it, with its clearer: what the "
                    "broker statements show. Click a row for the trades holding it; the first row is the total of the "
                    "rows showing. Each column filters from the funnel in its heading.")
@@ -2728,6 +2926,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
         html.Div(html.H2("Book", className="tab-title"), className="tab-header"),
         html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
+            summary_card(),
             html.Div(id=CARD_ID, className=CARD_CLASS, children=[
                 html.Div(className="tk-strip", children=[
                     html.Div(className="tk-strip-lead", children=[
@@ -2785,6 +2984,12 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             return p["body"], HIDDEN, None, None, None, [], True, p["title"], card_class(by_contract)
         return (None, {}, compact(p["headline"]), compact(p["table"]), compact(p["foot"]), p["names"],
                 p["risk_ready"], p["title"], card_class(by_contract))
+
+    @app.callback(Output(SUMMARY_SLOT_ID, "children"), Output(SUMMARY_COUNT_ID, "children"),
+                  Input(AS_OF_STORE_ID, "data"), Input(DATA_REVISION_ID, "data"), Input(SUMMARY_BY_ID, "value"))
+    def _summary(as_of, _rev, by):
+        tbl, count = summary_parts(as_of, get_db_path(), by)
+        return compact(tbl) if tbl is not None else None, count
 
     @app.callback(Output(RISK_READY_ID, "data"), Input(RISK_POLL_ID, "n_intervals"), State(AS_OF_STORE_ID, "data"),
                   prevent_initial_call=True)

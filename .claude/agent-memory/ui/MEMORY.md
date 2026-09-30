@@ -59,3 +59,6 @@
 - [Book one line per trade 2026-09-30](book-one-line-table-2026-09-30.md) — 13 cols (superseded by the four-questions note), Check = actions only, CSV link, tk-trades CSS
 - [Book four questions 2026-09-30](book-four-questions-2026-09-30.md) — 12 cols with Open / Locked in from the engine, Type/Entry date/Move in panel facts, empty columns hidden via a tfoot line
 - [Bloomberg fixes in the app 2026-09-30](bbg-fixes-in-app-2026-09-30.md) — Data card: tick/pick fixes, dry run, confirm, reresolve_roots, git commit+push thread, Download report; proof recipe
+- [Book legs inline + summary 2026-09-30](book-legs-inline-summary-2026-09-30.md) — legs always under each trade (leg_rows), panel = value/roll-down only, Summary card by type/family/commodity
+- [P&L chart two panels 2026-09-30](pnl-chart-two-panels-2026-09-30.md) — line-to-date over day bars on a business-day category axis, readable categories (hover "x" trap), padded ranges, hover-shot recipe
+- [Data tab three cards 2026-09-30](data-tab-three-cards-2026-09-30.md) — Blotter | Bloomberg | Diagnosis cards, render 17 outputs, diagnosis_text in the runner, clipboard ::after, proof recipe

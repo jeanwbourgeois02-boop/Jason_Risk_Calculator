@@ -28,3 +28,32 @@
 .market-data .data-trade-table td:nth-child(5), .market-data .data-trade-table td:nth-child(6) { white-space: normal; min-width: 220px; }
 .market-data .data-parse-block { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px;
   border-top: 1px solid var(--line, #e5e7eb); }
+/* The Data tab rebuilt (2026-09-30): three cards, Blotter, Bloomberg, Diagnosis. The Bloomberg card's
+   folds sit flat inside it (no card inside a card); the diagnosis report in a monospace box. */
+.market-data .data-folds { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.market-data .data-folds .data-fold { margin: 0; }
+.market-data .data-folds .data-fold[open] { border: none; border-top: 1px solid var(--line, #e5e7eb);
+  border-radius: 0; padding: 4px 0 10px; background: transparent; }
+.market-data .data-folds > div:empty { display: none; }
+.market-data .data-fold-tools { display: flex; align-items: center; gap: 10px; justify-content: flex-end;
+  margin: 4px 0 6px; }
+.market-data .data-fold-tools .btn--ghost { padding: 4px 12px; font-size: 12px; }
+.market-data .data-fold-tools .tf-bar-slot { margin-right: auto; }
+.market-data .data-dup-table td.data-dup-why { white-space: normal; min-width: 280px; font-size: 12px; }
+.market-data .data-trade-table td:nth-child(5) { white-space: normal; min-width: 320px; }
+.market-data .data-diag-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.market-data .data-diag-copy { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.market-data .data-diag-copy::after { content: "Copy to clipboard"; }
+.market-data .data-diag-copy svg { width: 12px; height: 12px; }
+.market-data .data-diag-text { width: 100%; min-height: 360px; box-sizing: border-box; resize: vertical;
+  font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.45; color: #1f2937;
+  background: #f8fafc; border: 1px solid var(--line, #e5e7eb); border-radius: 6px; padding: 10px 12px;
+  white-space: pre; overflow: auto; }
+.market-data .data-card-body .tk-table.data-trade-table, .market-data .data-card-body .tk-table.data-pull-problems,
+.market-data .data-card-body .tk-table.data-dup-table, .market-data .data-card-body .tk-table.data-parse-table,
+.market-data .data-card-body .tk-table.data-asked-table { width: 100%; max-width: none; }
+.market-data .data-trade-table td .cell-red { font-weight: 400; }
+.market-data .data-bbg-subhead .tk-title { font-weight: 600; color: var(--navy); }
+.market-data .data-card-body .tk-table.data-bbg-results, .market-data .data-card-body .tk-table.data-ticker-table {
+  width: 100%; max-width: none; }
+.market-data .tk-table.data-bbg-results td:last-child { white-space: normal; }

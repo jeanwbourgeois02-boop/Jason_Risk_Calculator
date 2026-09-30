@@ -74,10 +74,11 @@ def _product_name(code: str) -> str:
 def _failed(filename: str, error: str) -> dict:
     return {"ok": False, "error": error, "filename": filename, "summary": error,
             "counts": {"rows": 0, "loaded": 0, "by_product": {}, "not_recognised": 0, "warnings": 0,
-                       "excluded": 0, "superseded": 0, "cancelled": 0, "prices_converted": 0},
+                       "excluded": 0, "superseded": 0, "cancelled": 0, "prices_converted": 0,
+                       "possible_duplicates": 0},
             "merge": {"new": 0, "replace": 0, "remove": 0, "remove_manual": 0, "on_file_before": 0,
                       "on_file_after": 0},
-            "file_notes": [], "rows": []}
+            "file_notes": [], "rows": [], "possible_duplicates": []}
 
 
 def _book_on_file(db_path) -> tuple:
@@ -162,7 +163,7 @@ def check_file(payload: bytes, filename: str, db_path) -> dict:
     """How `payload` (a blotter file's bytes, named `filename`) would load against the database at
     `db_path`, with nothing written. Never raises.
 
-    Returns ``{ok, error, filename, summary, counts, merge, file_notes, rows}``:
+    Returns ``{ok, error, filename, summary, counts, merge, file_notes, rows, possible_duplicates}``:
 
     - ``counts``: rows (the file's data rows), loaded (trades an upload would write, not recognised
       included), by_product {plain name: n}, not_recognised, warnings (the parser's, as the upload
@@ -174,6 +175,9 @@ def check_file(payload: bytes, filename: str, db_path) -> dict:
     - ``file_notes``: plain sentences about the file as a whole.
     - ``rows``: one dict per data row, in file order (see the module docstring and ``_blank_row``);
       status OK | WARNING | NOT RECOGNISED | EXCLUDED | CANCELS; on_file new | replaces | removes | ''.
+      A loaded row's ``duplicate_of`` lists the other Trade Ids of its possible-duplicate group.
+    - ``possible_duplicates``: ``upload.possible_duplicates``' groups as the upload would leave them
+      (the file's own upload named 'in this file'); counted in ``counts['possible_duplicates']``.
     """
     filename = str(filename or "blotter")
     try:
@@ -208,7 +212,54 @@ def _check(payload, filename: str, db_path) -> dict:
             res = blotter.parse(df, filename, conn=conn)
         except ValueError as e:
             return _failed(filename, _plain(str(e)))
-    return _report(filename, df, res, before, manual)
+        # The book on file as the duplicate check reads it (read-only; empty with no database).
+        on_file = upload.trade_records(conn) if conn is not None else []
+        carried = upload.uploads_by_trade(conn) if conn is not None else {}
+    out = _report(filename, df, res, before, manual)
+    _add_duplicates(out, filename, res, on_file, carried, manual)
+    return out
+
+
+def _add_duplicates(out: dict, filename: str, res, on_file: list, carried: dict, manual: set) -> None:
+    """The possible duplicates the upload of this file would leave on file (``upload.possible_duplicates``
+    run on the book as the merge would leave it: the trades on file the file does not replace or
+    remove, plus the file's trades, the file counted as one more upload). Adds ``possible_duplicates``
+    (``upload.possible_duplicates``' groups, the file's own upload shown as 'in this file'),
+    ``counts['possible_duplicates']``, a row's ``duplicate_of`` (the other Trade Ids of its group), a
+    file note and the summary's clause. Flags only: nothing is dropped."""
+    from data.ingest import upload
+
+    file_ids = {t.trade_id for t in res.trades}
+    removed = {str(tid) for _n, tid, _s, status in res.excluded_status_rows
+               if tid and blotter._status_removes(status)} - file_ids
+    gone = file_ids | removed | (set(manual) - file_ids)
+    settle: Dict[str, str] = {}
+    for leg in res.legs:
+        settle[leg.trade_id] = max(settle.get(leg.trade_id, ""), str(leg.settle_date))
+    records = [r for r in on_file if r["trade_id"] not in gone]
+    records += [{"trade_id": t.trade_id, "trade_date": t.trade_date, "instrument_id": t.instrument_id,
+                 "product": t.product, "quantity": t.quantity, "price": t.price,
+                 "broker_symbol": getattr(t, "broker_symbol", "") or "", "broker_price": getattr(t, "broker_price", "") or "",
+                 "pb_root": getattr(t, "pb_root", "") or "", "settle": settle.get(t.trade_id, "")} for t in res.trades]
+    this_file = {"id": None, "filename": filename, "uploaded_at": ""}
+    uploads = {tid: list(v) for tid, v in carried.items()}
+    for tid in file_ids:
+        uploads[tid] = uploads.get(tid, []) + [this_file]
+    groups = upload.duplicate_groups(records, uploads)
+    out["possible_duplicates"] = groups
+    out["counts"]["possible_duplicates"] = len(groups)
+    others = {}
+    for g in groups:
+        for tid in g["trade_ids"]:
+            others[tid] = [x for x in g["trade_ids"] if x != tid]
+    for r in out["rows"]:
+        r["duplicate_of"] = others.get(r["trade_id"], []) if r["status"] not in (EXCLUDED, CANCELS) else []
+    if groups:
+        n = len(groups)
+        out["file_notes"].append(f"{_plural(n, 'possible duplicate fill', 'possible duplicate fills')} after the "
+                                 "upload (same date, contract, side, size and price under different Trade Ids): "
+                                 "nothing would be dropped.")
+        out["summary"] = out["summary"][:-1] + f"; {_plural(n, 'possible duplicate', 'possible duplicates')}."
 
 
 class _NullContext:

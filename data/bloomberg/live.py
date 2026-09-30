@@ -631,8 +631,12 @@ def contract_dates_summary(block: dict) -> str:
                   and parse_option_ticker(str(u.get("instrument_id") or "")) is not None)
     moved = len(updated) - options
     failed = len(block.get("failed") or [])
+    known = int(block.get("known_empty") or 0)
+    # 2026-09-30: contracts Bloomberg already answered with no date, not asked again today.
+    known_text = (f"{known} contract{'' if known == 1 else 's'} Bloomberg gave no date for "
+                  f"not asked again today") if known else ""
     if not (requested or stored or moved or options or failed):
-        return ""
+        return known_text[:1].upper() + known_text[1:] if known_text else ""
     what = f"{moved} future{'' if moved == 1 else 's'}"
     if options:
         what = (what + " and " if moved else "") + f"{options} option{'' if options == 1 else 's'} on futures"
@@ -640,6 +644,8 @@ def contract_dates_summary(block: dict) -> str:
             f"{what} moved to Bloomberg's expiry")
     if failed:
         text += f"; {failed} ticker{'' if failed == 1 else 's'} gave no date"
+    if known_text:
+        text += "; " + known_text
     if applied.get("error"):
         text += f"; moving the futures stopped ({applied['error']})"
     return text
@@ -654,6 +660,98 @@ def _is_option_entry(entry: dict) -> bool:
     except Exception:  # noqa: BLE001
         LISTED_OPTION_PRODUCTS = ("EQ_OPTION", "CMDTY_OPTION")
     return entry.get("product") in LISTED_OPTION_PRODUCTS or tuple(entry.get("fields") or ()) == OPTION_CONTRACT_DATE_FIELDS
+
+
+# A contract Bloomberg answers with no last trade date (2026-09-30; user: "bloomberg needs to
+# store on cache all the data - and only pull any new data"). Nothing is stored for it, so
+# the library lists it again and, before this, it was asked on every press, forever. It is
+# now recorded in a JSON sidecar beside the database, `<db>.contract_dates_state.json`
+# (bbg-live's own bookkeeping like the backfill's `<db>.risk_history_state.json`, never read
+# for a figure), and not asked again on the same book day (`book_today`); a new book day, or
+# a change of its request ticker (a future's one-digit year becoming two-digit at expiry, a
+# fix to config/contracts.csv), asks it again. A ticker Bloomberg rejects as unknown (a
+# securityError) is not asked again until its ticker changes, whatever the day.
+CONTRACT_DATES_STATE_VERSION = 1
+CONTRACT_DATES_EMPTY_LISTED = 20       # status["contract_dates"]["empty_tickers"] names at most this many
+
+
+def _contract_dates_state_path(conn: sqlite3.Connection) -> Optional[Path]:
+    """`<db>.contract_dates_state.json` beside the connection's main database file; None for
+    an in-memory or temporary database (nothing is then remembered across presses)."""
+    try:
+        for _seq, name, path in conn.execute("PRAGMA database_list").fetchall():
+            if name == "main" and path:
+                p = Path(path)
+                return p.with_name(p.name + ".contract_dates_state.json")
+    except sqlite3.Error:
+        pass
+    return None
+
+
+def _load_contract_dates_empty(path: Optional[Path]) -> Dict[str, dict]:
+    """{contract id: {ticker, reason, day, rejected}} from the sidecar; {} when there is none
+    or it cannot be read (each such contract is then asked once more)."""
+    if path is None:
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return {str(k): dict(v) for k, v in (raw.get("empty") or {}).items() if isinstance(v, dict)}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+
+
+def _save_contract_dates_empty(path: Optional[Path], empty: Dict[str, dict]) -> None:
+    """Write the sidecar whole (a temporary file, then a replace). Never raises: a sidecar
+    that cannot be written only means the contract is asked again next press."""
+    if path is None:
+        return
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"version": CONTRACT_DATES_STATE_VERSION, "empty": empty},
+                                  indent=1, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _known_empty(record: Optional[dict], ticker: str, day: str) -> bool:
+    """Does a recorded 'no date' still stand for `ticker` on book day `day`? Only for the same
+    request ticker, and then on the same book day, or on any day for a ticker Bloomberg
+    rejected as unknown."""
+    if not record or str(record.get("ticker") or "") != ticker:
+        return False
+    return bool(record.get("rejected")) or str(record.get("day") or "") == day
+
+
+def _bloomberg_rejected(diag, ticker: str, purpose: str) -> str:
+    """Bloomberg's securityError message for `ticker` in the latest run of requests with this
+    `purpose` recorded in `diag` (the ticker is unknown to it); '' when it named no such
+    error. The same walk as `_bloomberg_said_for`."""
+    for rec in reversed(getattr(diag, "requests", None) or []):
+        if rec.get("purpose") != purpose:
+            return ""
+        for sec in rec.get("raw_response") or []:
+            if sec.get("security") == ticker and sec.get("securityError"):
+                return str(sec["securityError"].get("message") or "security error")
+    return ""
+
+
+def _contract_dates_on_file(conn: sqlite3.Connection, as_of: str, listed) -> int:
+    """How many contracts needing contract dates today are not asked because their dates are
+    stored already: the library's CONTRACT_DATES rows in force on `as_of` with a ticker,
+    not in today's list (`listed`), and in contract_static. 0 when it cannot be read."""
+    try:
+        from data.bloomberg import library
+        kind = _contract_dates_kind()
+        keys = {r["key"] for r in library.rows(conn)
+                if r.get("kind") == kind and r.get("needed_from", "") <= as_of <= r.get("needed_until", "")
+                and r.get("requestable", bool(r.get("bbg_ticker")))} - set(listed)
+        if not keys:
+            return 0
+        stored = {row[0] for row in conn.execute("SELECT contract_id FROM contract_static").fetchall()}
+        return len(keys & stored)
+    except Exception:  # noqa: BLE001 -- a count for the status file only
+        return 0
 
 
 def _contract_dates_entries(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[str, dict], bool]:
@@ -711,24 +809,52 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
     options' own fields (OPTION_CONTRACT_DATE_FIELDS), asked in a request of their own; an
     option's OPT_EXPIRE_DT, else its LAST_TRADEABLE_DT, is stored as its last trade date,
     first notice '' (data.contracts.store_static_dates takes option ids), and the apply
-    moves the option onto it like a future."""
-    block: dict = {"requested": 0, "stored": 0, "failed": [], "applied": {}}
+    moves the option onto it like a future.
+
+    Asked once per book day (2026-09-30): a contract Bloomberg answered with no date is
+    recorded in `<db>.contract_dates_state.json` and not asked again the same book day
+    (`today`, the pull's `book_today`), nor, when Bloomberg rejected its ticker as unknown,
+    until the ticker changes (`_known_empty`). The block also carries: asked (= requested,
+    tickers sent), on_file (contracts needing dates today not asked because they are
+    stored), empty (tickers Bloomberg answered with no date this press), known_empty
+    (contracts not asked because an earlier answer of no date still stands), empty_tickers
+    (this press's then the known ones, at most CONTRACT_DATES_EMPTY_LISTED)."""
+    block: dict = {"requested": 0, "stored": 0, "failed": [], "applied": {},
+                   "asked": 0, "on_file": 0, "empty": 0, "empty_tickers": [], "known_empty": 0}
+    day = today.isoformat()
+    state_path = _contract_dates_state_path(conn)
+    empty_state: Dict[str, dict] = {}
+    empty_before: Dict[str, dict] = {}
+    fresh_empty: List[str] = []
+    known_tickers: List[str] = []
 
     def _done() -> dict:
+        block["asked"] = int(block.get("requested") or 0)
+        block["empty"] = len(fresh_empty)
+        block["known_empty"] = len(known_tickers)
+        block["empty_tickers"] = (fresh_empty + known_tickers)[:CONTRACT_DATES_EMPTY_LISTED]
         block["summary"] = contract_dates_summary(block)
         return block
 
     try:
-        entries, in_force = _contract_dates_entries(conn, today.isoformat())
+        entries, in_force = _contract_dates_entries(conn, day)
     except Exception as exc:  # noqa: BLE001
         block["error"] = f"contract dates not read from the library: {exc!r}"
         return _done()
     if not in_force:
         return _done()
+    block["on_file"] = _contract_dates_on_file(conn, day, entries)
     for key, entry in sorted(entries.items()):
         if not entry["ticker"]:     # the library leaves these out; never sent to Bloomberg regardless
             block["failed"].append({"ticker": key, "reason": f"no Bloomberg ticker for {key}"})
     ask = {k: e for k, e in entries.items() if e["ticker"]}
+    # What an earlier press learnt: a contract no longer listed (its dates stored, or no
+    # longer open) is forgotten; one whose 'no date' still stands is not asked again.
+    empty_before = _load_contract_dates_empty(state_path)
+    empty_state = {k: v for k, v in empty_before.items() if k in ask}
+    for key in sorted(ask):
+        if _known_empty(empty_state.get(key), ask[key]["ticker"], day):
+            known_tickers.append(ask.pop(key)["ticker"])
     if ask:
         from data.bloomberg.pull_marks import fetch_reference, _to_date
         _release_lock(conn)         # the library's sync is committed before Bloomberg is asked
@@ -783,8 +909,14 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
                 wanted = "FUT_LAST_TRADE_DT"
             if last_trade is None:
                 said = _bloomberg_said_for(diag, ticker, CONTRACT_DATES)
-                block["failed"].append({"ticker": ticker, "reason": said or f"Bloomberg returned no {wanted}"})
+                reason = said or f"Bloomberg returned no {wanted}"
+                block["failed"].append({"ticker": ticker, "reason": reason})
+                empty_state[key] = {"ticker": ticker, "reason": reason, "day": day,
+                                    "rejected": bool(_bloomberg_rejected(diag, ticker, CONTRACT_DATES))}
+                if ticker not in fresh_empty:
+                    fresh_empty.append(ticker)
                 continue
+            empty_state.pop(key, None)
             if store_static_dates is None:
                 block["failed"].append({"ticker": ticker, "reason": "not stored: " + block.get("error", "")})
                 continue
@@ -795,6 +927,8 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
                 block["stored"] += 1
             except Exception as exc:  # noqa: BLE001
                 block["failed"].append({"ticker": ticker, "reason": f"not stored: {exc}"})
+    if empty_state != empty_before:
+        _save_contract_dates_empty(state_path, empty_state)
     try:
         from data.ingest.contract_dates import apply_contract_dates
     except ImportError as exc:
@@ -1090,7 +1224,7 @@ def _step_outcome(name: str, block, failed_items: int = 0, asked: int = 0) -> Tu
     if name == "contract_dates":
         failed = len(block.get("failed") or [])
         if not (block.get("requested") or failed or (block.get("applied") or {}).get("updated")):
-            return "skipped", "no contract dates to ask"
+            return "skipped", block.get("summary") or "no contract dates to ask"
         if (block.get("applied") or {}).get("error"):
             return "partial", block.get("summary") or str(block["applied"]["error"])
         if failed and not block.get("stored") and failed >= int(block.get("requested") or 0):

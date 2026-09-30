@@ -139,6 +139,14 @@ again on the next press; and the top bar's status["progress"] carries the pull's
 with "Backfilling closes: 3 of 7 days" while the backfill runs (`_Asks`,
 `_BackfillProgress`). What is asked, and which source is official, are unchanged.
 
+Only what is not stored (2026-09-30, user: "bloomberg needs to store on cache all the data - and
+only pull any new data"): a day being worked asks only the marks it still lacks at the close,
+key by key (`_wanted_keys`; an overwrite run asks everything), so the hourly retry of a
+recent day that came back incomplete asks only what is still missing; a
+forward-points divisor answered today is not asked again today (`_scale_cache`); and the risk
+history keeps the stretches Bloomberg answered with nothing (`_trim_known_empty`). What each
+press asked, left alone and got nothing for is the status block's "cache" (`_cache_block`).
+
 A day counts as complete (skipped unless overwrite=True) only once ALL of the above are
 official for it -- `data.bloomberg.inventory.close_completeness`, the same "needed" set
 `data.bloomberg.live.build_requests` uses for the live feed, so the three can never drift
@@ -413,6 +421,11 @@ ASK_LABELS = {"spot": "FX closes", "fwd": "forward-curve tenors", "future": "fut
 # reason reads the same whichever step refused the value.
 NOT_A_NUMBER = getattr(fc, "NOT_A_NUMBER", "Bloomberg sent a value that is not a number")
 
+# The steps of the status block's "cache" (2026-09-30), each history kind under one: what a
+# press asked of Bloomberg, and what came back empty, step by step (`_cache_block`).
+CACHE_STEPS = {"spot": "fx_closes", "fwd": "fx_forwards", "scale": "points_scale", "future": "futures",
+               "lme": "lme", "vol": "vol", "ois": "ois"}
+
 
 def _number(value) -> Optional[float]:
     """`value` as a finite float, else None: Bloomberg's 'N.A.', an empty string, NaN,
@@ -561,6 +574,27 @@ class _Asks:
         self.error_count = 0
         self.not_numbers: List[dict] = []
         self.not_number_count = 0
+        # What was asked and what came back empty, per kind (2026-09-30, user: "bloomberg needs
+        # to store on cache all the data - and only pull any new data"): the tickers sent in an
+        # answered request, the ones that came back with something, and the ones with nothing
+        # ({ticker: reason}); published as the status block's "cache" (`_cache_block`).
+        self.asked: Dict[str, set] = {}
+        self.had_data: Dict[str, set] = {}
+        self.came_back_empty: Dict[str, Dict[str, str]] = {}
+
+    def note_answer(self, kind: str, ticker: str, has_data: bool, reason: str = "") -> None:
+        """Count one ticker of an answered request: asked, and with or without data."""
+        self.asked.setdefault(kind, set()).add(ticker)
+        if has_data:
+            self.had_data.setdefault(kind, set()).add(ticker)
+        else:
+            self.came_back_empty.setdefault(kind, {}).setdefault(ticker, reason or f"Bloomberg returned nothing "
+                                                                               f"for {ticker}")
+
+    def empties(self, kind: str) -> Dict[str, str]:
+        """{ticker: reason} of `kind` asked this run that brought nothing back in any request."""
+        had = self.had_data.get(kind) or set()
+        return {t: why for t, why in (self.came_back_empty.get(kind) or {}).items() if t not in had}
 
     @property
     def gave_up(self) -> bool:
@@ -650,6 +684,10 @@ class _Asks:
             for ticker, per_day in got.items():
                 if isinstance(per_day, dict):
                     out.setdefault(ticker, {}).update(per_day)
+        for t in chunk:
+            per_day = got.get(t) if isinstance(got, dict) else None
+            self.note_answer(kind, t, isinstance(per_day, dict) and bool(per_day),
+                             f"Bloomberg returned no history for {t} ({start}..{end})")
 
     def stage(self, kind: str, exc: BaseException, day: str = "") -> str:
         """A whole stage raised (outside a request): recorded, and its reason stands for every
@@ -661,7 +699,23 @@ class _Asks:
     def summary(self) -> dict:
         return {"sent": self.requests, "answered": self.answered, "failed": self.failed_requests,
                 "tickers_failed": self.tickers_failed, "tickers_not_asked": self.tickers_not_asked,
-                "gave_up": self.gave_up, "no_session": self.no_session}
+                "gave_up": self.gave_up, "no_session": self.no_session,
+                "tickers_asked": sum(len(v) for v in self.asked.values())}
+
+    def by_step(self) -> Dict[str, dict]:
+        """{cache step: {asked, empty, empty_tickers}} of this run's answered requests
+        (CACHE_STEPS), for the status block's "cache"."""
+        out: Dict[str, dict] = {}
+        for kind, step in CACHE_STEPS.items():
+            asked = self.asked.get(kind) or set()
+            if not asked:
+                continue
+            empty = self.empties(kind)
+            entry = out.setdefault(step, {"asked": 0, "empty": 0, "empty_tickers": []})
+            entry["asked"] += len(asked)
+            entry["empty"] += len(empty)
+            entry["empty_tickers"] = (entry["empty_tickers"] + sorted(empty))[:MAX_STATUS_ERRORS]
+        return out
 
 
 def _import_realise_settled():
@@ -981,7 +1035,8 @@ def _tenor_tickers(pair: str, tenors: List[str]) -> Dict[str, str]:
 def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
                                 fwd_fetch: Optional[Callable] = None, holidays=frozenset(),
                                 fields: Optional[List[str]] = None,
-                                asks: Optional[_Asks] = None) -> Dict[str, Dict[str, Dict[str, dict]]]:
+                                asks: Optional[_Asks] = None,
+                                wanted: Optional[Dict[str, set]] = None) -> Dict[str, Dict[str, Dict[str, dict]]]:
     """{instrument_id: {date_iso: {tenor label: {'PX_LAST': ..., 'SETTLE_DT': ... if sent}}}}
     -- one call of `fwd_fetch` per stretch of `runs`, for the pairs with a leg still to
     settle inside it (the Bloomberg library's FWD_OUTRIGHT rows; a leg settling on or
@@ -999,15 +1054,21 @@ def _fetch_fwd_outright_history(conn: sqlite3.Connection, session, service, runs
     it is sent once more for PX_LAST alone, and the later stretches ask for PX_LAST alone.
 
     In chunks (`asks`, a pair's tenors in one request); a tenor whose PX_LAST is not a number
-    is left out of that day (counted, `asks.not_number`), so no curve is built on it."""
+    is left out of that day (counted, `asks.not_number`), so no curve is built on it.
+
+    `wanted` ({day_iso: {pair}}, 2026-09-30, "only pull any new data"): the pairs with a
+    forward still missing at the close on some day of the stretch; a pair whose forwards are
+    all on file is not asked. None asks every pair (an overwrite run)."""
     from data.bloomberg import library
     asks = asks or _Asks()
     out: Dict[str, Dict[str, Dict[str, dict]]] = {}
     fields = list(fields) if fields else ["PX_LAST", "SETTLE_DT"]
     for run_start, run_end in runs:
+        keep = None if wanted is None else set(_keys_in_run(wanted, run_start, run_end))
         legs_by_pair: Dict[str, List[dict]] = {}
         for r in library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat()):
-            if r["kind"] == "FWD_OUTRIGHT" and r["settle_date"] > run_start.isoformat():
+            if (r["kind"] == "FWD_OUTRIGHT" and r["settle_date"] > run_start.isoformat()
+                    and (keep is None or r["key"] in keep)):
                 legs_by_pair.setdefault(r["key"], []).append(r)
         if not legs_by_pair:
             continue
@@ -1067,7 +1128,37 @@ def _fetch_points_scales(session, service, pairs: List[str], scale_fetch: Option
         return {pair: {"scale": None, "field": "", "raw": {}, "errors": {"request": reason}} for pair in pairs}
     asks.answered += 1
     asks.timeouts_in_row = 0
+    for pair in pairs:
+        report = (got or {}).get(pair) or {}
+        asks.note_answer("scale", pair, bool(report.get("scale")),
+                         f"Bloomberg sent no forward-points divisor for {pair}")
     return got
+
+
+# {db: {"on": book day, "by_pair": {pair: scale report}}} (2026-09-30): the divisors a real
+# Bloomberg session answered on that book day, so a second press of the same day, or a later
+# stretch, does not ask the same pair again (an empty answer included: not asked again that day).
+_scale_cache: Dict[str, dict] = {}
+
+
+def _cached_points_scales(db_path, today_iso: str, session, service, pairs: List[str],
+                          scale_fetch: Optional[Callable], asks: Optional[_Asks]) -> Tuple[Dict[str, dict], int]:
+    """(`_fetch_points_scales` for `pairs`, how many pairs came from the day's cache). Only a
+    real session is cached (`scale_fetch` None): a test's injected lookup is always asked. A
+    lookup that failed is never cached, so it is asked again on the next press."""
+    if scale_fetch is not None or session is None:
+        return _fetch_points_scales(session, service, pairs, scale_fetch, asks), 0
+    key = _db_key(db_path)
+    cache = _scale_cache.get(key)
+    if not cache or cache.get("on") != today_iso:
+        cache = _scale_cache[key] = {"on": today_iso, "by_pair": {}}
+    known = {p: cache["by_pair"][p] for p in pairs if p in cache["by_pair"]}
+    ask = [p for p in pairs if p not in known]
+    got = _fetch_points_scales(session, service, ask, scale_fetch, asks) if ask else {}
+    for pair, report in (got or {}).items():
+        if not ((report or {}).get("errors") or {}).get("request"):
+            cache["by_pair"][pair] = report
+    return {**known, **(got or {})}, len(known)
 
 
 INFERRED_SCALE_FIELD = "Bloomberg's own forwards on file"
@@ -1193,7 +1284,8 @@ def _future_request_tickers(conn: sqlite3.Connection, library_rows: List[dict],
 def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: List[Tuple[date, date]],
                              fut_fetch: Optional[Callable] = None, today: Optional[date] = None,
                              not_asked: Optional[Dict[str, str]] = None,
-                             asks: Optional[_Asks] = None) -> Dict[str, Dict[str, float]]:
+                             asks: Optional[_Asks] = None,
+                             wanted: Optional[Dict[str, set]] = None) -> Dict[str, Dict[str, float]]:
     """{instrument_id: {date_iso: PX_LAST}} -- one HistoricalDataRequest per stretch of
     `runs`, for the futures and listed options open inside it (the Bloomberg library's
     FUTURE_PX rows), asked for the daily PX_LAST (user, 2026-09-22: "all futures for past
@@ -1205,14 +1297,18 @@ def _fetch_future_px_history(conn: sqlite3.Connection, session, service, runs: L
     `_fetch_fwd_outright_history`'s `fwd_fetch`; defaults to
     pull_marks.fetch_historical_series. In chunks (`asks`); a failure is recorded under the
     instrument_id (`asks.reason("future", instrument_id, day)`). Values are kept as sent:
-    pass 1 refuses one that is not a number."""
+    pass 1 refuses one that is not a number. `wanted` ({day_iso: {instrument_id}},
+    2026-09-30): the futures and options with a close still missing on some day of the
+    stretch; one whose closes are all on file is not asked. None asks every one."""
     from data.bloomberg import library
     today = today or _as_date(None)
     asks = asks or _Asks()
     out: Dict[str, Dict[str, float]] = {}
     for run_start, run_end in runs:
-        ticker_to_instrument, skipped = _future_request_tickers(
-            conn, library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat()), today)
+        keep = None if wanted is None else set(_keys_in_run(wanted, run_start, run_end))
+        lib = [r for r in library.needed_in_range(conn, run_start.isoformat(), run_end.isoformat())
+               if keep is None or r["key"] in keep]
+        ticker_to_instrument, skipped = _future_request_tickers(conn, lib, today)
         if not_asked is not None:
             not_asked.update(skipped)
         if not ticker_to_instrument:
@@ -1446,15 +1542,70 @@ def _write_closes(conn: sqlite3.Connection, rows: List[dict], overwrite: bool = 
     return written
 
 
+# --------------------------------------------------------------------------- only what is not stored (2026-09-30)
+# User, 2026-09-30: "bloomberg needs to store on cache all the data - and only pull any new
+# data". A day being worked is asked only for the marks it still lacks at the close
+# (close_completeness's `missing`), key by key: a day missing one future's close asks that
+# future, not every pair, tenor and future of the day again (before, the whole day was asked
+# and `_drop_already_official` threw the stored half of the answer away). The marks the day
+# holds at the close are read from file where a missing one is built from them (the day's
+# SPOT close under a forward). An overwrite run asks everything, as before.
+def _wanted_keys(missing_of: Dict[str, list], work: List[date]) -> Dict[str, Dict[str, set]]:
+    """{kind: {day_iso: keys}} of the marks `work`'s days still lack (`missing_of`: {day_iso:
+    close_completeness's `missing` list}): 'spot' the FX pairs whose SPOT close is missing,
+    'fwd' the (pair, settle date) of a missing FX forward, 'fwd_pairs' the pairs with a missing
+    forward that settles after the day (the ones whose tenors are needed), 'future' the
+    futures and listed options missing their FUTURE_PX, 'lme' the LME metals with a cash,
+    prompt or curve mark missing."""
+    out: Dict[str, Dict[str, set]] = {"spot": {}, "fwd": {}, "fwd_pairs": {}, "future": {}, "lme": {}}
+    for d in work:
+        day = d.isoformat()
+        for m in missing_of.get(day) or []:
+            iid, mark_type, settle = m.get("instrument_id"), m.get("mark_type"), str(m.get("settle_date") or "")
+            if not iid:
+                continue
+            if is_lme_instrument(iid):
+                out["lme"].setdefault(day, set()).add(iid)
+            elif mark_type == "SPOT":
+                out["spot"].setdefault(day, set()).add(iid)
+            elif mark_type == "FWD_OUTRIGHT":
+                out["fwd"].setdefault(day, set()).add((iid, settle))
+                if settle > day:
+                    out["fwd_pairs"].setdefault(day, set()).add(iid)
+            elif mark_type == "FUTURE_PX":
+                out["future"].setdefault(day, set()).add(iid)
+    return out
+
+
+def _close_spots_on_file(conn: sqlite3.Connection, day: str, pairs: Iterable[str]) -> Dict[str, float]:
+    """{pair: value} of the official SPOT closes `day` already holds (stamped at the close,
+    `is_close_row`) for `pairs`: what a missing forward of that day is built on when the SPOT
+    itself is not asked again."""
+    wanted = set(pairs)
+    out: Dict[str, float] = {}
+    if not wanted:
+        return out
+    for iid, value, snapped in conn.execute(
+            "SELECT instrument_id, value, snapped_at FROM marks_official WHERE as_of_date = ? AND mark_type = 'SPOT'",
+            (day,)):
+        if iid in wanted and is_close_row("SPOT", day, snapped):
+            number = _number(value)
+            if number is not None:
+                out[iid] = number
+    return out
+
+
 def _spot_fetch_from_series(series_fetch: Callable, conn: sqlite3.Connection, runs: List[Tuple[date, date]],
-                            asks: Optional[_Asks] = None) -> Callable:
+                            asks: Optional[_Asks] = None, wanted: Optional[Dict[str, set]] = None) -> Callable:
     """A per-day SPOT fetch (the `fetch` signature backfill() takes) answered from
     `series_fetch` per stretch of `runs` (pull_marks.fetch_historical_series: the daily
     close, PX_LAST), in chunks (`asks`), for the pairs whose SPOT is needed inside that
     stretch (the Bloomberg library's SPOT rows), sent the first time one of its days is
     asked for. `fetch.reason(ticker, day)` is the source's own reason a day has no close,
     else why its request failed or was not sent ('' when neither), so a missing close is
-    reported in Bloomberg's words."""
+    reported in Bloomberg's words. `wanted` ({day_iso: {pair}}, 2026-09-30): the pairs whose
+    close is still missing on some day of the stretch; a pair whose closes are all on file is
+    not asked. None asks every pair the stretch needs."""
     from data.bloomberg import library
     asks = asks or _Asks()
     cache: Dict[Tuple[date, date], dict] = {}
@@ -1463,17 +1614,18 @@ def _spot_fetch_from_series(series_fetch: Callable, conn: sqlite3.Connection, ru
         run = next(((a, b) for a, b in runs if a <= day <= b), None)
         return ((cache.get(run) or {}).get(ticker) or {}).get(day.isoformat()) or {}
 
-    def fetch(session, service, wanted, field, day):
+    def fetch(session, service, tickers_wanted, field, day):
         run = next(((a, b) for a, b in runs if a <= day <= b), None)
         if run is None:
             return {}
         if run not in cache:
             known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
+            keep = None if wanted is None else set(_keys_in_run(wanted, run[0], run[1]))
             tickers = sorted({r["bbg_ticker"] for r in library.needed_in_range(conn, run[0].isoformat(), run[1].isoformat())
-                              if r["kind"] == "SPOT" and r["key"] in known})
+                              if r["kind"] == "SPOT" and r["key"] in known and (keep is None or r["key"] in keep)})
             cache[run] = (asks.series("spot", series_fetch, session, service, tickers, [field], run[0], run[1])
                           if tickers else {})
-        return {t: _row(t, day).get(field) for t in wanted}
+        return {t: _row(t, day).get(field) for t in tickers_wanted}
 
     fetch.reason = lambda ticker, day: (str(_row(ticker, day).get(CLOSE_REASON) or "")
                                         or asks.reason("spot", ticker, day))
@@ -1516,7 +1668,7 @@ _run_writes: Dict[str, int] = {}
 
 
 def _empty_run_report() -> dict:
-    return {"errors": [], "error_count": 0, "requests": {}, "not_numbers": [], "not_number_count": 0}
+    return {"errors": [], "error_count": 0, "requests": {}, "not_numbers": [], "not_number_count": 0, "by_step": {}}
 
 
 def _run_report(db_path) -> dict:
@@ -1531,6 +1683,12 @@ def _merge_asks(db_path, asks: _Asks) -> None:
     report["not_numbers"] = (report["not_numbers"] + asks.not_numbers)[:MAX_STATUS_ERRORS]
     report["not_number_count"] += asks.not_number_count
     report["requests"] = asks.summary()
+    by_step = report.setdefault("by_step", {})
+    for step, entry in asks.by_step().items():     # what was asked and came back empty (2026-09-30)
+        into = by_step.setdefault(step, {"asked": 0, "empty": 0, "empty_tickers": []})
+        into["asked"] += entry["asked"]
+        into["empty"] += entry["empty"]
+        into["empty_tickers"] = (into["empty_tickers"] + entry["empty_tickers"])[:MAX_STATUS_ERRORS]
 
 
 def _report_error(db_path, step: str, reason: str, day: str = "") -> str:
@@ -1707,6 +1865,11 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         span_end = max(work)
         runs = _runs(work)
         fx_runs = runs
+        # Only the marks each day still lacks are asked (2026-09-30, "only pull any new data");
+        # an overwrite run asks everything. None = every key.
+        want = (None if overwrite else
+                _wanted_keys(dict(zip(completeness["as_of_date"], completeness["missing"])), work))
+        spot_want = None if want is None else want["spot"]
         session = service = None
         own_session = False  # did THIS call open the session itself (pm.open_session)?
         fwd_fields = None    # an injected fwd_fetch is asked for PX_LAST + SETTLE_DT, as before
@@ -1716,7 +1879,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         try:
             if fetch is None or fwd_fetch is None or fut_fetch is None:
                 if fetch is None:
-                    fetch = _spot_fetch_from_series(pm.fetch_historical_series, conn, fx_runs, asks)
+                    fetch = _spot_fetch_from_series(pm.fetch_historical_series, conn, fx_runs, asks, spot_want)
                 if fwd_fetch is None:
                     fwd_fetch, fwd_fields = pm.fetch_historical_series, ["PX_LAST"]
                 if fut_fetch is None:
@@ -1757,14 +1920,21 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     return default
 
             tenor_rows_by_pair = _stage("fwd", lambda: _fetch_fwd_outright_history(
-                conn, session, service, fx_runs, fwd_fetch, holidays, fields=fwd_fields, asks=asks), {})
+                conn, session, service, fx_runs, fwd_fetch, holidays, fields=fwd_fields, asks=asks,
+                wanted=None if want is None else want["fwd_pairs"]), {})
             future_not_asked: Dict[str, str] = {}     # instrument_id -> why no history was asked for it
             future_px_by_instrument = _stage("future", lambda: _fetch_future_px_history(
-                conn, session, service, runs, fut_fetch, today, future_not_asked, asks=asks), {})
+                conn, session, service, runs, fut_fetch, today, future_not_asked, asks=asks,
+                wanted=None if want is None else want["future"]), {})
             # LME curves (2026-09-24): each day's pillars, their daily PX_LAST per stretch with
             # the futures' fetcher; the rows are built in pass 1 below.
+            # Only the metals with a mark still missing that day (2026-09-30).
             lme_plans = _stage("lme", lambda: {iso: plan for iso, plan in
-                                               ((d.isoformat(), _lme_plan(lme_rows, d.isoformat())) for d in work)
+                                               ((d.isoformat(), {root: entry for root, entry in
+                                                                 _lme_plan(lme_rows, d.isoformat()).items()
+                                                                 if want is None
+                                                                 or root in want["lme"].get(d.isoformat(), ())})
+                                                for d in work)
                                                if plan}, {})
             lme_series = _stage("lme", lambda: _fetch_lme_history(session, service, runs, lme_plans, fut_fetch, asks)
                                 if lme_plans else {}, {})
@@ -1780,8 +1950,9 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
 
             def scale_report_for(pair: str) -> dict:
                 if "by_pair" not in scales:      # asked for once, and only if some series is points
-                    scales["by_pair"] = _fetch_points_scales(session, service, sorted(tenor_rows_by_pair), scale_fetch,
-                                                             asks)
+                    # a pair's divisor answered earlier the same book day is not asked again (2026-09-30)
+                    scales["by_pair"], _cached = _cached_points_scales(db_path, today_iso, session, service,
+                                                                       sorted(tenor_rows_by_pair), scale_fetch, asks)
                 report = scales["by_pair"].get(pair) or {}
                 if not report.get("scale"):
                     # neither field answered: work the divisor out from Bloomberg's own
@@ -1810,8 +1981,14 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     needed = _needed_marks(conn, day, historical=True)
                     # Only the pairs THIS day needs a close for (2026-09-21); it was every pair
                     # of the whole range, on every day.
-                    tickers = [ticker_of[i["instrument_id"]] for i in needed
-                               if i["mark_type"] == "SPOT" and i["instrument_id"] in ticker_of]
+                    # (2026-09-30) and, but for an overwrite, only those whose close is not on file yet:
+                    # the others' stored closes stand in for them below.
+                    day_spot_want = None if spot_want is None else spot_want.get(day, set())
+                    day_pairs = [i["instrument_id"] for i in needed
+                                 if i["mark_type"] == "SPOT" and i["instrument_id"] in ticker_of]
+                    tickers = [ticker_of[p_] for p_ in day_pairs if day_spot_want is None or p_ in day_spot_want]
+                    stored_spots = ({} if day_spot_want is None else
+                                    _close_spots_on_file(conn, day, [p_ for p_ in day_pairs if p_ not in day_spot_want]))
                     closes, spot_failed = {}, ""
                     if tickers and spot_per_day:
                         # an injected per-day fetch: guarded like a chunk (2026-09-29)
@@ -1823,13 +2000,16 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                                 closes = fetch(session, service, tickers, "PX_LAST", d) or {}
                                 asks.answered += 1
                                 asks.timeouts_in_row = 0
+                                for t in tickers:
+                                    asks.note_answer("spot", t, closes.get(t) is not None,
+                                                     f"Bloomberg returned no PX_LAST for {t} on {day}")
                             except Exception as exc:  # noqa: BLE001 -- this day's FX closes fail alone
                                 asks.raised(exc)
                                 spot_failed = asks.error("spot", f"{REQUEST_FAILED} for the FX closes of {day}: "
                                                                  f"{_plain_error(exc)}", day)
                     elif tickers:
                         closes = fetch(session, service, tickers, "PX_LAST", d) or {}
-                    spot_rows, spot_by_pair, missing_pairs, pair_reasons = [], {}, [], {}
+                    spot_rows, spot_by_pair, missing_pairs, pair_reasons = [], dict(stored_spots), [], {}
                     for ticker in tickers:
                         value = closes.get(ticker)
                         fvalue = _number(value)
@@ -1846,7 +2026,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         spot_rows.append({"as_of_date": day, "instrument_id": by_ticker[ticker], "settle_date": day,
                                           "mark_type": "SPOT", "value": fvalue, "source": SRC_SPOT_FWD,
                                           "snapped_at": close_stamp(d)})
-                    if tickers and not spot_rows:
+                    if tickers and not spot_rows and not stored_spots:
                         # Only a genuine holiday/no-data day (there WERE FX tickers to ask
                         # for, and none came back) short-circuits here. A futures-only book
                         # (2026-09-18 fix) has `tickers == []` -- trivially "no spot rows"
@@ -1859,6 +2039,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         instrument_id = item["instrument_id"]
                         if item["mark_type"] != "FUTURE_PX":
                             continue
+                        if want is not None and instrument_id not in want["future"].get(day, ()):
+                            continue             # its close is on file (2026-09-30): not asked, left as it is
                         raw = (future_px_by_instrument.get(instrument_id) or {}).get(day)
                         settle_value = _number(raw)
                         if settle_value is None:
@@ -1967,6 +2149,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         instrument_id, settle = item["instrument_id"], item["settle_date"]
                         if is_lme_instrument(instrument_id):
                             continue    # an LME prompt: built with its metal's curve in pass 1, never an FX curve
+                        if want is not None and (instrument_id, settle) not in want["fwd"].get(day, ()):
+                            continue    # its close is on file (2026-09-30): not rebuilt, left as it is
                         target = date.fromisoformat(settle)
                         spot = spot_by_pair.get(instrument_id)
                         if target <= d:
@@ -2190,6 +2374,10 @@ MAX_STATUS_REASONS = 5
 # past days that could never complete (a few tickers Bloomberg rejects or has nothing for)
 # were re-asked on every press after a restart, some 20 minutes of requests for nothing.
 RECENT_BUSINESS_DAYS = 3
+# 2026-09-30 (session decision, after "only pull any new data"): the hourly retry of a recent
+# day stays -- Bloomberg can lag a close past the 05:00 Hong Kong roll -- and costs little now,
+# since a retry asks only the keys the day still lacks (`_wanted_keys`). Each state also keeps
+# the book day it was tried on ("tried_on"), bookkeeping only.
 # Bloomberg's own rejection of a ticker or field, as the pull code passes it through
 # verbatim (a fetch's `.reason`: "Bloomberg answered the history request for <ticker>
 # with: Unknown/Invalid security [nid:11150]"; fwd_curve / live: "securityError: ..." /
@@ -2207,6 +2395,19 @@ _inputs_block: Dict[str, dict] = {}            # db -> the "inputs" dict, likewi
 _published: Dict[str, dict] = {}               # db -> the whole "backfill" block last published
 _notes: Dict[str, str] = {}                    # db -> the last run's "note" (past days being re-requested at the close)
 _waiting: Dict[str, str] = {}                  # db -> the last run's "waiting_on_tickers" sentence (2026-09-22)
+_cache_stats: Dict[str, dict] = {}             # db -> the last listing's day counts (2026-09-30, `_listing_stats`)
+
+
+def _listing_stats(listed: List[dict]) -> dict:
+    """What the listing of the past days says is on file (2026-09-30): the days listed, the
+    days needing anything, the complete ones, and per day the needed marks present at the close
+    (`present`; `_record_outcome` updates the days a run worked). `closes_skipped` is the
+    marks on file this press did not ask for (all of them: a stored close is never asked)."""
+    needing = [r for r in listed if int(r.get("needed") or 0) > 0 or r.get("inputs_missing")]
+    present = {r["as_of_date"]: int(r.get("present") or 0) for r in listed}
+    return {"days_listed": len(listed), "days_needing": len(needing),
+            "complete": {r["as_of_date"] for r in needing if not _is_open(r)},
+            "present": present, "closes_skipped": sum(present.values()), "days_asked": 0, "days_waiting": 0}
 
 
 def _db_key(db_path) -> str:
@@ -2343,7 +2544,8 @@ def _load_state(db_path, key: str, clock: Callable[[], float]) -> None:
                 "signature": frozenset(tuple(item) for item in entry["signature"]),
                 "status": entry["status"], "missing_count": int(entry["missing_count"]),
                 "missing": list(entry["missing"]), "rejected": list(entry.get("rejected") or []),
-                "rejected_only": bool(entry.get("rejected_only")), "transient": bool(entry.get("transient"))}
+                "rejected_only": bool(entry.get("rejected_only")), "transient": bool(entry.get("transient")),
+                "tried_on": str(entry.get("tried_on") or "")}
         except (KeyError, TypeError, ValueError):
             continue                                   # one bad entry: that day counts as never tried
 
@@ -2355,7 +2557,7 @@ def _save_state(db_path, key: str) -> None:
                   "signature": sorted(list(item) for item in s["signature"]), "status": s["status"],
                   "missing_count": s["missing_count"], "missing": list(s["missing"]),
                   "rejected": list(s["rejected"]), "rejected_only": bool(s["rejected_only"]),
-                  "transient": bool(s.get("transient"))}
+                  "transient": bool(s.get("transient")), "tried_on": str(s.get("tried_on") or "")}
             for (k, day), s in sorted(_day_state.items()) if k == key}
     target = _state_path(db_path)
     try:
@@ -2763,10 +2965,103 @@ def _risk_asks(needs: List[dict], stored: Dict[str, tuple], last_day: date) -> L
             out.append({**base, "lo": lo, "hi": min(head_hi, hi), "fresh": False})
         tail_lo = max(lo, last + timedelta(days=1))
         if _has_weekday(tail_lo, hi):
+            late = {}
             if last_incomplete and not fx and lo <= last:
                 tail_lo = last                         # its volume / open interest, a day late
-            out.append({**base, "lo": tail_lo, "hi": hi, "fresh": False})
+                late = {"late_from": last}             # never asked for that day alone (`_trim_known_empty`)
+            out.append({**base, "lo": tail_lo, "hi": hi, "fresh": False, **late})
     return out
+
+
+# --------------------------------------------------------------------------- risk history: empty answers kept (2026-09-30)
+# User, 2026-09-30: "bloomberg needs to store on cache all the data - and only pull any new
+# data". A stretch of days Bloomberg answered with nothing is written down (a JSON sidecar
+# beside the database, `<db>.risk_history_state.json`, the backfill's own bookkeeping like
+# `_state_path`'s, never read for a figure) and not asked again: the same book day, whatever
+# it is; for good once the stretch ended RISK_EMPTY_FINAL_DAYS or more before the day it was
+# asked (a contract's days before it was listed, an expired contract's days after its last
+# close: Bloomberg's history does not fill those in later), or when Bloomberg rejected the
+# ticker itself (until the ticker changes: a stretch is kept per ticker). Before this, a
+# contract listed inside the 900-day window had its days before its first close asked on
+# every press, and an expired contract whose last close fell before its estimated last trade
+# date its last days, for nothing each time.
+RISK_EMPTY_FINAL_DAYS = 7
+
+
+def _risk_state_path(db_path) -> Path:
+    p = Path(db_path)
+    return p.with_name(p.name + ".risk_history_state.json")
+
+
+def _load_risk_empty(db_path) -> Dict[str, List[dict]]:
+    """{instrument_id: [{ticker, lo, hi, on, reason, rejected}]} from the sidecar; {} when it
+    is missing or unreadable (every stretch is then asked once more)."""
+    try:
+        raw = json.loads(_risk_state_path(db_path).read_text(encoding="utf-8"))
+        return {str(iid): [dict(e) for e in entries if isinstance(e, dict)]
+                for iid, entries in (raw.get("empty") or {}).items() if isinstance(entries, list)}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+
+
+def _usable_empty(entry: dict, ticker: str, today: date) -> Optional[Tuple[date, date, str]]:
+    """(lo, hi, reason) of a recorded empty stretch that still stands for `ticker` on `today`:
+    recorded today, final (ended RISK_EMPTY_FINAL_DAYS before the day it was asked), or a
+    ticker Bloomberg rejected. None otherwise."""
+    if str(entry.get("ticker") or "") != ticker:
+        return None
+    try:
+        lo, hi, on = (date.fromisoformat(str(entry[k])) for k in ("lo", "hi", "on"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if entry.get("rejected") or on == today or (on - hi).days >= RISK_EMPTY_FINAL_DAYS:
+        return lo, hi, str(entry.get("reason") or RISK_HISTORY_NO_ROWS)
+    return None
+
+
+def _save_risk_empty(db_path, empty: Dict[str, List[dict]], today: date) -> None:
+    """Write the stretches that still stand tomorrow or later (final, rejected) and today's;
+    one that would lapse is dropped, and so is one that ended before the longest window. Never
+    raises: a sidecar that cannot be written only costs a re-ask."""
+    oldest = (today - timedelta(days=RISK_EMPTY_KEEP_DAYS)).isoformat()
+    keep = {}
+    for iid, entries in empty.items():
+        kept = [e for e in entries if str(e.get("hi") or "") >= oldest
+                and _usable_empty(e, str(e.get("ticker") or ""), today) is not None]
+        if kept:
+            keep[iid] = kept
+    target = _risk_state_path(db_path)
+    try:
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(json.dumps({"version": 1, "empty": keep}, indent=1, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        pass
+
+
+RISK_EMPTY_KEEP_DAYS = 1000     # a stretch older than any window (900 calendar days) is forgotten
+
+
+def _trim_known_empty(ask: dict, entries: List[dict], today: date) -> Tuple[Optional[dict], str]:
+    """(`ask` less the stretches recorded empty that still stand, or None when nothing is left
+    to ask; the reason of the stretch that covered it). An ask left with only the late volume
+    / open interest day (`late_from`) is dropped too: that day is never asked alone."""
+    spans = [u for e in entries if (u := _usable_empty(e, ask["ticker"], today))]
+    if not spans:
+        return ask, ""
+    lo, hi, said = ask["lo"], ask["hi"], ""
+    changed = True
+    while changed and lo <= hi:
+        changed = False
+        for elo, ehi, why in spans:
+            if elo <= lo <= ehi:
+                lo, said, changed = ehi + timedelta(days=1), why, True
+            if lo <= hi and elo <= hi <= ehi:
+                hi, said, changed = elo - timedelta(days=1), why, True
+    late = ask.get("late_from")
+    if not _has_weekday(lo, hi) or (late is not None and hi <= late):
+        return None, said or RISK_HISTORY_NO_ROWS
+    return {**ask, "lo": lo, "hi": hi}, ""
 
 
 def _risk_chunks(asks: List[dict]) -> List[List[dict]]:
@@ -2822,7 +3117,15 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
        "failures": [{"ticker", "instrument_id", "reason"}, ...], "failure_count",
        "not_numbers": [{"what", "day", "reason"}, ...], "not_number_count",
        "unrequestable": [{"instrument_id", "ticker", "reason"}, ...], "unrequestable_count",
-       "error": "" or why the step did not run}
+       "error": "" or why the step did not run,
+       (2026-09-30, "only pull any new data")
+       "skipped_stored": <int> rows on file inside the needs' windows, never asked again,
+       "empty": [{"ticker", "instrument_id", "reason"}, ...], "empty_count": securities asked
+           this press that brought no row for their stretch (recorded, not asked again: see
+           `_trim_known_empty`),
+       "known_empty": [{"ticker", "instrument_id", "reason"}, ...], "known_empty_count":
+           securities not asked this press because their stretch came back empty before,
+       "rows_stored", "securities_stored", "days_stored": the whole table after the step}
 
     A requestable need is asked Bloomberg's daily history (PX_LAST, PX_VOLUME, OPEN_INT; an FX
     pair PX_LAST alone) only for its days not on file (`_risk_asks`), many securities per
@@ -2845,8 +3148,25 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
     block: dict = {"ran_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                    "as_of_date": today.isoformat(), "needs": 0, "up_to_date": 0, "asked": 0, "requests": {},
                    "rows_written": 0, "failures": [], "failure_count": 0, "not_numbers": [], "not_number_count": 0,
-                   "unrequestable": [], "unrequestable_count": 0, "error": ""}
+                   "unrequestable": [], "unrequestable_count": 0, "error": "",
+                   "skipped_stored": 0, "empty": [], "empty_count": 0, "known_empty": [], "known_empty_count": 0,
+                   "rows_stored": 0, "securities_stored": 0, "days_stored": 0}
     _risk_blocks[key] = block
+    empty_now: Dict[str, dict] = {}         # ticker -> {ticker, instrument_id, reason}: asked, nothing came back
+    known_empty: Dict[str, dict] = {}       # ticker -> ...: not asked, came back empty before
+    recorded = _load_risk_empty(db_path)    # the empty stretches on record (2026-09-30)
+    record_changed = False
+
+    def _record_empty(instrument_id: str, ticker: str, lo: date, hi: date, reason: str, rejected: bool) -> None:
+        nonlocal record_changed
+        if lo > hi:
+            return
+        entry = {"ticker": ticker, "lo": lo.isoformat(), "hi": hi.isoformat(), "on": today.isoformat(),
+                 "reason": reason, "rejected": bool(rejected)}
+        entries = [e for e in recorded.get(instrument_id, [])
+                   if (e.get("ticker"), e.get("lo"), e.get("hi")) != (ticker, entry["lo"], entry["hi"])]
+        recorded[instrument_id] = entries + [entry]
+        record_changed = True
     conn = None
     own_session = None
     failures: Dict[str, dict] = {}
@@ -2885,7 +3205,24 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
                                (vol is None or vol < 0) or (oi is None or oi < 0))
             except (TypeError, ValueError):
                 continue
-        wanted = _risk_asks(requestable, stored, today - timedelta(days=1))
+        wanted = []
+        asked_any = set()
+        for a in _risk_asks(requestable, stored, today - timedelta(days=1)):
+            asked_any.add(a["instrument_id"])
+            kept, why = _trim_known_empty(a, recorded.get(a["instrument_id"], []), today)
+            if kept is None:
+                known_empty.setdefault(a["ticker"], {"ticker": a["ticker"], "instrument_id": a["instrument_id"],
+                                                     "reason": why})
+            else:
+                wanted.append(kept)
+        # The days on file inside the needs' windows: stored, so never asked again.
+        ids = {n["instrument_id"] for n in requestable}
+        starts = [str(n.get("start") or "") for n in requestable if n.get("start")]
+        if ids and starts:
+            for iid, count in conn.execute("SELECT instrument_id, COUNT(*) FROM price_history WHERE as_of_date >= ? "
+                                           "GROUP BY instrument_id", (min(starts),)):
+                if iid in ids:
+                    block["skipped_stored"] += int(count)
         for n in requestable:
             try:
                 date.fromisoformat(str(n["start"]))
@@ -2894,8 +3231,12 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
                 _fail(n["bbg_ticker"], n["instrument_id"],
                       f"no valid window to ask (start {n.get('start')!r}, end {n.get('end')!r}); not asked")
         block["up_to_date"] = len({n["instrument_id"] for n in requestable}
-                                  - {a["instrument_id"] for a in wanted}
+                                  - asked_any
                                   - {f["instrument_id"] for f in failures.values()})
+        # a security with an ask left is asked; one whose every ask came back empty before is "known_empty"
+        still_asked = {a["instrument_id"] for a in wanted}
+        for t in [t for t, e in known_empty.items() if e["instrument_id"] in still_asked]:
+            known_empty.pop(t, None)
         block["asked"] = len({a["ticker"] for a in wanted})
         if not wanted:
             return block
@@ -2930,14 +3271,19 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
                 why = asks.reason("risk_history", a["instrument_id"], a["lo"])
                 if why:
                     _fail(a["ticker"], a["instrument_id"], why)
-                    continue
+                    continue                           # a request that failed: asked again next press
                 if not in_window:
-                    if a["ticker"] in security_errors:
-                        _fail(a["ticker"], a["instrument_id"], security_errors[a["ticker"]])
-                    elif a["fresh"]:
-                        _fail(a["ticker"], a["instrument_id"], f"{RISK_HISTORY_NO_ROWS} for {a['ticker']} "
-                                                               f"({a['lo']}..{a['hi']})")
-                    continue                           # a stretch of holidays only: nothing to say
+                    rejected = a["ticker"] in security_errors
+                    reason = (security_errors[a["ticker"]] if rejected
+                              else f"{RISK_HISTORY_NO_ROWS} for {a['ticker']} ({a['lo']}..{a['hi']})")
+                    if rejected or a["fresh"]:
+                        _fail(a["ticker"], a["instrument_id"], reason)
+                    # recorded: not asked again today, nor ever once final (2026-09-30)
+                    _record_empty(a["instrument_id"], a["ticker"], a["lo"], a["hi"], reason, rejected)
+                    empty_now.setdefault(a["ticker"], {"ticker": a["ticker"], "instrument_id": a["instrument_id"],
+                                                       "reason": reason})
+                    continue
+                written_days = []
                 for day_iso, values in sorted(in_window.items()):
                     settle = _number(values.get("PX_LAST"))
                     if settle is None:
@@ -2953,6 +3299,16 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
                         extra.append(-1.0 if value is None else value)
                     rows.append((a["instrument_id"], day_iso, settle, extra[0], extra[1], a["ticker"],
                                  RISK_HISTORY_SOURCE, snapped))
+                    written_days.append(day_iso)
+                if written_days:
+                    # the days either side of what came back hold nothing (2026-09-30)
+                    first, last = date.fromisoformat(min(written_days)), date.fromisoformat(max(written_days))
+                    if _has_weekday(a["lo"], first - timedelta(days=1)):
+                        _record_empty(a["instrument_id"], a["ticker"], a["lo"], first - timedelta(days=1),
+                                      f"Bloomberg has no history of {a['ticker']} before {first}", False)
+                    if _has_weekday(last + timedelta(days=1), a["hi"]):
+                        _record_empty(a["instrument_id"], a["ticker"], last + timedelta(days=1), a["hi"],
+                                      f"Bloomberg has no history of {a['ticker']} after {last}", False)
             if rows:
                 try:
                     conn.executemany(
@@ -2981,10 +3337,22 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
             except Exception:  # noqa: BLE001
                 pass
         if conn is not None:
+            try:                                  # what is on file now (2026-09-30)
+                hit = conn.execute("SELECT COUNT(*), COUNT(DISTINCT instrument_id), COUNT(DISTINCT as_of_date) "
+                                   "FROM price_history").fetchone()
+                block["rows_stored"], block["securities_stored"], block["days_stored"] = (int(x or 0) for x in hit)
+            except Exception:  # noqa: BLE001 -- no table yet: nothing stored
+                pass
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
+        if record_changed:
+            _save_risk_empty(db_path, recorded, today)
+        block["empty_count"] = len(empty_now)
+        block["empty"] = list(empty_now.values())[:MAX_STATUS_ERRORS]
+        block["known_empty_count"] = len(known_empty)
+        block["known_empty"] = list(known_empty.values())[:MAX_STATUS_ERRORS]
         block["failure_count"] = len(failures)
         block["failures"] = list(failures.values())[:MAX_STATUS_ERRORS]
         problems = block["failure_count"] + block["not_number_count"]
@@ -3051,6 +3419,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     from data.bloomberg.live import book_today
     key = _db_key(db_path)
     _run_reports[key] = _empty_run_report()      # this run's errors, requests and refused values (2026-09-29)
+    _cache_stats.pop(key, None)                  # this run's listing, once made (2026-09-30)
     today = book_today()
     results: List[dict] = []
     signatures: Dict[str, frozenset] = {}
@@ -3092,6 +3461,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             conn.close()
         open_rows = [row for row in listed if _is_open(row)]
         signatures = {row["as_of_date"]: _signature(row["missing"], row["inputs_missing"]) for row in open_rows}
+        stats = _cache_stats[key] = _listing_stats(listed)
         # Days that hold marks which are not that day's close (a row stamped at a live pull's
         # own time, or at the 15:00 New York close of the FX rule retired on 2026-09-28): said
         # once in the log and in the status block, since the first run after a rule change asks
@@ -3122,6 +3492,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                 due.append(date.fromisoformat(day_iso))
         waiting = _waiting_sentence(key, signatures, {d.isoformat() for d in due}, recent)
         _waiting[key] = waiting
+        stats["days_asked"], stats["days_waiting"] = len(due), len(signatures) - len(due)
         refs = reference_dates(today)
         planned = True
         if not due:
@@ -3190,8 +3561,13 @@ def _record_outcome(db_path, key: str, results: List[dict], signatures: Dict[str
             for a, b in _runs([date.fromisoformat(r["day"]) for r in results]):
                 for row in close_completeness(conn, a.isoformat(), b.isoformat()).to_dict("records"):
                     after[row["as_of_date"]] = row
+            stats = _cache_stats.get(key)
             for result in results:
                 row = after[result["day"]]
+                if stats is not None:          # what is on file now, for the status block's "cache"
+                    stats["present"][result["day"]] = int(row.get("present") or 0)
+                    if not _is_open(row) and int(row.get("needed") or 0) > 0:
+                        stats["complete"].add(result["day"])
                 if (row["complete"] or not row["missing"]) and not row["inputs_missing"]:
                     _day_state.pop((key, result["day"]), None)
                     signatures.pop(result["day"], None)
@@ -3205,7 +3581,8 @@ def _record_outcome(db_path, key: str, results: List[dict], signatures: Dict[str
                     "missing_count": len(row["missing"]) + len(row["inputs_missing"]),
                     "missing": _plain_reasons(result, row["missing"]),
                     "rejected": rejected, "rejected_only": bool(failures) and all(is_rejection(r) for r in failures),
-                    "transient": any(is_transient(r) for r in failures)}
+                    "transient": any(is_transient(r) for r in failures),
+                    "tried_on": today.isoformat() if today is not None else ""}
         finally:
             conn.close()
     _save_state(db_path, key)
@@ -3243,6 +3620,83 @@ def _record_outcome(db_path, key: str, results: List[dict], signatures: Dict[str
         inputs = {r["day"]: {"vol_quotes": r.get("vol_quotes") or 0, "curve_quotes": r.get("curve_quotes") or 0,
                              "missing_inputs": list(r.get("missing_inputs") or [])} for r in results}
         _inputs_block[key] = dict(sorted(inputs.items(), reverse=True)[:MAX_STATUS_DAYS])
+
+
+def _history_counts(db_path) -> Tuple[int, int, int]:
+    """(rows, securities, days) of `price_history` on file, read plainly; zeros without it."""
+    try:
+        from data.ingest.schema import BUSY_TIMEOUT_SECONDS
+        conn = sqlite3.connect(str(Path(db_path)), timeout=BUSY_TIMEOUT_SECONDS)
+        try:
+            hit = conn.execute("SELECT COUNT(*), COUNT(DISTINCT instrument_id), COUNT(DISTINCT as_of_date) "
+                               "FROM price_history").fetchone()
+            return tuple(int(x or 0) for x in hit)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 -- no table, no file: nothing stored
+        return 0, 0, 0
+
+
+def _cache_block(db_path, report: dict, risk: dict) -> dict:
+    """The status block's "cache" (2026-09-30, user: "bloomberg needs to store on cache all the
+    data - and only pull any new data"): what is on file, and what this press asked of
+    Bloomberg's history against what it left alone because it is stored.
+
+      {"updated_at",
+       "closes_stored": past-day marks the book needs, on file at the close (after the run),
+       "history_rows_stored" / "history_securities_stored" / "history_days_stored":
+           `price_history` (one row = one security's day),
+       "days": {"listed", "needing", "complete", "asked", "waiting"} -- past business days
+           since the first trade; needing a mark or an input; complete; asked this press;
+           incomplete but not asked (came back incomplete before: see "waiting_on_tickers"),
+       "asked": tickers sent to Bloomberg's history this press (every step, risk history included),
+       "skipped_stored": stored values not asked again (the closes on file before the run and
+           the risk-history rows on file inside its windows),
+       "empty" / "empty_tickers": tickers asked that brought nothing back,
+       "known_empty": risk-history securities not asked because they came back empty before,
+       "steps": {step: {"asked", "empty", "empty_tickers"}} for fx_closes, fx_forwards,
+           points_scale, futures, lme, vol, ois (only the steps that asked anything), and
+           risk_history {"asked", "empty", "empty_tickers", "skipped_stored", "known_empty"},
+       "sentence": "Stored: N closes, N history days · This pull asked: N new, skipped N already
+           stored" (then " · N came back empty" when any did)}
+
+    Nothing here asks Bloomberg or writes the database. Never raises."""
+    try:
+        return _cache_block_of(db_path, report, risk)
+    except Exception as exc:  # noqa: BLE001 -- the status file is a report
+        return {"error": f"the cache counts could not be made: {_plain_error(exc)}", "sentence": ""}
+
+
+def _cache_block_of(db_path, report: dict, risk: dict) -> dict:
+    key = _db_key(db_path)
+    stats = _cache_stats.get(key) or {}
+    steps = {step: dict(entry) for step, entry in (report.get("by_step") or {}).items()}
+    risk = risk or {}
+    if "rows_stored" in risk and risk.get("ran_at"):
+        rows, securities, days = (int(risk.get(k) or 0) for k in ("rows_stored", "securities_stored", "days_stored"))
+    else:
+        rows, securities, days = _history_counts(db_path)
+    if risk.get("ran_at"):
+        steps["risk_history"] = {"asked": int(risk.get("asked") or 0), "empty": int(risk.get("empty_count") or 0),
+                                 "empty_tickers": [e.get("ticker") for e in risk.get("empty") or []],
+                                 "skipped_stored": int(risk.get("skipped_stored") or 0),
+                                 "known_empty": int(risk.get("known_empty_count") or 0)}
+    closes = sum((stats.get("present") or {}).values())
+    asked = sum(int(e.get("asked") or 0) for e in steps.values())
+    skipped = int(stats.get("closes_skipped") or 0) + int((steps.get("risk_history") or {}).get("skipped_stored") or 0)
+    empty = sum(int(e.get("empty") or 0) for e in steps.values())
+    empty_tickers = [t for e in steps.values() for t in e.get("empty_tickers") or []][:MAX_STATUS_ERRORS]
+    sentence = (f"Stored: {closes:,} closes, {rows:,} history days · This pull asked: {asked:,} new, "
+                f"skipped {skipped:,} already stored" + (f" · {empty:,} came back empty" if empty else ""))
+    return {"updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "closes_stored": closes, "history_rows_stored": rows, "history_securities_stored": securities,
+            "history_days_stored": days,
+            "days": {"listed": int(stats.get("days_listed") or 0), "needing": int(stats.get("days_needing") or 0),
+                     "complete": len(stats.get("complete") or ()), "asked": int(stats.get("days_asked") or 0),
+                     "waiting": int(stats.get("days_waiting") or 0)},
+            "asked": asked, "skipped_stored": skipped, "empty": empty, "empty_tickers": empty_tickers,
+            "known_empty": int((steps.get("risk_history") or {}).get("known_empty") or 0),
+            "steps": steps, "sentence": sentence}
 
 
 def failure_sentence(report: dict) -> str:
@@ -3400,6 +3854,9 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
       "not_numbers": [{"what", "day", "reason"}, ... at most MAX_STATUS_ERRORS] -- values
               Bloomberg sent that are not numbers ('N.A.', NaN), never written (hard rule 2);
               "not_number_count": how many in all.
+      "cache": what is stored and what the last press asked (2026-09-30, user: "bloomberg needs
+              to store on cache all the data - and only pull any new data"): see `_cache_block`
+              for its keys; "sentence" is the Data tab's one line.
       "risk_history": the Risk tab's daily history step of the last real pull (2026-09-30,
               `risk_history_step`'s block: securities asked, rows written, failures by ticker,
               values not a number, the unrequestable needs with their reasons, "error"); its
@@ -3470,6 +3927,7 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     def _run():
         crashed = ""
         results: List[dict] = []
+        risk_ran = False
         try:
             try:
                 _publish({"running": True, "reason": ""})
@@ -3488,6 +3946,7 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                 # ledger step, before the snapshot: a real pull only, on the lent session when
                 # there is one; reported in its own block, never a failure of the backfill.
                 progress.stage("the risk history")
+                risk_ran = True
                 try:
                     risk_history_step(db_path, session=session, log=_QuietLog(), host=host, port=port)
                 except Exception as exc:  # noqa: BLE001 -- the step never raises; belt and braces
@@ -3507,6 +3966,8 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                          "not_number_count": report["not_number_count"],
                          # 2026-09-30: the Risk tab's history step, its own report
                          "risk_history": _risk_blocks.get(key, {}),
+                         # 2026-09-30: what is stored, and what this press asked against what it left alone
+                         "cache": _cache_block(db_path, report, _risk_blocks.get(key, {}) if risk_ran else {}),
                          "last_run": datetime.now().astimezone().isoformat(timespec="seconds")}
                 if not crashed:
                     patch["reason"] = failure_sentence(report)

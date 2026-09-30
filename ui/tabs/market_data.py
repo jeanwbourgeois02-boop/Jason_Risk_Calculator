@@ -99,6 +99,18 @@ TRADES_CSV_ID = "market-data-trades-csv"
 TRADES_DOWNLOAD_ID = "market-data-trades-download"
 TRADES_SORT_TYPE = "data-trade-sort"
 TRADES_COL_TYPE = "md-trade-col"
+DUPES_ID = "market-data-duplicates"              # the duplicates check under the Blotter card's rows (2026-09-30)
+BBG_ASKED_ID = "market-data-bbg-asked"           # the fold: what the last pull asked, step by step
+BBG_CHECK_FOLD_ID = "market-data-bbg-check-fold"   # the Bloomberg check and its fixes, folded
+BBG_CHECK_META_ID = "market-data-bbg-check-meta"
+DIAG_CARD_ID = "market-data-diagnosis"           # the Diagnosis card: one report to paste into Claude Code
+DIAG_BUILD_ID = "market-data-diagnosis-build"
+DIAG_PROGRESS_ID = "market-data-diagnosis-progress"
+DIAG_TEXT_ID = "market-data-diagnosis-text"
+DIAG_COPY_ID = "market-data-diagnosis-copy"
+DIAG_SAVE_ID = "market-data-diagnosis-save"
+DIAG_DOWNLOAD_ID = "market-data-diagnosis-download"
+DIAG_TOOLS_ID = "market-data-diagnosis-tools"
 PARSE_UPLOAD_ID = "market-data-parse-upload"   # never "report-file": the real upload's id
 PARSE_STORE_ID = "market-data-parse-result"
 PARSE_RESULTS_ID = "market-data-parse-results"
@@ -1801,28 +1813,36 @@ def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, in
     return out
 
 
-def trades_link(n_trades: int, rows: List[dict]) -> html.A:
-    """'Trades 89 · 1 warning' (amber with any problem, 'Trades 89 · ok' without), a jump to the
-    Trades card; the counts in full on hover."""
+def trades_link(n_trades: int, rows: List[dict], dupes: int = 0) -> html.A:
+    """'Trades 89 · 1 warning' (amber with any problem or possible duplicate, 'Trades 89 · ok'
+    without), a jump to the Blotter card; the counts in full on hover."""
     words = data_checks.trade_problem_words(rows)
+    if dupes:
+        words = " · ".join(x for x in (words, f"{dupes:,} possible duplicate{'' if dupes == 1 else 's'}") if x)
     head = f"Trades {n_trades:,}" if n_trades else "No trades on file"
     if words:
         return _link(f"{head} · {words}", TRADES_CARD_ID,
-                     f"{len(rows):,} problem{'' if len(rows) == 1 else 's'} with the trades on file: {words}. "
-                     "Listed in full in the Trades section.", warn=True)
+                     f"The trades on file: {words}. Listed in full in the Blotter section.", warn=True)
     return _link(f"{head} · ok" if n_trades else head, TRADES_CARD_ID,
-                 "Every trade on file is recognised and the last upload loaded every row cleanly." if n_trades
-                 else "No blotter uploaded yet: press Upload blotter.", warn=not n_trades)
+                 "Every trade on file is recognised, the last upload loaded every row cleanly and no fill is on "
+                 "file twice." if n_trades else "No blotter uploaded yet: press Upload blotter.", warn=not n_trades)
 
 
-TRADES_TITLE = "Trades"
-TRADES_ABOUT = ("The last blotter upload, every problem with the trades on file in full (a contract not recognised, "
-                "a row not loaded, a warning on a row or on the file), and a check of a file before you upload it. "
-                "The one place the trades' problems are written out.")
-TRADE_PROBLEMS_TITLE = "Trade problems"
-TRADE_PROBLEMS_ABOUT = ("Every problem with the trades on file, problems first: the trades whose contract is not "
-                        "recognised (on file with no P&L until mapped), the rows an upload did not load, the row "
-                        "warnings and the lines about the file. Sort on a title, filter from the Status funnel.")
+TRADES_TITLE = "Blotter"
+TRADES_ABOUT = ("What the last blotter file loaded, every row that did not load or needs a fix and why, a check that "
+                "no fill is on file twice, and a check of a file before you upload it. The one place the trades' "
+                "problems are written out.")
+TRADE_PROBLEMS_TITLE = "Rows not loaded or to fix"
+TRADE_PROBLEMS_ABOUT = ("Every row of the last file that did not load as a clean trade, needs a fix first: trades on "
+                        "file whose contract is not recognised (no P&L until mapped), rows not loaded (a status, the "
+                        "book filter, an earlier version of a repeated Trade Id), warnings, and cancelled rows with "
+                        "the trade they removed. Sort on a title, filter from the What happened funnel.")
+DUPES_TITLE = "Duplicates check"
+DUPES_ABOUT = ("The trades on file that look like one fill booked under two or more Trade Ids: the same trade date, "
+               "contract, side, size and price. An upload merges by Trade Id, so a Trade Id is never on file twice; "
+               "this catches a fill the broker re-booked under a new Trade Id. Nothing is dropped or merged: a flag "
+               "only.")
+DUPES_NONE = "No duplicates: every Trade Id is on file once, and no fill appears under two Trade Ids"
 
 
 def _hk_upload_time(iso) -> str:
@@ -1843,7 +1863,8 @@ def trades_upload_line(report: Optional[dict], n_trades: int) -> Tuple[str, str]
     if not report:
         if n_trades:
             return (f"No upload recorded on this database · {n_trades:,} trades on file",
-                    "The upload that loaded these trades kept no summary: the next upload records one.")
+                    "The trades on file were loaded without an upload record: the next upload records what it "
+                    "loaded, what it did not, and why.")
         return "No blotter uploaded yet", "Press Upload blotter to load Jason's file."
     name = str(report.get("filename") or "file name not recorded")
     when = _hk_upload_time(report.get("uploaded_at"))
@@ -1854,25 +1875,74 @@ def trades_upload_line(report: Optional[dict], n_trades: int) -> Tuple[str, str]
     return line, plain_words(report.get("summary")) or line
 
 
-def trades_head(report: Optional[dict], n_trades: int, rows: List[dict]) -> html.Div:
-    """The Trades card's first two blocks: the last upload in one line, then "Trade problems (N)"."""
+def loaded_line(outcome: Optional[dict]) -> Optional[Tuple[str, str]]:
+    """("Loaded 89: 70 futures, 4 options on futures, 15 FX forwards", its hover) of the last
+    file; None before the first recorded upload."""
+    if not outcome:
+        return None
+    counts = outcome.get("counts") or {}
+    loaded = int(counts.get("loaded") or 0)
+    kinds = [(str(k), int(v)) for k, v in (outcome.get("loaded_by_kind") or {}).items() if v]
+    parts = [f"{n:,} {k if k.isupper() or k.startswith(('FX', 'LME')) else k.lower()}" for k, n in kinds]
+    words = f"Loaded {loaded:,}" + (f": {', '.join(parts)}" if parts else "")
+    rest = [f"{int(counts.get(k) or 0):,} {w}" for k, w in (("not_loaded", "not loaded"), ("cancelled", "cancelled"),
+                                                          ("need_fix", "need a fix"), ("warnings", "with a warning"))
+            if counts.get(k)]
+    hover = (f"The rows of the last file that became trades on file, by kind. {'; '.join(rest).capitalize()}."
+             if rest else "The rows of the last file that became trades on file, by kind. Every row loaded.")
+    return words, hover
+
+
+def trades_head(report: Optional[dict], n_trades: int, rows: List[dict],
+                outcome: Optional[dict] = None) -> html.Div:
+    """The Blotter card's first blocks: the last upload in one line, what it loaded by kind in
+    one line, then "Rows not loaded or to fix (N)"."""
     words, hover = trades_upload_line(report, n_trades)
-    line = html.Div(html.Span(words, title=hover or None), className="tk-headline data-bbg-line")
-    return html.Div([line, html.Div(kit.strip_title(f"{TRADE_PROBLEMS_TITLE} ({len(rows)})", TRADE_PROBLEMS_ABOUT),
-                                    className="data-bbg-subhead")])
+    lines = [html.Div(html.Span(words, title=hover or None), className="tk-headline data-bbg-line")]
+    loaded = loaded_line(outcome)
+    if loaded:
+        lines.append(html.Div(html.Span(loaded[0], title=plain_words(loaded[1]) or None),
+                              className="tk-headline data-bbg-line"))
+    return html.Div(lines + [html.Div(kit.strip_title(f"{TRADE_PROBLEMS_TITLE} ({len(rows)})", TRADE_PROBLEMS_ABOUT),
+                                      className="data-bbg-subhead")])
 
 
-def trade_facts(conn: sqlite3.Connection) -> Tuple[Optional[dict], int, List[dict]]:
-    """(the last upload's report, the trades on file, the trade problems) for the Trades card."""
+def duplicates_block(groups: List[dict], names: Optional[Dict[str, str]] = None) -> html.Div:
+    """"Duplicates check": one green line when no fill is on file twice, else the groups."""
+    title = f"{DUPES_TITLE} ({len(groups)})" if groups else DUPES_TITLE
+    head = html.Div(kit.strip_title(title, DUPES_ABOUT), className="data-bbg-subhead")
+    if not groups:
+        return html.Div([head, html.Div(html.Span(f"{kit.TICK} {DUPES_NONE}", className="cell-pos"),
+                                        className="tk-headline data-bbg-line")])
+    return html.Div([head, data_checks.duplicates_table(groups, names)])
+
+
+def trade_facts(conn: sqlite3.Connection) -> Tuple[Optional[dict], int, List[dict], Optional[dict], List[dict]]:
+    """(the last upload's report, the trades on file, the rows not loaded or to fix, the last
+    upload's outcome, the possible duplicates) for the Blotter card."""
     from data.bloomberg.inventory import unrecognised as read_unrecognised
     from data.ingest.upload import last_upload_issues, last_upload_report
     try:
         n_trades = int(conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0])
     except sqlite3.Error:
         n_trades = 0
-    report = last_upload_report(conn)
-    rows = data_checks.trade_problem_rows(last_upload_issues(conn), read_unrecognised(conn))
-    return report, n_trades, rows
+    try:
+        from data.ingest.upload import last_upload_outcome
+        outcome = last_upload_outcome(conn)
+    except ImportError:
+        outcome = None
+    report = (outcome or {}).get("report") or last_upload_report(conn)
+    issues = last_upload_issues(conn) if outcome is None else None
+    rows = data_checks.blotter_rows(outcome, issues, read_unrecognised(conn))
+    if outcome is not None:
+        dupes = list(outcome.get("possible_duplicates") or [])
+    else:
+        try:
+            from data.ingest.upload import possible_duplicates
+            dupes = possible_duplicates(conn)
+        except ImportError:
+            dupes = []
+    return report, n_trades, rows, outcome, dupes
 
 
 def trades_view(rows: Optional[List[dict]], fstate: Optional[dict], sort: Optional[dict]) -> html.Table:
@@ -1934,10 +2004,18 @@ def reference_close_rows(conn: sqlite3.Connection, as_of: str, df_today: Optiona
 def reference_closes_panel(rows: List[dict], issues: Optional[list] = None) -> html.Div:
     """Daily, 5d, MTD, YTD: the reference close, complete or not, the close actually used, the
     trades that period leaves out."""
-    head = kit.strip([kit.strip_title(PAST_CLOSES_TITLE, REFERENCE_ABOUT)])
+    flagged = sum(1 for r in rows or [] if r["flag"])
+
+    def fold(table):
+        meta = f"{flagged} incomplete" if flagged else ""
+        return html.Details(className="book-fold tk-fold-block data-fold", children=[
+            html.Summary([html.Span(PAST_CLOSES_TITLE, className="book-section-title",
+                                    title=plain_words(REFERENCE_ABOUT)),
+                          html.Span(f" · {meta}" if meta else "", className="book-section-meta cell-amber")]),
+            table])
     if not rows:
-        return kit.card([head, kit.table(html.Thead(), [kit.note_row("No reference close for this date.", 1,
-                                                                    "cell-missing")], className="tk-small")])
+        return fold(kit.table(html.Thead(), [kit.note_row("No reference close for this date.", 1, "cell-missing")],
+                              className="tk-small"))
     cols: Tuple[kit.Column, ...] = (
         ("period", "Period", "l", "The header's period.", False),
         ("date", "Reference close", "l", "The close the period is measured from by its own rule.", False),
@@ -1969,7 +2047,7 @@ def reference_closes_panel(rows: List[dict], issues: Optional[list] = None) -> h
             kit.td(complete, left=True), kit.td(used, left=True),
             kit.td(f"{r['left_out']:,}", title=r["left_names"] or None),
         ]))
-    return kit.card([head, kit.table(kit.head(cols, None, "data-ref-none"), body, className="tk-small data-ref-table")])
+    return fold(kit.table(kit.head(cols, None, "data-ref-none"), body, className="tk-small data-ref-table"))
 
 
 # ---- 5. Contract dates
@@ -2117,17 +2195,18 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
     problems (rows for the store) and the card's style, the marks-check rows (store), its
     sector / commodity options, its empty line and its bar's style, the reference closes, the
     contract dates, the diagnostics body, the Data issues drawer, the Bloomberg card's line and
-    pull problems, the Trades card's head (13) and its problem rows (14, for the store). A block that fails says so
+    pull problems, the Blotter card's head (13), its rows (14, for the store), its duplicates check (15),
+    and the Bloomberg card's fold of what the last pull asked (16). A block that fails says so
     where it would be; the rest still renders."""
     blank = html.Div()
     if not as_of_date:
         return (message_box("No as-of date available."), [], _HIDDEN, [], [], blank, _HIDDEN, blank, blank, blank,
-                blank, blank, blank, blank, [])
+                blank, blank, blank, blank, [], blank, blank)
     try:
         conn = _connect_readonly(db_path)
     except sqlite3.OperationalError as exc:
         return (message_box(f"Database not available ({exc})."), [], _HIDDEN, [], [], blank, _HIDDEN, blank, blank,
-                blank, blank, blank, blank, blank, [])
+                blank, blank, blank, blank, blank, [], blank, blank)
     import logging
     log = logging.getLogger(__name__)
     issues: list = []
@@ -2196,12 +2275,13 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
 
         diag = safe_panel(DIAG_TITLE, lambda: diagnostics_body(conn, as_of_date, feed_status)) if diag else blank
         try:
-            report, n_trades, trade_rows = trade_facts(conn)
-            trades_block = trades_head(report, n_trades, trade_rows)
-            trades_part: Optional[Tuple[int, List[dict]]] = (n_trades, trade_rows)
+            report, n_trades, trade_rows, outcome, dupes = trade_facts(conn)
+            trades_block = trades_head(report, n_trades, trade_rows, outcome)
+            dupes_block = duplicates_block(dupes, ctx[2])
+            trades_part: Optional[tuple] = (n_trades, trade_rows, len(dupes))
         except Exception as exc:  # noqa: BLE001 -- the rest of the tab still renders
             log.exception("Data tab: the trades' problems could not be read")
-            trade_rows, trades_part = [], None
+            trade_rows, trades_part, dupes_block = [], None, blank
             trades_block = html.Div(missing_cell(f"the last upload could not be read ({type(exc).__name__}: {exc})"),
                                     className="data-bbg-line")
             issues.append((TRADES_TITLE, f"The trades' problems could not be read ({type(exc).__name__}: {exc})."))
@@ -2216,9 +2296,12 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
         conn.close()
     drawer = issues_drawer(issues, id=f"{ISSUES_ID}-drawer") or blank
     bbg_line, pull_panel = bloomberg_head(feed_status, pulls, history)
-    tidy([line, marks_empty, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel, trades_block])
+    asked = asked_fold(feed_status) or blank
+    tidy([line, marks_empty, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel, trades_block, dupes_block,
+          asked])
     return (line, problems, {} if problems else _HIDDEN, mark_rows, marks_filter_options(mark_rows), marks_empty,
-            tools_style, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel, trades_block, trade_rows)
+            tools_style, closes_panel, dates_panel, diag, drawer, bbg_line, pull_panel, trades_block, trade_rows,
+            dupes_block, asked)
 
 
 PULL_PROBLEMS_TITLE = "Pull problems"
@@ -2254,16 +2337,119 @@ def history_line(history: Optional[dict]) -> html.Div:
                     className="tk-headline data-bbg-line data-history-line")
 
 
+# ---- what Bloomberg stored and what the last pull asked (2026-09-30, user: "bloomberg needs to store
+# on cache all the data - and only pull any new data"): the backfill's status block "cache"
+STEP_NAMES = {"fx_closes": "FX closes", "fx_forwards": "FX forward closes", "points_scale": "Forward points scale",
+              "futures": "Futures and option closes", "lme": "LME closes", "vol": "FX vol smiles",
+              "ois": "OIS discount curves", "risk_history": "Price history (risk)"}
+ASKED_TITLE = "What the last pull asked, step by step"
+ASKED_ABOUT = ("Each step of the last pull's history requests: how many securities it asked Bloomberg for, how many "
+               "values it left alone because they are already stored, and how many came back empty (the tickers on "
+               "hover). A value stored is never asked again; a security that came back empty before is not asked "
+               "again by the price history.")
+
+
+def cache_block(status: Optional[dict]) -> Optional[dict]:
+    """The backfill's "cache" block of the status file, or None before a pull that wrote one."""
+    backfill = (status or {}).get("backfill")
+    cache = backfill.get("cache") if isinstance(backfill, dict) else None
+    return cache if isinstance(cache, dict) else None
+
+
+def _step_name(step: str) -> str:
+    return STEP_NAMES.get(step, cap(str(step).replace("_", " ")))
+
+
+def cache_line(status: Optional[dict]) -> Optional[html.Div]:
+    """'Stored: 1,204 closes, 9,380 history days · This pull asked: 12 new, skipped 1,180 already
+    stored · 2 came back empty', the steps on hover; None before a pull that wrote the block."""
+    cache = cache_block(status)
+    if cache is None:
+        return None
+    if cache.get("error") and not cache.get("sentence"):
+        return html.Div(html.Span(cap(f"What is stored could not be counted: {plain_words(cache['error'])}"),
+                                  className="cell-amber"), className="tk-headline data-bbg-line")
+    steps = cache.get("steps") or {}
+    tips = [f"{_step_name(k)}: {int(v.get('asked') or 0):,} asked"
+            + (f", {int(v['skipped_stored']):,} already stored" if v.get("skipped_stored") else "")
+            + (f", {int(v.get('empty') or 0):,} empty" if v.get("empty") else "")
+            for k, v in steps.items() if isinstance(v, dict)]
+    days = cache.get("days") or {}
+    if days:
+        tips.append(f"Past business days: {int(days.get('complete') or 0):,} complete of {int(days.get('listed') or 0):,}"
+                    f", {int(days.get('asked') or 0):,} asked this pull, {int(days.get('waiting') or 0):,} waiting")
+    empty = int(cache.get("empty") or 0)
+    return html.Div(html.Span(cap(str(cache.get("sentence") or "")), className="cell-amber" if empty else None,
+                              title="\n".join(tips) or None), className="tk-headline data-bbg-line")
+
+
+def contract_dates_status_line(status: Optional[dict]) -> Optional[html.Div]:
+    """'Contract dates: 23 on file · asked 3 · 1 came back empty' from the pull's contract-dates
+    block, when it carries the counts."""
+    block = (status or {}).get("contract_dates")
+    if not isinstance(block, dict) or not any(k in block for k in ("asked", "on_file", "empty")):
+        return None
+    parts = [f"{int(block.get('on_file') or 0):,} on file", f"asked {int(block.get('asked') or 0):,}"]
+    empty = int(block.get("empty") or 0)
+    if empty:
+        parts.append(f"{empty:,} came back empty")
+    if block.get("known_empty"):
+        parts.append(f"{int(block['known_empty']):,} known empty, not asked again")
+    tickers = ", ".join(str(t) for t in block.get("empty_tickers") or [])
+    return html.Div(html.Span("Contract dates: " + " · ".join(parts), className="cell-amber" if empty else None,
+                              title=f"Came back empty: {tickers}" if tickers else
+                              "Bloomberg's last trade and first notice dates, asked once per contract and stored"),
+                    className="tk-headline data-bbg-line")
+
+
+def asked_fold(status: Optional[dict]) -> Optional[html.Details]:
+    """The fold "What the last pull asked, step by step": Step | Asked | Already stored | Came back
+    empty (the tickers on hover). None before a pull that wrote the cache block."""
+    cache = cache_block(status)
+    steps = (cache or {}).get("steps") or {}
+    if not steps:
+        return None
+    cols: Tuple[kit.Column, ...] = (
+        ("step", "Step", "l", "The kind of history the pull asked.", False),
+        ("asked", "Asked", "", "Securities asked of Bloomberg this pull.", False),
+        ("stored", "Already stored", "", "Values on file, not asked again.", False),
+        ("empty", "Came back empty", "", "Asked, but Bloomberg sent nothing (the tickers on hover).", False),
+    )
+    body = []
+    for step, v in steps.items():
+        if not isinstance(v, dict):
+            continue
+        empty = int(v.get("empty") or 0)
+        tickers = ", ".join(str(t) for t in v.get("empty_tickers") or [] if t)
+        known = int(v.get("known_empty") or 0)
+        stored = v.get("skipped_stored")
+        body.append(html.Tr([
+            kit.td(_step_name(step), left=True),
+            kit.td(f"{int(v.get('asked') or 0):,}"),
+            kit.td(f"{int(stored):,}" if stored is not None else MISSING,
+                   title=None if stored is not None else "This step does not count what it left alone"),
+            kit.td(html.Span(f"{empty:,}", className="cell-amber" if empty else None),
+                   title=" ".join(x for x in (f"Came back empty: {tickers}." if tickers else "",
+                                              f"{known:,} known empty, not asked again." if known else "") if x)
+                   or None),
+        ]))
+    return html.Details(className="book-fold tk-fold-block data-fold", children=[
+        html.Summary(html.Span(ASKED_TITLE, className="book-section-title", title=plain_words(ASKED_ABOUT))),
+        kit.table(kit.head(cols, None, "data-asked-none"), body, className="tk-small data-asked-table")])
+
+
 def bloomberg_head(status: Optional[dict], pulls: List[dict],
                    history: Optional[dict] = None) -> Tuple[html.Div, html.Div]:
-    """The Bloomberg card's first blocks: the last pull in one line, the price history on file in
-    one line, then "Pull problems (N)"."""
+    """The Bloomberg card's first blocks: the last pull in one line, what is stored and what the
+    pull asked in one line, the contract dates' counts when the pull wrote them, the price history
+    on file in one line, then "Pull problems (N)"."""
     from ui.feed_controls import short_state
     no_pull = short_state(top_bar_status(status)) == "no pull yet"
     words, hover = data_checks.bloomberg_line(status, no_pull=no_pull)
     warn = no_pull or bool(pulls) or (status or {}).get("connected") is False
     line = html.Div([html.Div(html.Span(words, className="cell-amber" if warn else None,
                                         title=plain_words(hover) or None), className="tk-headline data-bbg-line"),
+                     *[x for x in (cache_line(status), contract_dates_status_line(status)) if x is not None],
                      history_line(history)])
     panel = html.Div([
         html.Div(kit.strip_title(f"{PULL_PROBLEMS_TITLE} ({len(pulls)})", PULL_PROBLEMS_ABOUT),
@@ -2295,11 +2481,29 @@ def _marks_search() -> html.Div:
                   className="blotter-filter-search tf-search", autoComplete="off")])
 
 
+def _fold(children: list, title: str, about_text: str, id: Optional[str] = None, meta_id: Optional[str] = None,
+          style: Optional[dict] = None) -> html.Details:
+    """A closed fold of the Bloomberg card: its title (the definition on hover), a meta span the
+    callbacks fill, then its body."""
+    summary = [html.Span(title, className="book-section-title", title=plain_words(about_text) or None)]
+    if meta_id:
+        summary.append(html.Span(id=meta_id, className="book-section-meta"))
+    props: Dict[str, Any] = {"className": "book-fold tk-fold-block data-fold", "children": [html.Summary(summary)]
+                             + children}
+    if id:
+        props["id"] = id
+    if style is not None:
+        props["style"] = style
+    return html.Details(**props)
+
+
 def build_layout(default_date: Optional[str] = None) -> html.Div:
-    """The Data tab (Phase G): the status line, Problems (only when any), Marks check (its bar
-    static, its choices kept for the session), Reference closes, Contract dates, Diagnostics (one
-    closed fold, the connection check button static inside it), the Data issues drawer. Every
-    container is filled by the callbacks of `register_callbacks`."""
+    """The Data tab (2026-09-30, user: "the data tab - needs to be clean"): the title with its one
+    status line, then three cards and nothing between them: Blotter (what the last file loaded,
+    what it did not and why, the duplicates check, the check of a file), Bloomberg (the last pull,
+    what is stored and what it asked, its problems; the prices, closes, contract dates, the
+    Bloomberg check and the details in closed folds) and Diagnosis (one report to paste into Claude
+    Code); the Data issues drawer last. Every container is filled by `register_callbacks`."""
     return html.Div(className="market-data", children=[
         # the tab's name as its title, the one status line beside it (look pass 2026-09-30);
         # BODY_ID holds the status line (the first output of the body callback)
@@ -2307,102 +2511,140 @@ def build_layout(default_date: Optional[str] = None) -> html.Div:
             about(TAB_TITLE, TAB_ABOUT, level="h2", className="tab-title"),
             html.Div(id=BODY_ID, className="status-line data-status-line", children=message_box("Loading...")),
         ]),
-        kit.card(id=MISSING_PANEL_ID, style=_HIDDEN, children=[
-            kit.strip([kit.strip_title(PROBLEMS_TITLE, PROBLEMS_ABOUT),
-                       html.Span(id=PROBLEMS_META_ID, className="book-section-meta"),
-                       html.Button("Download CSV", id=PROBLEMS_CSV_ID, n_clicks=0, className="btn btn--ghost",
-                                   title="The problems, every column, with their full sentences"),
-                       dcc.Download(id=PROBLEMS_DOWNLOAD_ID)]),
-            html.Div(id=PROBLEMS_SLOT_ID, className=kit.SLOT_CLASS),
-            dcc.Store(id=PROBLEMS_STORE_ID, data=[]),
-            dcc.Store(id=PROBLEMS_SORT_ID, storage_type="session"),
-        ]),
-        kit.card(id=MARKS_SECTION_ID, children=[
-            kit.strip([kit.strip_title(SUSPECT_TITLE, MARKS_ABOUT),
-                       html.Div(id=MARKS_TOOLS_ID, className="tf-bar-slot", style=_HIDDEN, children=_marks_search()),
-                       html.Button("Clear filters", id=MARKS_CLEAR_ID, n_clicks=0, className="book-link-button tf-clear",
-                                   style=_HIDDEN, title="Every column's filter back to All"),
-                       html.Span(id=MARKS_META_ID, className="book-section-meta"),
-                       html.Button("Download CSV", id=MARKS_CSV_ID, n_clicks=0, className="btn btn--ghost",
-                                   title="The prices showing, every column, at full figures"),
-                       dcc.Download(id=MARKS_DOWNLOAD_ID)]),
-            html.Div(id=MARKS_EMPTY_ID),
-            html.Div(id=MARKS_TABLE_WRAP_ID, className=kit.SLOT_CLASS),
-            dcc.Store(id=MARKS_STORE_ID, data=[]),
-            dcc.Store(id=MARKS_FSTORE_ID, storage_type="session"),
-            dcc.Store(id=MARKS_SORT_ID, storage_type="session"),
-        ]),
-        html.Div(id=PAST_CLOSES_PANEL_ID, className="data-block"),
-        html.Div(id=CONTRACT_DATES_PANEL_ID, className="data-block"),
-        bloomberg_card(),
         trades_card(),
+        bloomberg_card(),
+        diagnosis_card(),
         html.Div(id=ISSUES_ID),
     ])
 
 
 BBG_TITLE = "Bloomberg"
-BBG_ABOUT = ("The last Bloomberg pull, its problems in full, and a check you can run at any time: the connection and "
-             "data checks, then the book's own tickers asked of Bloomberg and compared with ours, and the fixes to "
-             "the contract list it suggests, applied here once you tick and confirm them.")
+BBG_ABOUT = ("The last Bloomberg pull, what is stored and what the pull asked of Bloomberg (a value stored is never "
+             "asked again), and its problems in full. Folded under it: the prices the book uses and their checks, the "
+             "reference closes, the contract dates, the Bloomberg check with its suggested fixes, and the pull step by "
+             "step.")
+BBG_CHECK_TITLE = "Bloomberg check and fixes"
+BBG_CHECK_ABOUT = ("The connection and data checks, then the book's own tickers asked of Bloomberg and compared with "
+                   "the app's contract list, and the fixes it suggests, applied here once you tick and confirm them. "
+                   "Building the diagnosis report runs the same check.")
 BBG_CHECK_NOTE = ("Asks Bloomberg for the book's own tickers and every ticker a pull asks; writes nothing. Its "
                   "suggested fixes are applied only when you tick them and confirm.")
-BBG_REPORT_NOTE = "Send this file to Claude: the last Bloomberg check's full report, as text."
+PROBLEMS_FOLD_TITLE = "Prices missing or flagged"
 PARSE_TITLE = "Check a file before uploading"
 PARSE_ABOUT = ("Check a blotter file before uploading it: every row read exactly as an upload would read it, what it "
-               "would be read as and what the upload would do with it against the book on file. Nothing is saved.")
+               "would be read as, what the upload would do with it against the book on file, and any fill it would "
+               "leave on file twice. Nothing is saved.")
 PARSE_NOTE = "Reads the file as an upload would; nothing is saved."
+DIAG_CARD_TITLE = "Diagnosis"
+DIAG_CARD_ABOUT = ("One plain-text report of everything needed to find a Bloomberg problem, to paste into Claude Code: "
+                   "what is wrong first, then the code version and the database, the connection and data checks, the "
+                   "book's tickers asked of Bloomberg, the last pull's status in full with the backfill's errors and "
+                   "what is stored, the library, the missing prices and the last upload. Asks Bloomberg nothing that "
+                   "writes, and works on a PC with no Bloomberg.")
+DIAG_BUILD_NOTE = "Runs the Bloomberg check in the background, then writes the report; nothing is saved."
 
 
 def bloomberg_card() -> html.Div:
     """The Bloomberg card (static; its blocks filled by the body callback and the check's own)."""
     return kit.card(id=BBG_CARD_ID, className="data-bbg-card data-block", children=[
-        kit.strip([kit.strip_title(BBG_TITLE, BBG_ABOUT),
-                   html.Button("Download report", id=BBG_REPORT_ID, n_clicks=0, className="btn btn--ghost",
-                               disabled=True, title=BBG_REPORT_NOTE),
-                   dcc.Download(id=BBG_REPORT_DOWNLOAD_ID),
-                   html.Button("Download CSV", id=BBG_CSV_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
-                               title="Every ticker of the last Bloomberg check, every field"),
-                   dcc.Download(id=BBG_DOWNLOAD_ID)]),
+        kit.strip([kit.strip_title(BBG_TITLE, BBG_ABOUT)]),
         html.Div(className="data-card-body", children=[
             html.Div(id=BBG_LINE_ID),
             html.Div(id=BBG_PULL_PROBLEMS_ID, className="data-bbg-pull"),
-            html.Div(className="data-bbg-run", children=[
-                html.Button("Run Bloomberg check", id=BBG_CHECK_BUTTON_ID, n_clicks=0, className="btn",
-                            title=BBG_CHECK_NOTE),
-                html.Span(id=BBG_PROGRESS_ID, className="data-bbg-progress"),
+            html.Div(className="data-folds", children=[
+                html.Div(id=BBG_ASKED_ID),
+                _fold([html.Div(className="data-fold-tools", children=[
+                           html.Button("Download CSV", id=PROBLEMS_CSV_ID, n_clicks=0, className="btn btn--ghost",
+                                       title="The problems, every column, with their full sentences"),
+                           dcc.Download(id=PROBLEMS_DOWNLOAD_ID)]),
+                       html.Div(id=PROBLEMS_SLOT_ID, className=kit.SLOT_CLASS),
+                       dcc.Store(id=PROBLEMS_STORE_ID, data=[]),
+                       dcc.Store(id=PROBLEMS_SORT_ID, storage_type="session")],
+                      PROBLEMS_FOLD_TITLE, PROBLEMS_ABOUT, id=MISSING_PANEL_ID, meta_id=PROBLEMS_META_ID, style=_HIDDEN),
+                _fold([html.Div(className="data-fold-tools", children=[
+                           html.Div(id=MARKS_TOOLS_ID, className="tf-bar-slot", style=_HIDDEN,
+                                    children=_marks_search()),
+                           html.Button("Clear filters", id=MARKS_CLEAR_ID, n_clicks=0,
+                                       className="book-link-button tf-clear", style=_HIDDEN,
+                                       title="Every column's filter back to All"),
+                           html.Span(id=MARKS_META_ID, className="book-section-meta"),
+                           html.Button("Download CSV", id=MARKS_CSV_ID, n_clicks=0, className="btn btn--ghost",
+                                       title="The prices showing, every column, at full figures"),
+                           dcc.Download(id=MARKS_DOWNLOAD_ID)]),
+                       html.Div(id=MARKS_EMPTY_ID),
+                       html.Div(id=MARKS_TABLE_WRAP_ID, className=kit.SLOT_CLASS),
+                       dcc.Store(id=MARKS_STORE_ID, data=[]),
+                       dcc.Store(id=MARKS_FSTORE_ID, storage_type="session"),
+                       dcc.Store(id=MARKS_SORT_ID, storage_type="session")],
+                      SUSPECT_TITLE, MARKS_ABOUT, id=MARKS_SECTION_ID),
+                html.Div(id=PAST_CLOSES_PANEL_ID),
+                html.Div(id=CONTRACT_DATES_PANEL_ID),
+                _fold([html.Div(className="data-bbg-run", children=[
+                           html.Button("Run Bloomberg check", id=BBG_CHECK_BUTTON_ID, n_clicks=0, className="btn",
+                                       title=BBG_CHECK_NOTE),
+                           html.Span(id=BBG_PROGRESS_ID, className="data-bbg-progress"),
+                           html.Button("Download CSV", id=BBG_CSV_ID, n_clicks=0, className="btn btn--ghost",
+                                       style=_HIDDEN, title="Every ticker of the last Bloomberg check, every field"),
+                           dcc.Download(id=BBG_DOWNLOAD_ID)]),
+                       html.Div(id=BBG_SUMMARY_ID),
+                       # the suggested fixes: the table, then its buttons (static, hidden by style), then the
+                       # dry run's confirm lines or what the apply did
+                       html.Div(id=BBG_FIXES_ID, className="data-bbg-fixes"),
+                       html.Div(className="data-bbg-run", children=[
+                           html.Button("Apply ticked fixes", id=BBG_FIX_APPLY_ID, n_clicks=0, className="btn",
+                                       style=_HIDDEN, title="Shows what the ticked fixes change first; nothing is "
+                                                            "written until you confirm"),
+                           html.Button("Confirm", id=BBG_FIX_CONFIRM_ID, n_clicks=0, className="btn", style=_HIDDEN,
+                                       title="Write these fixes to the contract list and rebuild the trades on them"),
+                           html.Button("Cancel", id=BBG_FIX_CANCEL_ID, n_clicks=0, className="btn btn--ghost",
+                                       style=_HIDDEN, title="Change nothing"),
+                       ]),
+                       html.Div(id=BBG_FIX_RESULT_ID, className="data-bbg-fix-result"),
+                       html.Div(id=BBG_RESULTS_ID, className="data-bbg-results"),
+                       dcc.Store(id=BBG_FSTORE_ID, storage_type="session"),
+                       dcc.Store(id=BBG_SORT_ID, storage_type="session")],
+                      BBG_CHECK_TITLE, BBG_CHECK_ABOUT, id=BBG_CHECK_FOLD_ID, meta_id=BBG_CHECK_META_ID),
+                html.Details(id=DIAGNOSTICS_ID, className="book-fold tk-fold-block data-fold", children=[
+                    html.Summary(html.Span("Details", className="book-section-title", title=DIAG_ABOUT),
+                                 id=DIAG_SUMMARY_ID, n_clicks=0),
+                    html.Div(id=DIAG_BODY_ID),
+                ]),
             ]),
-            html.Div(id=BBG_SUMMARY_ID),
-            # the suggested fixes: the table, then its buttons (static, hidden by style), then the
-            # dry run's confirm lines or what the apply did
-            html.Div(id=BBG_FIXES_ID, className="data-bbg-fixes"),
-            html.Div(className="data-bbg-run", children=[
-                html.Button("Apply ticked fixes", id=BBG_FIX_APPLY_ID, n_clicks=0, className="btn", style=_HIDDEN,
-                            title="Shows what the ticked fixes change first; nothing is written until you confirm"),
-                html.Button("Confirm", id=BBG_FIX_CONFIRM_ID, n_clicks=0, className="btn", style=_HIDDEN,
-                            title="Write these fixes to the contract list and rebuild the trades on them"),
-                html.Button("Cancel", id=BBG_FIX_CANCEL_ID, n_clicks=0, className="btn btn--ghost", style=_HIDDEN,
-                            title="Change nothing"),
-            ]),
-            html.Div(id=BBG_FIX_RESULT_ID, className="data-bbg-fix-result"),
             dcc.Store(id=BBG_DONE_ID, data=""),
             dcc.Store(id=BBG_FIX_STORE_ID),
             dcc.Interval(id=BBG_FIX_POLL_ID, interval=BBG_POLL_MS, disabled=True),
-            html.Div(id=BBG_RESULTS_ID, className="data-bbg-results"),
             dcc.Interval(id=BBG_POLL_ID, interval=BBG_POLL_MS, disabled=True),
             dcc.Store(id=BBG_RUN_STORE_ID),
-            dcc.Store(id=BBG_FSTORE_ID, storage_type="session"),
-            dcc.Store(id=BBG_SORT_ID, storage_type="session"),
-            html.Details(id=DIAGNOSTICS_ID, className="book-fold tk-fold-block data-fold", children=[
-                html.Summary(html.Span("Details", className="book-section-title", title=DIAG_ABOUT),
-                             id=DIAG_SUMMARY_ID, n_clicks=0),
-                html.Div(id=DIAG_BODY_ID),
+        ]),
+    ])
+
+
+def diagnosis_card() -> html.Div:
+    """The Diagnosis card: "Build diagnosis report" (the Bloomberg check in the background, then
+    the report, `ui.diagnostics_runner.diagnosis_text`), the report in a monospace box with Copy to
+    clipboard and Download in the strip, hidden until a report is built."""
+    return kit.card(id=DIAG_CARD_ID, className="data-diag-card data-block", children=[
+        kit.strip([kit.strip_title(DIAG_CARD_TITLE, DIAG_CARD_ABOUT),
+                   html.Div(id=DIAG_TOOLS_ID, className="data-diag-tools", style=_HIDDEN, children=[
+                       dcc.Clipboard(id=DIAG_COPY_ID, content="", className="btn data-diag-copy",
+                                     title="Copy the whole report, to paste into Claude Code"),
+                       html.Button("Download", id=DIAG_SAVE_ID, n_clicks=0, className="btn btn--ghost",
+                                   title="The report as a text file"),
+                       dcc.Download(id=DIAG_DOWNLOAD_ID)])]),
+        html.Div(className="data-card-body", children=[
+            html.Div(className="data-bbg-run", children=[
+                html.Button("Build diagnosis report", id=DIAG_BUILD_ID, n_clicks=0, className="btn",
+                            title=DIAG_BUILD_NOTE),
+                html.Span(id=DIAG_PROGRESS_ID, className="data-bbg-progress"),
             ]),
+            dcc.Textarea(id=DIAG_TEXT_ID, value="", readOnly=True, spellCheck=False, className="data-diag-text",
+                         style=_HIDDEN),
         ]),
     ])
 
 
 def parse_block() -> html.Div:
-    """The check of a blotter file, at the bottom of the Trades card: a file dropped here is read,
+    """The check of a blotter file, at the bottom of the Blotter card: a file dropped here is read,
     never loaded. Its Clear and Download CSV sit static in its own heading, hidden by style."""
     return html.Div(className="data-parse-block", children=[
         html.Div(className="data-bbg-subhead data-parse-head", children=[
@@ -2423,17 +2665,19 @@ def parse_block() -> html.Div:
 
 
 def trades_card() -> html.Div:
-    """The Trades card (static; its head and table filled by the body callback and the table's
-    own): the last upload in one line, "Trade problems (N)" with its funnels, then the check of a
+    """The Blotter card (id `market-data-trades`, the Blotter tab links here; static, its head and
+    tables filled by the body callback and the table's own): the last upload and what it loaded,
+    "Rows not loaded or to fix (N)" with its funnel, the duplicates check, then the check of a
     blotter file."""
     return kit.card(id=TRADES_CARD_ID, className="data-trades-card data-block", children=[
         kit.strip([kit.strip_title(TRADES_TITLE, TRADES_ABOUT),
                    html.Button("Download CSV", id=TRADES_CSV_ID, n_clicks=0, className="btn btn--ghost",
-                               title="Every trade problem, every column, with the upload's own sentences"),
+                               title="Every row not loaded or to fix, every column, with the upload's own sentences"),
                    dcc.Download(id=TRADES_DOWNLOAD_ID)]),
         html.Div(className="data-card-body", children=[
             html.Div(id=TRADES_HEAD_ID),
             html.Div(id=TRADES_SLOT_ID, className=kit.SLOT_CLASS),
+            html.Div(id=DUPES_ID),
             dcc.Store(id=TRADES_STORE_ID, data=[]),
             dcc.Store(id=TRADES_FSTORE_ID, storage_type="session"),
             dcc.Store(id=TRADES_SORT_ID, storage_type="session"),
@@ -2464,6 +2708,8 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         Output(BBG_PULL_PROBLEMS_ID, "children"),
         Output(TRADES_HEAD_ID, "children"),
         Output(TRADES_STORE_ID, "data"),
+        Output(DUPES_ID, "children"),
+        Output(BBG_ASKED_ID, "children"),
         Input(HEADER_AS_OF_STORE_ID, "data"),
         Input(DATA_REVISION_ID, "data"),
         Input(BOOK_REVISION_ID, "data"),
@@ -2521,7 +2767,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
             return html.Div(), ""
         red = sum(1 for r in rows if r.get("level") == "red")
         n = len(rows)
-        meta = (f"{n:,} problem{'' if n == 1 else 's'}"
+        meta = (f" · {n:,} problem{'' if n == 1 else 's'}"
                 + ((", all blocking" if red == n else f", {red:,} blocking") if red else ", none blocking"))
         return compact(data_checks.problems_table(rows, sort, PROBLEM_SORT_TYPE)), meta
 
@@ -2625,11 +2871,12 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     _list_filter(PARSE_FSTORE_ID, PARSE_COL_TYPE, data_checks.PARSE_FIELDS)
     _list_filter(TRADES_FSTORE_ID, TRADES_COL_TYPE, data_checks.TRADE_FIELDS)
 
-    # ---- "Run Bloomberg check" (2026-09-30): a background run, polled while it goes
+    # ---- "Run Bloomberg check" and "Build diagnosis report" (2026-09-30): one background run (the
+    # check, then the report), polled while it goes
     @app.callback(Output(BBG_RUN_STORE_ID, "data"), Input(BBG_CHECK_BUTTON_ID, "n_clicks"),
-                  prevent_initial_call=True)
-    def _bbg_start(n_clicks):
-        if not n_clicks:
+                  Input(DIAG_BUILD_ID, "n_clicks"), prevent_initial_call=True)
+    def _bbg_start(n_check, n_build):
+        if not (n_check or n_build):
             return dash.no_update
         import time
         from ui import diagnostics_runner
@@ -2639,7 +2886,9 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
     @app.callback(Output(BBG_RESULTS_ID, "children"), Output(BBG_PROGRESS_ID, "children"),
                   Output(BBG_POLL_ID, "disabled"), Output(BBG_CHECK_BUTTON_ID, "disabled"),
                   Output(BBG_CSV_ID, "style"),
-                  Output(BBG_SUMMARY_ID, "children"), Output(BBG_DONE_ID, "data"), Output(BBG_REPORT_ID, "disabled"),
+                  Output(BBG_SUMMARY_ID, "children"), Output(BBG_DONE_ID, "data"),
+                  Output(DIAG_PROGRESS_ID, "children"), Output(DIAG_BUILD_ID, "disabled"),
+                  Output(BBG_CHECK_META_ID, "children"),
                   Input(BBG_RUN_STORE_ID, "data"), Input(BBG_POLL_ID, "n_intervals"),
                   Input(BBG_FSTORE_ID, "data"), Input(BBG_SORT_ID, "data"), State(BBG_DONE_ID, "data"))
     def _bbg_results(run, _ticks, fstate, sort, done_before):
@@ -2655,7 +2904,7 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         done = "running" if going else (str(state.get("finished_at") or "done") if state and book else "")
         return (compact(results), progress, not going, going, ({} if has_rows else _HIDDEN),
                 compact(tidy(bbg_summary(state))), (dash.no_update if done == (done_before or "") else done),
-                not (book and not going))
+                diagnosis_progress(state, refused), going, check_meta(state))
 
     # ---- the check's suggested fixes: tick, Apply (a dry run), Confirm (2026-09-30)
     @app.callback(Output(BBG_FIXES_ID, "children"), Output(BBG_FIX_RESULT_ID, "children"),
@@ -2709,13 +2958,25 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         diagnostics_runner.cancel_fixes(get_db_path())
         return {"at": time.time(), "step": "cancel"}
 
-    @app.callback(Output(BBG_REPORT_DOWNLOAD_ID, "data"), Input(BBG_REPORT_ID, "n_clicks"), prevent_initial_call=True)
-    def _bbg_report(n_clicks):
+    # ---- the diagnosis report (2026-09-30): shown once a run has written it, copied or downloaded whole
+    @app.callback(Output(DIAG_TEXT_ID, "value"), Output(DIAG_TEXT_ID, "style"), Output(DIAG_COPY_ID, "content"),
+                  Output(DIAG_TOOLS_ID, "style"), Input(BBG_DONE_ID, "data"))
+    def _diag_text(_done):
         from ui import diagnostics_runner
         state = diagnostics_runner.state(get_db_path()) or {}
-        if not n_clicks or not state.get("book"):
+        text = str(state.get("report") or "")
+        if not text or state.get("running"):
+            return "", _HIDDEN, "", _HIDDEN
+        return text, {}, text, {}
+
+    @app.callback(Output(DIAG_DOWNLOAD_ID, "data"), Input(DIAG_SAVE_ID, "n_clicks"), prevent_initial_call=True)
+    def _diag_save(n_clicks):
+        from ui import diagnostics_runner
+        state = diagnostics_runner.state(get_db_path()) or {}
+        if not n_clicks or not state.get("report"):
             return dash.no_update
-        return {"content": report_text(state), "filename": report_filename(state), "type": "text/plain"}
+        return {"content": state["report"], "filename": diagnostics_runner.report_filename(state),
+                "type": "text/plain"}
 
     @app.callback(Output(BBG_DOWNLOAD_ID, "data"), Input(BBG_CSV_ID, "n_clicks"),
                   State(BBG_FSTORE_ID, "data"), State(BBG_SORT_ID, "data"), prevent_initial_call=True)
@@ -2791,6 +3052,39 @@ def _sub(title: str, hover: str, extra=None) -> html.Div:
     if extra is not None:
         kids.append(extra)
     return html.Div(kids, className="data-bbg-subhead")
+
+
+def diagnosis_progress(state: Optional[dict], refused: str = "") -> Any:
+    """The Diagnosis card's words beside its button: the run's progress while it goes, "Built Wed
+    30 Sep 18:20 HK" once a report is on hand, the refusal's sentence when a pull is running."""
+    if refused and not (state or {}).get("running"):
+        return html.Span(refused, className="cell-amber")
+    if not state:
+        return ""
+    if state.get("running"):
+        done, total = int(state.get("done") or 0), int(state.get("total") or 0)
+        words = cap(str(state.get("words") or "Running"))
+        return html.Span(f"{words}: {done} of {total} requests" if total else words, className="data-bbg-running")
+    if state.get("report"):
+        from ui.diagnostics_runner import no_bloomberg
+        when = _utc_words(state.get("report_at") or state.get("finished_at"))
+        extra = "No Bloomberg connection on this PC" if no_bloomberg(state.get("checks") or [],
+                                                                      state.get("book")) else ""
+        return html.Span([f"Built {when}" if when else "Built", html.Span(f" · {extra}", className="cell-amber")
+                          if extra else ""])
+    return ""
+
+
+def check_meta(state: Optional[dict]) -> str:
+    """The Bloomberg check fold's meta: " · Running", " · 3 fixes suggested", " · No fix to make"."""
+    if not state:
+        return ""
+    if state.get("running"):
+        return " · Running"
+    fixes = ((state.get("book") or {}).get("fixes")) or []
+    if not (state.get("book") or {}).get("ok"):
+        return " · Could not reach Bloomberg" if (state.get("book") or {}).get("reachable") is False else ""
+    return f" · {len(fixes):,} fix{'' if len(fixes) == 1 else 'es'} suggested" if fixes else " · No fix to make"
 
 
 def bbg_summary(state: Optional[dict]) -> html.Div:
@@ -3120,45 +3414,3 @@ def fixes_view(state: Optional[dict], fx: Optional[dict]) -> Tuple[Any, Any, boo
     chosen = fx.get("rows") or None      # as ticked for the last dry run, else the check's own ticks
     block = html.Div([_sub(f"{FIXES_TITLE} ({len(fixes):,})", FIXES_ABOUT), fixes_table(fixes, chosen)])
     return tidy(block), tidy(html.Div(result)), True, stage == "confirm", git_going
-
-
-def report_text(state: dict) -> str:
-    """The last check's report as text: the check's own `report_text`, else built from its
-    summary, the connection checks and the rows."""
-    book = (state or {}).get("book") or {}
-    text = str(book.get("report_text") or "")
-    if text.strip():
-        return text
-    lines = [f"Bloomberg check, finished {book.get('finished_at') or (state or {}).get('finished_at') or ''}",
-             str(book.get("summary") or book.get("reason") or ""), ""]
-    checks = (state or {}).get("checks") or []
-    if checks:
-        lines.append("Connection and data checks")
-        lines += [f"  {c.get('status', '')}: {c.get('name', '')}: {c.get('message', '')}" for c in checks]
-        lines.append("")
-    rows = book.get("rows") or []
-    if rows:
-        lines.append("The book's tickers")
-        for r in rows:
-            lines.append("  " + " | ".join(str(r.get(c, "")) for c in data_checks.TICKER_CSV_COLUMNS))
-        lines.append("")
-    fixes = book.get("fixes") or []
-    if fixes:
-        lines.append("Suggested fixes")
-        for f in fixes:
-            lines.append("  " + " | ".join(str(f.get(c, "")) for c in ("root_id", "field", "current", "suggested",
-                                                                          "verdict", "reason", "apply")))
-    return "\n".join(lines) + "\n"
-
-
-def report_filename(state: dict) -> str:
-    """'bbg_report_20260930_1412.txt': the check's finishing time on this PC's clock."""
-    stamp = str(((state or {}).get("book") or {}).get("finished_at") or (state or {}).get("finished_at") or "")
-    try:
-        when = datetime.fromisoformat(stamp)
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        when = when.astimezone()
-    except (TypeError, ValueError):
-        when = datetime.now()
-    return f"bbg_report_{when:%Y%m%d_%H%M}.txt"

@@ -55,6 +55,7 @@ notes) so the UI decides from counts, not from prose; ``import_blotter`` is its 
 from __future__ import annotations
 
 from contextlib import closing
+from datetime import timedelta, timezone
 from pathlib import Path
 import base64
 import json
@@ -581,13 +582,14 @@ def _migrate_report_table(conn: sqlite3.Connection) -> None:
 
 
 def record_upload_report(db_path, filename, result, n_underlying: int, library_tickers: int, summary: str,
-                         change: dict | None = None) -> bool:
+                         change: dict | None = None, file_rows: list | None = None) -> bool:
     """Persist the load summary of the upload just published (`upload_report`, one row replacing
     the previous one). The kind counts are `loaded_breakdown`'s (the trades that LOADED, never
     the parser's row counters); `excluded_rows` is the book filter's total (status, fund, trader,
     desk) with `filter_summary()` as its wording; `change` is `_stage_and_publish`'s merge
     accounting (`added`, `replaced`, `removed`, `on_file_after`; zeros when not given). The same
-    row, with the merge's trade ids, is appended to `upload_history` in the same transaction.
+    row, with the merge's trade ids, is appended to `upload_history` in the same transaction, and
+    `file_rows` (``file_rows_outcome``; None leaves the table as it is) replaces `upload_not_loaded`.
     Never fails an import: a database error is swallowed and False returned."""
     import datetime as _dt
     counts = loaded_counts(_file_trades(result))
@@ -613,6 +615,8 @@ def record_upload_report(db_path, filename, result, n_underlying: int, library_t
                              [row[c] for c in UPLOAD_REPORT_COLUMNS])
                 # The same upload appended to the history, in the same transaction (2026-09-29).
                 _append_history(conn, row, change)
+                if file_rows is not None:       # the rows that loaded no trade, and why (2026-09-30)
+                    _record_not_loaded(conn, file_rows, str(filename), row["uploaded_at"])
         finally:
             conn.close()
     except sqlite3.Error:
@@ -750,6 +754,292 @@ def last_upload_issues(conn: sqlite3.Connection) -> list[dict]:
                          f"{'trade_id' if has_tid else chr(39) * 2} FROM upload_issues ORDER BY row_no, rowid").fetchall()
     return [{"row_no": n, "symbol": sym, "kind": kind, "reason": why, "filename": name, "uploaded_at": at,
              "trade_id": tid} for n, sym, kind, why, name, at, tid in found]
+
+
+# ---- The last file's rows that did not become a trade (user, 2026-09-30: "what i need is check of what
+# is and isnt pulled from the blotter and why"). One row per file row that loaded no trade, replaced by
+# every successful upload, written in `record_upload_report`'s transaction: status EXCLUDED (pending /
+# draft / error status, the book filter, an earlier version of a repeated Trade Id) or CANCELS (a
+# cancelled / void / deleted / rejected / failed row; `removed` 1 when it removed a trade on file). Kept
+# apart from `upload_issues`, whose every kind but WARNING / UNRECOGNISED the screens count as a reject.
+UPLOAD_NOT_LOADED_DDL = ("CREATE TABLE IF NOT EXISTS upload_not_loaded (row_no INTEGER NOT NULL, "
+                         "trade_id TEXT NOT NULL DEFAULT '', symbol TEXT NOT NULL DEFAULT '', "
+                         "status TEXT NOT NULL, removed INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', "
+                         "filename TEXT NOT NULL DEFAULT '', uploaded_at TEXT NOT NULL DEFAULT '')")
+UPLOAD_NOT_LOADED_COLUMNS = ("row_no", "trade_id", "symbol", "status", "removed", "reason", "filename", "uploaded_at")
+
+
+def file_rows_outcome(frame: pd.DataFrame, filename, result, change: dict) -> list[dict]:
+    """The file's rows as the upload read them, one dict per data row in file order: the parsing
+    check's row (``parse_check`` row dicts: row_no, trade_id, symbol, status OK | WARNING | NOT
+    RECOGNISED | EXCLUDED | CANCELS, on_file new | replaces | removes | '', message ...), built from
+    the load's own ParseResult (no second parse) and the merge's accounting. [] when it cannot be
+    built (never fails an upload)."""
+    try:
+        from data.ingest import parse_check
+        df = blotter.canonicalize_columns(frame.copy()).reset_index(drop=True)
+        before = set(change.get("replaced_ids") or ()) | set(change.get("removed_ids") or ())
+        manual = set(change.get("removed_manual_ids") or ())
+        return parse_check._report(str(filename), df, result, before, manual)["rows"]
+    except Exception:  # noqa: BLE001 -- a report of the rows never takes the upload down
+        return []
+
+
+def _record_not_loaded(conn: sqlite3.Connection, rows, filename: str, stamp: str) -> None:
+    """Replace `upload_not_loaded` with the EXCLUDED / CANCELS rows of `rows` (``file_rows_outcome``).
+    Inside the caller's transaction."""
+    conn.execute(UPLOAD_NOT_LOADED_DDL)
+    conn.execute("DELETE FROM upload_not_loaded")
+    out = [(int(r.get("row_no") or 0), str(r.get("trade_id") or ""), str(r.get("symbol") or ""), r["status"],
+            1 if r.get("on_file") == "removes" else 0, str(r.get("message") or ""), str(filename), stamp)
+           for r in rows if r.get("status") in ("EXCLUDED", "CANCELS")]
+    conn.executemany(f"INSERT INTO upload_not_loaded ({','.join(UPLOAD_NOT_LOADED_COLUMNS)}) "
+                     f"VALUES ({','.join('?' for _ in UPLOAD_NOT_LOADED_COLUMNS)})", out)
+
+
+def last_upload_not_loaded(conn: sqlite3.Connection) -> list[dict]:
+    """The last upload's file rows that loaded no trade, in row order: [{row_no, trade_id, symbol,
+    status, removed, reason, filename, uploaded_at}], status 'EXCLUDED' (not a trade: pending /
+    draft / error status, the book filter, an earlier version of a repeated Trade Id) or 'CANCELS'
+    (the row cancels its Trade Id; `removed` True when that trade was on file and was removed).
+    [] before the first upload that recorded them (2026-09-30). Read-only."""
+    if not _table_exists(conn, "upload_not_loaded"):
+        return []
+    found = conn.execute(f"SELECT {','.join(UPLOAD_NOT_LOADED_COLUMNS)} FROM upload_not_loaded "
+                         "ORDER BY row_no, rowid").fetchall()
+    out = []
+    for values in found:
+        entry = dict(zip(UPLOAD_NOT_LOADED_COLUMNS, values))
+        entry["removed"] = bool(entry["removed"])
+        out.append(entry)
+    return out
+
+
+# ---- Possible duplicates (user, 2026-09-30: "obviously no duplicates when updating with new blotter").
+# The merge by Trade Id never loads a Trade Id twice; what it cannot see is the same fill arriving under
+# a new Trade Id in a later export. This only FLAGS (hard rule 6: every row loads): nothing is dropped
+# or merged. Two trades on file are the same fill when they share the trade date, the contract (the
+# instrument, and the last leg's date, so two LME prompts or two FX value dates never match), the side,
+# the size and the fill (the stored price: the file's Price cell times the root's broker scale, so the
+# same cell always gives the same fill, and a row loaded before `broker_price` was recorded still
+# matches). Read at call time from `trades`, `trade_legs` and `upload_history`, so a cancel or a
+# re-upload clears a group at once.
+DUP_DIFFERENT_UPLOADS = "different_uploads"   # no one upload carried them all: likely a re-booked fill
+DUP_SAME_FILE = "same_file"                   # one file carried them all: may be two real fills
+DUP_UNKNOWN = "unknown"                       # a member loaded before the upload history began
+_HK = timezone(timedelta(hours=8))   # Hong Kong keeps no DST
+_COUNT_WORDS = {2: "twice", 3: "three times", 4: "four times"}
+_NUMBER_WORDS = {2: "Two", 3: "Three", 4: "Four"}
+_TRADE_RECORDS_SQL = ("SELECT t.trade_id, t.trade_date, t.instrument_id, t.product, t.quantity, t.price, "
+                      "{symbol}, {price_cell}, t.pb_root, COALESCE(MAX(l.settle_date), '') "
+                      "FROM trades t LEFT JOIN trade_legs l ON l.trade_id = t.trade_id GROUP BY t.trade_id")
+_RECORD_KEYS = ("trade_id", "trade_date", "instrument_id", "product", "quantity", "price", "broker_symbol",
+                "broker_price", "pb_root", "settle")
+
+
+def trade_records(conn: sqlite3.Connection) -> list[dict]:
+    """Every trade on file as the duplicate check reads it: [{trade_id, trade_date, instrument_id,
+    product, quantity, price, broker_symbol, broker_price, pb_root, settle}] (`settle` the last leg's
+    date, '' with no leg). [] with no trades table. Read-only."""
+    if not _table_exists(conn, "trades"):
+        return []
+    have = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+    sql = _TRADE_RECORDS_SQL.format(symbol="t.broker_symbol" if "broker_symbol" in have else "''",
+                                    price_cell="t.broker_price" if "broker_price" in have else "''")
+    if "pb_root" not in have:
+        sql = sql.replace("t.pb_root", "''")
+    if not _table_exists(conn, "trade_legs"):
+        sql = sql.replace("COALESCE(MAX(l.settle_date), '')", "''").replace(
+            " LEFT JOIN trade_legs l ON l.trade_id = t.trade_id", "")
+    return [dict(zip(_RECORD_KEYS, values)) for values in conn.execute(sql)]
+
+
+def uploads_by_trade(conn: sqlite3.Connection) -> dict:
+    """{trade_id: [{id, filename, uploaded_at}]}: every recorded upload whose file carried the trade
+    (added or replaced it), oldest first. {} with no upload history. Read-only."""
+    out: dict = {}
+    for entry in reversed(upload_history(conn)):
+        carried = {"id": entry["id"], "filename": entry["filename"], "uploaded_at": entry["uploaded_at"]}
+        for tid in list(dict.fromkeys(entry["added_ids"] + entry["replaced_ids"])):
+            out.setdefault(tid, []).append(carried)
+    return out
+
+
+def _upload_day(uploaded_at, with_time: bool = False) -> str:
+    """'29 Sep' (the Hong Kong date of an upload stamped in UTC), '29 Sep 18:02 HK' with the time;
+    '' when the stamp does not read."""
+    import datetime as _dt
+    try:
+        stamp = _dt.datetime.fromisoformat(str(uploaded_at))
+    except (TypeError, ValueError):
+        return ""
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=_dt.timezone.utc)
+    day = stamp.astimezone(_HK)
+    return f"{day.day} {day:%b}" + (f" {day:%H:%M} HK" if with_time else "")
+
+
+def _upload_label(upload, with_time: bool = False) -> str:
+    """'uploaded 29 Sep' ('uploaded 29 Sep 18:02 HK' with the time), 'in this file' (the dry run's own
+    file, id None), '' when unknown."""
+    if upload is None:
+        return ""
+    if upload.get("id") is None:
+        return "in this file"
+    day = _upload_day(upload.get("uploaded_at"), with_time)
+    return f"uploaded {day}" if day else f"uploaded in {upload.get('filename') or 'an earlier file'}"
+
+
+def _join_words(items: list) -> str:
+    items = [str(i) for i in items]
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _number_key(x) -> str:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    return f"{v:.10g}"
+
+
+def duplicate_groups(records, uploads: dict) -> list[dict]:
+    """The possible duplicates among `records` (``trade_records`` dicts), `uploads` the files that
+    carried each trade (``uploads_by_trade``; an entry with id None is the dry run's own file).
+    Pure: see ``possible_duplicates`` for the returned shape."""
+    groups: dict = {}
+    for r in records:
+        q = float(r.get("quantity") or 0.0)
+        if q == 0:
+            continue
+        key = (str(r.get("trade_date") or ""), str(r.get("instrument_id") or ""), str(r.get("settle") or ""),
+               1 if q > 0 else -1, _number_key(abs(q)), _number_key(r.get("price")))
+        groups.setdefault(key, []).append(r)
+    out = []
+    for key, members in groups.items():
+        if len({m["trade_id"] for m in members}) < 2:
+            continue
+        members = sorted(members, key=lambda m: str(m["trade_id"]))
+        carried = [uploads.get(m["trade_id"]) or [] for m in members]
+        if any(not c for c in carried):
+            kind = DUP_UNKNOWN
+            common = []
+        else:
+            shared = set.intersection(*({u.get("id") for u in c} for c in carried))
+            kind = DUP_SAME_FILE if shared else DUP_DIFFERENT_UPLOADS
+            common = [u for u in carried[0] if u.get("id") in shared]
+        ids = [str(m["trade_id"]) for m in members]
+        n = len(ids)
+        if kind == DUP_DIFFERENT_UPLOADS:
+            labels = [_upload_label(c[0]) for c in carried]
+            if len(set(labels)) < n:       # two uploads on one day: the time tells them apart
+                labels = [_upload_label(c[0], with_time=True) for c in carried]
+            named = [f"{tid} ({label})" if label else tid for tid, label in zip(ids, labels)]
+            sentence = (f"Same fill on file {_COUNT_WORDS.get(n, f'{n} times')} under different Trade Ids: "
+                        f"{_join_words(named)}. If the broker re-booked it, the old one should be cancelled in the file.")
+        elif kind == DUP_SAME_FILE:
+            where = _upload_label(common[-1])
+            where = "in this file" if where == "in this file" else f"in the file {where}" if where else "in one file"
+            sentence = (f"{_NUMBER_WORDS.get(n, str(n))} identical fills under different Trade Ids {where}: "
+                        f"{_join_words(ids)}. They may be {'two' if n == 2 else n} real fills; if one is a "
+                        "re-booking, it should be cancelled in the file.")
+        else:
+            sentence = (f"Same fill on file {_COUNT_WORDS.get(n, f'{n} times')} under different Trade Ids: "
+                        f"{_join_words(ids)} (at least one loaded before the upload history began). They may be "
+                        f"{'two' if n == 2 else n} real fills; if the broker re-booked it, the old one should be "
+                        "cancelled in the file.")
+        first = members[0]
+        q = float(first["quantity"])
+        out.append({
+            "kind": kind, "trade_ids": ids, "sentence": sentence,
+            "trade_date": key[0], "instrument_id": key[1], "settle_date": key[2],
+            "side": "Buy" if q > 0 else "Sell", "quantity": abs(q), "price": float(first["price"]),
+            "symbol": next((str(m.get("broker_symbol") or "") for m in members if m.get("broker_symbol")), ""),
+            "price_in_file": next((str(m.get("broker_price") or "") for m in members if m.get("broker_price")), ""),
+            "product": str(first.get("product") or ""),
+            "trades": [{"trade_id": tid, "pb_root": str(m.get("pb_root") or ""),
+                        "broker_symbol": str(m.get("broker_symbol") or ""),
+                        "broker_price": str(m.get("broker_price") or ""),
+                        "first_upload": dict(c[0]) if c else None, "last_upload": dict(c[-1]) if c else None,
+                        "arrived": _upload_label(c[0]) if c else ""}
+                       for tid, m, c in zip(ids, members, carried)]})
+    order = {DUP_DIFFERENT_UPLOADS: 0, DUP_UNKNOWN: 1, DUP_SAME_FILE: 2}
+    return sorted(out, key=lambda g: (order[g["kind"]], g["trade_date"], g["instrument_id"], g["trade_ids"]))
+
+
+def possible_duplicates(conn: sqlite3.Connection) -> list[dict]:
+    """The trades on file that look like one fill booked under two or more Trade Ids (never dropped or
+    merged: a flag only). One dict per group, the likely re-bookings first:
+
+      kind           'different_uploads' (no one upload carried them all: likely a re-booked fill, the
+                     old one should be cancelled in the file) | 'same_file' (one file carried them all:
+                     may be two real fills) | 'unknown' (a member loaded before the upload history)
+      trade_ids      list[str], sorted
+      sentence       the plain sentence for the screen
+      trade_date, instrument_id, settle_date (the last leg's date, '' with no leg), side 'Buy' | 'Sell',
+      quantity (unsigned, lots / tonnes / base amount), price (the stored fill), symbol and
+      price_in_file (the file's cells as written, '' when not recorded), product
+      trades         [{trade_id, pb_root, broker_symbol, broker_price, first_upload, last_upload,
+                     arrived}] with first_upload / last_upload {id, filename, uploaded_at} of the
+                     uploads that carried it (None before the history) and arrived 'uploaded 29 Sep'
+
+    [] with no trades. Read at call time (a few hundred trades: milliseconds). Read-only."""
+    return duplicate_groups(trade_records(conn), uploads_by_trade(conn))
+
+
+# Plain labels of `upload_report`'s kind columns, in the order the load summary names them.
+_REPORT_KIND_LABELS = (("futures", "Futures"), ("options_on_futures", "Options on futures"),
+                       ("lme_forwards", "LME forwards"), ("fx_forwards", "FX forwards"), ("fx_spot", "FX spot"),
+                       ("fx_options", "FX options"))
+
+
+def last_upload_outcome(conn: sqlite3.Connection) -> dict | None:
+    """What the last file brought in and what it did not, and why, in one read (user, 2026-09-30).
+    None before the first upload. Keys:
+
+      report          `last_upload_report(conn)` (filename, uploaded_at, the merge counts, summary ...)
+      loaded_by_kind  {plain label: n} of the file's trades that loaded, nonzero only ('Futures',
+                      'Options on futures', 'LME forwards', 'FX forwards', 'FX spot', 'FX options',
+                      'Other', 'Not recognised': on file, need a fix)
+      not_loaded      the rows that loaded no trade, with why: `last_upload_not_loaded` rows of status
+                      EXCLUDED, then `last_upload_issues` rows of kind REJECTED / NOT LOADED (an older
+                      parser's), each {row_no, trade_id, symbol, status, reason}
+      cancelled       the cancelling rows: {row_no, trade_id, symbol, removed (bool), reason}
+      need_fix        `last_upload_issues` rows of kind UNRECOGNISED (on file, P&L blank until mapped)
+      warnings        `last_upload_issues` rows of kind WARNING (loaded on the primary field)
+      possible_duplicates  `possible_duplicates(conn)` (the whole book, at call time)
+      counts          {loaded, not_loaded, cancelled, removed, need_fix, warnings, possible_duplicates}
+
+    Rows before 2026-09-30's first upload carry no per-row not-loaded list (`not_loaded` then holds
+    only the older kinds; `report['excluded_rows']` / `excluded_text` still count them). Read-only."""
+    report = last_upload_report(conn)
+    if report is None:
+        return None
+    issues = last_upload_issues(conn)
+    rows = last_upload_not_loaded(conn)
+    need_fix = [i for i in issues if i["kind"] == NEED_FIX_KIND]
+    warnings = [i for i in issues if i["kind"] == "WARNING"]
+    not_loaded = [{k: r[k] for k in ("row_no", "trade_id", "symbol", "status", "reason")}
+                  for r in rows if r["status"] == "EXCLUDED"]
+    not_loaded += [{"row_no": i["row_no"], "trade_id": i["trade_id"], "symbol": i["symbol"], "status": i["kind"],
+                    "reason": i["reason"]} for i in issues if i["kind"] in ("REJECTED", "NOT LOADED")]
+    not_loaded.sort(key=lambda r: (r["row_no"], r["trade_id"]))
+    cancelled = [{k: r[k] for k in ("row_no", "trade_id", "symbol", "removed", "reason")}
+                 for r in rows if r["status"] == "CANCELS"]
+    by_kind = {label: int(report.get(col) or 0) for col, label in _REPORT_KIND_LABELS}
+    loaded = int(report.get("added") or 0) + int(report.get("replaced") or 0)
+    need_fix_n = int(report.get("need_fix") or 0)
+    other = loaded - sum(by_kind.values()) - need_fix_n
+    if other > 0:
+        by_kind["Other"] = other
+    by_kind["Not recognised"] = need_fix_n
+    by_kind = {k: v for k, v in by_kind.items() if v}
+    dups = possible_duplicates(conn)
+    return {"report": report, "loaded_by_kind": by_kind, "not_loaded": not_loaded, "cancelled": cancelled,
+            "need_fix": need_fix, "warnings": warnings, "possible_duplicates": dups,
+            "counts": {"loaded": loaded, "not_loaded": len(not_loaded), "cancelled": len(cancelled),
+                       "removed": int(report.get("removed") or 0), "need_fix": len(need_fix),
+                       "warnings": len(warnings), "possible_duplicates": len(dups)}}
 
 
 def unrecognised_reasons(conn: sqlite3.Connection) -> dict:
@@ -1331,6 +1621,8 @@ def import_blotter_report(payload, filename, db_path) -> dict:
       need_fix_ids list    their trade ids
       need_fix_on_file int the whole book's UNRECOGNISED trades after the upload
       reresolved list      trade ids `reresolve_unrecognised` rewrote as a real product
+      possible_duplicates int  groups of trades on file that look like one fill under two or more
+                           Trade Ids after the upload (`possible_duplicates`; flagged, never dropped)
 
     INFORMATION is in `notes` and `message` but never raises `warnings`: an option with
     no strike in the file, which the Blotter's missing-terms banner shows persistently, so
@@ -1399,13 +1691,25 @@ def import_blotter_report(payload, filename, db_path) -> dict:
         parts.append(dates_sentence)
     library_sentence, library_tickers = _library_update(db_path)
     parts.append(library_sentence)
+    # Possible duplicates: the same fill under two Trade Ids (flagged only, never dropped; 2026-09-30).
+    try:
+        with closing(schema.connect(Path(db_path).resolve())) as conn:
+            dups = possible_duplicates(conn)
+    except sqlite3.Error:
+        dups = []
+    if dups:
+        parts.append(f"{len(dups)} possible duplicate fill{'s' if len(dups) != 1 else ''} on file (same date, "
+                     "contract, side, size and price under different Trade Ids): nothing was dropped, "
+                     "see the Data tab's Trades card.")
     notes = result.notes()
     message = " ".join(parts + notes)
-    record_upload_report(db_path, filename, result, len(underlying), library_tickers, message, change)
+    record_upload_report(db_path, filename, result, len(underlying), library_tickers, message, change,
+                         file_rows_outcome(frame, filename, result, change))
     return {"message": message, "rejects": len(rejects),
             "warnings": len(result.warnings), "notes": notes,
             "added": change["added"], "replaced": change["replaced"], "removed": change["removed"],
             "removed_manual": change["removed_manual"], "on_file_after": change["on_file_after"],
             "need_fix": change["need_fix"], "need_fix_ids": [r["trade_id"] for r in need_fix],
             "need_fix_on_file": change["need_fix_on_file"],
-            "reresolved": [r["trade_id"] for r in reresolved["resolved"]]}
+            "reresolved": [r["trade_id"] for r in reresolved["resolved"]],
+            "possible_duplicates": len(dups)}

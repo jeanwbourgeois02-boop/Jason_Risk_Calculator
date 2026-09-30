@@ -1048,6 +1048,19 @@ def _figure(value) -> str:
     return f"{v:,.0f}" if v == int(v) else f"{v:,.6g}"
 
 
+def _parse_note(r: dict):
+    """The row's message, then "Possible duplicate of 910000032" in amber when the upload would
+    leave it looking like another fill under a different Trade Id (`duplicate_of`)."""
+    message = cap_parts(str(r.get("message") or ""))
+    others = [str(x) for x in r.get("duplicate_of") or [] if x]
+    if not others:
+        return message
+    dup = html.Span(f"Possible duplicate of {', '.join(others)}", className="cell-amber",
+                    title="The same date, contract, side, size and price under another Trade Id: if the broker "
+                          "re-booked it, the old one should be cancelled in the file")
+    return [message, html.Br(), dup] if message else dup
+
+
 def parse_table(rows: List[dict], sort: Optional[dict], sort_type: str, state: Optional[dict], col_type: str,
                 total: int, all_rows: Optional[List[dict]] = None) -> html.Table:
     """The file's rows as an upload would read them, problems first; Read as (its product), Upload
@@ -1089,35 +1102,40 @@ def parse_table(rows: List[dict], sort: Optional[dict], sort_type: str, state: O
             kit.td(cap(str(r.get("trade_type") or "")) or MISSING, left=True, title=str(r.get("pb_root") or "") or None),
             kit.td(r.get("upload") or "Nothing", left=True),
             kit.td(status, left=True),
-            html.Td(cap_parts(str(r.get("message") or "")), className="l data-parse-note"),
+            html.Td(_parse_note(r), className="l data-parse-note"),
         ]))
     return tidy(kit.table(head, body, className="tk-small data-parse-table"))
 
 
 # ---- the Trades card (2026-09-30, user: "any issue with the trades it shows up in a trade pull
 # section in the data tab"): every problem with the trades on file in one table, problems first.
-TRADE_ORDER = {"NOT RECOGNISED": 0, "NOT LOADED": 1, "WARNING": 2, "FILE": 3, "SKIPPED": 4}
+TRADE_ORDER = {"NOT RECOGNISED": 0, "NOT LOADED": 1, "WARNING": 2, "FILE": 3, "SKIPPED": 4, "CANCELLED": 5,
+               "CANCELLED_NONE": 6}
 TRADE_WORDS = {"NOT RECOGNISED": "Needs a fix", "NOT LOADED": "Not loaded", "WARNING": "Warning",
-               "FILE": "About the file", "SKIPPED": "Skipped"}
-TRADE_LEVEL = {"NOT RECOGNISED": "red", "NOT LOADED": "amber", "WARNING": "amber", "FILE": "amber", "SKIPPED": "grey"}
+               "FILE": "About the file", "SKIPPED": "Not loaded", "CANCELLED": "Cancelled, removed",
+               "CANCELLED_NONE": "Cancelled"}
+TRADE_LEVEL = {"NOT RECOGNISED": "red", "NOT LOADED": "amber", "WARNING": "amber", "FILE": "amber", "SKIPPED": "grey",
+               "CANCELLED": "grey", "CANCELLED_NONE": "grey"}
+# 2026-09-30 (user: "check of what is and isnt pulled from the blotter and why"): Row | Trade Id |
+# Symbol | What happened | Why, needs-a-fix rows first.
 TRADE_COLUMNS: Tuple[kit.Column, ...] = (
-    ("status", "Status", "l", "Needs a fix: on file as a trade whose contract the app does not recognise, no P&L until "
-                              "it is mapped. Not loaded: a row an older upload could not read. Warning: loaded, but "
-                              "two cells disagreed or one was doubtful. About the file: a line about the whole file. "
-                              "Skipped: a kind of row the app does not load (a retired product, a cash movement).",
-     True),
     ("row", "Row", "", "The row's number in the file, the header row not counted.", True),
     ("trade_id", "Trade Id", "l", "The row's Trade Id; the trade's name on hover.", True),
     ("symbol", "Symbol", "l", "The file's Symbol cell as written.", True),
-    ("problem", "What is wrong", "l", "What is wrong, in plain words; the upload's own sentence on hover.", True),
-    ("affects", "What it affects", "l", "What it does to the book's figures; what to do about it on hover.", True),
+    ("status", "What happened", "l", "Needs a fix: on file as a trade whose contract the app does not recognise, no "
+                                     "P&L until it is mapped. Not loaded: the row is not a trade of the book (its "
+                                     "status, the book filter, an earlier version of a repeated Trade Id, a kind of "
+                                     "row the app does not carry). Warning: loaded, but two cells disagreed or one "
+                                     "was doubtful. Cancelled, removed: a cancelled row that took its trade off the "
+                                     "book.", True),
+    ("problem", "Why", "l", "The reason in plain words; what it does to the book and what to do on hover.", True),
 )
-TRADE_LISTS = {"status": ("status", "Status")}
+TRADE_LISTS = {"status": ("status", "What happened")}
 TRADE_FIELDS = ("status",)
 TRADE_SORT: Dict[str, Callable[[dict], Any]] = {
     "status": lambda r: (TRADE_ORDER.get(str(r.get("status")), 9), r.get("row_no") or 0),
     "row": lambda r: r.get("row_no"),
-    **{k: _text_key(k) for k in ("trade_id", "symbol", "problem", "affects")},
+    **{k: _text_key(k) for k in ("trade_id", "symbol", "problem")},
 }
 TRADE_CSV_COLUMNS = ["status", "row_no", "trade_id", "trade_name", "symbol", "problem", "reason", "affects", "todo",
                      "filename", "uploaded_at"]
@@ -1227,21 +1245,54 @@ def trade_problem_words(rows: Optional[List[dict]]) -> str:
     return " · ".join(parts)
 
 
+def blotter_rows(outcome: Optional[dict], issues: Optional[List[dict]],
+                 unrecognised: Optional[List[dict]]) -> List[dict]:
+    """Every row of the last file that did not load as a clean trade, and why (2026-09-30), needs a
+    fix first: `trade_problem_rows` over the outcome's need-fix and warning rows (and the trades on
+    file not recognised), then the rows that loaded no trade (`not_loaded`: a status, the book filter,
+    an earlier version, an older parser's reject) and the cancelling rows (`cancelled`). Without an
+    outcome (no upload recorded) `issues` (`last_upload_issues`) stand in. Read as recorded."""
+    from ui.tabs.blotter_fills import what_to_do
+    if outcome is None:
+        return trade_problem_rows(issues, unrecognised)
+    rows = trade_problem_rows(list(outcome.get("need_fix") or []) + list(outcome.get("warnings") or []),
+                              unrecognised)
+    for r in outcome.get("not_loaded") or []:
+        reason = str(r.get("reason") or "")
+        todo = what_to_do(str(r.get("status") or ""), reason)
+        quiet = todo.startswith("Nothing")
+        rows.append(_trade_row("SKIPPED" if quiet else "NOT LOADED", r, plain_words(reason) or "The row was not read",
+                               "Not in the book: nothing of it is counted" if quiet
+                               else "Not in the book: its P&L and exposure are missing from every figure",
+                               todo, reason=reason))
+    for r in outcome.get("cancelled") or []:
+        reason = str(r.get("reason") or "")
+        removed = bool(r.get("removed"))
+        rows.append(_trade_row("CANCELLED" if removed else "CANCELLED_NONE", r,
+                               plain_words(reason) or "The row is cancelled in the file",
+                               "The trade it names left the book" if removed
+                               else "No trade under this Trade Id was on file: nothing to remove",
+                               "Nothing, if the cancellation is meant.", reason=reason))
+    rows.sort(key=lambda r: (TRADE_ORDER.get(r["status"], 9), r["row_no"] or 0, r["trade_id"]))
+    return rows
+
+
 def trade_problems_table(rows: List[dict], sort: Optional[dict], sort_type: str, state: Optional[dict],
                          col_type: str, total: int, all_rows: Optional[List[dict]] = None) -> html.Table:
-    """The trade problems, problems first, the Status funnel in its heading; a row per trade or
-    file row, each sentence in full (the upload's own words on hover)."""
+    """The rows that did not load cleanly: Row | Trade Id | Symbol | What happened | Why, needs a
+    fix first (red), the What happened funnel in its heading; what it does to the book and what to
+    do on the Why cell's hover."""
     every = all_rows if all_rows is not None else rows
     options = {"status": list_options(every, "status", TRADE_ORDER, TRADE_WORDS)}
     head = funnel_head(TRADE_COLUMNS, sort, sort_type, state, col_type, TRADE_LISTS, options, "data-trade")
     body = []
     if not total:
-        body.append(kit.note_row("No problem with the trades on file: every row of the last upload loaded cleanly.",
+        body.append(kit.note_row("Every row of the last file loaded as a trade, with no warning.",
                                  len(TRADE_COLUMNS), "cell-pos"))
     elif not rows:
-        body.append(kit.note_row("No problem matches the filter.", len(TRADE_COLUMNS), "cell-missing"))
+        body.append(kit.note_row("No row matches the filter.", len(TRADE_COLUMNS), "cell-missing"))
     elif len(rows) != total:
-        body.append(kit.total_row([html.Td(f"Filtered · {len(rows):,} of {total:,} problems",
+        body.append(kit.total_row([html.Td(f"Filtered · {len(rows):,} of {total:,} rows",
                                            colSpan=len(TRADE_COLUMNS), className="l")]))
     for r in kit.sort_records(rows, sort, TRADE_SORT):
         st = r["status"]
@@ -1253,12 +1304,97 @@ def trade_problems_table(rows: List[dict], sort: Optional[dict], sort_type: str,
             row_cell = missing_cell("the upload that loaded it kept no row number")
         whole = "a line about the whole file, not one row"
         tid = r["trade_id"] or missing_cell(whole if st == "FILE" else "the upload recorded no Trade Id")
+        hover = " ".join(x for x in (f"{r['affects']}." if r.get("affects") else "",
+                                     f"To do: {r['todo']}" if r.get("todo") else "") if x)
+        red = st == "NOT RECOGNISED"
+        where = str(r.get("filename") or "")
         body.append(html.Tr([
-            kit.td(kit.chip(TRADE_WORDS.get(st, cap(st)), TRADE_LEVEL.get(st, "grey")), left=True),
-            kit.td(row_cell),
+            kit.td(row_cell, title=f"Row of {where}" if where and r.get("row_no") else None),
             kit.td(tid, left=True, title=cap(r.get("trade_name") or "") or None),
             kit.td(r["symbol"] or missing_cell(whole if st == "FILE" else "the row has no symbol"), left=True),
-            kit.td(cap_parts(r["problem"]), left=True, title=r.get("reason_words") or None),
-            kit.td(cap_parts(r["affects"]), left=True, title=r.get("todo") or None),
+            kit.td(kit.chip(TRADE_WORDS.get(st, cap(st)), TRADE_LEVEL.get(st, "grey")), left=True),
+            kit.td(html.Span(cap_parts(r["problem"]), className="cell-red" if red else None), left=True,
+                   title=hover or r.get("reason_words") or None),
         ]))
     return tidy(kit.table(head, body, className="tk-small data-trade-table"))
+
+
+# ---- possible duplicates (2026-09-30, user: "obviously no duplicates when updating with new blotter")
+DUP_ORDER = {"different_uploads": 0, "unknown": 1, "same_file": 2}
+DUP_WORDS = {"different_uploads": "Likely re-booked", "unknown": "To check", "same_file": "Same file"}
+DUP_LEVEL = {"different_uploads": "amber", "unknown": "amber", "same_file": "grey"}
+DUP_TODO = {"different_uploads": "If the broker re-booked it, cancel the old one in the file",
+            "same_file": "May be two real fills; if one is a re-booking, cancel it in the file",
+            "unknown": "May be two real fills; if the broker re-booked it, cancel the old one in the file"}
+DUP_COLUMNS: Tuple[kit.Column, ...] = (
+    ("kind", "Kind", "l", "Likely re-booked: the fills came in different uploads, so the broker probably re-booked "
+                          "one and the old one should be cancelled in the file. Same file: one file carried them "
+                          "all, so they may be real separate fills. To check: at least one loaded before the upload "
+                          "history began.", False),
+    ("date", "Date", "l", "The trade date the fills share.", False),
+    ("contract", "Contract", "l", "The contract the fills share; its id on hover.", False),
+    ("side", "Side", "l", "Buy or Sell.", False),
+    ("lots", "Lots", "", "The size each fill carries: lots, tonnes or the base amount.", False),
+    ("price", "Price", "", "The price as written in the file (the stored fill on hover).", False),
+    ("ids", "Trade Ids", "l", "Each Trade Id with the upload that brought it in.", False),
+    ("why", "What to do", "l", "What the app makes of it. Nothing is dropped or merged: a flag only.", False),
+)
+
+
+def _hk_stamp(iso) -> str:
+    """'30 Sep 18:27 HK' from an upload's UTC stamp; '' when it does not read."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    try:
+        when = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    hk = when.astimezone(ZoneInfo("Asia/Hong_Kong"))
+    return f"{hk.day} {hk:%b %H:%M} HK"
+
+
+def _dup_name(group: dict, names: Optional[Dict[str, str]]) -> str:
+    for tid in group.get("trade_ids") or []:
+        name = str((names or {}).get(str(tid)) or "")
+        if name:
+            return name[: -len(f" ({tid})")] if name.endswith(f" ({tid})") else name
+    return plain_ids(str(group.get("instrument_id") or ""))
+
+
+def duplicates_table(groups: List[dict], names: Optional[Dict[str, str]] = None) -> html.Table:
+    """One row per group of trades that look like one fill under two or more Trade Ids
+    (`data.ingest.upload.possible_duplicates`), the likely re-bookings first, in amber."""
+    body = []
+    for g in sorted(groups or [], key=lambda g: DUP_ORDER.get(str(g.get("kind")), 9)):
+        kind = str(g.get("kind") or "")
+        ids = []
+        members = g.get("trades") or [{"trade_id": x} for x in g.get("trade_ids") or []]
+        labels = [str(t.get("arrived") or "") for t in members]
+        same_day = len(set(labels)) < len(labels)
+        for t, arrived in zip(members, labels):
+            first = t.get("first_upload") or {}
+            if same_day and arrived.startswith("uploaded ") and first.get("uploaded_at"):
+                arrived = f"uploaded {_hk_stamp(first['uploaded_at']) or arrived[len('uploaded '):]}"
+            ids.append(html.Div(f"{t.get('trade_id')}" + (f" ({arrived})" if arrived else " (before the upload "
+                                                                                          "history)"),
+                                title=f"First in {first.get('filename')}" if first.get("filename") else None))
+        q = g.get("quantity")
+        in_file = str(g.get("price_in_file") or "")
+        price = in_file or (price_text(g.get("price")) if g.get("price") is not None else MISSING)
+        day = str(g.get("trade_date") or "")
+        body.append(html.Tr([
+            kit.td(kit.chip(DUP_WORDS.get(kind, "To check"), DUP_LEVEL.get(kind, "amber")), left=True),
+            kit.td(short_date(day) if day else MISSING, left=True, title=day or None),
+            kit.td(_dup_name(g, names), left=True,
+                   title=" · ".join(x for x in (str(g.get("instrument_id") or ""), str(g.get("symbol") or "")) if x)),
+            kit.td(str(g.get("side") or "") or MISSING, left=True),
+            kit.td(_figure(q) if q is not None else MISSING),
+            kit.td(price, title=f"Stored fill {_figure(g.get('price'))}" if g.get("price") is not None else None),
+            kit.td(ids, left=True),
+            html.Td(DUP_TODO.get(kind, DUP_TODO["unknown"]), className="l data-dup-why"
+                    + (" cell-amber" if kind == "different_uploads" else ""),
+                    title=cap(plain_words(g.get("sentence") or "")) or None),
+        ]))
+    return tidy(kit.table(kit.head(DUP_COLUMNS, None, "data-dup-none"), body, className="tk-small data-dup-table"))

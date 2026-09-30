@@ -8,9 +8,10 @@ and split the per-fill figures of the fills in it summed, a click giving the tra
 then the headline of the rows showing, then:
   - the controls: Period Today | 5d | MTD (default) | YTD | All | Custom (two dates), and Total |
     By month;
-  - the chart: the period's business days, the daily P&L of the rows showing as bars (one colour per
-    slice value when sliced by Type or Commodity with 6 values or fewer) and the cumulative P&L of
-    the period from 0 as a line; a day's hover gives its P&L, the cumulative and the top 3 trades;
+  - the chart: two panels on one business-day axis (only days with a close): on top the period's
+    P&L to date of the rows showing, a line filled to zero from 0 at the reference close; below,
+    smaller, each day's P&L as green / red bars; a day's hover gives its P&L, the P&L to date and
+    the 3 biggest trades that day;
   - the table: one row per slice value, sorted by the size of its P&L, the total row first (sticky,
     = the headline, and unfiltered = the top bar's figure for the period), columns P&L, Spread, FX,
     Hedge, New, Realised (Other only when not zero), % of total; By month: one column per month
@@ -68,7 +69,7 @@ DOWNLOAD_ID = "pnl-download"
 OPEN_STORE_ID = "pnl-open-rows"             # session: the rows opened ("g:<slice value>", "t:<trade>")
 ROW_TYPE = "pnl-row"                        # a clickable row: {"type", "idx": row key}
 TAB = "pnl"
-CHART_HEIGHT = 300
+CHART_HEIGHT = 380
 NA = MISSING
 HIDDEN = {"display": "none"}
 
@@ -90,7 +91,10 @@ COMPONENTS = (("spread", "Spread", "The spread's own move: the contracts' change
               ("other", "Other", "A trade that could not be split (no local P&L or conversion on one date)."))
 LTD_PARTS = (("realised", "Realised", "Trades settled or closed out: their P&L, frozen."),
              ("open", "Open", "Trades still open: their P&L since they opened (the total less realised)."))
-_PALETTE = ("#0f1f3d", "#c9a227", "#2e7d32", "#6a1b9a", "#00838f", "#ef6c00")
+# the chart's colours: the kit's navy line, green / red bars, hairline grid
+_NAVY, _GREEN, _RED = "#0f1f3d", "#1a7f4b", "#c0392b"
+_FILL = "rgba(15, 31, 61, 0.07)"
+_GRID, _ZERO, _MUTED = "#eef0f4", "#9aa3b2", "#6b7280"
 
 
 def _num(value: Any) -> Optional[float]:
@@ -781,52 +785,151 @@ def headline(b: dict, p: dict, state: Optional[dict]) -> Optional[html.Div]:
 
 
 # --------------------------------------------------------------------------- the chart
-def chart_figure(b: dict, p: dict, state: Optional[dict]) -> dict:
+# Two panels on one business-day axis (2026-09-30, user: "this graph is complete shit"): on top the
+# period's P&L to date as a line filled to zero, from 0 at the close it is measured from; below,
+# smaller, each day's P&L as green / red bars. Only days with a close are on the axis (a category
+# axis), so a weekend or a holiday leaves no gap and the line never slopes across one. Every figure
+# is the engine's (`_period`'s days, `period_pnl` per day), summed over the rows showing (display).
+def chart_points(b: dict, p: dict, state: Optional[dict]) -> dict:
+    """{x, daily, cum, text, ref}: the chart's days (the reference close first, at 0, when the
+    period is measured from one), each day's P&L and the period's P&L to date of the rows showing
+    (None where no fill of theirs has a figure), and each day's hover."""
     s = tf.normal(state)
     items = chart_groups(b, p, s)
     trade_of = b.get("trade_of") or {}
     show = set().union(*(ids for _v, ids in items)) if items else set()
     days = p.get("days") or []
-    xs = [d["date"] for d in days]
-    traces: List[dict] = []
-    daily_tot, cum_tot, texts = [], [], []
+    xs: List[str] = []
+    daily: List[Optional[float]] = []
+    cum: List[Optional[float]] = []
+    texts: List[str] = []
+    ref = p.get("ref_used") or p.get("start_ref")
+    if days and ref and not p.get("ltd") and ref < days[0]["date"]:
+        xs.append(ref)
+        daily.append(None)
+        cum.append(0.0)
+        texts.append("The close the period is measured from: 0")
     for d in days:
         vals = {t: v for t, v in d["by_trade"].items() if t in show}
         tot = sum(vals.values()) if vals else None
-        cum = [v for t, v in d["cum"].items() if t in show]
-        daily_tot.append(tot)
-        cum_tot.append(sum(cum) if cum else None)
+        so_far = [v for t, v in d["cum"].items() if t in show]
+        xs.append(d["date"])
+        daily.append(tot)
+        cum.append(sum(so_far) if so_far else None)
         per: Dict[str, float] = {}
         for t, v in vals.items():
-            per[trade_of.get(t, tf.UNASSIGNED)] = per.get(trade_of.get(t, tf.UNASSIGNED), 0.0) + v
-        top = sorted(per.items(), key=lambda x: -abs(x[1]))[:3]
-        texts.append("<br>".join([f"P&L {km_text(tot)} · Cumulative {km_text(cum_tot[-1])}"]
-                                 + [f"{n} {km_text(v)}" for n, v in top]
-                                 + ([f"Filled {d['filled']}"] if d.get("filled") else [])
-                                 + ([f"Excl. {d['n_excluded']}"] if d.get("n_excluded") else [])))
-    group = s["group"]
-    if group != tf.GROUP_NONE and 1 < len(items) <= 6:
-        for n, (value, ids) in enumerate(items):
-            ys = [sum(v for t, v in d["by_trade"].items() if t in ids) for d in days]
-            traces.append({"x": xs, "y": ys, "type": "bar", "name": value, "marker": {"color": _PALETTE[n % 6]},
-                           "hovertemplate": f"{value} " + "%{y:($,.0f}<extra></extra>"})
+            name = trade_of.get(t, tf.UNASSIGNED)
+            per[name] = per.get(name, 0.0) + v
+        top = [x for x in sorted(per.items(), key=lambda x: -abs(x[1])) if abs(x[1]) >= NOTHING][:3]
+        lines = [f"Day's P&L: {km_text(tot)}",
+                 f"P&L to date: {km_text(cum[-1])}"]
+        if top:
+            lines += ["", "Biggest trades that day"] + [f"{n}: {km_text(v)}" for n, v in top]
+        if d.get("filled"):
+            lines.append(f"Filled {d['filled']}: valued at an earlier close (no price that day)")
+        if d.get("n_excluded"):
+            lines.append(f"Excl. {d['n_excluded']}: not priced on both closes, left out")
+        texts.append("<br>".join(lines))
+    return {"x": xs, "daily": daily, "cum": cum, "text": texts, "ref": 1 if len(xs) > len(days) else 0}
+
+
+def _categories(days: Sequence[str]) -> List[str]:
+    """Each day's value on the chart's axis, 'Tue 8 Sep' (the year added to a day of an earlier year
+    than the last, 'Wed 31 Dec 2025'): the tick labels and the hover's date are this text itself,
+    so the two always agree."""
+    out = []
+    try:
+        end_year = dt.date.fromisoformat(days[-1]).year if days else 0
+    except ValueError:
+        end_year = 0
+    for iso in days:
+        try:
+            d = dt.date.fromisoformat(iso)
+        except ValueError:
+            out.append(iso)
+            continue
+        out.append(f"{d:%a} {d.day} {d:%b}" + (f" {d.year}" if d.year != end_year else ""))
+    return out
+
+
+def _tick_days(days: Sequence[str]) -> List[int]:
+    """The labelled days of a business-day axis (their positions): every day up to 16, else the
+    first day of each week (up to 70 business days), else the first of each month; at most about
+    12 labels either way."""
+    try:
+        dates = [dt.date.fromisoformat(x) for x in days]
+    except ValueError:
+        return list(range(len(days)))
+    n = len(dates)
+    if n <= 16:
+        return list(range(n))
+    if n <= 70:     # business days, not the calendar: a reference close months before still counts once
+        idx = [i for i in range(n) if i == 0 or dates[i].isocalendar()[:2] != dates[i - 1].isocalendar()[:2]]
+        idx = idx[::max(1, math.ceil(len(idx) / 10))]
     else:
-        traces.append({"x": xs, "y": daily_tot, "type": "bar", "name": "Daily P&L",
-                       "marker": {"color": ["#1a7f4b" if (v or 0) >= 0 else "#c0392b" for v in daily_tot]},
-                       "hovertemplate": "Daily %{y:($,.0f}<extra></extra>"})
-    traces.append({"x": xs, "y": cum_tot, "type": "scatter", "mode": "lines+markers" if len(xs) < 3 else "lines",
-                   "name": "Cumulative", "line": {"color": "#0f1f3d", "width": 2}, "text": texts, "yaxis": "y",
-                   "hovertemplate": "%{text}<extra></extra>"})
-    # a short period (Today, a two-day custom): one labelled category per day, not a date axis that
-    # repeats "28 Sep" across the width
-    xaxis = ({"type": "category", "tickvals": xs, "ticktext": [_day_label(d) for d in xs]} if len(xs) <= 3
-             else {"type": "date", "tickformat": "%d %b"})
-    return {"data": traces, "layout": {
-        "height": CHART_HEIGHT, "barmode": "relative", "margin": {"l": 84, "r": 16, "t": 10, "b": 28},
-        "hovermode": "x unified", "showlegend": group != tf.GROUP_NONE and 1 < len(items) <= 6,
-        "legend": {"orientation": "h", "y": 1.02, "yanchor": "bottom", "x": 0, "font": {"size": 11}},
-        "xaxis": xaxis, "bargap": 0.35 if len(xs) > 3 else 0.7,
-        "yaxis": {"tickformat": "(,.0f", "automargin": True, "zeroline": True, "zerolinecolor": "#c9ced8"},
+        idx = [0] + [i for i in range(1, n) if (dates[i].year, dates[i].month) != (dates[i - 1].year, dates[i - 1].month)]
+        idx = idx[::max(1, math.ceil(len(idx) / 12))]
+    kept: List[int] = []
+    for i in idx:               # never two labels side by side (a reference close weeks before the next day)
+        if not kept or i - kept[-1] >= max(3, n // 20):
+            kept.append(i)
+    return kept
+
+
+def chart_figure(b: dict, p: dict, state: Optional[dict], pts: Optional[dict] = None) -> dict:
+    pts = pts or chart_points(b, p, state)
+    days, daily, cum, texts = pts["x"], pts["daily"], pts["cum"], pts["text"]
+    xs = _categories(days)
+    n = len(xs)
+    marks = n <= 31
+    line = {"x": xs, "y": cum, "type": "scatter", "mode": "lines+markers" if marks else "lines",
+            "name": "P&L to date", "xaxis": "x", "yaxis": "y", "fill": "tozeroy", "fillcolor": _FILL,
+            "line": {"color": _NAVY, "width": 2}, "marker": {"size": 5 if n > 3 else 8, "color": _NAVY},
+            "connectgaps": False, "text": texts, "hovertemplate": "%{text}<extra></extra>"}
+    bars = {"x": xs, "y": daily, "type": "bar", "name": "Day's P&L", "xaxis": "x2", "yaxis": "y2",
+            "marker": {"color": [_GREEN if (v or 0) >= 0 else _RED for v in daily], "line": {"width": 0}},
+            "text": texts, "textposition": "none", "hovertemplate": "%{text}<extra></extra>"}
+    tickvals = [xs[i] for i in _tick_days(days)]
+    x_common = {"type": "category", "categoryorder": "array", "categoryarray": xs, "showgrid": False,
+                "showline": False, "zeroline": False, "fixedrange": True,
+                "showspikes": True, "spikemode": "across", "spikethickness": 1, "spikecolor": _ZERO,
+                "spikedash": "dot", "spikesnap": "data"}
+    y_common = {"tickformat": "(,.0f", "automargin": True, "gridcolor": _GRID, "gridwidth": 1,
+                "zeroline": True, "zerolinecolor": _ZERO, "zerolinewidth": 1, "fixedrange": True,
+                "tickfont": {"size": 11, "color": _MUTED}, "nticks": 5}
+    def padded(values: Sequence[Optional[float]]) -> Optional[List[float]]:
+        """The panel's range with zero in it and a tenth of room on each side: plotly snaps a bar or a
+        fill to zero at the edge, where the zero line and the panel's label then collide."""
+        known = [v for v in values if v is not None]
+        if not known:
+            return None
+        lo, hi = min(0.0, *known), max(0.0, *known)
+        pad = (hi - lo) * 0.1 or 1.0
+        return [lo - pad, hi + pad]
+    annotations = [
+        {"text": "P&L to date", "xref": "paper", "yref": "paper", "x": 0, "y": 1.0, "xanchor": "left",
+         "yanchor": "bottom", "showarrow": False, "font": {"size": 11, "color": _MUTED}},
+        {"text": "Day's P&L", "xref": "paper", "yref": "paper", "x": 0, "y": 0.31, "xanchor": "left",
+         "yanchor": "bottom", "showarrow": False, "font": {"size": 11, "color": _MUTED}},
+    ]
+    last = next((i for i in range(n - 1, -1, -1) if cum[i] is not None), None)
+    if last is not None and last >= pts.get("ref", 0):
+        v = cum[last]
+        annotations.append({"text": f"<b>{km_text(v)}</b>", "x": xs[last], "y": v, "xref": "x", "yref": "y",
+                            "xanchor": "right", "yanchor": "bottom" if v >= 0 else "top", "yshift": 4 if v >= 0 else -4,
+                            "showarrow": False, "font": {"size": 12, "color": _GREEN if v >= 0 else _RED}})
+    return {"data": [line, bars], "layout": {
+        "height": CHART_HEIGHT, "margin": {"l": 12, "r": 16, "t": 22, "b": 30},
+        "hovermode": "x", "showlegend": False, "bargap": 0.3 if n > 3 else 0.8,
+        "hoverlabel": {"bgcolor": "#fff", "bordercolor": "#c9ced8", "align": "left",
+                       "font": {"size": 12, "color": "#1f2937"}},
+        "xaxis": {**x_common, "anchor": "y", "matches": "x2", "showticklabels": False},
+        "yaxis": {**y_common, "domain": [0.38, 1.0], **({"range": padded(cum)} if padded(cum) else {})},
+        "xaxis2": {**x_common, "anchor": "y2", "tickmode": "array", "tickvals": tickvals,
+                   "tickangle": 0, "tickfont": {"size": 11, "color": _MUTED}},
+        "yaxis2": {**y_common, "domain": [0.0, 0.28], "nticks": 4, **({"range": padded(daily)} if padded(daily) else {})},
+        "annotations": annotations,
+        "font": {"family": "Inter, system-ui, sans-serif", "size": 12, "color": "#1f2937"},
         "plot_bgcolor": "#fff", "paper_bgcolor": "#fff"}}
 
 
@@ -837,10 +940,10 @@ def _day_label(iso: str) -> str:
         return iso
 
 
-CHART_TITLE = "Daily P&L and cumulative"
-CHART_WORDS = ("Bars: each business day's P&L of the rows showing, by the header's own Daily rule (one colour per "
-               "slice when sliced by strategy, commodity family or contract, six or fewer). Line: the period's P&L to date, from 0 at the close it is "
-               "measured from.")
+CHART_TITLE = "P&L over the period"
+CHART_WORDS = ("Top: the period's P&L to date of the rows showing, from 0 at the close it is measured from; it "
+               "ends at the table's total. Bottom: each business day's P&L, by the header's own Daily rule. Only "
+               "days with a close are on the axis. Hover a day for its figures and its biggest trades.")
 
 
 def _chart_note(text: str) -> dict:
@@ -857,11 +960,13 @@ def chart(b: dict, p: dict, state: Optional[dict]) -> Any:
     head = html.Div(about(CHART_TITLE, CHART_WORDS, level="span", className="book-section-title"),
                     className="card-head")
     note = None
+    pts = None
     if not p.get("days"):
         note = cap(p.get("reason") or "No business day in the period: nothing to chart")
     else:
-        fig = chart_figure(b, p, state)
-        ys = [v for trace in fig["data"] for v in trace.get("y") or [] if v is not None]
+        pts = chart_points(b, p, state)
+        k = pts["ref"]      # the reference close's 0 is not a figure of the period
+        ys = [v for v in pts["daily"][k:] + pts["cum"][k:] if v is not None]
         if not ys:
             note = ("No day of the period has a P&L figure for the rows showing"
                     + (": the figures fill in after a Bloomberg pull"
@@ -874,7 +979,8 @@ def chart(b: dict, p: dict, state: Optional[dict]) -> Any:
     if note is not None:
         graph = dcc.Graph(figure=_chart_note(cap(plain_words(note))), config={"displayModeBar": False, "staticPlot": True})
         return html.Div([head, graph])
-    return html.Div([head, dcc.Graph(figure=fig, config={"displayModeBar": False})])
+    fig = chart_figure(b, p, state, pts)
+    return html.Div([head, dcc.Graph(figure=fig, config={"displayModeBar": False}, className="pnl-chart-graph")])
 
 
 # --------------------------------------------------------------------------- the track record
