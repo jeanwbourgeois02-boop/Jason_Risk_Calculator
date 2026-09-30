@@ -785,7 +785,7 @@ def table(conn: sqlite3.Connection, data: dict, v: dict, risk: Optional[dict], s
                 body.append(html.Tr(html.Td(missing_cell(f"the legs could not be shown ({type(exc).__name__}: {exc})"),
                                             colSpan=len(COLUMNS), className="l"), className="tk-panel"))
 
-    group = v["state"]["group"]
+    group = tf.trade_group(v["state"])
     if group == tf.GROUP_NONE:
         for t, r in sort_rows(data, shown, sort):
             add(t, r)

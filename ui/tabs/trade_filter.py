@@ -50,7 +50,9 @@ SHARED_PARTS = ("type", "commodity", "trade")   # the funnel parts carried acros
 GROUP_NONE = "none"
 GROUP_BY_TYPE = "type"
 GROUP_BY_COMMODITY = "commodity"
-GROUPS = (GROUP_NONE, GROUP_BY_TYPE, GROUP_BY_COMMODITY)
+GROUP_BY_CONTRACT = "contract"              # the P&L tab's Contract slice only (2026-09-30); Book and Risk read it as none
+GROUPS = (GROUP_NONE, GROUP_BY_TYPE, GROUP_BY_COMMODITY, GROUP_BY_CONTRACT)
+TRADE_GROUPS = (GROUP_NONE, GROUP_BY_TYPE, GROUP_BY_COMMODITY)   # the groupings of whole trades (Book, Risk)
 DEFAULT_STATE: Dict[str, Any] = {"search": "", "type": [], "commodity": [], "trade": [], "group": GROUP_NONE,
                                  "cols": {}}
 FLAGS_ON = "on"
@@ -70,6 +72,9 @@ FILTER_ABOUT = ("Free text over the trade name, what it is, every leg's contract
                 "Type, Trade and Commodity carry across Book, P&L and Risk; the top bar always shows the whole book.")
 GROUP_ABOUT = ("Group the rows by the trade's type or its commodity family, each group with its subtotals. A trade "
                "is never split across groups: a trade mixing families is under Cross-product.")
+SLICE_ABOUT = ("Slice the table by spread (one row per trade), by strategy (calendar, cross-exchange, cross-product), "
+               "by commodity family, or by contract: one row per contract, with the part of each trade that holds it. "
+               "Only the Contract slice splits a trade; the others keep each trade whole.")
 
 
 # --------------------------------------------------------------------------- the state
@@ -242,6 +247,13 @@ def apply(trades: Iterable[dict], state: Optional[dict]) -> List[dict]:
     return [t for t in trades if keeps(t, state)]
 
 
+def trade_group(state: Optional[dict]) -> str:
+    """The grouping of whole trades the Book and Risk apply: the shared group, or none when it is the
+    P&L tab's Contract slice (a grouping those tabs do not have)."""
+    g = normal(state)["group"]
+    return g if g in TRADE_GROUPS else GROUP_NONE
+
+
 def group_of(trade: dict, group: str) -> str:
     """The group label a trade is shown under ('' when not grouped)."""
     if group == GROUP_BY_TYPE:
@@ -297,8 +309,13 @@ def _cid(kind: str, tab: str) -> dict:
 
 
 def _group_options(tab: str) -> List[dict]:
-    first = "Trade" if tab == "pnl" else "None"
-    return [{"label": first, "value": GROUP_NONE}, {"label": "Type", "value": GROUP_BY_TYPE},
+    """The strip's switch: Group None | Type | Commodity, and on P&L the Slice Spread (the trade) |
+    Strategy (its type, renamed 2026-09-30) | Commodity family | Contract."""
+    if tab == "pnl":
+        return [{"label": "Spread", "value": GROUP_NONE}, {"label": "Strategy", "value": GROUP_BY_TYPE},
+                {"label": "Commodity family", "value": GROUP_BY_COMMODITY},
+                {"label": "Contract", "value": GROUP_BY_CONTRACT}]
+    return [{"label": "None", "value": GROUP_NONE}, {"label": "Type", "value": GROUP_BY_TYPE},
             {"label": "Commodity", "value": GROUP_BY_COMMODITY}]
 
 
@@ -319,9 +336,10 @@ def bar(tab: str, state: Optional[dict], options: Optional[Dict[str, List[dict]]
                       placeholder="Search trade, contract or symbol", className="blotter-filter-search tf-search",
                       autoComplete="off")]),
         html.Span(className="tf-group", children=[
-            html.Label("Group" if tab != "pnl" else "Slice", className="tk-k", title=plain_words(GROUP_ABOUT)),
+            html.Label("Group" if tab != "pnl" else "Slice", className="tk-k",
+                       title=plain_words(GROUP_ABOUT if tab != "pnl" else SLICE_ABOUT)),
             dcc.RadioItems(id=_cid(GROUP_TYPE, tab), className="book-switch", options=_group_options(tab),
-                           value=s["group"], inline=True)]),
+                           value=s["group"] if tab == "pnl" else trade_group(s), inline=True)]),
         html.Button(CLEAR_WORDS, id=_cid(CLEAR_TYPE, tab), n_clicks=0, className="book-link-button tf-clear",
                     title=CLEAR_TIP, style={} if is_filtered(s, tab) else HIDDEN_STYLE),
     ])

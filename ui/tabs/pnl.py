@@ -1,8 +1,11 @@
 """P&L tab: "What did I make, and why?" (Phase G, 2026-09-29; the design doc's "Table specs", P&L).
 
 The trade is the unit, as on the Book: the shared filter bar and its switch (`ui.tabs.trade_filter`;
-here the switch slices the table by Trade (default) | Type | Commodity, whole trades only, never a
-trade split), then the headline of the rows showing, then:
+here the switch slices the table by Spread (the trade, default) | Strategy (its type) | Commodity
+family, whole trades only, never a trade split, or by Contract (2026-09-30, the user's decision: the
+one slice that splits a trade): one row per contract, `ui.tabs.book_contracts`' grouping, its P&L
+and split the per-fill figures of the fills in it summed, a click giving the trades holding it),
+then the headline of the rows showing, then:
   - the controls: Period Today | 5d | MTD (default) | YTD | All | Custom (two dates), and Total |
     By month;
   - the chart: the period's business days, the daily P&L of the rows showing as bars (one colour per
@@ -247,6 +250,13 @@ def _base(conn: sqlite3.Connection, as_of: str) -> dict:
     data["errors"].extend(bk.get("errors") or [])
     data["trade_of"] = {str(i): str(t.get("trade")) for t in data["trades"] for i in t.get("trade_ids") or []}
     try:
+        from ui.tabs import book_contracts
+        data["contracts"] = book_contracts.rows_of(conn, bk)
+    except Exception as exc:  # noqa: BLE001 -- the Contract slice then says why
+        log.exception("P&L tab: the contracts could not be grouped for %s", as_of)
+        data["contracts"] = []
+        data["errors"].append(("Contracts", f"could not be grouped ({type(exc).__name__}: {exc})"))
+    try:
         data["spreads"] = shared_spreads(conn, as_of, filled=True)
     except Exception as exc:  # noqa: BLE001 -- period_explain then groups off the series itself
         data["spreads"] = None
@@ -432,6 +442,38 @@ def slices(b: dict, p: dict, state: Optional[dict], mode: str = MODE_TOTAL) -> L
     return sorted(by.items(), key=size)
 
 
+def contract_items(b: dict, p: dict, state: Optional[dict], mode: str = MODE_TOTAL) -> List[Tuple[str, List[str], dict]]:
+    """The Contract slice: [(contract name, the fills of the trades showing in it, the contract row)],
+    sorted by the size of the period's P&L. The trades showing are the filters' whole trades, as in
+    every slice; a contract row holds only their fills in it, so the rows add up to the same total."""
+    shown = set(fills_of(shown_trades(b, p, state)))
+    items = []
+    for r in b.get("contracts") or []:
+        ids = [i for i in r["trade_ids"] if i in shown]
+        if ids:
+            items.append((r["name"], ids, r))
+
+    def size(item):
+        v = month_total(b, item[1]) if mode == MODE_MONTH else part_sum(p, item[1])[0]
+        return (v is None, -abs(v or 0.0), item[0], item[2]["key"])
+    return sorted(items, key=size)
+
+
+def chart_groups(b: dict, p: dict, state: Optional[dict]) -> List[Tuple[str, set]]:
+    """[(slice value, its fills)] of the rows showing, in the table's order: the chart's colours."""
+    s = tf.normal(state)
+    if s["group"] == tf.GROUP_BY_CONTRACT:
+        return [(name, set(ids)) for name, ids, _r in contract_items(b, p, s)]
+    return [(value, set(fills_of(trades))) for value, trades in slices(b, p, s)]
+
+
+def clearer_words(r: dict, ids: Sequence[str]) -> Tuple[str, str]:
+    """(the clearers of these fills of a contract, the accounts on hover)."""
+    of = r.get("clearer_of") or {}
+    names = sorted({of.get(i, "") for i in ids} - {""})
+    return " + ".join(names), ""
+
+
 # --------------------------------------------------------------------------- the table
 # Row kinds: the Book / Filtered total row and a slice's group row keep ONE "Excl. N" marker (on the
 # P&L cell); a trade or a leg row carries no badge, its reasons on each figure's hover and in the
@@ -468,10 +510,11 @@ def _row_reasons(p: dict, ids: Sequence[str], mode: str) -> List[str]:
 
 
 def _columns(p: dict, group: str, mode: str, months: Sequence[str] = ()) -> List[Tuple[str, str, str]]:
-    first = {tf.GROUP_NONE: "Trade", tf.GROUP_BY_TYPE: "Type", tf.GROUP_BY_COMMODITY: "Commodity"}[group]
-    cols = [("name", first, "l")]
+    cols = [("name", SLICE_TITLES.get(group, SLICE_TITLES[tf.GROUP_NONE]), "l")]
     if group == tf.GROUP_NONE:
-        cols.append(("type", "Type", "l"))
+        cols.append(("type", "Strategy", "l"))
+    elif group == tf.GROUP_BY_CONTRACT:
+        cols.append(("clearer", "Clearer", "l"))
     if mode == MODE_MONTH:
         cols += [(f"m:{m}", _month_title(m, months), "") for m in months] + [("mtotal", "Total", "")]
         return cols
@@ -501,14 +544,24 @@ def _month_title(m: str, months: Sequence[str]) -> str:
 
 BLANK_WORDS = "A blank cell: nothing in this part over the period."
 COLUMN_TIPS = {"total": "The period's P&L in USD: each fill's change by the header's own rule, summed.",
-               "mtotal": "The row's months added up.", "type": "The trade's type by rule, as on the Book."}
+               "mtotal": "The row's months added up.",
+               "type": "The trade's strategy: its type by rule from its legs (calendar, cross-exchange, cross-product, "
+                       "mixed, outright), the Book's Type.",
+               "clearer": "The clearing broker of the contract's fills, from the file's account."}
+SLICE_TITLES = {tf.GROUP_NONE: "Spread", tf.GROUP_BY_TYPE: "Strategy", tf.GROUP_BY_COMMODITY: "Commodity family",
+                tf.GROUP_BY_CONTRACT: "Contract"}
+SLICE_TIPS = {"Spread": "One row per trade (a PBRoot name), whole, every leg and hedge in it; click for its legs.",
+              "Strategy": "The trades by their strategy, whole; click for the trades.",
+              "Commodity family": "The trades by their commodity family, whole; click for the trades.",
+              "Contract": "One row per contract (SHFE, COMEX and LME copper apart), the P&L of every fill in it: the "
+                          "one slice that splits a trade. Click for the trades holding it."}
 
 
 # The first column's funnel holds the lists carried across Book, P&L and Risk, its own first: by
 # trade, the trade names and the commodity families (the Type column holds the types); sliced by
 # type or commodity, that list then the other two, so every carried filter stays in reach.
-NAME_PARTS = {"Trade": ("trade", "commodity"), "Type": ("type", "trade", "commodity"),
-              "Commodity": ("commodity", "trade", "type")}
+NAME_PARTS = {"Spread": ("trade", "commodity"), "Strategy": ("type", "trade", "commodity"),
+              "Commodity family": ("commodity", "trade", "type"), "Contract": ("trade", "commodity", "type")}
 NUMBER_KEYS = {"total", "open", "mtotal", *(k for k, _t, _h in COMPONENTS)}
 NUMBER_HINT = "Each trade's own figure for the period, in USD."
 
@@ -518,6 +571,7 @@ def head(cols: Sequence[Tuple[str, str, str]], state: Optional[dict] = None,
     """The column heads, each with its funnel: the text columns the lists carried across the trade
     tabs, the figures one comparison (this tab's own)."""
     tips = {**COLUMN_TIPS, **{k: f"{h} {BLANK_WORDS}" for k, _t, h in COMPONENTS},
+            "name": SLICE_TIPS.get(cols[0][1], "") if cols else "",
             **{k: f"{h} {BLANK_WORDS}" for k, _t, h in LTD_PARTS}}
     ths = []
     half = len(cols) // 2
@@ -566,7 +620,7 @@ def _cells(p: dict, b: dict, ids: Sequence[str], cols, mode: str, months: Sequen
     fig = row_figures(p, ids)
     out = []
     for key, _t, _c in cols:
-        if key in ("name", "type"):
+        if key in ("name", "type", "clearer"):
             continue
         if key == "total":
             out.append(_money_td(fig[key], full=full, badge=badge))
@@ -587,7 +641,8 @@ def leg_rows(p: dict, b: dict, t: dict, cols, mode, months) -> List[html.Tr]:
         ids = [str(i) for i in leg.get("trade_ids") or []]
         name = str(leg.get("name") or leg.get("contract_id") or "") + (" (hedge)" if leg.get("hedge") else "")
         first = [html.Td([name, row_info(_row_reasons(p, ids, mode))],
-                         className="l tk-indent2" if len(cols) and cols[0][1] != "Trade" else "l tk-indent")]
+                         className="l tk-indent2" if len(cols) and cols[0][0] == "name"
+                         and cols[0][1] != SLICE_TITLES[tf.GROUP_NONE] else "l tk-indent")]
         if any(k == "type" for k, _t, _c in cols):
             first.append(html.Td(""))
         rows.append(html.Tr(first + _cells(p, b, ids, cols, mode, months, ROW_LEG),
@@ -595,11 +650,53 @@ def leg_rows(p: dict, b: dict, t: dict, cols, mode, months) -> List[html.Tr]:
     return rows
 
 
+def contract_table(b: dict, p: dict, s: dict, mode: str, opened: set, cols, months) -> html.Table:
+    """The Contract slice: the total row (the same fills as every slice), one row per contract with
+    its clearer, a click giving the trades holding it, each with its part of the contract's P&L."""
+    items = contract_items(b, p, s, mode)
+    ids_all = fills_of(shown_trades(b, p, s))
+    filtered = tf.is_filtered(s, TAB)
+    n_all = len(b.get("contracts") or [])
+    label = (f"Filtered · {len(items)} of {_plural(n_all, 'contract')}" if filtered
+             else f"Book · {_plural(n_all, 'contract')}")
+    tip = ("equals the top bar's figure for the period" if not filtered and p.get("choice") in ("today", "mtd", "all")
+           else None)
+    body: List[Any] = [html.Tr([html.Td(html.Span(label, title=tip), className="l"), html.Td("")]
+                               + _cells(p, b, ids_all, cols, mode, months, ROW_TOTAL), className="tk-total book-total")]
+    for name, ids, r in items:
+        key = f"c:{r['key']}"
+        is_open = key in opened
+        clearers, _h = clearer_words(r, ids)
+        trades = [str(t.get("trade") or "") for t, leg in r["legs"] if set(leg.get("trade_ids") or []) & set(ids)]
+        hover = _lines(f"{_plural(len(ids), 'fill')} in {_plural(len(trades), 'trade')}: {', '.join(trades)}",
+                       "Only the fills of the trades showing" if len(ids) < len(r["trade_ids"]) else "")
+        first = [html.Td([html.Span("▾ " if is_open else "▸ ", className="tk-chev"),
+                          html.Span(name, className="tk-name", title=plain_words(hover)),
+                          row_info(_row_reasons(p, ids, mode))], className="l"),
+                 html.Td(clearers or missing_cell("No account on file for these fills"), className="l")]
+        body.append(html.Tr(first + _cells(p, b, ids, cols, mode, months), id=_row_id(key), n_clicks=0,
+                            className="tk-row" + (" tk-row--open" if is_open else "")))
+        if not is_open:
+            continue
+        idset = set(ids)
+        subs = [(t, [str(i) for i in leg.get("trade_ids") or [] if str(i) in idset]) for t, leg in r["legs"]]
+        for t, t_ids in sorted([x for x in subs if x[1]], key=lambda x: -abs(part_sum(p, x[1])[0] or 0.0)):
+            t_clr, _h = clearer_words(r, t_ids)
+            body.append(html.Tr([html.Td([str(t.get("trade") or ""), row_info(_row_reasons(p, t_ids, mode))],
+                                         className="l tk-indent"),
+                                 html.Td(t_clr, className="l")] + _cells(p, b, t_ids, cols, mode, months, ROW_LEG),
+                                className="tk-leg"))
+    return html.Table([head(cols, s, tf.options_for(b.get("trades") or [])), html.Tbody(body)], id=TABLE_ID,
+                      className="book-table book-grid tk-table")
+
+
 def table(b: dict, p: dict, state: Optional[dict], mode: str, opened: Sequence[str]) -> html.Table:
     s = tf.normal(state)
     group = s["group"]
     months = [m["month"] for m in (b["monthly"].months if b.get("monthly") is not None else [])] if mode == MODE_MONTH else []
     cols = _columns(p, group, mode, months)
+    if group == tf.GROUP_BY_CONTRACT:
+        return contract_table(b, p, s, mode, set(opened or []), cols, months)
     items = slices(b, p, s, mode)
     shown = [t for _v, ts in items for t in ts]
     ids_all = fills_of(shown)
@@ -686,9 +783,9 @@ def headline(b: dict, p: dict, state: Optional[dict]) -> Optional[html.Div]:
 # --------------------------------------------------------------------------- the chart
 def chart_figure(b: dict, p: dict, state: Optional[dict]) -> dict:
     s = tf.normal(state)
-    items = slices(b, p, s)
+    items = chart_groups(b, p, s)
     trade_of = b.get("trade_of") or {}
-    show = set(fills_of([t for _v, ts in items for t in ts]))
+    show = set().union(*(ids for _v, ids in items)) if items else set()
     days = p.get("days") or []
     xs = [d["date"] for d in days]
     traces: List[dict] = []
@@ -709,8 +806,7 @@ def chart_figure(b: dict, p: dict, state: Optional[dict]) -> dict:
                                  + ([f"Excl. {d['n_excluded']}"] if d.get("n_excluded") else [])))
     group = s["group"]
     if group != tf.GROUP_NONE and 1 < len(items) <= 6:
-        for n, (value, trades) in enumerate(items):
-            ids = set(fills_of(trades))
+        for n, (value, ids) in enumerate(items):
             ys = [sum(v for t, v in d["by_trade"].items() if t in ids) for d in days]
             traces.append({"x": xs, "y": ys, "type": "bar", "name": value, "marker": {"color": _PALETTE[n % 6]},
                            "hovertemplate": f"{value} " + "%{y:($,.0f}<extra></extra>"})
@@ -743,7 +839,7 @@ def _day_label(iso: str) -> str:
 
 CHART_TITLE = "Daily P&L and cumulative"
 CHART_WORDS = ("Bars: each business day's P&L of the rows showing, by the header's own Daily rule (one colour per "
-               "slice when sliced by type or commodity). Line: the period's P&L to date, from 0 at the close it is "
+               "slice when sliced by strategy, commodity family or contract, six or fewer). Line: the period's P&L to date, from 0 at the close it is "
                "measured from.")
 
 
@@ -955,11 +1051,35 @@ def csv_frame(b: dict, p: dict, state: Optional[dict], mode: str) -> pd.DataFram
     rows = []
     months = [m["month"] for m in (b["monthly"].months if b.get("monthly") is not None else [])]
     mp = b.get("monthly")
+    if s["group"] == tf.GROUP_BY_CONTRACT:
+        for name, ids, r in contract_items(b, p, s, mode):
+            idset = set(ids)
+            for t, leg in r["legs"]:
+                t_ids = [str(i) for i in leg.get("trade_ids") or [] if str(i) in idset]
+                if not t_ids:
+                    continue
+                row = {"Slice": name, "Contract key": r["key"], "Clearer": clearer_words(r, t_ids)[0],
+                       "Trade": t.get("trade"), "Strategy": tf.trade_type_label(t), "Commodity": r["family"],
+                       "Period": p.get("title"), "From close": p.get("ref_used") or p.get("start_ref"), "To": p.get("end")}
+                fig = row_figures(p, t_ids)
+                row["P&L"] = fig["total"][0]
+                for key, title, _h in COMPONENTS:
+                    row[title] = fig[key][0]
+                if p.get("ltd"):
+                    row["Open"] = fig["open"][0]
+                row["Fills excluded"] = fig["total"][1]
+                if mode == MODE_MONTH and mp is not None:
+                    fr = mp.by_trade
+                    for m in months:
+                        sub = fr[(fr["month"] == m) & fr["trade_id"].astype(str).isin(t_ids) & fr["included"]]
+                        row[m] = float(sub["pnl_usd"].sum()) if not sub.empty else None
+                rows.append(row)
+        return pd.DataFrame(rows)
     for value, trades in slices(b, p, s, mode):
         for t in trades:
             for leg in t.get("legs") or []:
                 ids = [str(i) for i in leg.get("trade_ids") or []]
-                row = {"Slice": value, "Trade": t.get("trade"), "Type": tf.trade_type_label(t),
+                row = {"Slice": value, "Trade": t.get("trade"), "Strategy": tf.trade_type_label(t),
                        "Commodity": tf.family_label(t), "Leg": leg.get("name"), "Hedge": bool(leg.get("hedge")),
                        "Period": p.get("title"), "From close": p.get("ref_used") or p.get("start_ref"),
                        "To": p.get("end")}

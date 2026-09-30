@@ -114,7 +114,11 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
                             "flag's sentence on hover."),
 )
 NEXT_ABBR = {"first notice": "FN", "last trade": "LT", "option expiry": "Exp", "LME prompt": "Prompt",
-             "expiry": "Exp", "prompt": "Prompt"}
+             "expiry": "Exp", "prompt": "Prompt", "value date": "Value"}
+TITLE_ID = "book-title"                      # the strip's title: "Trades" or "Contracts" (the view)
+CARD_ID = "book-main-card"                   # the table card; a class names the view (the CSS hides Group by contract)
+CARD_CLASS = "book-card book-main tk-card"
+CONTRACT_COL = "c-"                          # the By contract view's own column filters (ui/tabs/book_contracts.py)
 LEG_COLUMNS = (("leg", "Leg", "l"), ("side", "Side", "l"), ("lots", "Lots", ""), ("value", "Value USD", ""),
                ("fill", "Avg fill", ""), ("mark", "Mark", ""), ("daily", "Daily", ""), ("ltd", "LTD", ""),
                ("roll", "Roll-down / mo", ""))
@@ -1935,9 +1939,20 @@ def pseudo_fills(data: dict, t: dict) -> html.Table:
 
 
 # --------------------------------------------------------------------------- the table
+def own_cols(state: Optional[dict]) -> Dict[str, Any]:
+    """The trade view's own column filters: the Book's, less the By contract view's ('c-' keys)."""
+    return {k: v for k, v in tf.tab_filters(state, TAB).items() if not k.startswith(CONTRACT_COL)}
+
+
+def view_filtered(state: Optional[dict]) -> bool:
+    """A filter the trade view applies is set: the search, a shared list, or one of its own columns."""
+    s = tf.normal(state)
+    return bool(s["search"].strip() or s["type"] or s["commodity"] or s["trade"] or own_cols(s))
+
+
 def visible(data: dict, state: Optional[dict], risk: Optional[dict] = None) -> List[dict]:
     """The trades the search and every column's filter keep (whole trades, never a leg)."""
-    cols = tf.tab_filters(state, TAB)
+    cols = own_cols(state)
     shown = tf.apply(data.get("trades") or [], state)
     if not cols:
         return shown
@@ -1955,7 +1970,7 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
     opened_set = set(opened or [])
     folds = folds or {}
     folded = set(folds.get("groups") or [])
-    body: List[Any] = [total_tr(data, shown, tf.is_filtered(s, TAB))]
+    body: List[Any] = [total_tr(data, shown, view_filtered(s))]
     open_rows = [t for t in shown if t.get("status") == "open" or (t.get("pseudo") and t.get("status") != "closed")]
     closed_rows = [t for t in shown if t not in open_rows]
 
@@ -1971,7 +1986,7 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
                 body.append(html.Tr(html.Td(missing_cell(f"the panel could not be built ({type(exc).__name__}: {exc})"),
                                             colSpan=len(COLUMNS), className="l"), className="tk-panel"))
 
-    group = s["group"]
+    group = tf.trade_group(s)
     if group == tf.GROUP_NONE:
         for t in sort_rows(data, open_rows, sort, rrows):
             add(t)
@@ -2012,7 +2027,7 @@ def headline(data: dict, state: Optional[dict], risk: Optional[dict] = None) -> 
     the card (user, 2026-09-30: "net usd and flags ... alone in this row its clunky"): Gross, Net and
     the flags are on the table's total row, Daily and LTD there too (one place per number)."""
     s = tf.normal(state)
-    if not tf.is_filtered(s, TAB):
+    if not view_filtered(s):
         return None
     tot = totals(data, visible(data, s, risk))
 
@@ -2095,9 +2110,15 @@ def _open(db_path):
 
 
 def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, sort: Optional[dict] = None,
-                 opened: Sequence[str] = (), folds: Optional[dict] = None, wait_risk: bool = False) -> dict:
-    """{body, shown (bool), headline, table, foot, names, risk_ready} for `as_of`."""
-    out = {"body": None, "shown": False, "headline": None, "table": None, "foot": None, "names": [], "risk_ready": True}
+                 opened: Sequence[str] = (), folds: Optional[dict] = None, wait_risk: bool = False,
+                 view: Optional[str] = None, contract: Optional[dict] = None) -> dict:
+    """{body, shown (bool), headline, table, foot, names, risk_ready, title} for `as_of`. `view`
+    'contract' draws the By contract view (`ui.tabs.book_contracts`) from `contract` = {sort,
+    opened, folds} (its own stores); anything else the trade view."""
+    from ui.tabs import book_contracts as bc
+    by_contract = view == bc.VIEW_CONTRACT
+    out = {"body": None, "shown": False, "headline": None, "table": None, "foot": None, "names": [], "risk_ready": True,
+           "title": title(by_contract)}
     if not as_of:
         out["body"] = message_box("No as-of date available.")
         return out
@@ -2113,13 +2134,18 @@ def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, so
         data = gathered(conn, as_of)
         from ui.tabs.blotter_pricing import shared_trade_risk
         try:
-            risk = shared_trade_risk(conn, as_of, wait=wait_risk)
+            risk = shared_trade_risk(conn, as_of, wait=wait_risk and not by_contract)
         except Exception as exc:  # noqa: BLE001 -- the z column says why
             log.exception("Book: trade risk failed for %s", as_of)
             risk = {"available": False, "reason": f"{type(exc).__name__}: {exc}", "trades": []}
-        tbl, names = table(conn, data, state, sort, opened, folds, risk)
-        out.update(shown=True, headline=headline(data, state, risk), table=tbl, names=names,
-                   risk_ready=risk is not None)
+        if by_contract:
+            c = contract or {}
+            tbl, head_figs, names = bc.render(conn, data, state, c.get("sort"), c.get("opened") or [], c.get("folds"))
+            out.update(shown=True, headline=head_figs, table=tbl, names=names)
+        else:
+            tbl, names = table(conn, data, state, sort, opened, folds, risk)
+            out.update(shown=True, headline=headline(data, state, risk), table=tbl, names=names,
+                       risk_ready=risk is not None)
         prepull = None if data.get("has_marks") else html.Div(PREPULL_TEXT, className="book-prepull")
         out["foot"] = html.Div([prepull, issues_drawer(issue_items(data, risk))], className="tk-foot")
     except Exception as exc:  # noqa: BLE001 -- the reason on screen, never a blank tab
@@ -2134,7 +2160,7 @@ def render_parts(as_of: Optional[str], db_path, state: Optional[dict] = None, so
 
 def _tidy_parts(out: dict) -> dict:
     """Every hover in the parts starting with a capital (`formatting.tidy`)."""
-    for key in ("body", "headline", "table", "chart", "track", "foot"):
+    for key in ("body", "headline", "table", "chart", "track", "foot", "title"):
         if out.get(key) is not None:
             tidy(out[key])
     return out
@@ -2145,9 +2171,8 @@ def render(as_of: Optional[str], db_path, state: Optional[dict] = None) -> html.
     p = render_parts(as_of, db_path, state, wait_risk=True)
     if not p["shown"]:
         return html.Div([p["body"]])
-    return html.Div([html.Div([html.Div(className="tk-strip", children=[html.Span("Trades", className="tk-title"),
-                                                                     p["headline"]]),
-                               p["table"]], className="book-card book-main tk-card"), p["foot"]])
+    return html.Div([html.Div([html.Div(className="tk-strip", children=[p["title"], p["headline"]]),
+                               p["table"]], className=CARD_CLASS), p["foot"]])
 
 
 def options_of(as_of: str, db_path) -> Dict[str, List[dict]]:
@@ -2162,21 +2187,38 @@ def options_of(as_of: str, db_path) -> Dict[str, List[dict]]:
 
 
 # --------------------------------------------------------------------------- layout and callbacks
+TRADES_ABOUT = ("One row per trade (a PBRoot name). Click a row for its legs, its level since entry and its links; "
+                "the first row is the total of the rows showing, with Gross, Net and the flags. Each column filters "
+                "from the funnel in its heading.")
+CONTRACTS_ABOUT = ("One row per contract held, netted across every trade that holds it, with its clearer: what the "
+                   "broker statements show. Click a row for the trades holding it; the first row is the total of the "
+                   "rows showing. Each column filters from the funnel in its heading.")
+
+
+def title(by_contract: bool = False):
+    """The table strip's title of the view: "Trades" or "Contracts", its definition on hover."""
+    return about("Contracts" if by_contract else "Trades", CONTRACTS_ABOUT if by_contract else TRADES_ABOUT,
+                 level="span", className="tk-title")
+
+
+def card_class(by_contract: bool = False) -> str:
+    return CARD_CLASS + (" book-view--contract" if by_contract else "")
+
+
 def layout(default_date: Optional[str] = None) -> html.Div:
     """The shell: the message slot, then (hidden with no book) the filter bar, the headline, the
     table card with its strip (Expand all, Collapse all, Download CSV) and the footer; the session
     stores and the risk poll."""
+    from ui.tabs import book_contracts as bc
     return html.Div(className="book-tab", children=[
         html.Div(html.H2("Book", className="tab-title"), className="tab-header"),
         html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
-            html.Div(className="book-card book-main tk-card", children=[
+            html.Div(id=CARD_ID, className=CARD_CLASS, children=[
                 html.Div(className="tk-strip", children=[
                     html.Div(className="tk-strip-lead", children=[
-                        about("Trades", "One row per trade (a PBRoot name). Click a row for its legs, its level since "
-                                        "entry and its links; the first row is the total of the rows showing, with "
-                                        "Gross, Net and the flags. Each column filters from the funnel in its heading.",
-                              level="span", className="tk-title"),
+                        html.Span(title(), id=TITLE_ID),
+                        bc.switch(),
                         html.Span(id=HEADLINE_ID, className="tk-strip-slot")]),
                     tf.bar_slot(TAB),
                     html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="btn btn--ghost"),
@@ -2191,6 +2233,9 @@ def layout(default_date: Optional[str] = None) -> html.Div:
         dcc.Store(id=OPEN_STORE_ID, storage_type="session"),
         dcc.Store(id=SORT_STORE_ID, storage_type="session"),
         dcc.Store(id=FOLD_STORE_ID, storage_type="session"),
+        dcc.Store(id=bc.OPEN_STORE_ID, storage_type="session"),
+        dcc.Store(id=bc.SORT_STORE_ID, storage_type="session"),
+        dcc.Store(id=bc.FOLD_STORE_ID, storage_type="session"),
         dcc.Store(id=SHOWN_STORE_ID),
         dcc.Store(id=RISK_READY_ID),
         dcc.Interval(id=RISK_POLL_ID, interval=1500, n_intervals=0, disabled=True),
@@ -2206,22 +2251,27 @@ def _clicked() -> bool:
 
 
 def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
+    from ui.tabs import book_contracts as bc
     tf.register_bar(app, TAB, get_db_path, options_of)
+    bc.register_callbacks(app, get_db_path)
 
     @app.callback(
         Output(BODY_ID, "children"), Output(CONTENT_ID, "style"), Output(HEADLINE_ID, "children"),
         Output(TABLE_SLOT_ID, "children"), Output(FOOT_ID, "children"), Output(SHOWN_STORE_ID, "data"),
-        Output(RISK_POLL_ID, "disabled"),
+        Output(RISK_POLL_ID, "disabled"), Output(TITLE_ID, "children"), Output(CARD_ID, "className"),
         Input(AS_OF_STORE_ID, "data"), Input(DATA_REVISION_ID, "data"), Input(tf.STORE_ID, "data"),
         Input(SORT_STORE_ID, "data"), Input(OPEN_STORE_ID, "data"), Input(FOLD_STORE_ID, "data"),
-        Input(RISK_READY_ID, "data"),
+        Input(RISK_READY_ID, "data"), Input(bc.VIEW_ID, "value"), Input(bc.SORT_STORE_ID, "data"),
+        Input(bc.OPEN_STORE_ID, "data"), Input(bc.FOLD_STORE_ID, "data"),
     )
-    def _render(as_of, _rev, state, sort, opened, folds, _ready):
-        p = render_parts(as_of, get_db_path(), state, sort, opened or [], folds)
+    def _render(as_of, _rev, state, sort, opened, folds, _ready, view, c_sort, c_opened, c_folds):
+        p = render_parts(as_of, get_db_path(), state, sort, opened or [], folds, view=view,
+                         contract={"sort": c_sort, "opened": c_opened or [], "folds": c_folds})
+        by_contract = view == bc.VIEW_CONTRACT
         if not p["shown"]:
-            return p["body"], HIDDEN, None, None, None, [], True
+            return p["body"], HIDDEN, None, None, None, [], True, p["title"], card_class(by_contract)
         return (None, {}, compact(p["headline"]), compact(p["table"]), compact(p["foot"]), p["names"],
-                p["risk_ready"])
+                p["risk_ready"], p["title"], card_class(by_contract))
 
     @app.callback(Output(RISK_READY_ID, "data"), Input(RISK_POLL_ID, "n_intervals"), State(AS_OF_STORE_ID, "data"),
                   prevent_initial_call=True)
@@ -2238,11 +2288,14 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
 
     @app.callback(Output(OPEN_STORE_ID, "data"), Input({"type": ROW_TYPE, "idx": ALL}, "n_clicks"),
                   Input(EXPAND_ALL_ID, "n_clicks"), Input(COLLAPSE_ALL_ID, "n_clicks"),
-                  State(OPEN_STORE_ID, "data"), State(SHOWN_STORE_ID, "data"), prevent_initial_call=True)
-    def _toggle(_rows, _all, _none, current, shown):
+                  State(OPEN_STORE_ID, "data"), State(SHOWN_STORE_ID, "data"), State(bc.VIEW_ID, "value"),
+                  prevent_initial_call=True)
+    def _toggle(_rows, _all, _none, current, shown, view):
         if not _clicked():
             return dash.no_update
         trig = dash.ctx.triggered_id
+        if trig in (EXPAND_ALL_ID, COLLAPSE_ALL_ID) and view == bc.VIEW_CONTRACT:
+            return dash.no_update                   # the By contract view's own panels (book_contracts)
         if trig == EXPAND_ALL_ID:
             return list(shown or [])
         if trig == COLLAPSE_ALL_ID:
@@ -2279,18 +2332,23 @@ def register_callbacks(app, get_db_path: Callable[[], object]) -> None:
         return dash.no_update
 
     @app.callback(Output(DOWNLOAD_ID, "data"), Input(CSV_BUTTON_ID, "n_clicks"), State(AS_OF_STORE_ID, "data"),
-                  State(tf.STORE_ID, "data"), State(SORT_STORE_ID, "data"), prevent_initial_call=True)
-    def _csv(n_clicks, as_of, state, sort):
+                  State(tf.STORE_ID, "data"), State(SORT_STORE_ID, "data"), State(bc.VIEW_ID, "value"),
+                  State(bc.SORT_STORE_ID, "data"), prevent_initial_call=True)
+    def _csv(n_clicks, as_of, state, sort, view, c_sort):
         if not n_clicks or not as_of:
             return dash.no_update
         conn = _open(get_db_path())
         try:
             from ui.tabs.blotter_pricing import shared_trade_risk
             data = gathered(conn, as_of)
-            frame = csv_frame(data, state, sort, shared_trade_risk(conn, as_of, wait=False))
+            if view == bc.VIEW_CONTRACT:
+                frame, name = bc.csv_of(conn, data, state, c_sort), f"book_contracts_{as_of}.csv"
+            else:
+                frame = csv_frame(data, state, sort, shared_trade_risk(conn, as_of, wait=False))
+                name = f"book_{as_of}.csv"
         finally:
             conn.close()
-        return dcc.send_data_frame(frame.to_csv, f"book_{as_of}.csv", index=False)
+        return dcc.send_data_frame(frame.to_csv, name, index=False)
 
     app.clientside_callback(_OPEN_UPLOAD_JS, Output(EMPTY_UPLOAD_SINK_ID, "data"),
                             Input({"type": EMPTY_UPLOAD_TYPE, "idx": ALL}, "n_clicks"), prevent_initial_call=True)

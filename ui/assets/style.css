@@ -1348,3 +1348,12 @@ p { margin: 8px 0; }
    Size column left the same day: the lots are in What it is, in words. */
 .tk-table td.tk-now .tk-unit-slot { display: inline-block; min-width: 50px; text-align: left; }
 .tk-table td.tk-level { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* Book By trade | By contract, 2026-09-30: the switch sits after the strip's title; the By contract
+   view has no Group switch (a contract has no trade type), its positions line up as figures. */
+.tk-strip .book-view-switch { display: inline-flex; align-items: center; gap: 6px; }
+.tk-strip .book-view-switch .book-switch { margin-left: 0; }
+.book-view--contract .tf-tools .tf-group { display: none; }
+.tk-table.tk-contracts td .tk-net { white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; }
+.tk-table.tk-contracts td { white-space: nowrap; }
+.tk-table.tk-contracts td.tk-now .tk-unit-slot { min-width: 44px; }
