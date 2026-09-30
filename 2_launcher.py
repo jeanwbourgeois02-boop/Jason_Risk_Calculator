@@ -53,9 +53,8 @@ PACKAGES_STAMP = VENV / "packages.stamp"
 REQUIREMENTS = ROOT / "requirements.txt"
 REAL_DB = ROOT / "data" / "raw" / "risk.db"
 # The real database holds only what Jason uploads (user, 2026-09-28: "when i put jasons actual
-# excel i want that to be the only source of information"). The sample book is reached from
-# inside the app (ui/sample_book.py, "View the sample book" on the empty Book tab), in the
-# same process and on a throw-away database, so nothing here loads or serves it.
+# excel i want that to be the only source of information"). There is no sample book in the
+# app, and nothing here loads the synthetic sample into it.
 EMPTY_DB_LINE = "database is empty: upload Jason's blotter (Upload blotter in the app)"
 BLPAPI_INDEX = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
 MIN_PYTHON = (3, 11)
@@ -779,8 +778,8 @@ def cmd_start(args) -> int:
     if _trades_count() == 0:
         say(EMPTY_DB_LINE)
     from ui.launch import main
-    # The sample book runs inside the app's own process (ui/sample_book.py), never as an
-    # instance of its own, so a running risk monitor on the current code is safe to reuse.
+    # The app serves only the real database (no sample book, no second instance), so a
+    # running risk monitor on the current code is safe to reuse.
     return main(["--force-new"] if args.force_new else [])
 
 

@@ -5,7 +5,7 @@ second press while one runs is refused with a sentence). The thread runs, in ord
 
 1. `tools.bbg_diagnostics.run_bloomberg_diagnostics(db_path=<the active database>)`: the fast
    local checks (session, official sources, coverage, last pull), on the database the screens
-   show (the sample book included), and
+   show, and
 2. `data.bloomberg.ticker_check.check_book(db_path=..., on_progress=...)`: the book's own
    tickers asked of Bloomberg, its progress published as it goes.
 

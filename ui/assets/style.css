@@ -528,16 +528,8 @@ p { margin: 8px 0; }
 .header-block .tab-link, .top-bar .tab-link { color: rgba(255,255,255,.8); }
 .header-block .tab-link:hover, .top-bar .tab-link:hover { color: #fff; }
 
-/* The sample book (ui/sample_book.py, 2026-09-28): the small link in the top bar, the chip
-   while the sample is active, the locked upload button, and the Book tab's empty-state offer. */
-.top-bar .sample-book-link { color: rgba(255,255,255,.72); font-size: 11px; text-decoration: underline; white-space: nowrap; }
-.top-bar .sample-book-link:hover { color: #fff; }
-.sample-book-chip { display: flex; align-items: center; gap: 8px; background: #b45309; color: #fff; border-radius: 6px;
-  padding: 3px 8px; font-size: 11px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
-.sample-book-chip .sample-book-back { padding: 2px 8px; font-size: 11px; }
+/* A button disabled while its action runs (the upload's "Uploading…"). */
 .btn--locked, .btn--locked:hover { opacity: .5; cursor: not-allowed; }
-.sample-book-offer { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
-.sample-book-offer .sample-book-link { color: var(--navy); font-weight: 600; text-decoration: underline; }
 
 /* ---------------------------------------------------------------- 2026-09-28: the screens tidy (wave 1)
    The display rules every screen follows (ui/tabs/formatting.py): a missing value is a grey em

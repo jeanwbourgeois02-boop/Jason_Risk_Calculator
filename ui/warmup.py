@@ -48,7 +48,7 @@ database file, the revision poll publishes, and a warm-up re-valued all 15 steps
 revision, fighting the backfill for the CPU and the database lock. So the poll's trigger
 (`after_write`) only notes that a warm-up is owed while one runs, a run stops rerunning when a
 pull has started, and the poll's every tick (`warm_if_owed`) runs the owed warm-up once the
-status says finished. An upload and a book switch (`after_change`) and the start-up (`start`)
+status says finished. An upload (`after_change`) and the start-up (`start`)
 still warm at once.
 """
 from __future__ import annotations

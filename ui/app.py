@@ -38,13 +38,10 @@ from ui import revision, uploads
 # name every screen, script and test uses.
 from data.paths import DEFAULT_DB_PATH, REPO_ROOT, get_db_path  # noqa: F401
 
-# The ACTIVE database (2026-09-28, user: the sample book reachable from inside the app). The
-# process is single-user and local, so one process-wide holder is right: `create_app` sets it
-# to the database it was built for, "View the sample book" (ui/sample_book.py) points it at
-# the throw-away sample and "Back to my book" points it back. Every render reads it at call
-# time (`active_db_path` is the callable every tab's `register_callbacks` receives), and the
-# revision poll keys on it, so a switch refreshes every tab in place. The real database
-# (`get_db_path()`) is never written by a switch.
+# The ACTIVE database: the one `create_app` was built for (the real one when launched; a
+# scratch database under a tool or a test). The process is single-user and local, so one
+# process-wide holder is right. Every render reads it at call time (`active_db_path` is the
+# callable every tab's `register_callbacks` receives), and the revision poll keys on it.
 ACTIVE_DB: dict = {"path": None}
 
 
@@ -356,8 +353,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     from ui.launch import source_fingerprint
     resolved = Path(db_path) if db_path is not None else get_db_path()
     ensure_schema(resolved)
-    # The database this app was built for is the active one until a switch (module docstring
-    # of ui/sample_book.py); a stale sample file from an earlier run is not the active one.
+    # The database this app was built for is the active one.
     set_active_db(resolved)
     build = build_fingerprint if build_fingerprint is not None else source_fingerprint()
     # suppress_callback_exceptions: the Blotter sub-tabs render their tables, filter

@@ -45,7 +45,6 @@ import dash
 import pandas as pd
 from dash import ALL, Input, Output, State, dcc, html
 
-from ui import sample_book
 from ui.revision import DATA_REVISION_ID
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
@@ -295,7 +294,7 @@ def trades_on_file(conn: sqlite3.Connection) -> int:
 
 def empty_state(data: Optional[dict] = None, idx: str = "book") -> html.Div:
     """No trades on file: the upload card and the three steps. `idx` names the tab rendering it, so
-    the Upload button's and the sample link's pattern ids differ per tab."""
+    the Upload button's pattern id differs per tab."""
     return html.Div(className="book-empty", children=[
         html.Div(className="book-card book-empty-main", children=[
             html.Div("No blotter loaded", className="book-empty-title"),
@@ -304,7 +303,6 @@ def empty_state(data: Optional[dict] = None, idx: str = "book") -> html.Div:
             html.Div(className="book-empty-actions", children=[
                 html.Button("Upload blotter", id={"type": EMPTY_UPLOAD_TYPE, "idx": idx}, n_clicks=0, className="btn",
                             title="Choose the blotter file (the same upload as the top bar's)"),
-                *([sample_book.view_link(idx, small=False)] if not sample_book.is_sample_active() else []),
             ])]),
         html.Div(className="book-card book-empty-next", children=[
             html.Div("What happens next", className="book-h"),

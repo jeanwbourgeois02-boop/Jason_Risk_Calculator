@@ -189,7 +189,7 @@ def components(db_path: Union[str, Path], build: str = "") -> list:
 
 def warm_screens(get_db_path: Callable[[], object], after_write: bool = False) -> None:
     """Start the screens' warm-up for the database's new revision (ui/warmup.py, debounced).
-    An upload or a book switch warms at once; the poll's own call (`after_write=True`) waits
+    An upload warms at once; the poll's own call (`after_write=True`) waits
     while a Bloomberg pull or its backfill is running and only notes the warm-up as owed
     (`warmup.after_write`), so the warm-up never fights the pull for the CPU and the lock."""
     try:

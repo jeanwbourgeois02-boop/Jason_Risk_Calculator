@@ -146,7 +146,7 @@ Two warnings: most real value dates are broken dates, so many forward marks will
 - **Never run live.** Zero official marks in the database; every valuation is Unavailable or on the labelled BNP fallback dated 2026-08-17. The first run on the Bloomberg PC is the next step (section 8).
 - **The database on this PC is stale.** It was loaded before the option parser recorded strikes, and still carries the retired BNP trades and positions. Move it aside and re-upload the blotter before the first live run.
 - The database is `data/raw/risk.db`. It is not in git. Back it up: it holds the trades, the mark history behind Daily / MTD / YTD and the frozen settlements.
-- A fresh computer needs nothing copied across: launch creates an empty database; upload a blotter to fill it. the sample book is reached from inside the app ("View the sample book" on the empty Book tab, "Back to my book" returns), on a throw-away database built from `data/sample/blotter_sample.csv` at synthetic marks; the real database holds only what you upload.
+- A fresh computer needs nothing copied across: launch creates an empty database; upload a blotter to fill it. There is no sample book in the app; the real database holds only what you upload.
 
 ---
 
