@@ -210,7 +210,8 @@ def family_label(trade: dict) -> str:
 
 
 def _search_blob(trade: dict) -> str:
-    parts: List[str] = [str(trade.get("trade") or ""), str(trade.get("what_it_is") or "")]
+    parts: List[str] = [str(trade.get("trade") or ""), str(trade.get("what_it_is") or ""),
+                        str(trade.get("what_words") or "")]     # the Book's sentence ("short 30 SHFE copper ...")
     for leg in trade.get("legs") or []:
         parts.append(str(leg.get("name") or ""))
         parts.append(str(leg.get("contract_id") or ""))

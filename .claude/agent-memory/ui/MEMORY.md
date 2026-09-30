@@ -46,4 +46,5 @@
 - [Column funnels 2026-09-29](column-funnels-2026-09-29.md) — filters only as heading funnels (trade_filter kit), no bar above tables; triggered-only sync; JS re-open; ui_check names kept
 - [Book headline/size/flags 2026-09-30](book-headline-size-flags-2026-09-30.md) — no line above the card (total row carries Gross/Net/flags), signed Size form, flag names, readable muted colours
 - [Look pass 2 2026-09-30](look-pass-2-2026-09-30.md) — risk-monitor vibe: 13px kit + column hairlines, sort glyph, gold buttons, tab titles; money in full, losses in brackets
+- [Book size in words 2026-09-30](book-size-in-words-2026-09-30.md) — Size column gone; What it is says "Short 30 SHFE copper vs long 4 COMEX copper, Nov/Dec26"; builder rules
 - [No date picker 2026-09-30](no-date-picker-2026-09-30.md) — as-of = today NY; ?as_of= URL query for ui_check; hidden store keeps the poll's output shape

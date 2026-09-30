@@ -1005,11 +1005,12 @@ p { margin: 8px 0; }
 .tk-table .tk-chev { color: var(--muted); font-size: 10px; display: inline-block; width: 12px; }
 .tk-table .tk-name { font-weight: 700; }
 .tk-table .tk-sub { color: var(--muted); font-weight: 400; font-size: 11.5px; }
-.tk-table td.tk-what { max-width: 320px; white-space: nowrap; }
-/* What it is: the text clipped with an ellipsis, the hedge coverage beside it always whole (checker A) */
-.tk-table td.tk-what .tk-clip { display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis;
+.tk-table td.tk-what { max-width: 530px; white-space: nowrap; }
+/* What it is: the text clipped with an ellipsis, the hedge coverage beside it always whole (checker A);
+   since 2026-09-30 it says each side's lots in words and has the Size column's width */
+.tk-table td.tk-what .tk-clip { display: inline-block; max-width: 510px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; vertical-align: bottom; }
-.tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 200px; }
+.tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 400px; }
 .tk-table .tk-bold { font-weight: 700; }
 .tk-table .tk-flags, .tk-table .tk-flag-dot { color: var(--warn); font-weight: 700; cursor: help; white-space: nowrap; }
 .tk-table .tk-flag-dot { margin-left: 4px; font-size: 9px; vertical-align: middle; }
@@ -1123,9 +1124,9 @@ p { margin: 8px 0; }
   .book-main .tk-table-slot .book-table.book-grid thead th { position: sticky; }
   .book-main .tk-table-slot .book-table.book-grid tr.book-total td { position: sticky; }
   .book-main .book-table.book-grid td, .book-main .book-table.book-grid th { padding-left: 5px; padding-right: 5px; }
-  .tk-table td.tk-what { max-width: 190px; }
-  .tk-table td.tk-what .tk-clip { max-width: 180px; }
-  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 96px; }
+  .tk-table td.tk-what { max-width: 280px; }
+  .tk-table td.tk-what .tk-clip { max-width: 270px; }
+  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 170px; }
   .tf-bar.blotter-filter-bar { flex-wrap: wrap; }
   /* a cell's markers (Excl. 2, Mock history) go under its figure rather than widen the column */
   .book-main .book-table.book-grid td { white-space: normal; }
@@ -1134,9 +1135,9 @@ p { margin: 8px 0; }
 }
 @media (max-width: 1200px) {
   .book-main .book-table.book-grid td, .book-main .book-table.book-grid th { font-size: 12px; padding-left: 4px; padding-right: 4px; }
-  .tk-table td.tk-what { max-width: 140px; }
-  .tk-table td.tk-what .tk-clip { max-width: 130px; }
-  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 60px; }
+  .tk-table td.tk-what { max-width: 210px; }
+  .tk-table td.tk-what .tk-clip { max-width: 200px; }
+  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 120px; }
 }
 
 /* wave 2: data */
@@ -1249,8 +1250,6 @@ p { margin: 8px 0; }
 .tk-table tr.book-total td.tk-total-what { white-space: nowrap; }
 .tk-table .tk-total-k { font-weight: 600; color: var(--ink-2); }
 .tk-table .tk-total-sep { color: var(--muted); font-weight: 400; }
-.tk-table td.tk-size { white-space: nowrap; font-variant-numeric: tabular-nums; text-align: right; }
-.tk-table td.tk-size .tk-more { margin-left: 5px; }
 .tk-table td.tk-flags-cell { text-align: left; white-space: nowrap; }
 .tk-table .tk-flags-more { font-weight: 600; }
 
@@ -1338,18 +1337,14 @@ p { margin: 8px 0; }
 .subtab { font-size: 13.5px; }
 /* a wide screen (Jason's): What it is shows whole rather than clipped at the 1680 px width */
 @media (min-width: 2000px) {
-  .tk-table td.tk-what { max-width: 560px; }
-  .tk-table td.tk-what .tk-clip { max-width: 540px; }
-  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 400px; }
+  .tk-table td.tk-what { max-width: 720px; }
+  .tk-table td.tk-what .tk-clip { max-width: 700px; }
+  .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 580px; }
 }
 .blotter-upload-line .book-section-title { font-size: 11px; }
 
-/* Book Size / Entry / Now / Move, 2026-09-30 (user: "on the book the size/entry is messy still"): the
-   lots under "Size (lots)" in two right-aligned slots so the " / " lines up; the level's unit once per
-   row, on Now, in a fixed-width slot so the Now figures line up; Entry and Move bare. */
-.tk-table td.tk-size .tk-sz { display: inline-flex; align-items: baseline; justify-content: flex-end; }
-.tk-table td.tk-size .tk-sz-a { display: inline-block; min-width: 2.4em; text-align: right; }
-.tk-table td.tk-size .tk-sz-b { display: inline-block; min-width: 2.4em; text-align: left; }
-.tk-table td.tk-size .tk-sz-sep { display: inline-block; width: 1.2em; text-align: center; color: var(--muted); }
+/* Book Entry / Now / Move, 2026-09-30 (user: "on the book the size/entry is messy still"): the level's
+   unit once per row, on Now, in a fixed-width slot so the Now figures line up; Entry and Move bare. The
+   Size column left the same day: the lots are in What it is, in words. */
 .tk-table td.tk-now .tk-unit-slot { display: inline-block; min-width: 50px; text-align: left; }
 .tk-table td.tk-level { white-space: nowrap; font-variant-numeric: tabular-nums; }

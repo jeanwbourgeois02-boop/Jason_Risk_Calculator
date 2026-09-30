@@ -16,7 +16,7 @@ read anything", "the size column is cooked - looks horrible".
   total row (Book: Gross · Net in the What-it-is cell, "9 flags · 2 red" in Flags). `book.headline` now
   returns only the filtered MTD / YTD pair (`tk-strip-figs`) or None; `HEADLINE_ID` is a Span inside
   `.tk-strip-lead` next to the title (ui_check still fills it by id).
-- Size = `book.size_parts`: signed lots per side "+30 / −4" + grey "lots" suffix; outright or options the
+- (Superseded 2026-09-30: the Size column left; see book-size-in-words-2026-09-30.) Size = `book.size_parts`: signed lots per side "+30 / −4" + grey "lots" suffix; outright or options the
   legs' lots (long / short sums); FX / metal forwards and FX options the notional in its base unit
   ("−100 oz", "+10.0m EUR"); several parts = the largest + a "+N" (rest on hover). CSV "Size" = `size_text`.
 - Flags cell = `flag_name` of the most severe (`FLAG_NAMES` order, red first) + " +N"; column left-aligned.
