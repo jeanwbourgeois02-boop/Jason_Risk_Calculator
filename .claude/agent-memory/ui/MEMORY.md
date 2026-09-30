@@ -48,3 +48,4 @@
 - [Look pass 2 2026-09-30](look-pass-2-2026-09-30.md) — risk-monitor vibe: 13px kit + column hairlines, sort glyph, gold buttons, tab titles; money in full, losses in brackets
 - [Book size in words 2026-09-30](book-size-in-words-2026-09-30.md) — Size column gone; What it is says "Short 30 SHFE copper vs long 4 COMEX copper, Nov/Dec26"; builder rules
 - [No date picker 2026-09-30](no-date-picker-2026-09-30.md) — as-of = today NY; ?as_of= URL query for ui_check; hidden store keeps the poll's output shape
+- [Quiet terminal 2026-09-30](quiet-terminal-2026-09-30.md) — one INFO line per upload, warm-up at DEBUG, WARNING only for real failures; research DB absent = not available

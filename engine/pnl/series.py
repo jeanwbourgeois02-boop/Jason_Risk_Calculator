@@ -14,7 +14,7 @@ Cost. A day is valued once per database revision (path, mtime, size) and kept IN
 second call, or the next as-of on the same revision, costs only its new days. Nothing is ever
 written to the database (a write would change the file's mtime and invalidate every
 mtime-keyed cache in a loop: CLAUDE.md "Guard rails"). A new revision of a file drops the
-entries of its older revisions. Each call logs how many full re-pricings it cost.
+entries of its older revisions. Each call logs how many full re-pricings it cost, at debug level.
 """
 from __future__ import annotations
 
@@ -248,8 +248,8 @@ def daily_series(conn: sqlite3.Connection, as_of: str, db_key: Optional[tuple] =
                     _put(_FILLED, key, hit)
             frames[day] = hit.copy()
     seconds = time.perf_counter() - started
-    log.info("daily series to %s: %d days, %d full re-pricings of the book (%d from memo), %.2fs",
-             as_of, len(days), repricings, len(days) - repricings, seconds)
+    log.debug("daily series to %s: %d days, %d full re-pricings of the book (%d from memo), %.2fs",
+              as_of, len(days), repricings, len(days) - repricings, seconds)
     return DailySeries(as_of, tuple(days), frames, frozenset(holidays), revision, repricings, seconds, first)
 
 

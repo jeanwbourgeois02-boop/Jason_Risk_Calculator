@@ -57,9 +57,11 @@ _STATE = {"running": False, "pending": False, "db_path_fn": None, "as_of_fn": No
 MAX_RERUNS = 3            # a database changing on every run (a pull mid-write) is left to the next call
 
 # The last completed run, for the Data tab's diagnostics: {started_at (UTC ISO), finished_at,
-# db_path, as_of, seconds {step: s}, total, ok, reason, errors {step: sentence}, runs (count)}.
+# db_path, as_of, seconds {step: s}, total, ok, reason, errors {step: sentence}, runs (count),
+# research ('' when warmed, else why the research app's data is not available on this PC)}.
 last_run: Dict[str, object] = {}
 _RUNS = 0
+_SAID: set = set()        # the "research not available" reasons already logged (once per process)
 
 
 def status() -> dict:
@@ -188,7 +190,12 @@ def _run_once(db_path_fn, as_of_fn) -> bool:
     if not path or not Path(path).exists():
         info["reason"] = f"no database at {path or '(none)'}"
     else:
-        step("research", lambda: _research(path))
+        # The research app's database may simply not be on this PC: that is "not available", kept in
+        # `research`, never a failed step; a real error while warming it is one.
+        info["research"] = step("research", lambda: _research(path)) or ""
+        if info["research"] and info["research"] not in _SAID:
+            _SAID.add(info["research"])
+            log.debug("warm-up: research not available (%s)", info["research"])
         step("universe", _universe)
         from ui.app import connect_readonly
         conn = connect_readonly(path)
@@ -213,17 +220,25 @@ def _run_once(db_path_fn, as_of_fn) -> bool:
         last_run.clear()
         last_run.update(info)
     steps = ", ".join(f"{k} {v:.1f}s" for k, v in seconds.items() if k not in ("as_of", "trades"))
-    tail = f"; failed: {', '.join(sorted(errors))}" if errors else ""
-    log.info("screens warm-up for %s: %.1fs (%s)%s%s", as_of, total, steps or "nothing to do",
-             f"; {info['reason']}" if info["reason"] else "", tail)
+    # Quiet terminal (user, 2026-09-30): a run is DEBUG; only a real step failure is a WARNING.
+    for name in sorted(errors):
+        log.warning("Screens warm-up: step %s failed: %s", name, errors[name])
+    log.debug("screens warm-up for %s: %.1fs (%s)%s", as_of, total, steps or "nothing to do",
+              f"; {info['reason']}" if info["reason"] else "")
     return changed
 
 
-def _research(path: str) -> None:
+def _research(path: str) -> str:
+    """'' when warmed; the reason when the research app's data is not available on this PC (not a
+    failure). A real error while warming (`warm`'s "warm-up stopped (...)") raises: a failed step."""
     from engine.risk.commodity_history import warm
     out = warm(book_db=path)
-    if not out.get("ok") and out.get("reason"):
-        raise RuntimeError(str(out["reason"]))
+    reason = str(out.get("reason") or "")
+    if out.get("ok") or not reason:
+        return ""
+    if reason.startswith("warm-up stopped ("):
+        raise RuntimeError(reason)
+    return reason
 
 
 def _universe() -> None:

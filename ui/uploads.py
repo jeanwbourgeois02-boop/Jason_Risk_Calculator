@@ -183,7 +183,29 @@ def normalise_report(raw) -> dict:
             # every row loads (2026-09-29): rows on file whose contract is not recognised
             "need_fix": _count(raw.get("need_fix")) or 0,
             "notes": [str(n).strip() for n in notes if str(n).strip()],
+            # the merge's counts as the ingest reported them, for the one log line (`log_line`)
+            "merge": {k: _count(raw.get(k)) for k in ("added", "replaced", "removed")
+                      if _count(raw.get(k)) is not None},
             "structured": True}
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def log_line(filename, report: dict) -> str:
+    """The upload in one line for the terminal; the whole paragraph stays in `upload_report` and
+    on the Blotter tab (user, 2026-09-30: the terminal carried every note twice)."""
+    merge = report.get("merge") or {}
+    if {"added", "replaced", "removed"} <= set(merge):
+        loaded = (f"{_plural(merge['added'] + merge['replaced'], 'trade')} loaded ({merge['added']} added, "
+                  f"{merge['replaced']} replaced, {merge['removed']} removed as cancelled)")
+    else:
+        loaded = "loaded"
+    need_fix = report.get("need_fix", 0) or 0
+    fix = f", {_plural(need_fix, 'row')} to fix" if need_fix else ""
+    return (f"Upload: {filename} -- {loaded}; {_plural(report['rejects'], 'row')} rejected{fix}, "
+            f"{_plural(report['warnings'], 'warning')}, {_plural(len(report['notes']), 'note')}: see the Blotter tab.")
 
 
 def is_sticky(report: dict) -> bool:
@@ -342,9 +364,9 @@ def register(app, get_db_path):
             report = run_import(decode(contents), filename, db_path)
         except Exception as exc:
             return (html.Span(f"Import failed; no data saved. {exc}", className="source-result--error"), *keep)
-        # The box is transient; the log keeps the whole sentence, the counters and the notes.
-        log.info("%s (blotter): %s [rejects=%s warnings=%s notes=%s]", filename, report["message"],
-                 report["rejects"], report["warnings"], report["notes"])
+        # One short line in the terminal; the whole paragraph is in `upload_report` and on the Blotter.
+        log.info("%s", log_line(filename, report))
+        log.debug("%s (blotter): %s", filename, report["message"])
         revision.warm_screens(get_db_path)   # fill the screens' caches for the new book (ui/warmup.py)
         from ui.app import load_summary
         data = load_summary(db_path)

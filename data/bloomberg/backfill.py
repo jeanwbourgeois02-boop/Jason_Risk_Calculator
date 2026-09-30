@@ -472,6 +472,71 @@ def _chunks(tickers: Iterable[str], key_of: Dict[str, str]) -> List[List[str]]:
     return [sorted(c) for c in chunks]
 
 
+class _Problem(str):
+    """A log line that reports a problem: a day ERROR or NO_CLOSES, a request or step that
+    failed, a stopped run, the ledger's re-freeze or unrealisable news, days that cannot be
+    completed yet. Printed like any other line on the command-line path; the only lines the
+    in-app path's `_QuietLog` lets through (2026-09-30)."""
+
+
+def _problem(message: str) -> str:
+    """`message` marked as a problem line (see `_Problem`); still a plain string to any log."""
+    return _Problem(message)
+
+
+class _QuietLog:
+    """The in-app backfill's log (2026-09-30, user: the terminal was cluttered after every
+    "Pull Bloomberg now"): the problem lines (`_Problem`) go to `emit` as they are, every
+    other line (the per-day DONE lines, the range header, the points divisors, "realised
+    after the last day: 0") goes nowhere, since the status file and the Data tab hold them.
+    `start_auto_backfill` prints one summary line at the end (`_summary_line`). Never raises."""
+
+    def __init__(self, emit: Callable[[str], None] = print):
+        self.emit = emit
+
+    def __call__(self, message) -> None:
+        if isinstance(message, _Problem):
+            try:
+                self.emit(str(message))
+            except Exception:  # noqa: BLE001 -- the terminal is a courtesy, never a failure of the run
+                pass
+
+
+def _summary_line(results: List[dict], report: dict, days_block: Optional[dict] = None, crashed: str = "") -> str:
+    """The one line the in-app backfill prints when it finishes (2026-09-30): the past days
+    filled and their range, the history requests sent and failed, the values refused for not
+    being numbers, and the marks still missing on the latest day worked (from the status
+    block's "days", else that day's own result), the clauses with nothing to say left out."""
+    if crashed:
+        return f"Bloomberg history: {crashed}; see the Data tab."
+    req = report.get("requests") or {}
+    sent, failed = int(req.get("sent") or 0), int(req.get("failed") or 0)
+    asked = (f"{sent} request{'' if sent == 1 else 's'}, {failed} failed" if sent
+             else "nothing sent to Bloomberg")
+    worked = [r for r in results if r.get("status") != "SKIPPED"]
+    if not worked:
+        line = f"Bloomberg history: no past day to fill, {asked}"
+    else:
+        days = sorted(r["day"] for r in worked)
+        done = sum(1 for r in worked if r.get("status") == "DONE")
+        span = days[0] if days[0] == days[-1] else f"{days[0]} to {days[-1]}"
+        count = (f"{done} past day{'' if done == 1 else 's'}" if done == len(worked)
+                 else f"{done} of {len(worked)} past days")
+        line = f"Bloomberg history: {count} filled ({span}), {asked}"
+        latest = days[-1]
+        if days_block is not None:
+            missing = int((days_block.get(latest) or {}).get("missing_count") or 0)
+        else:
+            last = next(r for r in worked if r["day"] == latest)
+            missing = len(last.get("missing_pairs") or []) + len(last.get("missing_marks") or [])
+        if missing:
+            line += f"; {missing} mark{'' if missing == 1 else 's'} still missing on the latest day: see the Data tab"
+    refused = int(report.get("not_number_count") or 0)
+    if refused:
+        line += f"; {refused} value{'' if refused == 1 else 's'} not a number, left out"
+    return line + "."
+
+
 class _Asks:
     """Every Bloomberg history request of one backfill() call, and what went wrong in the run.
 
@@ -514,7 +579,7 @@ class _Asks:
         if len(self.errors) < MAX_STATUS_ERRORS:
             self.errors.append({"step": step, "label": ASK_LABELS.get(step, step), "day": day, "reason": reason})
         try:
-            self.log(f"  {day + '  ' if day else ''}{ASK_LABELS.get(step, step)}: {reason}")
+            self.log(_problem(f"  {day + '  ' if day else ''}{ASK_LABELS.get(step, step)}: {reason}"))
         except Exception:  # noqa: BLE001
             pass
         return reason
@@ -1618,9 +1683,11 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         log(f"Backfill {start} .. {end}: {len(days)} business days, {len(work)} to compute, {len(pairs)} pairs "
             f"(SPOT + FWD_OUTRIGHT + FUTURE_PX).")
         if realise_settled is None:
-            log("  note: engine.pnl.ledger.realise_settled not importable; marks only, no realisation this run.")
+            log(_problem("  note: engine.pnl.ledger.realise_settled not importable; marks only, no realisation "
+                         "this run."))
         if price_close is None:
-            log("  note: engine.options.store.price_close not importable; no past day's FX options are priced this run.")
+            log(_problem("  note: engine.options.store.price_close not importable; no past day's FX options are "
+                         "priced this run."))
         if not work:
             return [_skipped(d.isoformat()) for d in days]
         span_end = max(work)
@@ -1842,7 +1909,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                 day, p = d.isoformat(), prepared[d]
                 if p.get("error") or d in not_saved:
                     reason = p.get("error") or not_saved[d]
-                    log(f"  {day}  ERROR  {reason}")
+                    log(_problem(f"  {day}  ERROR  {reason}"))
                     results[d] = {"day": day, "status": "ERROR", "closes": 0, "fwd_outrights": 0, "future_px": 0,
                                   "missing_pairs": p.get("missing_pairs", []),
                                   "missing_pair_reasons": p.get("pair_reasons", {}),
@@ -1851,7 +1918,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     _told(results[d])
                     continue
                 if p["no_closes"]:
-                    log(f"  {day}  NO_CLOSES  (holiday or Bloomberg returned nothing; nothing written)")
+                    log(_problem(f"  {day}  NO_CLOSES  (holiday or Bloomberg returned nothing; nothing written)"))
                     results[d] = {"day": day, "status": "NO_CLOSES", "closes": 0, "fwd_outrights": 0, "future_px": 0,
                                   "missing_pairs": p["missing_pairs"], "missing_pair_reasons": p["pair_reasons"],
                                   "missing_marks": [], "realised": None, "unrealisable": [], **_step_keys()}
@@ -1991,19 +2058,21 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         _failed("ledger", exc, "the ledger")
                 _release_lock(conn)
                 status = "ERROR" if step_errors else "DONE"
-                log(f"  {day}  {status}  closes={len(p['spot_rows'])}  fwd_outrights={fwd_written}  "
-                    f"future_px={len(p['fut_rows'])}"
-                    + (f"  lme={len(p['lme_rows'])}" if p["lme_rows"] else "")
-                    + f"  missing={len(p['missing_pairs']) + len(missing_marks)}"
-                    f"  vol_quotes={vol_written}  curve_quotes={curve_written}"
-                    + (f"  missing_inputs={len(missing_inputs)}" if missing_inputs else "")
-                    + f"  options={options_priced}"
-                    + (f"  futures_options={futures_options_priced}" if futures_options_priced else "")
-                    + (f"  options_skipped={len(options_skipped)}" if options_skipped else "")
-                    + (f"  options_closed_out={len(options_closed_out)}" if options_closed_out else "")
-                    + (f"  {options_note}" if options_note else "")
-                    + f"  realised={realised}  {flag}"
-                    + (f"  stopped: {', '.join(step_errors)}" if step_errors else ""))
+                line = (f"  {day}  {status}  closes={len(p['spot_rows'])}  fwd_outrights={fwd_written}  "
+                        f"future_px={len(p['fut_rows'])}"
+                        + (f"  lme={len(p['lme_rows'])}" if p["lme_rows"] else "")
+                        + f"  missing={len(p['missing_pairs']) + len(missing_marks)}"
+                        f"  vol_quotes={vol_written}  curve_quotes={curve_written}"
+                        + (f"  missing_inputs={len(missing_inputs)}" if missing_inputs else "")
+                        + (f"  options={options_priced}" if options_priced is not None else "")
+                        + (f"  futures_options={futures_options_priced}" if futures_options_priced else "")
+                        + (f"  options_skipped={len(options_skipped)}" if options_skipped else "")
+                        + (f"  options_closed_out={len(options_closed_out)}" if options_closed_out else "")
+                        + (f"  {options_note}" if options_note else "")
+                        + (f"  realised={realised}" if realised is not None else "") + f"  {flag}"
+                        + (f"  stopped: {', '.join(step_errors)}" if step_errors else ""))
+                # a problem line (the in-app log keeps it) when a step stopped or the ledger has news
+                log(_problem(line) if step_errors or unrealisable or ledger["refrozen_summary"] else line)
                 results[d] = {"day": day, "status": status, "closes": len(p["spot_rows"]),
                               "fwd_outrights": fwd_written, "future_px": len(p["fut_rows"]),
                               "missing_pairs": p["missing_pairs"], "missing_pair_reasons": p["pair_reasons"],
@@ -2025,8 +2094,11 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     _release_lock(conn)
                     led = realise_settled(conn, span_end.isoformat())
                     ledger = _record_ledger(db_path, "after_last_day", ledger_block(led, span_end.isoformat()))
-                    log(f"  realised after the last day: {ledger['realised']}"
-                        + (f"  {ledger['refrozen_summary']}" if ledger["refrozen_summary"] else ""))
+                    unrealisable = ledger.get("unrealisable") or []
+                    line = (f"  realised after the last day: {ledger['realised']}"
+                            + (f"  {ledger['refrozen_summary']}" if ledger["refrozen_summary"] else "")
+                            + (f"  unrealisable={[u.get('trade_id') if isinstance(u, dict) else u for u in unrealisable]}" if unrealisable else ""))
+                    log(_problem(line) if ledger["refrozen_summary"] or unrealisable else line)
                 except Exception as exc:  # noqa: BLE001 -- as above: report and move on
                     _rollback(conn)
                     asks.error("ledger", f"realise_settled after the last day raised: {_plain_error(exc)}",
@@ -2398,10 +2470,13 @@ def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) ->
         if block["realised"]:
             log(f"Auto-backfill: {block['realised']} settled trade(s) frozen after the backfill.")
         if block["refrozen_summary"]:
-            log(f"Auto-backfill: {block['refrozen_summary']}.")
+            log(_problem(f"Auto-backfill: {block['refrozen_summary']}."))
+        if block["unrealisable"]:
+            ids = [u.get("trade_id") if isinstance(u, dict) else u for u in block["unrealisable"]]
+            log(_problem(f"Auto-backfill: {len(ids)} settled trade(s) could not be frozen: {ids}."))
         return block
     except Exception as exc:  # noqa: BLE001 -- as in backfill(): report and move on
-        log(f"  realise_settled raised: {exc!r}")
+        log(_problem(f"  realise_settled raised: {exc!r}"))
         _report_error(db_path, "closing", f"the closing realise_settled raised: {_plain_error(exc)}",
                       today.isoformat())
         return None
@@ -2533,11 +2608,12 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         planned = True
         if not due:
             log("Auto-backfill: history already complete." if not signatures else
-                f"Auto-backfill: {len(signatures)} day(s) cannot be completed yet; nothing asked of Bloomberg: {waiting}.")
+                _problem(f"Auto-backfill: {len(signatures)} day(s) cannot be completed yet; nothing asked of "
+                         f"Bloomberg: {waiting}."))
             _remaining(0)
             return []                                 # the closing step runs below: the backfill has tried
         if waiting:
-            log(f"Auto-backfill: {waiting}.")
+            log(_problem(f"Auto-backfill: {waiting}."))
         order = [d for d in refs if d in due] + sorted((d for d in due if d not in refs), reverse=True)
         log(f"Auto-backfill: {len(order)} incomplete day(s) between {min(order)} and {max(order)}, "
             f"reference dates first, then newest first.")
@@ -2552,11 +2628,11 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                      session_factory=session_factory, host=host, port=port, log=log, scale_fetch=scale_fetch,
                      order=order, on_day=_on_day, quote_fetch=quote_fetch, on_stage=on_stage)
         except Exception as exc:  # noqa: BLE001 -- recorded; the closing step and the bookkeeping still run
-            log(f"Auto-backfill: the backfill stopped: {exc!r}")
+            log(_problem(f"Auto-backfill: the backfill stopped: {exc!r}"))
             _report_error(db_path, "plan", f"the backfill stopped: {_plain_error(exc)}")
         return results
     except Exception as exc:  # noqa: BLE001 -- the listing of the days raised: said, and the closing step runs
-        log(f"Auto-backfill: the list of days could not be built: {exc!r}")
+        log(_problem(f"Auto-backfill: the list of days could not be built: {exc!r}"))
         _report_error(db_path, "plan", f"the list of past days to backfill could not be built: {_plain_error(exc)}")
         return results
     finally:
@@ -2849,13 +2925,17 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
 
     def _run():
         crashed = ""
+        results: List[dict] = []
         try:
             try:
                 _publish({"running": True, "reason": ""})
                 progress.stage("listing the past days that lack a close")
-                auto_backfill(db_path, host=host, port=port, fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
-                              session_factory=session_factory, scale_fetch=scale_fetch, quote_fetch=quote_fetch,
-                              on_progress=_on_progress, on_stage=progress.stage)
+                # the app's terminal gets the problem lines only, and one summary line below
+                # (2026-09-30); the command-line backfill keeps its full table
+                results = auto_backfill(db_path, host=host, port=port, fetch=fetch, fwd_fetch=fwd_fetch,
+                                        fut_fetch=fut_fetch, session_factory=session_factory,
+                                        scale_fetch=scale_fetch, quote_fetch=quote_fetch, log=_QuietLog(),
+                                        on_progress=_on_progress, on_stage=progress.stage) or []
             except Exception as exc:  # never let a background thread take the process down
                 crashed = f"auto-backfill failed: {exc!r}"
                 _publish({"running": False, "reason": crashed})
@@ -2881,6 +2961,10 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                 except Exception:  # noqa: BLE001 -- the status file is a report; the lock must still go
                     pass
                 progress.finish(report, crashed)
+                try:
+                    print(_summary_line(results, report, _days_block.get(key), crashed))
+                except Exception:  # noqa: BLE001 -- the terminal line is a courtesy
+                    pass
             finally:
                 _auto_lock.release()
 
