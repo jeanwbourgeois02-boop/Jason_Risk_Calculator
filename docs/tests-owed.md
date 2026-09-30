@@ -85,3 +85,7 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 
 - Fix: tests/test_risk_cli.py::test_start_reexecs_in_venv_when_outside must also stub `venv_python_broken` (on a PC with no real `.venv\pyvenv.cfg` it falls back to the mocked call and runs setup).
 - New coverage owed: `venv_python_broken` / `_venv_base_present` (cfg names a missing Python, `home` only, no cfg); `cmd_start` rebuilding a broken venv and rebuilding once when the imports fail after pip; the packages stamp written only after setup's import check; the `chelsea` block's PATH refresh and `.venv` fallback.
+
+## LME monthly ticker, two-digit year (2026-09-30): owed, not run
+
+- `engine.lme.monthly_ticker` now builds 'LPV26 Comdty' (Bloomberg's LME page), not 'LPV6'. Re-pin the one-digit literals: tests/test_lme.py:187,192 ('LPV26', 'LPZ28'); tests/test_ticker_check.py:536,549,572; tests/test_live.py:1942-1945 ('LPZ26 Comdty'); tests/test_backfill_commodity.py:387 ('LPX26 Comdty').

@@ -8,7 +8,9 @@ Every ticker here is a best guess until the Bloomberg check confirms it on a ter
 - 3 months: 'LM<code>DS03 Comdty' ('LMCADS03 Comdty'), the rolling 3-month price, a
   FWD_OUTRIGHT at the 3-month date of the curve's day.  # unverified
 - monthly: the dated third-Wednesday contract on contract-master's Bloomberg root, in
-  Bloomberg's live one-digit-year form ('LPV6 Comdty' for copper October 2026), a
+  Bloomberg's two-digit-year form ('LPV26 Comdty' for copper October 2026, as Bloomberg's
+  LME ticker page gives it: 'LAN24 Comdty', 'LXV26 Comdty'; the one-digit 'LPV6 Comdty' is
+  rejected), a
   FWD_OUTRIGHT at that month's prompt. The dated form is used rather than the generics
   ('LP1 Comdty') because a generic's month depends on Bloomberg's own roll rule, which is not
   known here, and a pillar on the wrong date is a wrong mark.  # unverified: that Bloomberg
@@ -35,9 +37,10 @@ def three_month_ticker(root_id: str) -> str:
 
 
 def monthly_ticker(root_id: str, year: int, month: int) -> str:
-    """'LPV6 Comdty' for 'LME:CA' October 2026.  # unverified"""
+    """'LPV26 Comdty' for 'LME:CA' October 2026: root, month code, two-digit year (Bloomberg's
+    LME ticker page, 2026-09-30).  # unverified"""
     root = metal_root(root_id)
-    return f"{padded_root(root.bbg_root)}{month_code(month)}{int(year) % 10} {root.bbg_yellow_key}"
+    return f"{padded_root(root.bbg_root)}{month_code(month)}{int(year) % 100:02d} {root.bbg_yellow_key}"
 
 
 def lme_curve_tickers(root_id: str, as_of: DateLike) -> list[dict]:
