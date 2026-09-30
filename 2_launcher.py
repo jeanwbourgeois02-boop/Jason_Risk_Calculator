@@ -357,15 +357,51 @@ def chelsea_available() -> list:
     return rows
 
 
-def venv_python_runs() -> bool:
+def venv_python_runs(py: Path | None = None) -> bool:
     """False when .venv exists but its interpreter no longer starts: the Python it was
     created from was removed or upgraded (Windows venvs hold a `home` path, not a copy),
-    the case after a python.org upgrade. Such a venv is rebuilt by `setup`, never trusted."""
+    the case after a python.org upgrade. Such a venv is rebuilt by `setup`, never trusted.
+    `py` defaults to .venv's interpreter."""
     try:
-        return subprocess.call([str(VENV_PY), "-c", "pass"], stdout=subprocess.DEVNULL,
+        return subprocess.call([str(py or VENV_PY), "-c", "pass"], stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL) == 0
     except OSError:
         return False
+
+
+def _venv_base_present(cfg: Path) -> bool | None:
+    """Whether the base interpreter a venv's `pyvenv.cfg` names is still on disk: its
+    `executable` line (Python 3.11+), else a python in its `home` folder. None when the file
+    cannot be read or names neither. A file-system check only, no process started."""
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    keys = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            keys[key.strip().lower()] = value.strip()
+    if keys.get("executable"):
+        return os.path.lexists(keys["executable"])
+    if keys.get("home"):
+        names = ("python.exe",) if os.name == "nt" else ("python3", "python")
+        return any(os.path.lexists(os.path.join(keys["home"], n)) for n in names)
+    return None
+
+
+def venv_python_broken(venv: Path | None = None) -> bool:
+    """True when the venv's interpreter no longer starts, for `start`, where the no-change
+    path must stay near-instant. The base interpreter named in `pyvenv.cfg` still on disk is
+    trusted without starting a process; only when the file cannot tell, or says the base is
+    gone, does `venv_python_runs()` decide, so a false alarm never rebuilds a working venv."""
+    if venv is None:
+        venv, py = VENV, VENV_PY
+    else:
+        py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if _venv_base_present(venv / "pyvenv.cfg"):
+        return False
+    return not venv_python_runs(py)
 
 
 LONG_PATH_WARN = 110   # characters of ROOT beyond which a package's deepest file can pass MAX_PATH
@@ -531,7 +567,6 @@ def cmd_setup(args) -> int:
     say("[3/7] Application packages")
     run([VENV_PY, "-m", "pip", "install", "--upgrade", "pip", "--quiet"], check=False)
     run([VENV_PY, "-m", "pip", "install", *PACKAGES, *DEV_PACKAGES, "--quiet"])
-    _write_packages_stamp()  # so the first `start` after setup trusts this install (fast path)
     say(f"  OK: {len(PACKAGES) + len(DEV_PACKAGES)} packages installed (see PACKAGES in 2_launcher.py)")
 
     # 4. blpapi (Bloomberg PC only)
@@ -559,6 +594,10 @@ def cmd_setup(args) -> int:
         "print('  OK: database', get_db_path())"
     )
     run([VENV_PY, "-c", check])
+    # Written only once the imports above succeeded (run() stops setup otherwise), so the first
+    # `start` after setup trusts this install (fast path) and a setup that failed partway never
+    # leaves a stamp saying the packages are fine.
+    _write_packages_stamp()
     if _trades_count() == 0:
         say(f"  {EMPTY_DB_LINE}")
 
@@ -665,14 +704,36 @@ def venv_blpapi_ok() -> bool:
     return code == 0
 
 
+def _setup_from_start(*flags: str) -> int:
+    """`setup --skip-tests` (plus `flags`) run by `start` itself; a step that stops setup
+    (its SystemExit) or a .venv that cannot be removed comes back as a non-zero code with its
+    line said, so `start` reports it in its own words instead of a traceback."""
+    try:
+        return cmd_setup(build_parser().parse_args(["setup", "--skip-tests", *flags]))
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            say(str(exc.code))
+        return 0 if exc.code in (None, 0) else 1
+    except OSError as exc:
+        say(f"FAILED: could not rebuild .venv ({exc}); close any running copy of the app and try again.")
+        return 1
+
+
 def cmd_start(args) -> int:
     if not in_venv():
+        # `start` never stops on a .venv it can repair (user, 2026-09-30: "i just want there to
+        # never be issues"). A PC that was never set up (or a fresh clone) is set up here; a
+        # .venv whose Python no longer starts (the Python it was built from was upgraded or
+        # removed) is rebuilt here. The no-change path is a file-system check, no process.
         if not VENV_PY.exists():
-            # A PC that was never set up (or a fresh clone): do the setup here rather than
-            # stopping with "No .venv yet" -- one time, a few minutes.
             say("No .venv yet: running setup first (one time; creates .venv, installs packages, creates the database).")
-            setup_args = build_parser().parse_args(["setup", "--skip-tests"])
-            code = cmd_setup(setup_args)
+            code = _setup_from_start()
+            if code != 0:
+                return code
+        elif venv_python_broken():
+            say("The .venv's Python no longer starts (the Python it was built from was upgraded or removed): "
+                "rebuilding .venv (a few minutes, one time).")
+            code = _setup_from_start("--recreate")
             if code != 0:
                 return code
         if not args.no_sync:
@@ -691,10 +752,16 @@ def cmd_start(args) -> int:
         # when nothing changed; a stale stamp installs PACKAGES then checks the imports). An
         # unconditional install on every start after every update was the single biggest
         # cost on a PC with slow PyPI access (2026-09-17); --refresh-packages is accepted for
-        # old `chelsea` blocks and ignored.
+        # old `chelsea` blocks and ignored. When pip does not bring the imports back, .venv is
+        # rebuilt once from scratch and checked again; only a second failure stops the start.
         if VENV_PY.exists() and not venv_imports_ok():
-            say("FAILED: .venv cannot import every package the app needs, even after pip. Run:  py 2_launcher.py setup")
-            return 1
+            say(".venv cannot import every package the app needs, even after pip: rebuilding .venv once "
+                "(a few minutes).")
+            # A failed rebuild is final: setup's own import check already failed.
+            if _setup_from_start("--recreate") != 0 or not (VENV_PY.exists() and venv_imports_ok()):
+                say("FAILED: .venv cannot import every package the app needs, even after pip and a rebuild "
+                    "of .venv (see above). Run:  py 2_launcher.py setup")
+                return 1
         # blpapi is installed by `setup` only when a Terminal was detected AT SETUP TIME
         # (bloomberg_pc()), and venv_imports_ok() deliberately ignores it, so a PC whose
         # Terminal was installed or logged in after setup ran started the app without the

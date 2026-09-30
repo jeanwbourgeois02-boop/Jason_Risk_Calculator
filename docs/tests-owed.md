@@ -80,3 +80,8 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 - Re-pin or delete: tests pinning "+42.1k" / "−$51.0k" / "USD −6,928" money text, k / m size words ("2.0m USD") and the old Data title (tests/test_header.py, tests/test_ui_smoke.py, tests/test_ui_formatting.py); tests reading `layout().children[0]` of book / pnl / risk / blotter (each now opens on a `tab-header` title).
 - New coverage owed: `formatting.paren` / `count_text`; money in brackets, no "+", full figures; CSV keeps plain "-"; the 17:00 NY roll `header.as_of_after_tick` (its picker test was deleted) and `header.as_of_from_query` (`?as_of=`); Book `size_text` forms and `flag_name`.
 - Book levels (2026-09-30): re-pin tests/test_spread_levels.py:199 `test_an_entry_whose_fx_is_not_on_file_is_na_with_its_reason` (the entry is now estimated from the near spots, `level_estimated["entry"]` names it; blank only with no spot of that currency on any date). New coverage owed: template levels (3-2-1 crack, board crush), options-only premium levels, the `*_estimated` flags; Book "Size (lots)" and the unit on Now only.
+
+## Launcher self-repair (2026-09-30): owed, not run
+
+- Fix: tests/test_risk_cli.py::test_start_reexecs_in_venv_when_outside must also stub `venv_python_broken` (on a PC with no real `.venv\pyvenv.cfg` it falls back to the mocked call and runs setup).
+- New coverage owed: `venv_python_broken` / `_venv_base_present` (cfg names a missing Python, `home` only, no cfg); `cmd_start` rebuilding a broken venv and rebuilding once when the imports fail after pip; the packages stamp written only after setup's import check; the `chelsea` block's PATH refresh and `.venv` fallback.
