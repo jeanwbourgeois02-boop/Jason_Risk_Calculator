@@ -604,7 +604,7 @@ def issues_drawer(items: Optional[Iterable[IssueItem]], title: str = "Data issue
     width = 1 + has_kind + has_where
     rows = []
     for kind, where, reason in parts:
-        if not isinstance(reason, str):
+        if not isinstance(reason, str) and not (kind or where):
             rows.append(html.Tr(html.Td(reason, colSpan=width, className="issues-reason")))
             continue
         cells = []

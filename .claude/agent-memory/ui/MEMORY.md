@@ -1,7 +1,6 @@
 - [Single-flight pricing cache 2026-09-28](single-flight-pricing-cache-2026-09-28.md) — priced_value_book prices once per (db, mtime, date) across threads; raw + filled stores; werkzeug at WARNING in launch; scratch-DB proof recipes
 - The retired screen lanes' notes are in `../ui-shell/` (index there), `../ui-header/`, `../ui-book/` etc.: read `ui-shell/MEMORY.md` first
-- [Sample book switch 2026-09-28](sample-book-switch-2026-09-28.md) — active_db_path holder in ui/app.py; ui/sample_book.py builds data/raw/sample.db from the golden book through today; proof recipe; static callback Inputs always rendered (hide by style)
-- [Pull lock while the sample book is active 2026-09-28](pull-lock-sample-book-2026-09-28.md) — feed_controls.pull_locked / pull_button, click_outcome refuses, _switch_book flips disabled + title; the pattern for any real-book write
+- [Sample book removed 2026-09-30](sample-book-removed-2026-09-30.md) — ui/sample_book.py, link, chip and upload/pull locks gone; ACTIVE_DB kept for tools/tests; older sample notes are history
 - [Screens tidy wave 1 2026-09-28](screens-tidy-wave1-2026-09-28.md) — the display kit (em dash, real minus, price_text, plain names), the header picker + marks chip, Book = header identity, proof recipe
 - [Screens fix pass 2026-09-28](screens-fix-pass-2026-09-28.md) — estimated dates "≈ date" + alert hover, Exposure excl. N, template short names, FX decimals, picker CSS, pattern-id Upload button, test-fix rule as applied
 - [Screens tidy wave 2 2026-09-28](screens-tidy-wave2-2026-09-28.md) — Exposure grid + cards, P&L five-period table with group-by, seven-column roll table, Risk drawer split, Data without the research curve; proof recipe
@@ -54,3 +53,4 @@
 - [Trades card + HK pull time 2026-09-30](trades-card-hk-pull-time-2026-09-30.md) — Data Trades card owns every trade problem (parse check inside), Blotter links to it; pull_time HK; render 15 outputs
 - [Warm-up waits for the pull 2026-09-30](warmup-waits-for-pull-2026-09-30.md) — poll's warm-up owed while progress/backfill running (15 min stale); warm_if_owed each tick; uploads still at once
 - [Book by contract + P&L Contract slice 2026-09-30](book-by-contract-pnl-contract-slice-2026-09-30.md) — book_contracts.rows_of shared, view switch, c- filters, group contract = none on Book/Risk, slice labels
+- [Book two-line What + chips 2026-09-30](book-what-two-lines-chips-2026-09-30.md) — long side first / grey sizes + hedge words, flag chips, "2 spreads" cell, signed moves, research missing said once, z hidden

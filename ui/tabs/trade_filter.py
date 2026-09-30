@@ -474,14 +474,52 @@ def number_funnel(tab: str, state: Optional[dict], col: str, hint: str = NUMBER_
 MOCK_WORDS = "mock history"
 
 
-def research_source() -> Dict[str, str]:
-    """{kind, note}: 'real' | 'mock' | 'unknown' and its one sentence; never raises."""
+def research_source() -> Dict[str, Any]:
+    """{kind, note, missing, tried}: 'real' | 'mock' | 'unknown' and its one sentence; `missing`
+    True when no research database is on this PC (`tried`: the paths looked at, for a hover only);
+    never raises."""
     try:
+        from engine.risk.commodity_history import candidates
         from engine.risk.commodity_history import research_source as read
         src = read() or {}
-        return {"kind": str(src.get("source_kind") or "unknown"), "note": str(src.get("source_note") or "")}
+        missing = not str(src.get("path") or "")
+        tried = ", ".join(str(c.get("path")) for c in candidates()) if missing else ""
+        return {"kind": str(src.get("source_kind") or "unknown"), "note": str(src.get("source_note") or ""),
+                "missing": missing, "tried": tried}
     except Exception as exc:  # noqa: BLE001 -- unknown, said so
-        return {"kind": "unknown", "note": f"the research history's source could not be read ({type(exc).__name__})"}
+        return {"kind": "unknown", "note": f"the research history's source could not be read ({type(exc).__name__})",
+                "missing": False, "tried": ""}
+
+
+# Research data not on this PC (user, 2026-09-30: three drawer lines each dumping the file path were
+# unclear): ONE drawer line per tab, the path on hover only, and every engine reason that only says
+# the database is missing left out of the drawer (`is_research_missing_reason`).
+RESEARCH_MISSING_WHERE = "z, carry, roll-down, hedge %"
+RESEARCH_MISSING_TEXT = "Research data not on this PC: z, carry, roll-down and hedge % are blank"
+_RESEARCH_MISSING = re.compile(r"research history not found|no (commodity|research) (price )?history( database)?\b|"
+                               r"no research database|research database|provider is unknown|no research figures|"
+                               r"research data not on this PC",
+                               re.IGNORECASE)
+
+
+def research_missing(source: Optional[Dict[str, Any]]) -> bool:
+    """True when the research database is not on this PC."""
+    return bool((source or {}).get("missing"))
+
+
+def is_research_missing_reason(text: Any) -> bool:
+    """True for a reason that only says the research data is missing (said once, by `research_issue`)."""
+    return bool(_RESEARCH_MISSING.search(str(text or "")))
+
+
+def research_issue(source: Optional[Dict[str, Any]], where: str = RESEARCH_MISSING_WHERE,
+                   text: str = RESEARCH_MISSING_TEXT) -> Optional[tuple]:
+    """The drawer's one line for the missing research data: (kind, where, the sentence with the paths
+    tried on hover), or None when the research data is there."""
+    if not research_missing(source):
+        return None
+    tried = str((source or {}).get("tried") or "")
+    return ("Research", where, html.Span(text, title=f"Looked for the research database at: {tried}" if tried else None))
 
 
 def research_mark(source: Optional[Dict[str, str]] = None):

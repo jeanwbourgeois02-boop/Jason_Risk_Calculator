@@ -5,6 +5,9 @@ metadata:
   type: feedback
 ---
 
+(Superseded later on 2026-09-30 by the two-line form: see book-what-two-lines-chips-2026-09-30. The rule below,
+sizes said where the contract is named and never a lots-only column, still stands.)
+
 User, 2026-09-30, third time asking: "this shitty, clunky lot this is still around", "the size column is
 cooked". Bare signed numbers ("−30 / +4") in their own column cannot be read without hovering: which
 number is which leg? Never bring back a lots-only column; say the size in words where the contract is named.

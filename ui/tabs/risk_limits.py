@@ -82,12 +82,15 @@ def _lots(value: Any) -> str:
 _PLAIN_REASONS: Tuple[Tuple[str, Optional[str]], ...] = (
     ("no market history", "no FX price history on this PC"),
     ("no commodity history on or before", None),
+    ("no commodity history database", "research data not on this PC"),
+    ("no research database", "research data not on this PC"),
     ("no commodity history", "no commodity price history"),
     ("no commodity row has a history series", "no commodity price history"),
     ("no open commodity futures", "no positions"),
     ("no currency or metal position", "no positions"),
     ("no commodity position", "no positions"),
 )
+RESEARCH_GONE = "research data not on this PC"
 _PATH_TAIL = re.compile(r"[:(]?\s*tried\s+[A-Za-z]:\\.*$|[:(]?\s*tried\s+/.*$")
 # engine words in a reason or a note, and their plain words (applied after the causes)
 _PLAIN_WORDS = (("not in the book series", "not in the book's figures"), ("' series", "' figures"),
@@ -119,6 +122,8 @@ def plain_reason(text: Any) -> str:
             seg = seg.replace(engine_words, plain)
         if seg and seg not in out:
             out.append(seg)
+    if out and all(RESEARCH_GONE in seg for seg in out):
+        return RESEARCH_GONE          # every leg's reason is the same missing file: said once, no tickers
     return "; ".join(out)
 
 

@@ -897,6 +897,11 @@ def headline(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> 
 def source_line(data: dict, risk: Optional[dict], sub: Optional[dict]) -> html.Div:
     """One grey line: the history's reach and source; the mock-data sentence while it is not real."""
     research = data.get("research") or {}
+    if tf.research_missing(research):
+        # said once, plainly, the paths looked at on hover only (user, 2026-09-30)
+        return html.Div("Research data not on this PC: Daily risk, VaR, hedge % and days to exit are blank",
+                        className="risk-reach",
+                        title=plain_words(f"Looked for the research database at: {research.get('tried') or 'nowhere'}"))
     parts = []
     if sub and sub.get("first_date"):
         parts.append(f"history {_day(sub.get('first_date'))} to {_day(sub.get('last_date'))} ({sub.get('days')} days), "
@@ -918,14 +923,30 @@ def source_line(data: dict, risk: Optional[dict], sub: Optional[dict]) -> html.D
 def issue_items(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) -> List[Any]:
     """The drawer's rows as (kind, where, reason): the kind of problem, the trade or contract it is
     about, the reason (`formatting.issues_drawer` draws them as its table)."""
+    research = data.get("research") or {}
+    gone = tf.research_missing(research)          # said once, below (user, 2026-09-30), never per trade
+
+    def research_only(text: Any) -> bool:
+        return gone and tf.is_research_missing_reason(text)
+
+    def without_research(text: str) -> str:
+        """A per-leg reason list ('A: no commodity price history; B: ...') less the legs whose only
+        reason is the missing research data."""
+        if not gone:
+            return text
+        return "; ".join(p for p in str(text or "").split("; ") if p.strip() and not research_only(p))
+
     items: List[Any] = [(str(label), "", sentence) for label, sentence in data.get("errors") or []]
     for n in (data.get("trade_book") or {}).get("notes") or []:
-        items.append(("Trades", "", str(n)))
-    if risk is not None and not risk.get("available"):
+        if not research_only(n):
+            items.append(("Trades", "", str(n)))
+    if risk is not None and not risk.get("available") and not research_only(plain_reason(risk.get("reason"))):
         items.append(("Risk", "", f"no risk figures: {plain_reason(risk.get('reason')) or 'no history'}"))
     for t, r in v["shown_rows"]:
         if r is not None and not r.get("included", True):
-            items.append(("Not in the VaR", str(t.get("trade")), plain_reason(r.get("reason")) or "no history"))
+            why = without_research(plain_reason(r.get("reason")) or "no history")
+            if why:
+                items.append(("Not in the VaR", str(t.get("trade")), why))
         elif r is not None and r.get("partial"):
             items.append(("Without hedge", str(t.get("trade")),
                           "counted without its currency hedge: " + plain_reason(r.get("partial_reason"))))
@@ -934,7 +955,7 @@ def issue_items(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) 
     for m in (risk or {}).get("missing") or []:
         items.append(("Positions", "", plain_reason(m)))
     liq = data.get("liquidity") or {}
-    if liq and not liq.get("available"):
+    if liq and not liq.get("available") and not research_only(plain_reason(liq.get("reason"))):
         items.append(("Liquidity", "", plain_reason(liq.get("reason")) or "not computed"))
     items += [("Liquidity", str(x.get("instrument_id") or x.get("trade_id")),
                "not in the liquidity check: " + plain_reason(x.get("reason")))
@@ -946,8 +967,11 @@ def issue_items(data: dict, v: dict, risk: Optional[dict], sub: Optional[dict]) 
     pc = (risk or {}).get("price_check") or {}
     if pc.get("flagged"):
         items.append(("Research prices", "", str(pc.get("sentence") or "")))
-    research = data.get("research") or {}
-    if research.get("kind") != "real":
+    if gone:
+        items.append(tf.research_issue(research, "Daily risk, VaR, hedge %, days to exit",
+                                       "Research data not on this PC: Daily risk, VaR, hedge % and days to exit are "
+                                       "blank"))
+    elif research.get("kind") != "real":
         items.append(("Research", "", research.get("note") or "the research history is not verified as real"))
     if data.get("margin") is not None and risk_limits.margin_limits_real(data.get("margin"), data.get("checks")):
         items += [("Not in the margin", "", plain_reason(x)) for x in (data.get("margin") or {}).get("reasons") or [] if x]

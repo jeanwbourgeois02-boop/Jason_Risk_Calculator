@@ -1310,7 +1310,7 @@ p { margin: 8px 0; }
 .header-figure-value { font-size: 18px; font-weight: 700; }
 .header-chip { font-size: 12px; }
 .header-trades { font-size: 12px; color: rgba(255,255,255,.7); }
-.top-bar .sample-book-link, .top-bar .feed-pull-status { font-size: 12px; }
+.top-bar .feed-pull-status { font-size: 12px; }
 
 /* secondary text: never below 11px, never washed out */
 .cell-unit { font-size: 11px; color: var(--muted); }
@@ -1349,3 +1349,18 @@ p { margin: 8px 0; }
 .tk-table.tk-contracts td .tk-net { white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; }
 .tk-table.tk-contracts td { white-space: nowrap; }
 .tk-table.tk-contracts td.tk-now .tk-unit-slot { min-width: 44px; }
+
+/* Book What it is / Flags / several spreads, 2026-09-30 (user, on Jason's real book: "unclear"). What it
+   is in two lines: the position in words, then grey the sizes, months and the hedge (amber when the hedge
+   runs the wrong way or is far too big). Every flag a chip of its own. A trade of several spreads says so
+   across Entry and Now, grey. */
+.tk-table td.tk-what .tk-clip.tk-what-main, .tk-table td.tk-what .tk-clip.tk-what-sub { display: block; }
+.tk-table td.tk-what .tk-what-main { font-weight: 600; color: var(--ink, #111827); }
+.tk-table td.tk-what .tk-what-sub { font-size: 11.5px; line-height: 15px; margin-top: 1px; }
+.tk-table .tk-cov--warn { color: var(--warn); font-weight: 600; }
+.tk-table td.tk-flags-cell { white-space: normal; max-width: 260px; }
+.tk-table .tk-chip { display: inline-block; white-space: nowrap; font-size: 11.5px; font-weight: 600; line-height: 16px;
+  color: var(--warn); background: var(--warn-bg); border-radius: 4px; padding: 1px 6px; margin: 1px 4px 1px 0; cursor: help; }
+.tk-table .tk-chip--red { color: var(--neg); background: #fdecea; }
+.tk-table td.tk-parts-cell { text-align: center; }
+.tk-table td.tk-parts-cell .tk-parts { font-size: 12px; }
