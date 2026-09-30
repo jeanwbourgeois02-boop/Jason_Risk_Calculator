@@ -1,6 +1,6 @@
 ---
 name: book-one-line-table-2026-09-30
-description: Book By trade = one line per trade (research app's Open trades table): 12 columns, z on Level now's hover, Check column = actions only, no Gross/Net, no Group/Expand, CSV link; fits 1680 px
+description: Book By trade = one line per trade (research app's Open trades table): 13 columns, z its own narrow column after Level now (always shown, dash + reason without history), Check column = actions only, no Gross/Net, no Group/Expand, CSV link; fits 1680 px
 metadata:
   type: feedback
 ---
@@ -18,8 +18,9 @@ on By contract).
 - `_with_words` stores `what_one` (line 1 + ", <cross months>" + " · + N more spread") and `what_qty`
   (line 2's sizes); "COMEX leg closed" = `what_closed`, hover only. Hedge coverage lives in the panel's
   hedge line only.
+- z back as its own column after Level now (user follow-up, same day; `_z_td`, class tk-z, bold |z|>=2, always shown). What it is gives the room: 220 px clip at <2000 px.
 - Entry level / Level now: unit slot on both ("ratio" for a ratio); leg fills / marks (`leg_price_lines`)
-  and z (`z_words`) on hover. No z column (COLUMNS has no "z"; `columns(show_z)` ignores the flag;
+  on hover (no z there; `columns(show_z)` ignores the flag, z is always a column;
   `own_cols` drops stale filter keys not in COLUMNS).
 - Check (key still "flags"): `check_items` = flags in CHECK_CODES (unrecognised, leg_without_price,
   no_trade, price_check) + `hedge_problem` ("Hedge wrong way / too big / left alone"). Unbalanced and type

@@ -56,4 +56,4 @@
 - [Book two-line What + chips 2026-09-30](book-what-two-lines-chips-2026-09-30.md) — long side first / grey sizes + hedge words, flag chips, "2 spreads" cell, signed moves, research missing said once, z hidden
 - [Upload box two lines 2026-09-30](upload-box-two-lines-2026-09-30.md) — top-bar upload result = loaded counts + problems link to Data Trades card; no paragraph/notes; navy link CSS
 - [Risk rebuild + no research app 2026-09-30](risk-rebuild-bloomberg-history-2026-09-30.md) — one-sentence headline, 5-col table, stresses card, 3 folds, empty card; price_history helpers; with-history ui-check + shot recipe
-- [Book one line per trade 2026-09-30](book-one-line-table-2026-09-30.md) — 12 cols, z on Level now hover, Check = actions only, no Gross/Net/Group/Expand, CSV link, tk-trades CSS fits 1680
+- [Book one line per trade 2026-09-30](book-one-line-table-2026-09-30.md) — 13 cols, z column after Level now, Check = actions only, no Gross/Net/Group/Expand, CSV link, tk-trades CSS fits 1680

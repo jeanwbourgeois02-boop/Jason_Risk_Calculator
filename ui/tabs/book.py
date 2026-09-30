@@ -5,7 +5,7 @@ The trade is the unit: one row per trade name (Jason's PBRoot suffix, `JSHY10_ZN
 `JSHY10.3_ZNA1` one trade), every leg and hedge under it, never split. Columns, one line per row
 (user, 2026-09-30, modelled on the research app's Open trades table): Trade | Type | What it is |
 Quantity | Entry date | Entry level | Level now | Move | P&L today | P&L since entry | Next date |
-Check (the legs' fills and marks and the z-score on the levels' hovers); a row's caveats (a figure
+Check, with z after Level now (the legs' fills and marks on the levels' hovers); a row's caveats (a figure
 leaving fills out) sit in one small "i" after its name (`formatting.row_info`). Nothing sits between the header and the card (user, 2026-09-30): the card's
 title strip holds the view switch, the search, a plain Download CSV link and, only while a filter
 is set, the rows' MTD and YTD (no Group switch, no Expand / Collapse all since 2026-09-30). The
@@ -25,7 +25,7 @@ What is read, never recomputed:
     reader `priced_value_book`), summed per trade and per leg (display), so the total row is the
     header's figure;
   - `engine.risk.trades.trade_risk` (`blotter_pricing.shared_trade_risk`, computed on its own
-    thread; Level now's hover fills in a moment after the table): z, percentile, z at entry, the
+    thread; the z column fills in a moment after the table): z, percentile, z at entry, the
     Quantity hover's hedge % and correlation, from the book database's own Bloomberg price history
     (`price_history`); before the first pull the drawer says why once;
   - `engine.spreads.trades.level_history` for the panel's chart (at most 60 closes).
@@ -105,8 +105,10 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
                                  "its unit, a China-against-West pair the converted ratio China over foreign); each "
                                  "leg's average fill on hover. A trade of several spreads says how many, each one's "
                                  "level in the opened trade."),
-    ("now", "Level now", "", "The same level at the latest official marks; each leg's mark and the z-score (one year "
-                             "of this exact level from the Bloomberg price history) on hover."),
+    ("now", "Level now", "", "The same level at the latest official marks; each leg's mark on hover."),
+    ("z", "z", "", "Where Level now sits in one year of this exact level: (now minus the mean) over the standard "
+                   "deviation of the last 252 daily closes (Bloomberg price history); bold at 2 or more either way. "
+                   "The percentile and z at entry on hover."),
     ("today", "Move", "", "The level's move since the previous close, in the level's own unit, green when it helps "
                           "the trade; a dash when it did not move."),
     ("daily", "P&L today", "", "Today's P&L in USD, every fill of the trade including its hedge."),
@@ -1309,23 +1311,25 @@ def leg_price_lines(data: Optional[dict], t: dict, key: str) -> List[str]:
     return lines
 
 
-def z_words(r: Optional[dict], ready: bool) -> str:
-    """'z +1.4 (percentile 78 %, z at entry +0.3; 251 daily closes to 29 Sep)' for Level now's hover,
-    or why there is none."""
+def _z_td(r: Optional[dict], ready: bool, closed: bool = False) -> html.Td:
+    """z, narrow and bold at |z| >= 2 (user, 2026-09-30: back as its own column after Level now); the
+    percentile, z at entry and the window on hover; an em dash with its reason when there is none."""
+    if closed:
+        return html.Td(missing_cell("closed: no z"), className="tk-z")
     if not ready:
-        return "z: the risk figures are still being computed"
+        return html.Td(missing_cell("the risk figures are still being computed"), className="tk-z")
     if r is None:
-        return ""
+        return html.Td(missing_cell("no risk row for this trade"), className="tk-z")
     z = _num(r.get("z"))
     if z is None:
-        return f"z: not given ({r.get('z_reason') or 'no figure'})" if r.get("z_reason") else ""
+        return html.Td(missing_cell(r.get("z_reason") or "no z"), className="tk-z")
     pct, ze = _num(r.get("percentile")), _num(r.get("z_entry"))
-    bits = [f"percentile {pct_text(pct / 100.0)}" if pct is not None else "",
-            f"z at entry {z_text(ze)}" if ze is not None else ""]
-    window = (f"{r.get('level_days')} daily closes to {r.get('level_date')}"
-              if r.get("level_days") and r.get("level_date") else "")
-    inner = "; ".join(x for x in (", ".join(b for b in bits if b), window) if x)
-    return f"z {z_text(z)}" + (f" ({inner})" if inner else "")
+    hover = _lines(f"Percentile: {pct_text(pct / 100.0) if pct is not None else MISSING}",
+                   f"z at entry: {z_text(ze)}" if ze is not None else f"z at entry: {r.get('z_entry_reason') or 'not given'}",
+                   f"Window: {r.get('level_days') or ''} daily closes to {r.get('level_date') or ''} (Bloomberg price "
+                   "history)")
+    return html.Td(html.Span(z_text(z), className="tk-bold" if abs(z) >= 2 else None, title=plain_words(hover)),
+                   className="tk-z")
 
 
 def _entry_td(t: dict, data: Optional[dict] = None) -> html.Td:
@@ -1346,7 +1350,7 @@ def _now_td(t: dict, check: Sequence[str] = (), data: Optional[dict] = None, r: 
         c = _num(t.get("carry_per_month"))
         carry = (f"Carry per month: {full_signed(c)} USD (the legs' roll-down on one curve)"
                  if c is not None else f"Carry per month: not summed ({t.get('carry_reason') or 'not given'})")
-    hover = _lines(*leg_price_lines(data, t, "mark"), z_words(r, ready) if not level.get("closed") else "",
+    hover = _lines(*leg_price_lines(data, t, "mark"),
                    level_unit_line(level) if level.get("mode") == "premium" else "",
                    (level.get("sources") or {}).get("now", ""), level.get("note") or "", carry,
                    *estimate_words(level, "now"), *(f"Price to check: {x}" for x in check))
@@ -1595,6 +1599,7 @@ def trade_tr(data: dict, t: dict, r: Optional[dict], ready: bool, opened: bool, 
                  html.Span(name, className="tk-name", title=name_hover or None), info], className="l"),
         _type_td(t), _what_one_td(t), _qty_td(t, r), _entry_date_td(t, data["as_of"]),
         *([_parts_td(t, n_parts, opened)] if n_parts else [_entry_td(tv, data), _now_td(tv, check, data, r, ready)]),
+        _z_td(r, ready, closed),
         _today_td(tv, r, ready, check),
         money_td(*daily, hover=_split_hover(t), check=check, row=True),
         money_td(*ltd, hover=_lines(f"MTD {km_text(mtd[0])}", f"YTD {km_text(ytd[0])}",
@@ -1684,7 +1689,7 @@ def _checked_money(data: dict, shown: Sequence[dict], fig, hover: str = "") -> h
 
 
 # --------------------------------------------------------------------------- sort
-SORTABLE = {"trade", "type", "what", "qty", "entry_date", "entry", "now", "today", "daily", "ltd", "next", "flags"}
+SORTABLE = {"trade", "type", "what", "qty", "entry_date", "entry", "now", "z", "today", "daily", "ltd", "next", "flags"}
 
 
 def sort_value(data: dict, t: dict, key: str, r: Optional[dict]) -> Any:
@@ -1703,6 +1708,9 @@ def sort_value(data: dict, t: dict, key: str, r: Optional[dict]) -> Any:
     if key == "qty":
         lots = [abs(_num(leg.get("lots")) or 0.0) for leg in _open_legs(t)]
         return sum(lots) if lots else None
+    if key == "z":
+        z = _num((r or {}).get("z"))
+        return abs(z) if z is not None else None
     if key == "entry_date":
         return str(t.get("first_trade_date") or "") or None
     if key in ("daily", "ltd"):
@@ -1744,6 +1752,7 @@ def next_sort(current: Optional[dict], key: str) -> Optional[dict]:
 # comparison, the Book's own; Flags a tick list. Nothing above the table repeats a column's name.
 LIST_FUNNELS = {"trade": ("trade",), "type": ("type",), "what": ("commodity",)}
 NUMBER_FUNNELS = {"entry": "The level at entry, in the level's own unit.",
+                  "z": "The z-score; a trade whose z is still being computed does not show.",
                   "now": "The level now, in the level's own unit.",
                   "today": "The level's move since the previous close, in the level's own unit.",
                   "daily": "Today's P&L in USD.", "ltd": "The P&L since the trade opened, in USD."}
@@ -1759,8 +1768,8 @@ def _flags_funnel(state: Optional[dict]) -> html.Details:
 
 
 def columns(show_z: bool = True) -> Tuple[Tuple[str, str, str, str], ...]:
-    """The trade view's columns (the z-score left the table for Level now's hover on 2026-09-30;
-    `show_z` is kept for the callers)."""
+    """The trade view's columns, z always among them (2026-09-30: a trade with no price history shows an
+    em dash with its reason; `show_z` is kept for the callers)."""
     return COLUMNS
 
 

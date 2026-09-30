@@ -1431,3 +1431,17 @@ p { margin: 8px 0; }
 @media (max-width: 1400px) {
   .book-main .book-table.book-grid.tk-trades td, .book-main .book-table.book-grid.tk-trades th { padding-left: 5px; padding-right: 5px; }
 }
+/* z back as its own column after Level now (2026-09-30): narrow; What it is gives up the room at 1680 px */
+.tk-table.tk-trades td.tk-z { white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 1999px) {
+  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 230px; }
+  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 220px; }
+}
+@media (max-width: 1400px) {
+  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 200px; }
+  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 190px; }
+}
+@media (max-width: 1200px) {
+  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 170px; }
+  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 160px; }
+}
