@@ -84,13 +84,15 @@ QUESTION = "How much can I lose, and is each trade really hedged?"
 COMPUTING = "the risk figures are still being computed"
 RATIO_APART = 0.20                            # his ratio and the best fit more than 20 % apart: amber
 
-# Hedged, in words from the engine's hedge % (1 - the trade's volatility over its bigger leg's):
+# Hedged, in words from the engine's hedge % (1 - the trade's P&L variance over its bigger leg's, on
+# the days every leg closed):
 # (lowest hedge %, words, amber); below the last, "Adds risk"; a one-leg trade "Outright".
 HEDGE_BANDS: Tuple[Tuple[float, str, bool], ...] = ((80.0, "Well hedged", False), (40.0, "Partly hedged", False),
                                                      (0.0, "Barely hedged", True))
 ADDS_RISK, OUTRIGHT = "Adds risk", "Outright"
 HEDGE_ORDER = {"Well hedged": 0, "Partly hedged": 1, "Barely hedged": 2, ADDS_RISK: 3, OUTRIGHT: 4}
-HEDGE_METHOD = ("Hedge %: 1 minus the trade's daily P&L volatility over its bigger leg's alone, over the last year "
+HEDGE_METHOD = ("Hedge %: the share of the bigger leg's risk the trade takes away, 1 minus the variance of the "
+                "trade's daily P&L over its bigger leg's alone, over the last year, on the days every leg closed "
                 "(2-day moves for legs closing hours apart). Well hedged from 80 %, partly from 40 %, barely from 0; "
                 "below 0 the other side adds risk.")
 

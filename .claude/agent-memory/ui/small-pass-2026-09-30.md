@@ -1,0 +1,1 @@
+2026-09-30: the Book Summary has no % of P&L since entry (it misleads when the book is down); `risk.HEDGE_METHOD` describes hedge % as variance reduction on the days every leg closed, never a vol ratio; the P&L Download CSV is a link at the right end of the toolbar (`pnl-csv-link`, `margin-left: auto`), and Risk keeps its gold button.

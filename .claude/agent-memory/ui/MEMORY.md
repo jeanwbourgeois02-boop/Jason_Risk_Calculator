@@ -62,3 +62,4 @@
 - [Book legs inline + summary 2026-09-30](book-legs-inline-summary-2026-09-30.md) — legs always under each trade (leg_rows), panel = value/roll-down only, Summary card by type/family/commodity
 - [P&L chart two panels 2026-09-30](pnl-chart-two-panels-2026-09-30.md) — line-to-date over day bars on a business-day category axis, readable categories (hover "x" trap), padded ranges, hover-shot recipe
 - [Data tab three cards 2026-09-30](data-tab-three-cards-2026-09-30.md) — Blotter | Bloomberg | Diagnosis cards, render 17 outputs, diagnosis_text in the runner, clipboard ::after, proof recipe
+- [Small pass 2026-09-30](small-pass-2026-09-30.md) — Book summary without %, hedge % text = variance reduction, P&L CSV as a link

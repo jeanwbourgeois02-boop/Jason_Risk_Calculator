@@ -1486,3 +1486,5 @@ p { margin: 8px 0; }
    opened trade's value table no wider than its three columns need */
 .book-summary .tk-strip .tk-headline.book-summary-count { display: inline-block; white-space: nowrap; }
 .book-main .tk-panel-legs .tk-table.tk-legs { max-width: 760px; }
+/* the P&L strip's Download CSV: a plain link at the right end, so the strip stays on one line at 1680 px */
+.tk-strip .pnl-csv-link { margin-left: auto; }

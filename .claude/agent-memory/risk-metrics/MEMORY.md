@@ -3,7 +3,7 @@
 - [Commodity underlyers, Phase 4](commodity_phase4_2026_09_24.md) — COMMODITY parts, SECTOR/SPREAD views, crisis fallback, shock days, LME mapping, how tests run without pyarrow.
 - [Perf profile 2026-09-28](perf_profile_2026_09_28.md) — book_risk cold 3 s / warm 0.6 s on the sample; caches survive a sample switch; the 16 s chip is GIL contention, not the engine; the two fixes are risk-history and spreads-engine.
 - [Position risk 2026-09-29](position_risk_2026_09_29.md) — positions by period_explain ids, component-VaR tail rule, correlation window, hedge exception (partial_reason).
-- [Trade risk, Phase G](trade_risk_2026_09_29.md) — trades.py choices (sides, 2-day, best-fit sign, level pick, CM splice for z), memo mtime pitfall; history source changed 2026-09-30, see bloomberg_price_history.
+- [Trade risk, Phase G](trade_risk_2026_09_29.md) — trades.py choices (sides, 2-day, best-fit sign, level pick, CM splice for z), memo mtime pitfall; hedge % = variance reduction on aligned days since 2026-09-30.
 - [Never kill all python](feedback_never_kill_all_python.md) — no kills; never `py -3 -`/`python -` in ANY form (hung again 2026-09-30); scripts via Write; own scratch subfolder.
 - [Bloomberg price history 2026-09-30](bloomberg_price_history_2026_09_30.md) — commodity AND FX history = book DB price_history, pass conn; no source_kind/price_check; LME prompt ids; 2-year depth vs 500-day vol.
 - [FX trades in trade risk 2026-09-30](fx_trades_in_trade_risk_2026_09_30.md) — subset_var(all) = book_risk VaR: FX trades + settled cash as legs, attribution by PBRoot name, CNH hedge % side effect.

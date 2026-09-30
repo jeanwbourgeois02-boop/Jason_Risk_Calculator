@@ -24,7 +24,7 @@ carry (each open leg's value in USD and roll-down, the trade's gross and carry),
 hedge line, the level since the first fill with its entry dashed and its rolls marked, and links to
 its fills (Blotter), its P&L history and its risk, each filtered to it. Above the table, one summary
 card (`summary_card`): the whole book broken down by spread type, commodity family or commodity,
-each group's trades, P&L today, P&L since entry and share of it, the Book row the header's figures.
+each group's trades, P&L today and P&L since entry, the Book row the header's figures.
 
 What is read, never recomputed:
   - `engine.spreads.trade_book` (`blotter_pricing.shared_trade_book`, once per database revision
@@ -2644,9 +2644,10 @@ def summary_group(t: dict, by: str) -> str:
 
 
 def summary_table(data: dict, by: str) -> html.Table:
-    """Group | Trades | P&L today | P&L since entry | % of P&L since entry, the largest P&L since entry
-    first, the fills on no trade last; the Book row first, its figures the header's (the fills' own
-    figures summed over every trade on file); the % never totalled."""
+    """Group | Trades | P&L today | P&L since entry, the largest P&L since entry first, the fills on
+    no trade last; the Book row first, its figures the header's (the fills' own figures summed over
+    every trade on file). No share of the book's P&L (user, 2026-09-30: with the book down overall a
+    winning group showed a negative %)."""
     by = by if by in SUMMARY_GROUP_TIPS else BY_TYPE
     trades = data.get("trades") or []
     groups: Dict[str, List[dict]] = {}
@@ -2654,7 +2655,6 @@ def summary_table(data: dict, by: str) -> html.Table:
         groups.setdefault(summary_group(t, by), []).append(t)
     all_ids = [str(i) for t in trades for i in t.get("trade_ids") or []]
     book_ltd = fill_sum(data, "ltd", all_ids)
-    whole = _num(book_ltd[0])
 
     def ids_of(ts):
         return [str(i) for t in ts for i in t.get("trade_ids") or []]
@@ -2668,13 +2668,6 @@ def summary_table(data: dict, by: str) -> html.Table:
         return html.Td(html.Span(f"{len(named)}", title=_lines(f"{n_open} open, {len(named) - n_open} closed",
                                                                 *(str(t.get("trade")) for t in named[:20]))))
 
-    def share_td(v):
-        if v is None:
-            return html.Td(missing_cell("no P&L since entry for this group"))
-        if whole is None or abs(whole) < 0.005:
-            return html.Td(missing_cell("the book's P&L since entry is nil or not known: no share"))
-        return html.Td(html.Span(pct_text(v / whole), title=f"Its P&L since entry over the book's ({full_signed(whole)})"))
-
     rows = []
     for label, ts in groups.items():
         ids = ids_of(ts)
@@ -2684,16 +2677,15 @@ def summary_table(data: dict, by: str) -> html.Table:
     body = [html.Tr([html.Td(html.Span("Book", title="Every trade on file; P&L today and since entry equal the top "
                                                      "bar's Daily and LTD to the cent"), className="l"),
                      count_td([t for t in trades if not t.get("pseudo")] or trades),
-                     money_td(*fill_sum(data, "daily", all_ids)), money_td(*book_ltd),
-                     html.Td(html.Span("", title="A share is never totalled"))], className="tk-total book-total")]
+                     money_td(*fill_sum(data, "daily", all_ids)), money_td(*book_ltd)],
+                    className="tk-total book-total")]
     for label, ts, daily, ltd in rows:
         body.append(html.Tr([html.Td(label, className="l"), count_td(ts), money_td(*daily, row=True),
-                             money_td(*ltd, row=True), share_td(ltd[0])]))
+                             money_td(*ltd, row=True)]))
     group_title = next(o["label"] for o in SUMMARY_OPTIONS if o["value"] == by)
     heads = ((group_title, "l", SUMMARY_GROUP_TIPS[by]), ("Trades", "", "The trades in the group, open and closed."),
              ("P&L today", "", "Today's P&L in USD of the group's trades, their hedges included."),
-             ("P&L since entry", "", "The P&L since each trade opened, in USD, open plus locked in."),
-             ("% of P&L since entry", "", "The group's P&L since entry over the book's; never totalled."))
+             ("P&L since entry", "", "The P&L since each trade opened, in USD, open plus locked in."))
     head = html.Thead(html.Tr([html.Th(about(t, tip, level="span"), className=cls or None) for t, cls, tip in heads]))
     return html.Table([head, html.Tbody(body)], className="book-table tk-table book-summary-table")
 
@@ -2934,7 +2926,7 @@ def layout(default_date: Optional[str] = None) -> html.Div:
                         bc.switch(),
                         html.Span(id=HEADLINE_ID, className="tk-strip-slot")]),
                     tf.bar_slot(TAB),
-                    # a small plain link, not a gold button (user, 2026-09-30; P&L and Risk keep theirs)
+                    # a small plain link, not a gold button (user, 2026-09-30; P&L's too since the same day, Risk keeps its button)
                     html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-link-button book-csv-link",
                                 title="The rows showing at full figures, every column and every hover figure"),
                     dcc.Download(id=DOWNLOAD_ID)]),

@@ -26,25 +26,37 @@ Per trade (parameters in `config/risk.yaml`; W = `trade_window_bd`, 252; a figur
                    `contribution_share`, a fraction; the shares add up to 1), with
                    `contribution_var` and `standalone_var` (the book VaR definition on the trade
                    alone, for the hover) beside it.
-  hedge_pct        1 - sd(the trade's P&L) / sd(its bigger leg's P&L alone), in PERCENT, over the
-                   last W days. The trade's legs are its sides: one per commodity root when its
-                   legs (currency hedges apart) cover two roots or more, else one per contract
-                   month (a calendar); "bigger" = the larger standard deviation. When two of its
-                   legs close hours apart (an exchange of `asian_close_countries` against one
-                   elsewhere: SHFE zinc against LME zinc) the moves are 2-day sums (overlapping),
-                   so the close-time gap does not read as unhedged risk (`hedge_moves`). An
-                   outright with nothing against it is None ("one leg: nothing hedges it", never
-                   0 %), as is one whose only hedge has no history. A trade in which a commodity
-                   nets to zero lots (calendars on it) is measured within each commodity and
-                   risk-weighted (`_hedge_calendars`; `hedge_method` names the way). It can be
-                   negative: the other side adds risk.
+  hedge_pct        the variance reduction, the standard hedge-effectiveness measure (user yes
+                   2026-09-30, replacing 1 - sd / sd): 1 - var(the trade's P&L) / var(its bigger
+                   leg's P&L alone), in PERCENT, over the last W days. For two equal legs it is
+                   2 rho - 1 (60 % at a correlation of 0.8, 80 % at 0.9). The trade's legs are
+                   its sides: one per commodity root when its legs (currency hedges apart) cover
+                   two roots or more, else one per contract month (a calendar); "bigger" = the
+                   larger variance. **Aligned days** (`_aligned`, shared with the best fit):
+                   only the days on which every leg of the trade closed are used; a leg's
+                   moves on a day another had no close (a Chinese holiday, a later listing)
+                   are carried into the next day all closed, so each row spans the same dates
+                   for every leg (a leg's own change after its gap already spans it), never a
+                   missing close counted as a flat day; `hedge_days` counts the aligned days,
+                   the reason names the days skipped, and fewer than `trade_min_days` of them
+                   is None ("only N days where both legs closed"). When two of its legs close
+                   hours apart (an exchange of `asian_close_countries` against one elsewhere:
+                   SHFE zinc against LME zinc) the moves are 2-day sums (overlapping) of the
+                   aligned days, so the close-time gap does not read as unhedged risk
+                   (`hedge_moves`). An outright with nothing against it is None ("one leg:
+                   nothing hedges it", never 0 %), as is one whose only hedge has no history. A
+                   trade in which a commodity nets to zero lots (calendars on it) is measured
+                   within each commodity, 1 - var(its net) / var(its bigger month), and the
+                   trade's figure is 1 - sum var(net) / sum var(bigger month), each commodity
+                   weighted by its bigger month's variance (`_hedge_calendars`; `hedge_method`
+                   names the way). It can be negative: the other side adds risk.
   best_fit_ratio   two-leg trades only (two sides as above; three or more: None, "more than two
                    legs"): the lots of leg B per lot of leg A, held opposite, that minimise the
                    variance of the pair (the slope of a regression of A's P&L per lot on B's,
                    cov(a, b) / var(b)), beside `lot_ratio` = -lots B / lots A as held (the same
                    convention: positive for a spread held one way against the other), and
-                   `leg_correlation` (Pearson, a and b). Days both legs settled, the last W,
-                   2-day moves on the same rule as hedge %. Leg A is the first leg of the trade's
+                   `leg_correlation` (Pearson, a and b). The hedge %'s aligned days (within
+                   the last W), 2-day moves on the same rule as hedge %. Leg A is the first leg of the trade's
                    level (spreads-engine's pair), else the bigger one.
   z / percentile   the trade's level against the last `level_window_bd` (252) closes of that
                    same level, from each leg's own Bloomberg price history (risk-history's
@@ -92,7 +104,6 @@ from engine.spreads.levels import LevelSpec, converted, spec_from_dict
 
 NAN = float("nan")
 CHINA = "CN"
-_TRADE = "__trade"
 _MEMO_SLOTS = 4
 _MEMO: "OrderedDict[tuple, dict]" = OrderedDict()
 _BASE: "OrderedDict[tuple, dict]" = OrderedDict()
@@ -118,6 +129,10 @@ def _iso(ts: Any) -> Optional[str]:
 
 def _std(s: pd.Series) -> Optional[float]:
     return _num(s.std()) if len(s) > 1 else None
+
+
+def _var(s: pd.Series) -> Optional[float]:
+    return _num(s.var()) if len(s) > 1 else None
 
 
 def _moves(frame: pd.DataFrame, two_day: bool) -> pd.DataFrame:
@@ -257,6 +272,7 @@ class _Ctx:
         self.roots, self.strategy, self.position, self.config = roots, strategy, position, config
         self.book_level: Optional[dict] = None     # the trade's `level` of spreads-engine's trade_book, when given
         self.book_given = False                    # trade_book was passed (a row may still have no trade in it)
+        self.aligned_memo: Optional[tuple] = None  # `_aligned`'s result, built once per trade
 
     def root_of(self, cid: str) -> str:
         return str((self.by_contract.get(cid) or {}).get("root_id") or "")
@@ -305,6 +321,52 @@ def _window(ctx: _Ctx) -> Tuple[Optional[pd.Series], str]:
     if len(s) < floor:
         return None, f"needs {floor} daily observations: {len(s)} on file"
     return s.iloc[-n:], ""
+
+
+def _aligned(ctx: _Ctx) -> Tuple[Optional[pd.DataFrame], int, str]:
+    """(every leg's daily USD P&L on the aligned days, days skipped, why none): one column per
+    leg of the trade with a series (`ctx.parts`, currency hedges included; the trade's P&L is
+    their sum), rows = the days of the trade's window on which every one of them closed. A leg's
+    moves on a day another leg had no close (a Chinese holiday such as Golden Week, a later
+    listing) are carried into the next aligned day, so each row spans the same dates for every
+    leg: the leg that missed closes shows its whole change since its last close there (its own
+    change after a gap already spans it). Moves after the last aligned day are left out. Never a
+    missing close counted as a flat day. Hedge %, both of its ways, and the best fit read this."""
+    if ctx.aligned_memo is not None:
+        return ctx.aligned_memo
+    w, why = _window(ctx)
+    if w is None or not ctx.parts:
+        ctx.aligned_memo = (None, 0, why or "no leg has a history series")
+        return ctx.aligned_memo
+    lo, hi = w.index[0], w.index[-1]
+    cols = {}
+    for cid, s in ctx.parts.items():
+        s = s.dropna()
+        cols[cid] = s[(s.index >= lo) & (s.index <= hi)]
+    days = pd.DatetimeIndex(w.index)
+    for s in cols.values():
+        days = days.intersection(pd.DatetimeIndex(s.index))
+    days = days.sort_values()
+    frame = pd.DataFrame(index=days)
+    for cid, s in cols.items():
+        at = days.searchsorted(pd.DatetimeIndex(s.index), side="left")
+        keep = at < len(days)
+        frame[cid] = pd.Series(s.to_numpy()[keep]).groupby(at[keep]).sum().reindex(range(len(days))).to_numpy()
+    ctx.aligned_memo = (frame, int(len(w) - len(days)), "")
+    return ctx.aligned_memo
+
+
+def _few_days(ctx: _Ctx, frame: pd.DataFrame) -> str:
+    """The reason when fewer than trade_min_days aligned days remain, else ''."""
+    floor = int(ctx.config["trade_min_days"])
+    if len(frame) >= floor:
+        return ""
+    who = "both legs" if frame.shape[1] == 2 else "every leg"
+    return f"only {len(frame)} days where {who} closed, fewer than {floor}"
+
+
+def _skipped_note(skipped: int) -> str:
+    return (f"{skipped} day{'s' if skipped != 1 else ''} skipped where a leg had no close" if skipped > 0 else "")
 
 
 def _daily_risk(ctx: _Ctx) -> dict:
@@ -378,20 +440,24 @@ def _hedge(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str) -> dict:
         return out
     if len(sides) >= 2 and any(abs(sd["lots"]) < 1e-9 for sd in sides):
         # an FX trade's hedge is left out of the within-calendar measure (it never enters it)
-        return _hedge_calendars(ctx, w, sides, any(not lg.get("pair") for lg in hedges), out,
+        return _hedge_calendars(ctx, sides, any(not lg.get("pair") for lg in hedges), out,
                                 fx_hedges=[str(lg.get("name") or lg["contract_id"]) for lg in hedges if lg.get("pair")])
     out["hedge_method"] = "trade" if len(sides) >= 2 else "one leg against its currency hedge"
-    frame = pd.DataFrame({_TRADE: w, **{s["key"]: s["series"].reindex(w.index).fillna(0.0) for s in sides}})
-    m = _moves(frame, two_day)
-    sd_trade = _std(m[_TRADE])
-    sds = {s["key"]: _std(m[s["key"]]) for s in sides}
-    big = max(sides, key=lambda s: sds[s["key"]] if sds[s["key"]] is not None else -1.0)
-    sd_big = sds[big["key"]]
-    out.update(hedge_leg=big["name"], hedge_days=int(len(m)))
-    if sd_trade is None or not sd_big:
+    aligned, skipped, why = _aligned(ctx)
+    if aligned is None or _few_days(ctx, aligned):
+        out["hedge_reason"] = why if aligned is None else _few_days(ctx, aligned)
+        return out
+    m = _moves(aligned, two_day)
+    trade = m.sum(axis=1)                         # the trade's P&L: every leg, its currency hedges included
+    var_trade = _var(trade)
+    vars_ = {s["key"]: _var(m[[c for c in s["contracts"] if c in m.columns]].sum(axis=1)) for s in sides}
+    big = max(sides, key=lambda s: vars_[s["key"]] if vars_[s["key"]] is not None else -1.0)
+    var_big = vars_[big["key"]]
+    out.update(hedge_leg=big["name"], hedge_days=int(len(aligned)))
+    if var_trade is None or not var_big:
         out["hedge_reason"] = f"{big['name']} did not move over the window, so there is no ratio"
         return out
-    out["hedge_pct"] = (1.0 - sd_trade / sd_big) * 100.0
+    out["hedge_pct"] = (1.0 - var_trade / var_big) * 100.0
     notes = []
     if len(sides) == 1:
         notes.append("one leg against its currency hedge")
@@ -399,50 +465,56 @@ def _hedge(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str) -> dict:
         notes.append(ctx.row.get("partial_reason"))
     if len(m) < int(ctx.config["trade_window_bd"]) - (1 if two_day else 0):
         notes.append(f"on {len(m)} {'2-day' if two_day else 'daily'} moves")
+    notes.append(_skipped_note(skipped))
     out["hedge_reason"] = "; ".join(n for n in notes if n)
     return out
 
 
-def _hedge_calendars(ctx: _Ctx, w: pd.Series, sides: List[dict], hedged: bool, out: dict,
+def _hedge_calendars(ctx: _Ctx, sides: List[dict], hedged: bool, out: dict,
                      fx_hedges: Sequence[str] = ()) -> dict:
     """hedge % of a trade whose commodities include one that nets to zero lots (calendars on it:
     SCO1's iron ore Oct/Feb and Nov/Mar). Between commodities there is then no "other side": the
     bigger commodity's P&L is already a hedged strip. So the hedge is measured WITHIN each
-    commodity (its months against each other, 1-day moves: one exchange, one close) and the
-    trade's figure is RISK-weighted, each commodity by its bigger month's standalone sd:
-        hedge % = 1 - sum over commodities sd(commodity) / sum sd(its bigger month)
-    (= the sd-weighted mean of each commodity's own 1 - sd / sd_big). A commodity held in one
-    month (an outright) enters at 0 %: sd = its bigger month's. Not value-weighted: a value needs
-    a price, and the history's prices are context, not ours. A currency hedge with a series would
-    not fit this split, so such a trade is None with its reason; a hedge made of FX trades
-    (forwards, options) is left out of this measure and named in the reason."""
+    commodity (its months against each other, 1-day moves: one exchange, one close), as the
+    variance reduction 1 - var(its net) / var(its bigger month), and the trade's figure weights
+    each commodity by its bigger month's variance:
+        hedge % = 1 - sum over commodities var(net) / sum var(its bigger month)
+    (= the variance-weighted mean of each commodity's own 1 - var / var_big). A commodity held in
+    one month (an outright) enters at 0 %: var = its bigger month's. Not value-weighted: a value
+    needs a price, and the history's prices are context, not ours. On the trade's aligned days
+    (`_aligned`), like the other way. A currency hedge with a series would not fit this split, so
+    such a trade is None with its reason; a hedge made of FX trades (forwards, options) is left out
+    of this measure and named in the reason."""
     out.update(hedge_method="within calendars (risk-weighted)", hedge_moves="1-day")
     if hedged:
         out["hedge_reason"] = ("a commodity nets to zero lots (calendars) and the trade holds a currency hedge: "
                                "no honest single hedge %")
         return out
+    aligned, skipped, why = _aligned(ctx)
+    if aligned is None or _few_days(ctx, aligned):
+        out["hedge_reason"] = why if aligned is None else _few_days(ctx, aligned)
+        return out
     num = den = 0.0
     parts = []
-    days = 0
     for sd in sides:
-        cids = [c for c in sd["contracts"] if c in ctx.parts]
-        frame = pd.DataFrame({c: ctx.parts[c].reindex(w.index).fillna(0.0) for c in cids})
-        net = frame.sum(axis=1)
-        legs_sd = {c: _std(frame[c]) for c in cids}
-        big = max(cids, key=lambda c: legs_sd[c] if legs_sd[c] is not None else -1.0)
-        sd_big, sd_net = legs_sd[big], _std(net)
-        days = max(days, int(len(frame)))
-        if not sd_big or sd_net is None:
+        cids = [c for c in sd["contracts"] if c in aligned.columns]
+        frame = aligned[cids]
+        legs_var = {c: _var(frame[c]) for c in cids}
+        big = max(cids, key=lambda c: legs_var[c] if legs_var[c] is not None else -1.0)
+        var_big, var_net = legs_var[big], _var(frame.sum(axis=1))
+        if not var_big or var_net is None:
             out["hedge_reason"] = f"{sd['name']}: its bigger month did not move over the window, so there is no ratio"
             return out
-        num += sd_net
-        den += sd_big
-        parts.append(f"{sd['name']} {(1.0 - sd_net / sd_big) * 100.0:.0f} %"
+        num += var_net
+        den += var_big
+        parts.append(f"{sd['name']} {(1.0 - var_net / var_big) * 100.0:.0f} %"
                      + (" (one month: unhedged)" if len(cids) == 1 else ""))
-    out.update(hedge_pct=(1.0 - num / den) * 100.0, hedge_days=days,
+    out.update(hedge_pct=(1.0 - num / den) * 100.0, hedge_days=int(len(aligned)),
                hedge_leg=", ".join(sd["name"] for sd in sides),
-               hedge_reason="measured within each commodity's months, weighted by risk: " + "; ".join(parts)
-               + (f"; the currency hedge ({', '.join(fx_hedges)}) is not in this measure" if fx_hedges else ""))
+               hedge_reason="measured within each commodity's months, each weighted by its bigger month's variance: "
+               + "; ".join(parts)
+               + (f"; the currency hedge ({', '.join(fx_hedges)}) is not in this measure" if fx_hedges else "")
+               + (f"; {_skipped_note(skipped)}" if skipped > 0 else ""))
     return out
 
 
@@ -470,16 +542,17 @@ def _best_fit(ctx: _Ctx, sides: List[dict], two_day: bool, side_why: str, spec: 
         out["best_fit_reason"] = f"{', '.join(zero)} nets to zero lots, so it has no P&L per lot"
         return out
     out["lot_ratio"] = -b["lots"] / a["lots"]
-    frame = pd.concat([a["series"] / a["lots"], b["series"] / b["lots"]], axis=1, join="inner").dropna()
-    frame.columns = ["a", "b"]
-    frame = frame.iloc[-int(ctx.config["trade_window_bd"]):]
-    floor = int(ctx.config["trade_min_days"])
-    if len(frame) < floor:
-        out["best_fit_reason"] = f"the two legs share {len(frame)} settlement days, fewer than {floor}"
+    # the hedge %'s aligned days: only days every leg closed, a gap's moves carried to the next one
+    aligned, _skipped, why = _aligned(ctx)
+    if aligned is None or _few_days(ctx, aligned):
+        out["best_fit_reason"] = why if aligned is None else _few_days(ctx, aligned)
         return out
+    frame = pd.DataFrame({
+        "a": aligned[[c for c in a["contracts"] if c in aligned.columns]].sum(axis=1) / a["lots"],
+        "b": aligned[[c for c in b["contracts"] if c in aligned.columns]].sum(axis=1) / b["lots"]})
     m = _moves(frame, two_day)
     var_b = _num(m["b"].var())
-    out["best_fit_days"] = int(len(m))
+    out["best_fit_days"] = int(len(frame))
     out["leg_correlation"] = _num(m["a"].corr(m["b"]))
     if not var_b:
         out["best_fit_reason"] = f"{b['name']} did not move over the window, so there is no fit"
@@ -496,8 +569,10 @@ def _leg_risk(ctx: _Ctx, sides: List[dict], two_day: bool) -> dict:
     with the trade's other side: with two sides, the other side; with one side or three or more,
     the rest of the trade (every other leg with a series); for a currency hedge, the trade's
     legs besides its hedges. Both are the P&L as held (signed lots), so a leg the other side offsets
-    reads a NEGATIVE correlation (a working spread: about -0.7 to -1). Moves as the hedge %'s
-    (2-day when the legs close hours apart)."""
+    reads a NEGATIVE correlation (a working spread: about -0.7 to -1). The correlation is on the
+    hedge %'s aligned days (`_aligned`: only days every leg closed, a skipped day's moves carried
+    into the next), 2-day moves when the legs close hours apart, so every figure of the trade's
+    panel comes from the same days; the daily risk stays on the leg's own closes."""
     n, floor = int(ctx.config["trade_window_bd"]), int(ctx.config["trade_min_days"])
     side_of = {cid: s["key"] for s in sides for cid in s["contracts"]}
     out: List[dict] = []
@@ -526,9 +601,15 @@ def _leg_risk(ctx: _Ctx, sides: List[dict], two_day: bool) -> dict:
         if others is None:
             row["corr_reason"] = "no other leg with a history series"
             continue
-        row["corr_with"], other = others
-        frame = pd.concat([own, other.reindex(own.index).fillna(0.0)], axis=1)
-        frame.columns = ["leg", "other"]
+        row["corr_with"], other_ids = others
+        # the hedge %'s aligned days: only days every leg closed, a gap's moves carried to the next one
+        aligned, _skipped, why = _aligned(ctx)
+        if aligned is None or cid not in aligned.columns or _few_days(ctx, aligned):
+            row["corr_reason"] = (why if aligned is None else _few_days(ctx, aligned)
+                                  or f"{row['name']} is not among the trade's aligned legs")
+            continue
+        frame = pd.DataFrame({"leg": aligned[cid], "other": aligned[[c for c in other_ids if c in aligned.columns]]
+                              .sum(axis=1)})
         m = _moves(frame, two_day)
         row["corr_other_side"] = _num(m["leg"].corr(m["other"]))
         if row["corr_other_side"] is None:
@@ -536,21 +617,20 @@ def _leg_risk(ctx: _Ctx, sides: List[dict], two_day: bool) -> dict:
     return {"legs_risk": out}
 
 
-def _other_side(ctx: _Ctx, sides: List[dict], cid: str, hedge: bool) -> Optional[Tuple[str, pd.Series]]:
-    """(what the leg is correlated with, its daily USD P&L) or None."""
+def _other_side(ctx: _Ctx, sides: List[dict], cid: str, hedge: bool) -> Optional[Tuple[str, List[str]]]:
+    """(what the leg is correlated with, the contract ids of `ctx.parts` it is made of) or None."""
     if hedge:
-        parts = [ctx.parts[c] for s in sides for c in s["contracts"] if c in ctx.parts and c != cid]
+        ids = [c for s in sides for c in s["contracts"] if c in ctx.parts and c != cid]
         label = "the trade's legs besides its hedges"
     elif len(sides) == 2:
         other = next((s for s in sides if cid not in s["contracts"]), None)
         if other is None:
             return None
-        parts, label = [other["series"]], f"the other side ({other['name']})"
+        ids, label = [c for c in other["contracts"] if c in ctx.parts], f"the other side ({other['name']})"
     else:
-        parts = [x for c, x in ctx.parts.items() if c != cid]
+        ids = [c for c in ctx.parts if c != cid]
         label = "the rest of the trade"
-    total = _sum_series([x for x in parts if x is not None])
-    return None if total is None else (label, total)
+    return (label, ids) if ids else None
 
 
 def _order_sides(ctx: _Ctx, sides: List[dict], spec: Optional[LevelSpec]) -> Tuple[dict, dict]:
@@ -1026,7 +1106,8 @@ METHOD = {
                   "position held constant across Bloomberg's daily price history.",
     "share": "The trade's historical component VaR over the book's: its P&L averaged over the book's tail "
              "days nearest the 95 % quantile, scaled so the shares add up to 100 %.",
-    "hedge": "1 - the trade's P&L volatility / its bigger leg's alone, over a year; legs closing hours "
+    "hedge": "The share of its bigger leg's risk the trade takes away: 1 - the variance of the trade's daily "
+             "P&L / its bigger leg's alone, over a year, on the days every leg closed; legs closing hours "
              "apart (China against the West) on 2-day moves.",
     "best_fit": "The lots of one leg per lot of the other that minimise the pair's variance (a regression "
                 "of their P&L per lot), beside the lots held; two-leg trades only.",

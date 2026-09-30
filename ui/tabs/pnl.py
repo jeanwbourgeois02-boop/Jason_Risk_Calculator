@@ -1279,7 +1279,10 @@ def layout(default_date: Optional[str] = None) -> html.Div:
                 html.Span("Table", className="tk-k"),
                 _switch(MODE_ID, ((MODE_TOTAL, "Total"), (MODE_MONTH, "By month")), MODE_TOTAL),
                 tf.bar_slot(TAB),
-                html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0, className="book-download",
+                # a plain link at the strip's right end, as on the Book, so the strip stays one line at
+                # 1680 px (user, 2026-09-30: the gold button wrapped onto a second line)
+                html.Button("Download CSV", id=CSV_BUTTON_ID, n_clicks=0,
+                            className="book-link-button book-csv-link pnl-csv-link",
                             title="Every leg of the rows showing with its split (and months), at full figures"),
                 dcc.Download(id=DOWNLOAD_ID)]),
             html.Div(id=HEADLINE_ID),

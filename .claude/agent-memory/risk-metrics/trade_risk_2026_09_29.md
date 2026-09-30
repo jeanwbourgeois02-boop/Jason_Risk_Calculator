@@ -35,6 +35,13 @@ Choices made where the brief left room (reported, not yet contradicted by the us
   by each commodity's bigger month's sd (value-weighting needs a price; research prices are context and
   mock here): SCO1 -0.0 % -> 65.6 %. `hedge_method` says which way. Such a trade with a currency hedge in
   series is None.
+- hedge % changed 2026-09-30 (user yes): VARIANCE reduction 1 - var(trade)/var(bigger leg) (2 rho - 1
+  for equal legs; the sd ratio read 37 % at rho 0.8), calendars 1 - sum var(net)/sum var(big month).
+  Days: `_aligned` (hedge, calendars, best fit share it; memo on ctx) keeps only days EVERY leg closed and
+  CARRIES the other legs' moves over a skipped day into the next aligned day, because a history
+  change after a gap already spans the gap (own.diff over own closes): dropping rows alone would still
+  pair a week's move with one day's. `_leg_risk`'s corr_other_side moved onto `_aligned` too (same day, user yes); its daily risk stays on own closes.
+  Synthetic check: rho .8 -> 62.5 %, .9 -> 80.8 %, 5-day gap 80.7 % (old alignment 79.5 %).
 - The hand-back tool delivers ONE report per run: after it, the coordinator never sees later text.
 - Memo pitfall: the first book_spreads on a db creates tables and moves the file mtime, so the memo is
   stored under the key read AFTER the build too (warm 0.02-0.04 s, subsets 15-30 ms).

@@ -129,3 +129,11 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 
 ## Add (2026-09-30)
 - `tests/test_spreads.py`: the open / locked-in split of `trade_book`: open + locked = LTD per leg and trade; a partial reduction, a cross through zero and a same-day buy and sell against a hand average-cost figure; a never-reduced leg's locked in exactly 0; an unrecognised leg gives None with its reason; a closed trade all locked in.
+
+## Added 2026-09-30 (Book legs, P&L chart, Data tab, Bloomberg cache, hedge %)
+
+- `tests/test_auto_backfill.py`: any test expecting a day with its FX close on file to ask that close again (the backfill now asks only the missing keys).
+- `tests/test_ui_market_data.py`, `tests/test_ui.py`: tests pinned to the removed Trades card, the removed "Download report" ids (`market-data-bbg-report*`) or the old trade-problems columns; delete, the tab was rebuilt.
+- `tests/test_risk.py` or `tests/test_risk_history.py`: any expected hedge %, best-fit or correlation value (now variance reduction on aligned days); pin 0.8 → about 60 %, 0.9 → about 80 %, and a 5-day gap on one leg that does not lower the figure.
+- New pins: `upload.possible_duplicates` (re-booking across uploads, same-file pair), `last_upload_outcome`, `check_file`'s duplicates; `live.contract_dates_step`'s no-date memory; `backfill` cache block and risk-history empty-stretch memory; the Book's leg rows summing to the trade row.
+- `tools/ui_check.py::render_data` (infra): fill the Data tab's new render slots 11-16 so the static check covers them.
