@@ -1258,9 +1258,10 @@ def latest_mark_time(conn: sqlite3.Connection, as_of: str) -> Optional[tuple]:
 
 
 def mark_time_words(as_of_date: str, snapped_at: str, now: Optional[dt.datetime] = None) -> str:
-    """'Fri 25 Sep 17:00 NY' from a close date and its stamp (any offset, shown in New York
-    time); 'live' when the stamp is within the last hour on the book's own date; the date alone
-    when the stamp is not a time."""
+    """'Sat 26 Sep 05:00 HK' from a close date and its stamp (any offset, shown in Hong Kong
+    time, date and time both from the converted stamp, like every other time on screen: a 17:00
+    New York close on Fri 25 Sep reads 'Sat 26 Sep 05:00 HK'); 'live' when the stamp is within the
+    last hour on the book's own date; the close date alone when the stamp is not a time."""
     try:
         d = dt.date.fromisoformat(as_of_date)
         day = f"{d:%a} {d.day} {d:%b}"
@@ -1271,13 +1272,14 @@ def mark_time_words(as_of_date: str, snapped_at: str, now: Optional[dt.datetime]
     except ValueError:
         return day
     from zoneinfo import ZoneInfo
-    ny = ZoneInfo("America/New_York")
+    hk = ZoneInfo("Asia/Hong_Kong")
     if t.tzinfo is None:
         t = t.replace(tzinfo=dt.timezone.utc)
     now = now or dt.datetime.now(dt.timezone.utc)
     if as_of_date == today_ny(now) and 0 <= (now - t).total_seconds() <= 3600:
         return f"{day} live"
-    return f"{day} {t.astimezone(ny):%H:%M} NY"
+    h = t.astimezone(hk)
+    return f"{h:%a} {h.day} {h:%b} {h:%H:%M} HK"
 
 
 def _library_tickers(conn: sqlite3.Connection, as_of: str) -> Optional[int]:
@@ -1289,8 +1291,9 @@ def _library_tickers(conn: sqlite3.Connection, as_of: str) -> Optional[int]:
 
 
 def marks_chip(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple], n_total: int) -> html.Div:
-    """The header's marks chip (2026-09-28): 'Marks: Fri 25 Sep 17:00 NY · 2 missing', the time
-    the latest official close the book uses was stamped (`latest_mark_time`, New York time; 'live'
+    """The header's marks chip (2026-09-28): 'Marks: Sat 26 Sep 05:00 HK · 2 missing', the time
+    the latest official close the book uses was stamped (`latest_mark_time`, shown in Hong Kong
+    time by `mark_time_words` since 2026-09-30; 'live'
     within the hour) and the count of marks the book needs on `as_of` with no official mark
     (`needed_marks`, the Data tab's own list, memoised on the database revision). Amber while any
     is missing, green when complete ('· complete'), red with no official mark for the book at all
