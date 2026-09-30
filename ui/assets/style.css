@@ -1387,3 +1387,47 @@ p { margin: 8px 0; }
 .risk-panel { gap: 18px; align-items: flex-start; }
 .tk-table.tk-kv.risk-kv thead th { position: static; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
 .risk-trade-table td.tk-what { max-width: 520px; }
+
+/* Book one line per trade, 2026-09-30 (user: modelled on the research app's Open trades table): no second
+   line under any cell; What it is clipped to its column (the whole of it on hover), Quantity and the dates
+   whole, Entry level and Level now with their unit slot, the Download CSV a small plain link. Fits 1680 px. */
+.tk-table td.tk-what.tk-what--one { max-width: 380px; }
+.tk-table td.tk-what.tk-what--one .tk-clip { display: inline-block; max-width: 370px; }
+.tk-table td.tk-qty { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tk-table td.tk-entry .tk-unit-slot { display: inline-block; min-width: 50px; text-align: left; }
+.tk-strip .book-csv-link { margin-left: 4px; white-space: nowrap; }
+.tk-table .tk-type-differs { font-size: 11.5px; font-weight: 600; cursor: help; }
+@media (max-width: 1400px) {
+  .tk-table td.tk-what.tk-what--one { max-width: 240px; }
+  .tk-table td.tk-what.tk-what--one .tk-clip { max-width: 230px; }
+}
+@media (max-width: 1200px) {
+  .tk-table td.tk-what.tk-what--one { max-width: 170px; }
+  .tk-table td.tk-what.tk-what--one .tk-clip { max-width: 160px; }
+}
+@media (min-width: 2000px) {
+  .tk-table td.tk-what.tk-what--one { max-width: 640px; }
+  .tk-table td.tk-what.tk-what--one .tk-clip { max-width: 630px; }
+}
+/* the one-line Book at 1680 px with no sideways scroll: tighter cell padding, Quantity clipped (whole on hover) */
+.book-main .book-table.book-grid.tk-trades td, .book-main .book-table.book-grid.tk-trades th { padding-left: 8px; padding-right: 8px; }
+.tk-table.tk-trades td.tk-what.tk-what--one { max-width: 280px; }
+.tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 270px; }
+.tk-table.tk-trades td.tk-qty .tk-clip { display: inline-block; max-width: 140px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; vertical-align: bottom; }
+@media (min-width: 2000px) {
+  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 640px; }
+  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 630px; }
+  .tk-table.tk-trades td.tk-qty .tk-clip { max-width: 260px; }
+}
+@media (max-width: 1400px) {
+  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 240px; }
+  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 230px; }
+}
+@media (max-width: 1200px) {
+  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 170px; }
+  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 160px; }
+}
+@media (max-width: 1400px) {
+  .book-main .book-table.book-grid.tk-trades td, .book-main .book-table.book-grid.tk-trades th { padding-left: 5px; padding-right: 5px; }
+}

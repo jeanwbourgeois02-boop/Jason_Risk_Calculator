@@ -137,6 +137,8 @@ HEADINGS = {"H1", "H2", "H3", "H4", "H5", "H6"}
 # ("No strike on file: type it in ...") rather than a label.
 PART_RULE = "LOWERCASE_PART"
 HIDDEN_STYLE = re.compile(r"display\s*:\s*none")
+# The Book's grey second line under "What it is" may start lowercase (user decision 2026-09-30).
+LOWERCASE_EXEMPT_CLASS_PARTS = ("tk-what-sub",)
 
 
 # ----------------------------------------------------------------------------- findings
@@ -537,10 +539,12 @@ def check_runs(tab: str, runs: List[Run]) -> List[Finding]:
             out.append(Finding(tab, rule, shown[:120], path, hover, detail))
 
         banned = _banned(text, control=run.kind == "control")
-        if lowercase_hit(text) and not (banned and _first_word(text)[1] in {"n", "nan", "none", "null", "undefined",
+        case_exempt = run.kind == "visible" and any(part in c for n in run.chain for c in n.classes
+                                                    for part in LOWERCASE_EXEMPT_CLASS_PARTS)
+        if lowercase_hit(text) and not case_exempt and not (banned and _first_word(text)[1] in {"n", "nan", "none", "null", "undefined",
                                                                              "inf"}):
             add("LOWERCASE")
-        if run.kind == "visible" and any(n.type in ("Td", "Th") for n in run.chain):
+        if run.kind == "visible" and not case_exempt and any(n.type in ("Td", "Th") for n in run.chain):
             for part in lowercase_parts(text):
                 add(PART_RULE, f"after the separator: {part[:40]}")
         for name in banned:

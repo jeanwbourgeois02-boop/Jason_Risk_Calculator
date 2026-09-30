@@ -324,8 +324,9 @@ CLEAR_WORDS = "Clear filters"
 CLEAR_TIP = "Every column's filter and the search back to All (the grouping stays)"
 
 
-# The tabs whose strip has no Group switch (Risk, 2026-09-30: one flat table by daily risk).
-NO_GROUP_TABS = frozenset({"risk"})
+# The tabs whose strip has no Group switch (Risk, 2026-09-30: one flat table by daily risk; Book, 2026-09-30:
+# one flat list of trades, the switch taken out of its strip on the user's word).
+NO_GROUP_TABS = frozenset({"risk", "book"})
 
 
 def bar(tab: str, state: Optional[dict], options: Optional[Dict[str, List[dict]]] = None) -> html.Div:

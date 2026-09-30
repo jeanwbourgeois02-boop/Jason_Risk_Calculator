@@ -68,11 +68,11 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
     ("gross", "Gross", "", "The trades' positions added without their signs: a contract whose trades net to zero "
                            "still shows what each holds."),
     ("trades", "Trades", "l", "The trades holding the contract; each one's position on hover."),
-    ("now", "Now", "", "The contract's latest official mark at its tick; the source, the time and the previous close "
+    ("now", "Price now", "", "The contract's latest official mark at its tick; the source, the time and the previous close "
                        "on hover."),
-    ("daily", "Daily", "", "Today's P&L in USD of every fill in the contract, across its trades."),
-    ("ltd", "LTD", "", "The P&L since the first fill, in USD."),
-    ("next", "Next", "l", "The contract's next key date: first notice, last trade, option expiry, LME prompt or an FX "
+    ("daily", "P&L today", "", "Today's P&L in USD of every fill in the contract, across its trades."),
+    ("ltd", "P&L since entry", "", "The P&L since the first fill, in USD."),
+    ("next", "Next date", "l", "The contract's next key date: first notice, last trade, option expiry, LME prompt or an FX "
                           "value date; red within 3 business days, amber within 10, grey ≈ when estimated."),
 )
 N_BEFORE_MONEY = 6                             # the columns before Daily (the fold and total rows' spans)
@@ -516,7 +516,7 @@ def contract_tr(data: dict, r: dict, opened: bool, accounts: Dict[str, str]) -> 
     ids = r["trade_ids"]
     daily, ltd = bk.fill_sum(data, "daily", ids), bk.fill_sum(data, "ltd", ids)
     mtd, ytd = bk.fill_sum(data, "mtd", ids), bk.fill_sum(data, "ytd", ids)
-    info = row_info([bk.excl_line("Daily", daily), bk.excl_line("LTD", ltd), bk.excl_line("MTD", mtd),
+    info = row_info([bk.excl_line("P&L today", daily), bk.excl_line("P&L since entry", ltd), bk.excl_line("MTD", mtd),
                      bk.excl_line("YTD", ytd)])
     leg = r["mark_leg"]
     name_hover = _lines(bk._leg_hover(data, leg) if not leg.get("pseudo") else "",
@@ -572,7 +572,7 @@ def panel_tr(data: dict, r: dict, accounts: Dict[str, str]) -> html.Tr:
     foot = html.Tr([html.Td("Contract total", className="l", colSpan=2),
                     html.Td(net_text(r["net"], r["unit"], r["money"])), html.Td(""),
                     _money(bk.fill_sum(data, "daily", ids)), _money(bk.fill_sum(data, "ltd", ids)), html.Td("")])
-    heads = ("Trade", "Clearer", "Position", "Avg fill", "Daily", "LTD", "")
+    heads = ("Trade", "Clearer", "Position", "Avg fill", "P&L today", "P&L since entry", "")
     table = html.Table([html.Thead(html.Tr([html.Th(h, className="l" if i in (0, 1, 6) else None)
                                             for i, h in enumerate(heads)])),
                         html.Tbody(body), html.Tfoot(foot)], className="book-table tk-table tk-legs")
@@ -611,13 +611,14 @@ def total_tr(data: dict, shown: Sequence[dict], rows: Sequence[dict], state: Opt
     label = (f"Filtered · {len(shown)} of {_plural(len(rows), 'contract')}" if filtered
              else f"Book · {_plural(len(rows), 'contract')}")
     hover = _lines(f"{len(rows)} contracts: {n_open} held, {len(rows) - n_open} closed",
-                   _filter_words(state) if filtered else "Daily and LTD equal the top bar's to the cent")
+                   _filter_words(state) if filtered else "P&L today and P&L since entry equal the top bar's Daily and "
+                   "LTD to the cent")
     nxt = [(r["next"], r) for r in shown if r["status"] == "open" and r["next"] and r["next"].get("date")]
     nx_cell: Any = ""
     if nxt:
         e, r = min(nxt, key=lambda x: (str(x[0]["date"]), x[1]["name"]))
         text, cls, nh = bk.next_parts({"next": e}, data["as_of"])
-        nx_cell = html.Span(f"{r['name']} {text}", className=cls or None, title=plain_words(nh))
+        nx_cell = html.Span(f"{r['name']} · {text}", className=cls or None, title=plain_words(nh))
     checked = [r["name"] for r in shown if r["check"]]
 
     def money(fig, hover=""):
@@ -637,7 +638,7 @@ def total_tr(data: dict, shown: Sequence[dict], rows: Sequence[dict], state: Opt
 
 def table(data: dict, rows: Sequence[dict], state: Optional[dict], sort: Optional[dict], opened: Sequence[str],
           folds: Optional[dict], accounts: Dict[str, str]) -> Tuple[html.Table, List[str]]:
-    """The By contract table and the keys showing (Expand all)."""
+    """The By contract table and the keys showing."""
     shown = visible(data, rows, state)
     opened_set = set(opened or [])
     body: List[Any] = [total_tr(data, shown, rows, state)]
@@ -662,7 +663,7 @@ def table(data: dict, rows: Sequence[dict], state: Optional[dict], sort: Optiona
         body.append(html.Tr([
             html.Td([html.Span("▾ " if is_open else "▸ ", className="tk-chev"), f"Closed ({len(closed_rows)})"],
                     className="l", colSpan=N_BEFORE_MONEY,
-                    title="The contracts no trade holds any more: settled, expired or flat; LTD the final P&L"),
+                    title="The contracts no trade holds any more: settled, expired or flat; P&L since entry the final P&L"),
             bk.money_td(*bk.fill_sum(data, "daily", ids)), bk.money_td(*bk.fill_sum(data, "ltd", ids)), html.Td("")],
             id={"type": FOLD_TYPE, "idx": "closed"}, n_clicks=0, className="tk-fold"))
         if is_open:
@@ -741,21 +742,15 @@ def _clicked() -> bool:
 
 
 def register_callbacks(app, get_db_path) -> None:
-    """The contract rows' panels (a click, Expand all, Collapse all in this view), the sort, the
+    """The contract rows' panels (a click), the sort, the
     closed fold, and a panel's "Open trade" link (the By trade view, that trade's panel open; the
     shared filter and the tab are set by `trade_filter`'s link callback)."""
     @app.callback(Output(OPEN_STORE_ID, "data"), Input({"type": ROW_TYPE, "idx": ALL}, "n_clicks"),
-                  Input(bk.EXPAND_ALL_ID, "n_clicks"), Input(bk.COLLAPSE_ALL_ID, "n_clicks"),
-                  State(OPEN_STORE_ID, "data"), State(bk.SHOWN_STORE_ID, "data"), State(VIEW_ID, "value"),
-                  prevent_initial_call=True)
-    def _toggle(_rows, _all, _none, current, shown, view):
+                  State(OPEN_STORE_ID, "data"), prevent_initial_call=True)
+    def _toggle(_rows, current):
         if not _clicked():
             return dash.no_update
         trig = dash.ctx.triggered_id
-        if trig in (bk.EXPAND_ALL_ID, bk.COLLAPSE_ALL_ID):
-            if view != VIEW_CONTRACT:
-                return dash.no_update
-            return list(shown or []) if trig == bk.EXPAND_ALL_ID else []
         if isinstance(trig, dict):
             key = str(trig.get("idx") or "")
             cur = list(current or [])

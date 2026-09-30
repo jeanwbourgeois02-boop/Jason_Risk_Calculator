@@ -192,7 +192,7 @@ FRAME_COLUMNS = [
     "description", "contract", "contract_tip", "instrument_id", "bbg_ticker", "product", "price", "price_unit",
     "price_text", "broker_price", "broker_price_num", "broker_price_tip", "price_scale", "price_scaled", "strategy",
     "pb_root", "landed", "landed_type", "landed_tip", "assigned", "status", "uploads", "uploads_tip", "account",
-    "unrecognised", "unrecognised_reason"]
+    "unrecognised", "unrecognised_reason", "type_differs"]
 
 
 def _read_trades(conn: sqlite3.Connection) -> List[dict]:
@@ -314,6 +314,7 @@ def _build_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, Li
     trades = _read_trades(conn)
     issues: List[tuple] = []
     landed: Dict[str, Tuple[str, str]] = {}
+    mismatch: Dict[str, str] = {}                # trade_id -> the engine's sentence: its trade's type differs from the PBRoot
     leg_names: Dict[str, str] = {}
     unassigned: set = set()
     book_error = ""
@@ -324,8 +325,11 @@ def _build_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, Li
             for t in tb.get("trades") or []:
                 from ui.tabs.trade_filter import NOT_TYPED, trade_type_label
                 code = NOT_TYPED_CODE if trade_type_label(t) == NOT_TYPED else str(t.get("type") or "")
+                differs = str(t.get("type_mismatch") or "")
                 for tid in t.get("trade_ids") or []:
                     landed[str(tid)] = (str(t.get("trade") or ""), code)
+                    if differs:
+                        mismatch[str(tid)] = differs
                 for leg in t.get("legs") or []:
                     for tid in leg.get("trade_ids") or []:
                         leg_names.setdefault(str(tid), str(leg.get("name") or ""))
@@ -429,7 +433,7 @@ def _build_frame(conn: sqlite3.Connection, as_of: str) -> Tuple[pd.DataFrame, Li
             "pb_root": str(r["pb_root"] or ""), "landed": landed_label, "landed_type": type_words(code) if code else "",
             "landed_tip": landed_tip, "assigned": assigned, "status": status_of.get(tid, ""),
             "uploads": uploads, "uploads_tip": uploads_tip, "account": str(r["account"] or ""),
-            "unrecognised": product == UNRECOGNISED,
+            "unrecognised": product == UNRECOGNISED, "type_differs": mismatch.get(tid, ""),
             "unrecognised_reason": (unrec_why.get(tid) or f"contract not recognised: {broker_symbol or inst}: P&L can't "
                                     "be computed until it is mapped") if product == UNRECOGNISED else "",
         })
@@ -574,6 +578,11 @@ def _row(r: dict, as_of: str) -> html.Tr:
             r["landed_tip"])
     else:
         landed = html.Span("not in a trade", className="cell-amber", title=plain_words(r["landed_tip"]))
+    if r.get("type_differs") and r["assigned"]:
+        # the Book's Check column leaves this to the opened trade and here (user, 2026-09-30)
+        landed = html.Span([landed, html.Span(" · ", className="tk-sub"),
+                            html.Span("Type differs", className="cell-amber tk-type-differs",
+                                      title=plain_words(cap(f"type differs from the PBRoot: {r['type_differs']}")))])
     if r.get("unrecognised"):
         # every row loads (2026-09-29): on file as a trade, its contract not recognised: a red flag
         landed = html.Span([html.Span("● Not recognised", className="cell-red",
