@@ -21,7 +21,7 @@ dash = pytest.importorskip("dash", reason="dash is not installed in this environ
 from data.ingest import schema  # noqa: E402
 from ui import app as uiapp  # noqa: E402
 from ui.tabs import blotter, controls, header, market_data  # noqa: E402
-from ui import revision, uploads  # noqa: E402
+from ui import uploads  # noqa: E402
 
 
 def _seed(conn):
@@ -267,31 +267,6 @@ def test_tab_show_hide_callback_toggles_bodies(tmp_path):
     assert key, "expected a callback outputting tab-body-*.style keyed on main-tabs value"
     cb = app.callback_map[key[0]]
     assert any(d["id"] == uiapp.MAIN_TABS_ID and d["property"] == "value" for d in cb["inputs"])
-
-
-def test_header_as_of_defaults_to_today_follows_a_pick_and_rolls_over_at_midnight(tmp_path):
-    """User, 2026-09-22: "by default, always price pnl as of today, so that the top bar
-    numbers all reflect todays numbers, unless changed specifically otherwise"."""
-    db_path = tmp_path / "risk.db"
-    _seeded_db(db_path)
-    app = uiapp.create_app(db_path=db_path, start_feed=False)
-    assert callable(app.layout)                                   # built on every page load: today is fresh
-    ids = _all_ids(app.layout())
-    assert header.AS_OF_STORE_ID in ids and header.AS_OF_PICKED_ID in ids
-    # the header's own picker feeds the store; the poll rolls the store and the picker to the new day
-    keys = list(app.callback_map)
-    follow = next(k for k in keys if k.startswith(f"..{header.AS_OF_STORE_ID}.data...{header.AS_OF_PICKED_ID}.data.."))
-    inputs = {d["id"] for d in app.callback_map[follow]["inputs"]}
-    assert inputs == {header.DATE_PICKER_ID}
-    roll = next(k for k in keys if f"{header.DATE_PICKER_ID}.date@" in k and header.AS_OF_STORE_ID in k)
-    assert {d["id"] for d in app.callback_map[roll]["inputs"]} == {revision.POLL_ID}
-    # the rules themselves
-    assert header.as_of_after_pick("2026-09-15", "2026-09-22") == ("2026-09-15", True)
-    assert header.as_of_after_pick("2026-09-22", "2026-09-22") == ("2026-09-22", False)   # the Today button
-    assert header.as_of_after_pick(None, "2026-09-22") == ("2026-09-22", False)
-    assert header.as_of_after_tick("2026-09-21", False, "2026-09-22") == "2026-09-22"    # the day rolled
-    assert header.as_of_after_tick("2026-09-22", False, "2026-09-22") is None
-    assert header.as_of_after_tick("2026-09-15", True, "2026-09-22") is None             # picked: stays
 
 
 def test_the_books_today_rolls_at_five_pm_new_york():

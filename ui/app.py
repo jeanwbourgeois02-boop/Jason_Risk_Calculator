@@ -111,8 +111,8 @@ TAB_BUILDERS = {
 
 
 def tab_layout(key: str) -> html.Div:
-    """A tab's own layout, built now: today in New York is its default date (the header's
-    picker, `ui/tabs/header.py::DATE_PICKER_ID`, is the one place the as-of changes)."""
+    """A tab's own layout, built now: today in New York is its default date (every tab reads the
+    header's as-of store, `header.AS_OF_STORE_ID`; no picker since 2026-09-30)."""
     return TAB_BUILDERS[key](default_date=today_ny())
 
 
@@ -301,13 +301,13 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
     (the selected tab's key, `TAB_KEYS`).
 
     Each tab module owns its own controls/table via `build_layout(default_date)`; this
-    module only assembles them and wires the header's date picker (`header.DATE_PICKER_ID`, the
-    one picker of the app since 2026-09-28) into `header.AS_OF_STORE_ID`, which every tab reads.
+    module only assembles them and keeps `header.AS_OF_STORE_ID`, which every tab reads: today in
+    New York, rolled at 17:00 New York; `?as_of=YYYY-MM-DD` in the page URL values the page at
+    that date with no control on screen (no date picker since 2026-09-30, user: "that can go").
 
     Defaults: today in New York everywhere (user, 2026-09-22: "always price pnl as of today")."""
     today = today_ny()
-    # Every tab names today: the header's picker (ui/tabs/header.py::DATE_PICKER_ID) is the one
-    # place the as-of changes since 2026-09-28; the Trades and Data tabs read the header's store.
+    # Every tab names today and reads the header's store (no date picker since 2026-09-30).
     # The last uploaded trade date (`data["as_of_date"]`) opens no tab any more.
     first = TAB_KEYS[VISIBLE_TABS[0]]
     tabs = [dcc.Tab(label=label, value=TAB_KEYS[label], className="tab", selected_className="tab--selected")
@@ -328,6 +328,11 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
         html.Div(id="tab-bodies", children=bodies),
         dcc.Store(id=header.AS_OF_STORE_ID, data=today),
         dcc.Store(id=header.AS_OF_PICKED_ID, data=False),
+        # The page URL: `?as_of=YYYY-MM-DD` sets the as-of (`_as_of_from_url`), no control on screen.
+        dcc.Location(id=header.URL_ID, refresh=False),
+        # Not a picker: an empty store under the old picker's id, so the poll's outputs (the day roll
+        # writes `date` here, always no_update) keep the shape a page of an older build asks for.
+        dcc.Store(id=header.DATE_PICKER_ID),
         # The trade tabs' shared filter (ui/tabs/trade_filter.py, Phase G): one session store outside
         # every tab, so what is set on Book is set on P&L and Risk; "See fills" writes the Blotter's.
         dcc.Store(id=trade_filter.STORE_ID, storage_type="session"),
@@ -398,11 +403,12 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     market_data.register_callbacks(app, get_db_path=active_db_path)
     uploads.register(app, get_db_path=active_db_path)
     # The header's day roll rides the revision poll (one callback per tick, `revision.register`):
-    # today in New York once the book's day turns at 17:00 New York, header and picker together,
-    # unless a day other than today was picked (`header.as_of_after_tick`).
+    # today in New York once the book's day turns at 17:00 New York, unless the page was opened
+    # at another day (`?as_of=`; `header.as_of_after_tick`). The second output is the old picker's
+    # id, kept so the poll's outputs never change shape (`ui/revision.py`); never written.
     def _roll_to_today(store, picked):
         today = header.as_of_after_tick(store, bool(picked), today_ny())
-        return (dash.no_update, dash.no_update) if today is None else (today, today)
+        return (dash.no_update if today is None else today), dash.no_update
 
     revision.register(app, get_db_path=active_db_path, build=build, tick=(
         [Output(header.AS_OF_STORE_ID, "data", allow_duplicate=True),
@@ -410,19 +416,17 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
         [State(header.AS_OF_STORE_ID, "data"), State(header.AS_OF_PICKED_ID, "data")],
         _roll_to_today))
 
-    # The header's as-of (user, 2026-09-22: "always price pnl as of today ... unless changed
-    # specifically otherwise"): today in New York on every page load (the callable layout
-    # above), following the header's own date picker when the user changes it (the one picker
-    # of the app since 2026-09-28: the Trades and Data tabs read the store), and rolling
-    # to the new day at the book's day roll -- header and picker together -- unless a day
-    # other than today was picked. `prevent_initial_call`: the picker's initial value is the
-    # same default and must not count as a pick.
+    # The header's as-of (user, 2026-09-22: "always price pnl as of today"): today in New York on
+    # every page load (the callable layout above), rolled at the book's day roll. The date picker
+    # left on 2026-09-30 (user: "this as of wednesday button thing - that can go"); a page opened
+    # with `?as_of=YYYY-MM-DD` is valued at that day and stays on it (`tools/ui_check.py`). Runs on
+    # load; no query (or no valid date) changes nothing, so a plain page renders once.
     @app.callback(Output(header.AS_OF_STORE_ID, "data"),
                   Output(header.AS_OF_PICKED_ID, "data"),
-                  Input(header.DATE_PICKER_ID, "date"),
-                  prevent_initial_call=True)
-    def _follow_pickers(picked_date):
-        return header.as_of_after_pick(picked_date, today_ny())
+                  Input(header.URL_ID, "search"))
+    def _as_of_from_url(search):
+        got = header.as_of_from_query(search, today_ny())
+        return (dash.no_update, dash.no_update) if got is None else got
 
     # The tab switch (see `build_tab_bodies` above): the selected tab's layout, built now, and
     # nothing in the others. The page opens with the first tab already built into its body, so

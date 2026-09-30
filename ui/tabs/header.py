@@ -163,26 +163,35 @@ CHART_CONTAINER_ID = "header-ltd-chart-container"
 DETAILS_ID = "header-ltd-details"
 SUMMARY_ID = f"{DETAILS_ID}-summary"
 AS_OF_STORE_ID = "header-as-of-store"
-# The one date picker of the app (2026-09-28, the screens tidy): the header's first cell, "AS OF".
-# `ui/app.py` wires it into `AS_OF_STORE_ID` (`_follow_pickers`) and rolls it with the day
-# (`_roll_to_today`); the Trades and Data tabs lost their own pickers that day and read the store.
+# No date picker since 2026-09-30 (user: "this as of wednesday button thing - that can go"): the
+# app values as of today in New York and rolls at 17:00 NY (`ui/app.py::_roll_to_today`). The id
+# survives only as a hidden store (`ui/app.py`), so the poll's outputs (`ui/revision.py`, which a
+# page of an older build asks a newer one for) keep the same shape; nothing writes it.
 DATE_PICKER_ID = "header-as-of-picker"
+# The page URL (`ui/app.py`'s dcc.Location): `?as_of=YYYY-MM-DD` values the page at that date with
+# no control on screen (`tools/ui_check.py` uses it to shoot the sample at a fixed date).
+URL_ID = "page-url"
+AS_OF_QUERY = "as_of"
 TRADES_COUNT_CLASS = "header-trades"
 CHIP_CLASS = "header-chip"
-# True once a date picker (Blotter or Ladder) was set to a day other than today: the header
-# then stays on that day; otherwise it follows the New York calendar (user, 2026-09-22:
-# "by default, always price pnl as of today, so that the top bar numbers all reflect todays
-# numbers, unless changed specifically otherwise").
+# True once the page was opened at a day other than today (`?as_of=`): the header then stays on
+# that day; otherwise it follows the New York calendar (user, 2026-09-22: "by default, always
+# price pnl as of today, so that the top bar numbers all reflect todays numbers, unless changed
+# specifically otherwise").
 AS_OF_PICKED_ID = "header-as-of-picked"
 
 
-def as_of_after_pick(date_value: Optional[str], today: str) -> tuple:
-    """(store value, picked) after a Blotter or Ladder date picker changed to `date_value`:
-    the header follows the picker; a pick of today itself (the Today buttons) is not a
-    departure from the default, so the day still rolls over at New York midnight."""
-    if not date_value:
-        return today, False
-    return date_value, date_value != today
+def as_of_from_query(search: Optional[str], today: str) -> Optional[tuple]:
+    """(store value, picked) from the page URL's query (`?as_of=2026-09-18`), or None when it names
+    no valid date (the page stays on today). A date of today itself is not a departure, so the day
+    still rolls at 17:00 New York."""
+    from urllib.parse import parse_qs
+    values = parse_qs(str(search or "").lstrip("?")).get(AS_OF_QUERY) or []
+    try:
+        day = dt.date.fromisoformat(values[0].strip()).isoformat()
+    except (IndexError, ValueError):
+        return None
+    return day, day != today
 
 
 def as_of_after_tick(store: Optional[str], picked: bool, today: str) -> Optional[str]:
@@ -334,22 +343,8 @@ def layout() -> html.Div:
     `_build_chart` there); `DETAILS_ID`, `SUMMARY_ID` and `CHART_CONTAINER_ID` stay as names
     for the P&L tab's own ids and older notes, but no element of the header carries them."""
     return html.Div(id=HEADER_ID, className="header-block", children=[
-        _picker_card(),
         html.Div(id=f"{HEADER_ID}-figures", className="header-figures",
                  children=[_figure_card("LTD", MISSING)]),
-    ])
-
-
-def _picker_card() -> html.Div:
-    """The header's first cell: "AS OF" over the date picker (`DATE_PICKER_ID`), today in New
-    York by default (the layout is rebuilt on every page load, so it is never frozen). The one
-    place the as-of changes (CLAUDE.md "Tabs as views")."""
-    return html.Div(className="header-figure header-asof", children=[
-        html.Div(AS_OF_TITLE, className="header-figure-title"),
-        # Dash 4.4's own picker (no react-dates): it maps the moment tokens D, DD, Do, YY, YYYY and
-        # dd and hands the rest to date-fns, so the weekday is EEE ("Mon"); "ddd" rendered "Mo28".
-        dcc.DatePickerSingle(id=DATE_PICKER_ID, date=today_ny(), display_format="EEE D MMM YYYY",
-                             first_day_of_week=1, number_of_months_shown=1, clearable=False),
     ])
 
 

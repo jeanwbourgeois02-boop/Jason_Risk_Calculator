@@ -4,7 +4,7 @@
    upload control. */
 :root {
   --navy: #0f1f3d; --navy-2: #16294f; --gold: #c9a227;
-  --page: #f6f7fa; --card: #ffffff; --line: #dfe3ea; --text: #1b2333; --muted: #6b7280;
+  --page: #f6f7fa; --card: #ffffff; --line: #dfe3ea; --text: #1b2333; --muted: #4b5563; --ink-2: #374151;
   --pos: #1a7f4b; --neg: #c0392b;
   /* legacy aliases kept so untouched selectors below still resolve sensibly */
   --ink: var(--text); --bg: var(--page); --panel: var(--card); --accent: var(--gold);
@@ -366,7 +366,7 @@ p { margin: 8px 0; }
    selections still render via dash-dropdown-value-item). */
 .blotter-filter-dropdown .dash-dropdown-value-count { background: var(--navy); color: #fff;
   border-radius: 10px; font-size: 11px; font-weight: 700; padding: 1px 8px; line-height: 18px; }
-.btn--ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
+.btn--ghost { background: transparent; color: var(--ink-2); border: 1px solid var(--line);
   align-self: flex-end; height: 32px; padding: 0 14px; border-radius: 6px; font-weight: 600;
   font-size: 12px; transition: color .1s ease, border-color .1s ease; }
 .btn--ghost:hover { color: var(--navy); border-color: var(--navy); }
@@ -546,13 +546,13 @@ p { margin: 8px 0; }
    grey from 2026-09-28 until then), compact rows, sort arrows on hover only, the unit a small
    grey suffix. The header carries the one date picker and the marks chip; the top bar carries
    the Bloomberg state as a dot. */
-.cell-missing { color: #9ca3af; cursor: help; }
+.cell-missing { color: #6b7280; cursor: help; }
 .cell-pos { color: var(--pos); }
 .cell-neg { color: var(--neg); }
 .cell-estimated { color: var(--muted); cursor: help; }
 .cell-amber { color: var(--warn); font-weight: 600; }
 .cell-red { color: var(--neg); font-weight: 700; }
-.cell-unit { color: #8a919c; font-size: 10.5px; margin-left: 4px; }
+.cell-unit { color: #5f6876; font-size: 10.5px; margin-left: 4px; }
 
 /* dash_table: the navy header of the kit above; compact rows; sort arrows only on hover */
 .dash-spreadsheet-container .dash-spreadsheet-inner th {
@@ -567,26 +567,11 @@ p { margin: 8px 0; }
 .dash-spreadsheet-container .dash-spreadsheet-inner th:hover .sort { opacity: 1; }
 .dash-spreadsheet-container .dash-spreadsheet-inner th .column-header--sort { color: #fff !important; }
 
-/* the header: one row, the picker first, the figures, the marks chip, the count at the right */
+/* the header: one row, the figures from the left edge, the marks chip, the count at the right (no picker, 2026-09-30) */
 .header-block { display: flex; flex-wrap: nowrap; align-items: center; gap: 22px; padding: 7px 24px; background: var(--navy);
   border-top: 1px solid rgba(255,255,255,.08); box-shadow: 0 1px 2px rgba(15,31,61,.12); }
 .header-figures { flex: 1 1 auto; align-items: center; gap: 22px; min-height: 44px; }
 .header-figure-value { margin-top: 1px; }
-.header-asof { min-width: 150px; }
-.header-asof .header-figure-title { margin-bottom: 1px; }
-/* Dash 4.4 renders its own date picker (classes .dash-datepicker-*, no react-dates): the picker keeps its
-   white box with navy text on it, never the header's white (seen white on white, 2026-09-28: the earlier
-   .DateInput_input rules matched nothing on this Dash). Its calendar opens in a portal outside the header
-   and keeps the component's own palette. */
-.header-asof .dash-datepicker { width: 150px; background: #fff; border-radius: 4px; color: var(--navy); }
-.header-asof .dash-datepicker-input-wrapper { border: none; border-radius: 4px; background: #fff; padding: 0 8px;
-  min-height: 28px; cursor: pointer; box-shadow: inset 0 -2px 0 transparent; }
-.header-asof .dash-datepicker-input-wrapper:focus-within { border: none; box-shadow: inset 0 -2px 0 var(--gold); }
-.header-asof .dash-datepicker-input-wrapper:has(:focus-visible) { outline: none; }
-.header-asof .dash-datepicker-input { height: 28px; font-size: 14px; font-weight: 700; color: var(--navy); background: #fff;
-  cursor: pointer; font-variant-numeric: tabular-nums; }
-.header-asof .dash-datepicker-input::placeholder { color: var(--navy); opacity: .55; }
-.header-asof .dash-datepicker-caret-icon { color: var(--navy); }
 .header-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid rgba(255,255,255,.35);
   border-radius: 12px; padding: 3px 10px; font-size: 11px; color: #fff; white-space: nowrap; cursor: help; margin-left: 6px; }
 .header-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: 0 0 8px; }
@@ -604,14 +589,14 @@ p { margin: 8px 0; }
 /* a view switch: a segmented control, the chosen segment navy with a gold rule under it */
 .book-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; font-size: 12px; font-weight: 600;
   margin-left: 8px; background: #fff; }
-.book-switch label { padding: 0 12px; height: 28px; color: var(--muted); background: #fff; cursor: pointer; margin: 0; display: inline-flex;
+.book-switch label { padding: 0 12px; height: 28px; color: var(--ink-2); background: #fff; cursor: pointer; margin: 0; display: inline-flex;
   align-items: center; border-right: 1px solid var(--line); transition: color .1s ease, background .1s ease; }
 .book-switch label:last-child { border-right: none; }
 .book-switch label:hover { color: var(--navy); background: var(--hover); }
 .book-switch input { display: none; }
 .book-switch label:has(input:checked) { background: var(--navy); color: #fff; box-shadow: inset 0 -2px 0 var(--gold); }
 /* the tabs' small secondary buttons (Download CSV, Expand all, Collapse all): the reference's ghost button */
-.book-download { margin-left: auto; height: 28px; padding: 0 12px; font-size: 12px; font-weight: 600; color: var(--muted);
+.book-download { margin-left: auto; height: 28px; padding: 0 12px; font-size: 12px; font-weight: 600; color: var(--ink-2);
   background: #fff; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-family: inherit; align-self: center;
   white-space: nowrap; transition: color .1s ease, border-color .1s ease; }
 .book-download:hover { color: var(--navy); border-color: var(--navy); }
@@ -695,7 +680,7 @@ p { margin: 8px 0; }
 .cards-row > .book-card { flex: 1 1 0; min-width: 0; }
 .card-pad { padding: 14px 16px 16px; }
 .card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
-.name-sub { color: #8a919c; font-size: 11px; margin-left: 6px; font-weight: 400; }
+.name-sub { color: #5f6876; font-size: 11px; margin-left: 6px; font-weight: 400; }
 .grid-note { color: var(--muted); font-size: 11.5px; }
 .grid-note .marker { margin-left: 0; }
 .fx-net-line { margin-top: 8px; font-size: 12.5px; }
@@ -954,7 +939,7 @@ p { margin: 8px 0; }
 .risk-section-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
 .risk-section-head .risk-h { margin: 0; }
 .risk-section-head .book-switch { margin-left: auto; }
-.risk-grey { color: #8a919c; font-size: 11px; font-weight: 400; margin-left: 6px; text-transform: none; letter-spacing: 0; }
+.risk-grey { color: #5f6876; font-size: 11px; font-weight: 400; margin-left: 6px; text-transform: none; letter-spacing: 0; }
 .risk-quiet { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
 .risk-quiet[title] { cursor: help; }
 .risk-note-line { font-size: 12.5px; color: var(--text); margin: 8px 0 0; }
@@ -999,7 +984,7 @@ p { margin: 8px 0; }
 .tk-strip .tk-title { font-weight: 700; color: var(--navy); margin-right: auto; }
 .tk-strip .book-download { margin-left: 0; }   /* the strip's tools sit together at the right, after the title */
 .tk-strip--controls { background: var(--card); border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; }
-.tk-strip .tk-k, .tk-facts .tk-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.tk-strip .tk-k, .tk-facts .tk-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); }
 .tk-table td.l, .tk-table th.l { text-align: left; }
 .tk-table th.tk-sortable { cursor: pointer; user-select: none; }
 .tk-table th.tk-sortable:hover { background: var(--navy-2); }
@@ -1022,7 +1007,7 @@ p { margin: 8px 0; }
   white-space: nowrap; vertical-align: bottom; }
 .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 200px; }
 .tk-table .tk-bold { font-weight: 700; }
-.tk-table .tk-flags, .tk-table .tk-flag-dot { color: var(--warn); font-weight: 700; cursor: help; }
+.tk-table .tk-flags, .tk-table .tk-flag-dot { color: var(--warn); font-weight: 700; cursor: help; white-space: nowrap; }
 .tk-table .tk-flag-dot { margin-left: 4px; font-size: 9px; vertical-align: middle; }
 .tk-table [title] { cursor: help; }
 .tk-table tr.tk-row [title], .tk-table tr.tk-group [title] { cursor: pointer; }
@@ -1061,7 +1046,7 @@ p { margin: 8px 0; }
   padding: 0 4px; margin: 0 0 10px; font-size: 13px; }
 .tk-head-item { display: inline-flex; flex-direction: row; align-items: baseline; gap: 7px; min-width: 0; }
 .tk-head-item[title] { cursor: help; }
-.tk-head-k { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.tk-head-k { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-2); }
 .tk-head-v { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tk-head-v .marker { font-size: 10px; font-weight: 400; }
 /* the shared filter bar */
@@ -1244,3 +1229,23 @@ p { margin: 8px 0; }
 .tk-table thead th.tk-sortable { cursor: default; }
 .tk-table thead th .tk-sort { cursor: pointer; }
 .tk-table thead th .tk-sort:hover { color: var(--gold); }
+
+/* Book, 2026-09-30 (user: "net usd and flags ... alone in this row its clunky", "too faint you cant read
+   anything", "the size column is cooked"): no headline line above the card, the rows' MTD / YTD inline after
+   the strip's title while filtered; Gross / Net and the flag count on the total row; one Size form; the flag
+   named in words; the strip's text and the rows' secondary text readable (4.5:1 or better). */
+.tk-strip .tk-strip-lead { display: flex; align-items: center; gap: 6px 18px; margin-right: auto; min-width: 0; }
+.tk-strip .tk-strip-lead .tk-title { margin-right: 0; }
+.tk-strip .tk-strip-figs { display: inline-flex; align-items: baseline; gap: 14px; font-size: 12.5px; font-weight: 600;
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tk-strip .tk-strip-fig { display: inline-flex; align-items: baseline; gap: 5px; cursor: help; }
+.tk-strip .tk-strip-fig .marker { font-size: 10px; font-weight: 400; }
+.tk-strip input::placeholder, .tf-tools input::placeholder, .blotter-filter-search::placeholder,
+.blotter-filter-search input::placeholder { color: var(--muted); opacity: 1; }
+.tk-table tr.book-total td.tk-total-what { white-space: nowrap; }
+.tk-table .tk-total-k { font-weight: 600; color: var(--ink-2); }
+.tk-table .tk-total-sep { color: var(--muted); font-weight: 400; }
+.tk-table td.tk-size { white-space: nowrap; font-variant-numeric: tabular-nums; text-align: right; }
+.tk-table td.tk-size .tk-more { margin-left: 5px; }
+.tk-table td.tk-flags-cell { text-align: left; white-space: nowrap; }
+.tk-table .tk-flags-more { font-weight: 600; }

@@ -5,11 +5,11 @@ The trade is the unit: one row per trade name (Jason's PBRoot suffix, `JSHY10_ZN
 `JSHY10.3_ZNA1` one trade), every leg and hedge under it, never split. Columns: Trade | Type |
 What it is | Size | Entry | Now | z | Move | Daily | LTD | Next | Flags; a row's caveats (a figure
 leaving fills out) sit in one small "i" after its name (`formatting.row_info`), the research caveat
-once on the z heading. Above the table the shared filter bar and Group switch (`ui.tabs.trade_filter`,
-the same on P&L and Risk, carried across the three tabs) and one light headline line of what neither
-the header nor the total row shows (Net USD, the flags; MTD and YTD when filtered). The table's
-first row is the total ("Book · 6 trades", "Filtered · 3 of 6"), sticky, equal unfiltered to the
-top bar's Daily, MTD and LTD to the cent; the fully flat trades are in the closed fold at the
+once on the z heading. Nothing sits between the header and the card (user, 2026-09-30): the card's
+title strip holds the search, the Group switch and, only while a filter is set, the rows' MTD and
+YTD. The table's first row is the total ("Book · 6 trades", "Filtered · 3 of 6"), sticky, with
+Gross and Net USD in its What-it-is cell and the flag count in its Flags cell, equal unfiltered to
+the top bar's Daily, MTD and LTD to the cent; the fully flat trades are in the closed fold at the
 bottom. A click on a trade opens its panel under it: the flags, the legs (hedges last, in italics;
 a Mixed trade's legs under its sub-spreads), the trade's footer (totals, USD per 1-unit move of the
 level, the hedge line), the level since the first fill with its entry dashed and its rolls
@@ -94,7 +94,8 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
     ("type", "Type", "l", "The trade's type by rule from its legs (hedges apart): calendar, cross-exchange, "
                           "cross-product, mixed or outright; a type mismatch with the PBRoot is in Flags."),
     ("what", "What it is", "l", "The trade in plain words, with the share of its currency exposure hedged."),
-    ("size", "Size", "", "The lots of each side (side A first); the value per side, the balance and the USD per "
+    ("size", "Size", "", "The signed lots of each side, side A first (+ long, minus short); an FX or metal "
+                         "forward or FX option its notional; the value per side, the balance and the USD per "
                          "1-unit move of the level on hover."),
     ("entry", "Entry", "", "The level at entry: the fills' size-weighted level (a calendar near minus far in its "
                            "unit, a China-against-West pair the converted ratio China over foreign)."),
@@ -107,8 +108,9 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
     ("ltd", "LTD", "", "The P&L since the trade opened, in USD."),
     ("next", "Next", "l", "The nearest key date of an open leg: first notice, last trade, option expiry or LME "
                           "prompt; red within 3 business days, amber within 10, grey ≈ when estimated."),
-    ("flags", "Flags", "", "The trade's flags, each on hover: unbalanced, hedge oversized, type mismatch, a leg "
-                           "without a price, a price to check; red when a contract is not recognised."),
+    ("flags", "Flags", "l", "The trade's most severe flag in words, and how many more: unbalanced, hedge too big, "
+                            "type mismatch, no price, price to check; red when a contract is not recognised. Each "
+                            "flag's sentence on hover."),
 )
 NEXT_ABBR = {"first notice": "FN", "last trade": "LT", "option expiry": "Exp", "LME prompt": "Prompt",
              "expiry": "Exp", "prompt": "Prompt"}
@@ -612,30 +614,78 @@ def _what_td(t: dict) -> html.Td:
                    className="l tk-what" + (" tk-what--cov" if cov else ""))
 
 
-def _lots_pair(a: float, b: float) -> str:
-    if not a or not b:
-        n = a or b
-        return f"{n:,.0f} {'lot' if round(n) == 1 else 'lots'}"
-    return f"{a:,.0f} : {b:,.0f}"
+LOT_PRODUCTS = {"FUTURE", "CMDTY_OPTION", "EQ_OPTION", "LME_FWD"}      # sized in lots
+NOTIONAL_PRODUCTS = {"FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION"}      # sized in the pair's base unit
+
+
+def signed_count(n: float, money: bool = False) -> str:
+    """'+30', '−4', '+1,000'; with `money` a currency amount in k / m ('+2.0m', '−250k')."""
+    f = float(n)
+    v = abs(f)
+    if money and v >= 1e6:
+        body = f"{v / 1e6:,.1f}m"
+    elif money and v >= 1000:
+        body = f"{v / 1e3:,.0f}k" if v == round(v / 1e3) * 1e3 else f"{v / 1e3:,.1f}k"
+    else:
+        body = f"{abs(f):,.2f}".rstrip("0").rstrip(".")
+    if body == "0":
+        return "0"
+    return (MINUS if f < 0 else "+") + body
+
+
+def _lots_word(*counts: float) -> str:
+    return "lot" if len(counts) == 1 and abs(counts[0]) == 1 else "lots"
+
+
+def _base_unit(leg: dict) -> Tuple[str, bool]:
+    """(unit, is money) of an FX leg's notional: 'oz' for a precious metal pair, else its base currency."""
+    base = str(leg.get("root_id") or "")[:3]
+    if base in METAL_PAIRS:
+        return "oz", False
+    return base, bool(base)
+
+
+def leg_size(leg: dict) -> Tuple[str, str]:
+    """(signed figure, unit) of one leg: '+4' 'lots', '−100' 'oz', '+10.0m' 'EUR'."""
+    q = _num(leg.get("lots")) or 0.0
+    if str(leg.get("product") or "") in NOTIONAL_PRODUCTS:
+        unit, money = _base_unit(leg)
+        return signed_count(q, money), unit
+    return signed_count(q), _lots_word(q)
+
+
+def _pair_figure(a: float, b: float, money: bool = False) -> str:
+    """'+30 / −4' for two sides, '+2' for one."""
+    if a and b:
+        return f"{signed_count(a, money)} / {signed_count(b, money)}"
+    return signed_count(a or b, money)
 
 
 def sub_sides(t: dict, sub: dict) -> Tuple[float, float]:
-    """(side A lots, side B lots) of one part of a trade (display: its legs' lots added per side). Side
-    A is the trade's first side (`size.sides[0]`, its roots); a part on one root (a calendar) is long
-    against short."""
+    """(side A lots, side B lots), signed (+ long), of one part of a trade (display: its legs' lots
+    added per side). Side A is the trade's first side (`size.sides[0]`, its roots); a part on one
+    root (a calendar) is long against short."""
     sides = (t.get("size") or {}).get("sides") or []
     a_roots = {str(r) for r in (sides[0].get("root_ids") or [])} if sides else set()
     root_of = {str(leg.get("contract_id")): str(leg.get("root_id") or "") for leg in t.get("legs") or []}
     legs = [(root_of.get(str(x.get("contract_id")), ""), _num(x.get("lots")) or 0.0) for x in sub.get("legs") or []]
     roots = {r for r, _l in legs}
     if len(roots) <= 1 or not (roots & a_roots) or roots <= a_roots:
-        return sum(q for _r, q in legs if q > 0), sum(-q for _r, q in legs if q < 0)
-    return sum(abs(q) for r, q in legs if r in a_roots), sum(abs(q) for r, q in legs if r not in a_roots)
+        return sum(q for _r, q in legs if q > 0), sum(q for _r, q in legs if q < 0)
+    return sum(q for r, q in legs if r in a_roots), sum(q for r, q in legs if r not in a_roots)
 
 
-def size_text(t: dict) -> Tuple[str, str]:
-    """(the Size cell, why when blank): the lots of side A against side B ("91 : 167"); a trade of
-    several parts shows its largest part and "+N more"."""
+def _open_legs(t: dict) -> List[dict]:
+    return [leg for leg in t.get("legs") or [] if leg.get("status") == "open" and not leg.get("hedge")
+            and not leg.get("unrecognised") and (_num(leg.get("lots")) or 0.0)]
+
+
+def size_parts(t: dict) -> Tuple[str, str, int, str]:
+    """(figure, unit, other parts, why when blank) of the Size cell, one form on every open row:
+    a spread's signed lots per side, side A first ('+30 / −4' lots); an outright future or option
+    its signed lots ('+2' lots); an FX or precious-metal forward or FX option its signed notional
+    in its unit ('−100' oz, '+10.0m' EUR). A trade of several parts shows its largest and counts
+    the rest (on hover). Display only: the engine's sides, or the legs' lots added."""
     size = t.get("size") or {}
     sides = size.get("sides") or []
     subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
@@ -643,13 +693,43 @@ def size_text(t: dict) -> Tuple[str, str]:
         best = max(subs, key=lambda x: sum(abs(_num(leg.get("lots")) or 0.0) for leg in x.get("legs") or []))
         a, b = sub_sides(t, best)
         if a or b:
-            return f"{_lots_pair(a, b)} +{len(subs) - 1} more", ""
-    if len(sides) < 2:
-        return "", str(size.get("reason") or "no size")
-    a, b = (abs(_num(s.get("lots")) or 0.0) for s in sides[:2])
-    if not a and not b:
-        return "", str(size.get("reason") or "nothing open")
-    return _lots_pair(a, b), ""
+            return _pair_figure(a, b), _lots_word(*(x for x in (a, b) if x)), len(subs) - 1, ""
+    if len(sides) >= 2:
+        a, b = (_num(s.get("lots")) or 0.0 for s in sides[:2])
+        if a or b:
+            return _pair_figure(a, b), _lots_word(*(x for x in (a, b) if x)), 0, ""
+    legs = _open_legs(t)
+    if legs and all(str(leg.get("product") or "") in LOT_PRODUCTS for leg in legs):
+        qs = [_num(leg.get("lots")) or 0.0 for leg in legs]
+        a, b = sum(q for q in qs if q > 0), sum(q for q in qs if q < 0)
+        return _pair_figure(a, b), _lots_word(*(x for x in (a, b) if x)), 0, ""
+    if legs and all(str(leg.get("product") or "") in NOTIONAL_PRODUCTS for leg in legs):
+        by: Dict[Tuple[str, bool], List[float]] = {}
+        for leg in legs:
+            by.setdefault(_base_unit(leg), []).append(_num(leg.get("lots")) or 0.0)
+        (unit, money), qs = max(by.items(), key=lambda kv: sum(abs(q) for q in kv[1]))
+        a, b = sum(q for q in qs if q > 0), sum(q for q in qs if q < 0)
+        others = sum(1 for leg in legs if _base_unit(leg) != (unit, money))
+        return _pair_figure(a, b, money), unit, others, ""
+    if legs:
+        leg = max(legs, key=lambda x: abs(_num(x.get("lots")) or 0.0))
+        fig, unit = leg_size(leg)
+        return fig, unit, len(legs) - 1, ""
+    unknown = [leg for leg in t.get("legs") or [] if leg.get("unrecognised")]
+    if unknown and t.get("status") != "closed":
+        return "", "", 0, ("contract not recognised: no size until it is mapped ("
+                           + "; ".join(f"{leg.get('name')}: {signed_count(_num(leg.get('lots')) or 0.0)} in the file"
+                                       for leg in unknown) + ")")
+    return "", "", 0, str(size.get("reason") or "nothing open")
+
+
+def size_text(t: dict) -> Tuple[str, str]:
+    """(the Size cell as one string, why when blank): '+30 / −4 lots', '+2 lots', '−100 oz'; the
+    CSV's Size column."""
+    fig, unit, more, why = size_parts(t)
+    if not fig:
+        return "", why
+    return " ".join(x for x in (fig, unit, f"+{more} more" if more else "") if x), ""
 
 
 def size_hover(t: dict, r: Optional[dict], research: dict) -> str:
@@ -659,11 +739,14 @@ def size_hover(t: dict, r: Optional[dict], research: dict) -> str:
     if len(subs) > 1:
         for x in subs:
             a, b = sub_sides(t, x)
-            lines.append(f"{cap(str(x.get('what_it_is') or ''))}: {_lots_pair(a, b)}")
+            lines.append(f"{cap(str(x.get('what_it_is') or ''))}: {_pair_figure(a, b)} lots")
     for leg in t.get("legs") or []:
         if leg.get("status") == "open" and not leg.get("hedge"):
-            lines.append(f"{leg.get('name')}: {_num(leg.get('lots')) or 0:+,.0f} lots")
+            fig, unit = leg_size(leg)
+            lines.append(f"{leg.get('name')}: {fig} {unit}")
     for s in size.get("sides") or []:
+        if not _num(s.get("lots")):
+            continue                            # an outright's empty side: nothing to say
         fill, mark = _num(s.get("value_fill_usd")), _num(s.get("value_mark_usd"))
         metal = _num(s.get("physical"))
         lines.append(f"{s.get('label')}: {format_cell(abs(fill)) + ' USD at the fill' if fill is not None else 'value at the fill not known'}"
@@ -692,10 +775,12 @@ def size_hover(t: dict, r: Optional[dict], research: dict) -> str:
 
 
 def _size_td(t: dict, r: Optional[dict], research: dict) -> html.Td:
-    text, why = size_text(t)
-    if not text:
-        return html.Td(missing_cell(why))
-    return html.Td(html.Span(text, title=plain_words(size_hover(t, r, research))))
+    fig, unit, more, why = size_parts(t)
+    if not fig:
+        return html.Td(missing_cell(why), className="tk-size")
+    return html.Td(html.Span([fig, html.Span(unit, className="cell-unit") if unit else None,
+                              html.Span(f"+{more}", className="tk-sub tk-more") if more else None],
+                             title=plain_words(size_hover(t, r, research))), className="tk-size")
 
 
 def _entry_td(t: dict) -> html.Td:
@@ -841,14 +926,32 @@ def _closed_td(t: dict, as_of: str) -> html.Td:
     return html.Td(html.Span(f"Closed {day_text(c['close_date'], as_of)}", className="tk-sub", title=hover), className="l")
 
 
+# The flags' short names, most severe first (the Flags cell names the first and counts the rest).
+FLAG_NAMES = (("unrecognised", "Not recognised"), ("leg_without_price", "No price"), ("no_trade", "No trade"),
+              ("price_check", "Price to check"), ("unbalanced", "Unbalanced"), ("hedge_oversized", "Hedge too big"),
+              ("type_mismatch", "Type mismatch"))
+_FLAG_RANK = {code: i for i, (code, _n) in enumerate(FLAG_NAMES)}
+
+
+def flag_name(flag: dict) -> str:
+    """'Unbalanced', 'Hedge too big', 'Not recognised' ...: the flag's short name."""
+    return dict(FLAG_NAMES).get(str(flag.get("code") or "")) or cap(str(flag.get("label") or "Flag"))
+
+
+def flags_by_severity(flags: Sequence[dict]) -> List[dict]:
+    return sorted(flags, key=lambda f: (not is_red(f), _FLAG_RANK.get(str(f.get("code") or ""), 99)))
+
+
 def _flags_td(t: dict) -> html.Td:
-    flags = t.get("flags") or []
+    flags = flags_by_severity(t.get("flags") or [])
     if not flags:
-        return html.Td("")                      # no flag: blank, the column's one rule
-    red = any(is_red(f) for f in flags)
-    hover = _lines(*(flag_sentence(f) for f in sorted(flags, key=lambda f: not is_red(f))))
-    return html.Td(html.Span(f"● {len(flags)}", className="tk-flags" + (" tk-flags--red" if red else ""),
-                             title=plain_words(hover)))
+        return html.Td("", className="tk-flags-cell")    # no flag: blank, the column's one rule
+    red = is_red(flags[0])
+    hover = _lines(*(flag_sentence(f) for f in flags))
+    return html.Td(html.Span([flag_name(flags[0]), html.Span(f" +{len(flags) - 1}", className="tk-flags-more")
+                              if len(flags) > 1 else None],
+                             className="tk-flags" + (" tk-flags--red" if red else ""), title=plain_words(hover)),
+                   className="tk-flags-cell")
 
 
 # --------------------------------------------------------------------------- rows
@@ -944,13 +1047,37 @@ def totals(data: dict, shown: Sequence[dict]) -> dict:
     out["next"] = nearest_next(shown)
     out["flags"] = sum(len(t.get("flags") or []) for t in shown)
     out["red_flags"] = [flag_sentence(f) for t in shown for f in t.get("flags") or [] if is_red(f)]
+    out["flag_lines"] = [f"{t.get('trade')}: {flag_sentence(f)}" for t in shown
+                         for f in flags_by_severity(t.get("flags") or [])]
     return out
+
+
+def _total_money(label: str, fig: Tuple[Optional[float], int, List[str]], hover: str, signed: bool) -> html.Span:
+    """'Gross 14.2m' / 'Net −34.4k' in the total row, its 'excl. N' marker and reasons on hover."""
+    v, n, r = fig
+    value = (km_cell(v, hover=hover, signed=signed, colour=False) if v is not None
+             else missing_cell(_lines(*list(dict.fromkeys(r))[:8]) or f"no {label.lower()}"))
+    return html.Span([html.Span(label + " ", className="tk-total-k"), value,
+                      marker(f"excl. {n}", _lines(f"excludes {_plural(n, 'trade')} with no {label.lower()} USD",
+                                                  *list(dict.fromkeys(r))[:8]), "marker--small")
+                      if n and v is not None else None], className="tk-total-fig")
+
+
+def _total_flags(tot: dict) -> Any:
+    """'9 flags · 2 red' in the total row's Flags cell: red when any is red, amber otherwise; each
+    flag's trade and sentence on hover."""
+    n, red = tot["flags"], len(tot["red_flags"])
+    if not n:
+        return ""
+    lines = tot["flag_lines"]
+    hover = _lines(*lines[:20], f"And {len(lines) - 20} more" if len(lines) > 20 else "")
+    text = _plural(n, "flag") + (f" · {red} red" if red else "")
+    return html.Span(text, className="tk-flags" + (" tk-flags--red" if red else ""), title=plain_words(hover))
 
 
 def total_tr(data: dict, shown: Sequence[dict], filtered: bool) -> html.Tr:
     tot = totals(data, shown)
     label, hover = _total_label(shown, data.get("trades") or [], filtered)
-    g, g_n, g_r = tot["gross"]
     nx = tot["next"]
     nx_cell: Any = ""
     if nx:
@@ -959,14 +1086,15 @@ def total_tr(data: dict, shown: Sequence[dict], filtered: bool) -> html.Tr:
     if not filtered:
         hover = _lines(hover, "Daily, MTD and LTD equal the top bar's to the cent")
     return html.Tr([
-        html.Td(html.Span(label, title=hover), className="l"), html.Td(""), html.Td(""),
-        html.Td([km_cell(g, hover="gross USD of the rows showing", signed=False, colour=False) if g is not None
-                 else missing_cell("no gross"), html.Span(" gross", className="cell-unit"),
-                 marker(f"excl. {g_n}", _lines(*g_r), "marker--small") if g_n else None]),
-        html.Td(""), html.Td(""), html.Td(""), html.Td(""),
+        html.Td(html.Span(label, title=hover), className="l"), html.Td(""),
+        html.Td([_total_money("Gross", tot["gross"], "Gross USD notional of the rows showing, summed", False),
+                 html.Span(" · ", className="tk-total-sep"),
+                 _total_money("Net", tot["net"], "Net USD notional of the rows showing, summed", True)],
+                className="l tk-total-what"),
+        html.Td(""), html.Td(""), html.Td(""), html.Td(""), html.Td(""),
         _checked_money(data, shown, tot["daily"]),
         _checked_money(data, shown, tot["ltd"], hover=f"MTD {km_text(tot['mtd'][0])}"),
-        html.Td(nx_cell, className="l"), html.Td(""),
+        html.Td(nx_cell, className="l"), html.Td(_total_flags(tot), className="tk-flags-cell"),
     ], className="tk-total book-total")
 
 
@@ -1620,38 +1748,24 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
             [str(t.get("trade")) for t in shown])
 
 
-def headline(data: dict, state: Optional[dict], risk: Optional[dict] = None) -> html.Div:
-    """One light line over the table with only what neither the header nor the table's own total row
-    shows (layout wave 2026-09-29, one place per number): the header has the whole book's Daily, MTD,
-    YTD, LTD and trade count; the total row, sticky under the heads, has the rows' count, Gross,
-    Daily, LTD and the next date. So: Net USD and the flags always; with a filter set, the rows'
-    MTD and YTD too (the header's are the whole book's)."""
+def headline(data: dict, state: Optional[dict], risk: Optional[dict] = None) -> Optional[html.Span]:
+    """The rows' MTD and YTD, inline in the card's title strip after "Trades", only while a filter is
+    set (the header's are the whole book's); None otherwise. Nothing else sits between the header and
+    the card (user, 2026-09-30: "net usd and flags ... alone in this row its clunky"): Gross, Net and
+    the flags are on the table's total row, Daily and LTD there too (one place per number)."""
     s = tf.normal(state)
-    shown = visible(data, s, risk)
-    tot = totals(data, shown)
-    filtered = tf.is_filtered(s, TAB)
+    if not tf.is_filtered(s, TAB):
+        return None
+    tot = totals(data, visible(data, s, risk))
 
-    def money(k):
+    def money(label, k):
         v, n, r = tot[k]
-        return html.Span([km_cell(v, reason=_lines(*r[:6])),
-                          marker(f"excl. {n}", _excl_hover(n, r), "marker--small") if n and v is not None else None])
+        return html.Span(title=f"The {label} P&L of the rows showing (the header's is the whole book's)",
+                         className="tk-strip-fig", children=[
+            html.Span(label, className="tk-k"), " ", km_cell(v, reason=_lines(*r[:6])),
+            marker(f"excl. {n}", _excl_hover(n, r), "marker--small") if n and v is not None else None])
 
-    v, n, r = tot["net"]
-    net = html.Span([km_cell(v, reason=_lines(*r[:6]), colour=False, signed=True),
-                     marker(f"excl. {n}", _lines(*r[:8]), "marker--small") if n and v is not None else None])
-    flags = tot["flags"]
-    red = len(tot["red_flags"])
-    flag_value: Any = (html.Span([_plural(flags, "flag"), html.Span(f" · {red} red", className="tk-red") if red else None],
-                                 className="cell-red" if red else "cell-amber") if flags else "None")
-    return tf.headline([
-        ("MTD", money("mtd"), "the month's P&L of the rows showing (the header's is the whole book's)") if filtered else None,
-        ("YTD", money("ytd"), "the year's P&L of the rows showing (the header's is the whole book's)") if filtered else None,
-        ("Net USD", net, "the rows' net USD notional, summed (Gross is on the table's first row)"),
-        ("Flags", flag_value,
-         _lines("flags on the rows showing: unbalanced, hedge oversized, type mismatch, a leg without a price, a "
-                "price to check; red: a contract not recognised (its P&L can't be computed until it is mapped)",
-                *tot["red_flags"][:8])),
-    ])
+    return html.Span([money("MTD", "mtd"), money("YTD", "ytd")], className="tk-strip-figs")
 
 
 ISSUE_KIND_WORDS = {"daily": "Daily", "ltd": "LTD"}
@@ -1773,7 +1887,9 @@ def render(as_of: Optional[str], db_path, state: Optional[dict] = None) -> html.
     p = render_parts(as_of, db_path, state, wait_risk=True)
     if not p["shown"]:
         return html.Div([p["body"]])
-    return html.Div([p["headline"], html.Div(p["table"], className="book-card book-main tk-card"), p["foot"]])
+    return html.Div([html.Div([html.Div(className="tk-strip", children=[html.Span("Trades", className="tk-title"),
+                                                                     p["headline"]]),
+                               p["table"]], className="book-card book-main tk-card"), p["foot"]])
 
 
 def options_of(as_of: str, db_path) -> Dict[str, List[dict]]:
@@ -1795,13 +1911,14 @@ def layout(default_date: Optional[str] = None) -> html.Div:
     return html.Div(className="book-tab", children=[
         html.Div(id=BODY_ID, children=[message_box("Loading the book...")]),
         html.Div(id=CONTENT_ID, style=HIDDEN, children=[
-            html.Div(id=HEADLINE_ID),
             html.Div(className="book-card book-main tk-card", children=[
                 html.Div(className="tk-strip", children=[
-                    about("Trades", "One row per trade (a PBRoot name). Click a row for its legs, its level since entry "
-                                    "and its links; the first row is the total of the rows showing. Each column "
-                                    "filters from the funnel in its heading.",
-                          level="span", className="tk-title"),
+                    html.Div(className="tk-strip-lead", children=[
+                        about("Trades", "One row per trade (a PBRoot name). Click a row for its legs, its level since "
+                                        "entry and its links; the first row is the total of the rows showing, with "
+                                        "Gross, Net and the flags. Each column filters from the funnel in its heading.",
+                              level="span", className="tk-title"),
+                        html.Span(id=HEADLINE_ID, className="tk-strip-slot")]),
                     tf.bar_slot(TAB),
                     html.Button("Expand all", id=EXPAND_ALL_ID, n_clicks=0, className="btn btn--ghost"),
                     html.Button("Collapse all", id=COLLAPSE_ALL_ID, n_clicks=0, className="btn btn--ghost"),

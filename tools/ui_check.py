@@ -1401,14 +1401,10 @@ _PROP_JS = """([id, prop]) => {
 
 
 def _pick_as_of(page, poll_ids: List[str]) -> bool:
-    """Set the header's picker to AS_OF the way a user pick does (Dash's own `set_props` on
-    `header.DATE_PICKER_ID`, which `_follow_pickers` turns into the as-of store and a pick the day
-    roll keeps), so the shots show the figures the text check reads; True once the store holds it."""
+    """Wait for the as-of store to hold AS_OF (the page is opened at `?as_of=AS_OF`, which
+    `ui/app.py::_as_of_from_url` turns into the store and a pick the day roll keeps), so the shots
+    show the figures the text check reads; True once the store holds it."""
     from ui.tabs import header
-    page.wait_for_function("() => window.dash_clientside && window.dash_clientside.set_props",
-                           timeout=SETTLE_SECONDS * 1000)
-    page.evaluate("([id, day]) => window.dash_clientside.set_props(id, {date: day})",
-                  [header.DATE_PICKER_ID, AS_OF])
     try:
         page.wait_for_function(f"() => ({_PROP_JS})([{header.AS_OF_STORE_ID!r}, 'data']) === {AS_OF!r}",
                                timeout=SETTLE_SECONDS * 1000)
@@ -1509,7 +1505,7 @@ def take_shots(app, tabs: List[str], opened: bool = False) -> str:
                         "nothing was installed")
             try:
                 page = browser.new_page(viewport={"width": SHOT_WIDTH, "height": 1000})
-                page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+                page.goto(f"http://127.0.0.1:{server.port}/?as_of={AS_OF}", wait_until="networkidle")
                 picked = _pick_as_of(page, poll_ids)
                 SHOT_DIR.mkdir(parents=True, exist_ok=True)
                 for tab in tabs:
