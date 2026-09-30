@@ -94,7 +94,7 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
     ("type", "Type", "l", "The trade's type by rule from its legs (hedges apart): calendar, cross-exchange, "
                           "cross-product, mixed or outright; a type mismatch with the PBRoot is in Flags."),
     ("what", "What it is", "l", "The trade in plain words, with the share of its currency exposure hedged."),
-    ("size", "Size", "", "The signed lots of each side, side A first (+ long, minus short); an FX or metal "
+    ("size", "Size (lots)", "", "The signed lots of each side, side A first (+ long, minus short); an FX or metal "
                          "forward or FX option its notional; the value per side, the balance and the USD per "
                          "1-unit move of the level on hover."),
     ("entry", "Entry", "", "The level at entry: the fills' size-weighted level (a calendar near minus far in its "
@@ -141,6 +141,7 @@ def _lines(*parts: Any) -> str:
 
 
 METAL_PAIRS = ("XAU", "XAG", "XPT", "XPD")
+NBSP = "\u00a0"        # holds an empty unit slot open (a ratio's Now), so the Now figures line up
 
 
 def unit_words(unit: Optional[str]) -> str:
@@ -173,15 +174,39 @@ def level_text(value: Any, level: dict, signed: bool = False) -> str:
 
 
 def _level_cell(value: Any, level: dict, reason: str, hover: str = "", estimated: bool = False,
-                className: str = "") -> Any:
+                className: str = "", with_unit: bool = False) -> Any:
+    """A level figure at the row's one precision (`level_text`: the unit's tick, 4 decimals for a
+    ratio or a premium with no unit), grey after a "≈" when `estimated`. The unit is said once per
+    row, on Now (`with_unit`), in a fixed-width slot so the Now figures line up as a column."""
     v = _num(value)
     if v is None:
         return missing_cell(_lines(reason, hover) or "no level")
-    unit = unit_words(level.get("unit"))
+    unit = unit_words(level.get("unit")) if with_unit else ""
     return html.Span([("≈ " if estimated else "") + level_text(v, level),
-                      html.Span(unit, className="cell-unit") if unit else None],
+                      html.Span(unit or NBSP, className="cell-unit tk-unit-slot") if with_unit else None],
                      className=" ".join(c for c in (className, "cell-estimated" if estimated else "") if c) or None,
                      title=plain_words(hover) or None)
+
+
+def level_unit_line(level: dict) -> str:
+    """The row's level unit in words for a hover ('In $/bbl', 'A ratio, no unit', 'Net premium per
+    unit, in $/bbl', 'Premium as a fraction of notional'): the unit is shown once, on Now."""
+    unit = unit_words(level.get("unit"))
+    if level.get("mode") == "premium":
+        return f"Net premium per unit, in {unit}" if unit else "Premium as a fraction of notional"
+    if level.get("mode") == "ratio" or level.get("unit") == "ratio":
+        return "A ratio, no unit"
+    return f"In {unit}" if unit else ""
+
+
+def estimate_words(level: dict, *ends: str) -> List[str]:
+    """The engine's estimate notes of `ends` ('entry', 'prev', 'now'), one hover line each; a note
+    the level's own source line for that end already carries is not repeated."""
+    names = {"entry": "Entry", "prev": "Previous close", "now": "Now"}
+    said = " ".join(str(v) for v in (level.get("sources") or {}).values())
+    return [f"{names[e]} estimated: {level.get(e + '_estimate_note')}" for e in ends
+            if level.get(e + "_estimated") and level.get(e + "_estimate_note")
+            and str(level.get(e + "_estimate_note")) not in said]
 
 
 def _usd_per_move(level: dict) -> Tuple[Optional[float], str]:
@@ -613,7 +638,10 @@ def _what_td(t: dict) -> html.Td:
     if cov:
         what = _HEDGED_TAIL.sub("", what)     # the coverage says it, with its figure
     legs = [str(leg.get("name") or "") for leg in t.get("legs") or []]
-    hover = _lines(what, cov, *(f"· {n}" for n in legs if n))
+    level = t.get("level") or {}
+    structure = (f"Level: {level.get('note')}" if level.get("note")
+                 and (level.get("mode") == "premium" or level.get("source") == "template") else "")
+    hover = _lines(what, cov, structure, *(f"· {n}" for n in legs if n))
     return html.Td([html.Span(cap(what), className="tk-clip", title=plain_words(hover) or None),
                     html.Span(f" · {cov}", className="tk-sub tk-cov") if cov else None],
                    className="l tk-what" + (" tk-what--cov" if cov else ""))
@@ -779,12 +807,23 @@ def size_hover(t: dict, r: Optional[dict], research: dict) -> str:
 
 
 def _size_td(t: dict, r: Optional[dict], research: dict) -> html.Td:
+    """The Size cell under "Size (lots)": the signed lots alone, side A and side B in two
+    right-aligned slots so the " / " lines up down the column ('−30 / +4'; an outright's '+2' in
+    side A's slot); a size not in lots (an FX or metal forward, an FX option) keeps its unit, the
+    exception. The rest of a several-part trade as "+N", on hover."""
     fig, unit, more, why = size_parts(t)
     if not fig:
         return html.Td(missing_cell(why), className="tk-size")
-    return html.Td(html.Span([fig, html.Span(unit, className="cell-unit") if unit else None,
-                              html.Span(f"+{more}", className="tk-sub tk-more") if more else None],
-                             title=plain_words(size_hover(t, r, research))), className="tk-size")
+    more_span = html.Span(f"+{more}", className="tk-sub tk-more") if more else None
+    hover = plain_words(size_hover(t, r, research))
+    if unit in ("lot", "lots"):
+        a, _sep, b = fig.partition(" / ")
+        return html.Td(html.Span([html.Span(a, className="tk-sz-a"),
+                                  html.Span(" / " if b else "", className="tk-sz-sep"),
+                                  html.Span(b, className="tk-sz-b"), more_span], className="tk-sz", title=hover),
+                       className="tk-size")
+    return html.Td(html.Span([fig, html.Span(unit, className="cell-unit") if unit else None, more_span],
+                             title=hover), className="tk-size tk-size--unit")
 
 
 def _entry_td(t: dict) -> html.Td:
@@ -792,9 +831,10 @@ def _entry_td(t: dict) -> html.Td:
     fills = [f"{leg.get('name')}: avg fill {price_text(leg.get('avg_fill'))}" for leg in t.get("legs") or []
              if not leg.get("hedge") and _num(leg.get("avg_fill")) is not None]
     hover = _lines(f"Entry: first fill {t.get('first_trade_date') or ''}", *fills,
-                   (level.get("sources") or {}).get("entry", ""))
+                   (level.get("sources") or {}).get("entry", ""), *estimate_words(level, "entry"),
+                   level_unit_line(level))
     return html.Td(_level_cell(level.get("entry"), level, str(level.get("entry_reason") or level.get("reason") or ""),
-                               hover))
+                               hover, estimated=bool(level.get("entry_estimated"))), className="tk-level")
 
 
 def _now_td(t: dict, check: Sequence[str] = ()) -> html.Td:
@@ -804,10 +844,12 @@ def _now_td(t: dict, check: Sequence[str] = ()) -> html.Td:
         c = _num(t.get("carry_per_month"))
         carry = (f"Carry per month: {full_signed(c)} USD (the legs' roll-down on one curve, research)"
                  if c is not None else f"Carry per month: not summed ({t.get('carry_reason') or 'not given'})")
-    hover = _lines((level.get("sources") or {}).get("now", ""), level.get("note") or "", carry,
-                   *(f"Price to check: {x}" for x in check))
+    hover = _lines(level_unit_line(level) if level.get("mode") == "premium" else "",
+                   (level.get("sources") or {}).get("now", ""), level.get("note") or "", carry,
+                   *estimate_words(level, "now"), *(f"Price to check: {x}" for x in check))
+    estimated = bool(level.get("now_estimated")) or _estimated_level(t) or bool(check)
     return html.Td(_level_cell(level.get("now"), level, str(level.get("now_reason") or level.get("reason") or ""),
-                               hover, estimated=_estimated_level(t) or bool(check)))
+                               hover, estimated=estimated, with_unit=True), className="tk-level tk-now")
 
 
 def _z_td(r: Optional[dict], ready: bool, research: dict) -> html.Td:
@@ -859,17 +901,19 @@ def _today_td(t: dict, r: Optional[dict] = None, ready: bool = True, check: Sequ
         held = _num((leg or {}).get("lots")) or 0.0
         cls = sign_class(ch * held) if held else ""      # a rise helps a long, hurts a short (display only)
     since = f"Since the {level.get('prev_date') or 'previous'} close ({level_text(level.get('prev'), level)})"
-    hover = _lines(since, f"Worth {full_signed(effect)} USD to the trade" if effect is not None else "",
-                   sigma_words(r, ready, level), *(f"Price to check: {x}" for x in check))
+    notes = estimate_words(level, "prev", "now")
+    hover = _lines(since, level_unit_line(level),
+                   f"Worth {full_signed(effect)} USD to the trade" if effect is not None else "",
+                   sigma_words(r, ready, level), *notes, *(f"Price to check: {x}" for x in check))
     text = level_text(ch, level, signed=True)
     if not text.strip("+()" + MINUS + "0.,"):
         # nothing moved at the level's precision: one dash for the whole column, never 0.0000 / 0.00 / 0.0
-        return html.Td(missing_cell(_lines(f"No move {since[0].lower()}{since[1:]}", *(f"Price to check: {x}" for x in check))))
-    unit = unit_words(level.get("unit"))
-    suffix = html.Span(unit, className="cell-unit") if unit else None
-    if check:
-        return html.Td(html.Span(["≈ " + text, suffix], className="cell-estimated", title=plain_words(hover)))
-    return html.Td(html.Span([text, suffix], className=cls or None, title=plain_words(hover)))
+        return html.Td(missing_cell(_lines(f"No move {since[0].lower()}{since[1:]}", *notes,
+                                           *(f"Price to check: {x}" for x in check))), className="tk-level")
+    # the unit is said once per row, on Now; an estimated end (either close) greys the move
+    if check or level.get("prev_estimated") or level.get("now_estimated") or _estimated_level(t):
+        return html.Td(html.Span("≈ " + text, className="cell-estimated", title=plain_words(hover)), className="tk-level")
+    return html.Td(html.Span(text, className=cls or None, title=plain_words(hover)), className="tk-level")
 
 
 def next_parts(t: dict, as_of: str) -> Tuple[str, str, str]:

@@ -558,13 +558,16 @@ def one_leg_spec(spec: LevelSpec, n: int) -> LevelSpec:
 def _difference(book, spec: LevelSpec, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
     """The template's / calendar's / USD-per-unit level at entry, on the previous close and now,
     through ``book.level_on`` and ``book.entry_level`` (the one level rule)."""
-    entry, entry_why, entry_src, entry_px = book.entry_level(spec)
-    now, now_why, now_src, now_px = book.level_on(spec, book.as_of, book.today, fallback=False)
-    prev, prev_why, prev_src, prev_px = book.level_on(spec, prev_day, prev_rows, fallback=True)
+    entry, entry_why, entry_src, entry_px, entry_est = book.entry_level(spec)
+    now, now_why, now_src, now_px, now_est = book.level_on(spec, book.as_of, book.today, fallback=False)
+    prev, prev_why, prev_src, prev_px, prev_est = book.level_on(spec, prev_day, prev_rows, fallback=True)
     return {"entry": entry, "entry_reason": entry_why, "prev": prev, "prev_reason": prev_why, "now": now,
             "now_reason": now_why, "change": (now - prev) if now is not None and prev is not None else None,
             "sources": {"entry": entry_src, "prev": prev_src, "now": now_src},
-            "prices": {"entry": entry_px, "prev": prev_px, "now": now_px}}
+            "prices": {"entry": entry_px, "prev": prev_px, "now": now_px},
+            "estimated": {"entry": "; ".join(entry_est) if entry is not None else "",
+                          "prev": "; ".join(prev_est) if prev is not None else "",
+                          "now": "; ".join(now_est) if now is not None else ""}}
 
 
 def _ratio_levels(book, spec: LevelSpec, cn: int, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
@@ -582,17 +585,19 @@ def _ratio_levels(book, spec: LevelSpec, cn: int, prev_day: str, prev_rows: Dict
         "prev": (book.level_on(sc, prev_day, prev_rows, fallback=True),
                  book.level_on(sf, prev_day, prev_rows, fallback=True)),
     }
-    out = {"sources": {}, "prices": {}, "conv": {}}
-    for key, ((vc, why_c, src_c, px_c), (vf, why_f, _src_f, _px_f)) in reads.items():
+    out = {"sources": {}, "prices": {}, "conv": {}, "estimated": {}}
+    for key, ((vc, why_c, src_c, px_c, est_c), (vf, why_f, _src_f, _px_f, est_f)) in reads.items():
         out["sources"][key] = src_c
         out["prices"][key] = px_c if vc is not None else None
         out["conv"][key] = (vc, vf)
+        out["estimated"][key] = ""
         if vc is None or vf is None:
             out[key], out[f"{key}_reason"] = None, why_c or why_f
         elif abs(vf) < 1e-12:
             out[key], out[f"{key}_reason"] = None, "the foreign leg's price is 0"
         else:
             out[key], out[f"{key}_reason"] = vc / vf, ""
+            out["estimated"][key] = "; ".join(dict.fromkeys(list(est_c) + list(est_f)))
     out["sources"]["entry"] = (out["sources"]["entry"] or "the fills") + (
         f"; ratio {spec.legs[cn].instrument_id} over {spec.legs[1 - cn].instrument_id}, both in {spec.unit}")
     out["change"] = (out["now"] - out["prev"]) if out["now"] is not None and out["prev"] is not None else None
@@ -607,7 +612,8 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
            "level_entry_reason": why, "level_prev_reason": why, "level_now_reason": why, "level_change_reason": why,
            "level_prev_date": prev_day, "usd_per_unit": None, "usd_per_unit_reason": why,
            "unit_alt": "", "level_alt": None, "level_alt_reason": why,
-           "level_sources": {}, "level_prices": {}, "level_spec": spec_to_dict(spec), "level_china_leg": -1}
+           "level_sources": {}, "level_prices": {}, "level_spec": spec_to_dict(spec), "level_china_leg": -1,
+           "level_estimated": {"entry": "", "prev": "", "now": ""}}
     if spec is None:
         return out
     a, b = p["a"], p["b"]
@@ -630,7 +636,7 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
                                               if diff[k + "_reason"]),
                    level_sources={**ratio["sources"], "alt": diff["sources"]},
                    level_prices={"ratio": ratio["prices"], "alt": diff["prices"]},
-                   level_china_leg=cn)
+                   level_china_leg=cn, level_estimated=dict(ratio["estimated"]))
         # a 1.0 rise of the ratio with the foreign leg unchanged: the China leg's converted price
         # rises by the foreign leg's converted price, on the China leg's paired quantity
         _vc, vf = ratio["conv"]["now"]
@@ -649,7 +655,8 @@ def _levels(book, p: dict, prev_day: str, prev_rows: Dict[str, dict]) -> dict:
                level_change=diff["change"], level_entry_reason=diff["entry_reason"],
                level_prev_reason=diff["prev_reason"], level_now_reason=diff["now_reason"],
                level_change_reason="; ".join(w for w in (diff["now_reason"], diff["prev_reason"]) if w),
-               level_sources=diff["sources"], level_prices=diff["prices"], level_alt_reason="")
+               level_sources=diff["sources"], level_prices=diff["prices"], level_alt_reason="",
+               level_estimated=dict(diff["estimated"]))
     if s_unit is None:
         out["usd_per_unit_reason"] = s_why
     else:

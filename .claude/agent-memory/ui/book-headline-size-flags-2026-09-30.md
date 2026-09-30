@@ -23,3 +23,11 @@ read anything", "the size column is cooked - looks horrible".
 - CSS kit: `--muted` #4b5563, new `--ink-2` #374151 for strip controls (switch labels, ghost buttons,
   CSV, Group label, headline labels), `.cell-unit` #5f6876, `.cell-missing` #6b7280, placeholders
   `--muted` opacity 1. Keep secondary text at or above 4.5:1; never go back to #8a919c / #9ca3af for text.
+
+**Later 2026-09-30 ("the size/entry is messy still"):** heading "Size (lots)", lot rows show bare signed
+numbers in two slots (`.tk-sz-a` right-aligned, `.tk-sz-sep`, `.tk-sz-b` left-aligned) so " / " lines up;
+oz / currency sizes keep their unit (the exception). The level unit only on Now (`_level_cell(with_unit=True)`,
+fixed-width `.tk-unit-slot`, NBSP when empty so ratios line up); Entry and Move bare, the unit in words on
+their hover (`level_unit_line`). Estimated ends from the engine's `entry_/prev_/now_estimated` (+ notes via
+`estimate_words`) grey the cell after "≈", joined with `_estimated_level` (INTERP legs) on Now and Move.
+Trap: a heredoc edit script with nested quotes broke bash; write edit scripts to the scratchpad instead.

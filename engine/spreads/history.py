@@ -112,7 +112,8 @@ def position_history(conn: sqlite3.Connection, position: Union[Mapping, Sequence
       '<member>: why; ...'); ``ltd_filled`` (member trades whose row the filled reader took from
       an earlier close) with ``ltd_notes`` (those rows' notes); ``members_on`` (members traded
       by then); ``level`` (None when n/a) with ``level_reason`` ('' or why) and
-      ``level_source`` (what was read, as ``level_sources["now"]``).
+      ``level_source`` (what was read, as ``level_sources["now"]``); ``level_estimated`` ('' or the sentence
+      naming each near-marks estimate the level rests on, hard rule 2).
     """
     members = _members(position)
     all_ids = [t for ids in members.values() for t in ids]
@@ -133,7 +134,8 @@ def position_history(conn: sqlite3.Connection, position: Union[Mapping, Sequence
             continue
         traded = {t for t in all_ids if t in info and info[t][0] <= day}
         point = {"date": day, "ltd_usd": None, "ltd_excluded": 0, "ltd_reasons": "", "ltd_filled": 0,
-                 "ltd_notes": "", "members_on": 0, "level": None, "level_reason": "", "level_source": ""}
+                 "ltd_notes": "", "members_on": 0, "level": None, "level_reason": "", "level_source": "",
+                 "level_estimated": ""}
         try:
             out = value_fn(conn, day)
             frame = out[0] if isinstance(out, tuple) else out
@@ -175,9 +177,10 @@ def position_history(conn: sqlite3.Connection, position: Union[Mapping, Sequence
         if spec is None:
             point["level_reason"] = no_level
         else:
-            lvl, why, src, _px = level_on(conn, spec, day, rows, False,
-                                          lambda leg: info.get(leg.trade_ids[0], ("", ""))[1])
-            point.update(level=lvl, level_reason=why, level_source=src)
+            lvl, why, src, _px, est = level_on(conn, spec, day, rows, False,
+                                               lambda leg: info.get(leg.trade_ids[0], ("", ""))[1])
+            point.update(level=lvl, level_reason=why, level_source=src,
+                         level_estimated="; ".join(est) if lvl is not None else "")
         points.append(point)
     return {
         "position_id": str(position.get("position_id") or "") if is_map else "",

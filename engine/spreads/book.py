@@ -259,6 +259,58 @@ def unit_spot(conn: sqlite3.Connection, spec: LevelSpec, day: str, exact: bool) 
     return (s, "") if s else (None, f"no SPOT for USD conversion of {spec.currency} on {day}")
 
 
+def is_estimate(source) -> bool:
+    """True when a mark or spot source is the near-marks estimate of hard rule 2 (``INTERP:``)."""
+    return str(source or "").startswith("INTERP")
+
+
+def spot_near(conn: sqlite3.Connection, ccy: str, day: str) -> Tuple[Optional[float], str, str]:
+    """(USD per unit of ``ccy`` on ``day``, estimate note, why when None). The exact official SPOT
+    of ``day`` first (``official_spot``); with none on file, the valuation's own near-marks
+    estimate (``engine.pnl.valuation.usd_per_quote``, whose ``_mark_near`` is CLAUDE.md hard rule
+    2: the nearest earlier and later official closes, linear in calendar days, one side carried as
+    it stands), with a note naming the closes it used, never silent. None only when no official
+    spot of that currency is on file on any date. A level's read, never a P&L figure."""
+    if ccy == "USD":
+        return 1.0, "", ""
+    s = official_spot(conn, ccy, day)
+    if s:
+        return s, "", ""
+    try:
+        v, pair, src = usd_per_quote(conn, ccy, day)
+    except Exception as exc:  # noqa: BLE001 -- a stored spot that is not a number: named, not raised
+        return None, "", f"the {ccy} USD spot of {day} could not be read ({type(exc).__name__}: {exc})"
+    v = _num(v)
+    if not v:
+        return None, "", f"no official {ccy} USD spot is on file on any date, so {day} cannot be converted"
+    how = str(src or "")[len("INTERP:"):].strip() if is_estimate(src) else str(src or "")
+    return v, f"{pair} SPOT of {day} not on file: estimated from the near closes ({how})", ""
+
+
+def unit_spot_near(conn: sqlite3.Connection, spec: LevelSpec, day: str) -> Tuple[Optional[float], str, str]:
+    """(USD per unit of the level's currency on ``day``, estimate note, why when None): ``spot_near``."""
+    s, note, why = spot_near(conn, spec.currency, day)
+    if s is None:
+        return None, "", f"{why}: the level cannot be expressed in {spec.unit}"
+    return s, note, ""
+
+
+def _usd_near(conn: sqlite3.Connection, ccy: str, day: str) -> Tuple[Optional[float], str, str]:
+    """(``usd_per_quote`` of ``ccy`` on ``day``, estimate note when its source is ``INTERP:``, why when None)."""
+    if ccy == "USD":
+        return 1.0, "", ""
+    try:
+        v, pair, src = usd_per_quote(conn, ccy, day)
+    except Exception as exc:  # noqa: BLE001 -- a stored spot that is not a number: named, not raised
+        return None, "", f"the {ccy} SPOT of {day} could not be read ({exc})"
+    v = _num(v)
+    if not v:
+        return None, "", f"no SPOT for USD conversion of {ccy} on {day}"
+    note = (f"{pair} SPOT of {day} estimated from the near closes ({str(src)[len('INTERP:'):].strip()})"
+            if is_estimate(src) else "")
+    return v, note, ""
+
+
 def official_price(conn: sqlite3.Connection, leg: LevelLeg, day: str, expiry: str) -> Optional[Tuple[float, str]]:
     row = conn.execute(
         "SELECT value, source FROM marks_official WHERE instrument_id = ? AND mark_type = 'FUTURE_PX' "
@@ -269,52 +321,65 @@ def official_price(conn: sqlite3.Connection, leg: LevelLeg, day: str, expiry: st
 
 
 def level_on(conn: sqlite3.Connection, spec: LevelSpec, day: str, rows: Dict[str, dict], fallback: bool,
-             expiry_of: Callable[[LevelLeg], str]) -> Tuple[Optional[float], str, str, List[Optional[float]]]:
-    """(level, why when None, sources, quoted price per leg) on ``day`` from the ``value_book``
-    rows given: each leg's ``mark`` and, across currencies, its row's ``spot``. With
+             expiry_of: Callable[[LevelLeg], str]
+             ) -> Tuple[Optional[float], str, str, List[Optional[float]], List[str]]:
+    """(level, why when None, sources, quoted price per leg, estimates) on ``day`` from the
+    ``value_book`` rows given: each leg's ``mark`` and, across currencies, its row's ``spot``. With
     ``fallback`` a leg with no row on that close (put on after it) reads the exact official
-    FUTURE_PX (keyed on ``expiry_of(leg)``) and SPOT of the day instead. The one level rule:
-    ``level_now``, ``level_prev`` and ``history.position_history`` all read it."""
+    FUTURE_PX (keyed on ``expiry_of(leg)``) of the day and its currency's SPOT (``spot_near``: the
+    near-marks estimate when that day's is not on file). ``estimates``: one sentence per figure
+    the level rests on that is the near-marks estimate of hard rule 2 (a mark or spot whose source
+    starts ``INTERP:``), [] when every figure is exact. The one level rule: ``level_now``,
+    ``level_prev`` and ``history.position_history`` all read it."""
     prices: List[Optional[float]] = [None] * len(spec.legs)
-    conv, sources = [], []
-    s_unit, unit_why = unit_spot(conn, spec, day, exact=False)
+    conv, sources, estimates = [], [], []
+    s_unit, unit_note, unit_why = _usd_near(conn, spec.currency, day)
     for n, leg in enumerate(spec.legs):
         leg_rows = [rows[t] for t in leg.trade_ids if t in rows]
+        spot_note = ""
         if leg_rows:
             status = next((str(r.get("status") or "") for r in leg_rows
                            if str(r.get("status") or "") not in ("OPEN", "")), "")
             if status:
                 return None, (f"{leg.instrument_id} is {status.lower()} on {day}: a spread has no level "
-                              f"once a leg has expired"), "", prices
+                              f"once a leg has expired"), "", prices, []
             r = next((r for r in leg_rows if _num(r.get("mark")) is not None), None)
             if r is None:
-                return None, f"{leg.instrument_id} has no price on {day} ({_why(leg_rows[0])})", "", prices
+                return None, f"{leg.instrument_id} has no price on {day} ({_why(leg_rows[0])})", "", prices, []
             px, s_leg = float(r["mark"]), _num(r.get("spot"))
             src = f"{leg.instrument_id} {r.get('mark_source') or 'value_book'}"
             note = str(r.get("note") or "")
             if note.startswith("no price on"):
                 src += f" ({note})"
+            if is_estimate(r.get("mark_source")):
+                estimates.append(f"{leg.instrument_id} price of {day} estimated ({r.get('mark_source')})")
+            if is_estimate(r.get("spot_source")):
+                spot_note = f"{leg.currency} spot of {day} estimated ({r.get('spot_source')})"
         elif fallback:
             hit = official_price(conn, leg, day, expiry_of(leg))
             if hit is None:
                 return None, (f"{leg.instrument_id} was not yet held on the {day} close and has no official "
-                              f"FUTURE_PX that day"), "", prices
+                              f"FUTURE_PX that day"), "", prices, []
             px = hit[0]
-            s_leg = official_spot(conn, leg.currency, day) if spec.needs_fx(leg) else None
+            s_leg, spot_note, _w = spot_near(conn, leg.currency, day) if spec.needs_fx(leg) else (None, "", "")
             src = f"{leg.instrument_id} {hit[1]} (official FUTURE_PX of the {day} close: not yet held then)"
         else:
-            return None, f"{leg.instrument_id} is not valued by value_book on {day}", "", prices
+            return None, f"{leg.instrument_id} is not valued by value_book on {day}", "", prices, []
         if spec.needs_fx(leg):
             if not s_leg:
                 return None, (f"no USD conversion of {leg.currency} on {day} for {leg.instrument_id}, "
-                              f"so it cannot be expressed in {spec.unit}"), "", prices
+                              f"so it cannot be expressed in {spec.unit}"), "", prices, []
             if s_unit is None:
-                return None, unit_why, "", prices
+                return None, unit_why, "", prices, []
             src += f", {leg.currency} at its USD spot {s_leg:.6g}"
+            if spot_note:
+                estimates.append(spot_note)
+            if unit_note:
+                estimates.append(unit_note)
         prices[n] = px
         conv.append(converted(px, leg, spec, s_leg, s_unit))
         sources.append(src)
-    return level(conv, spec), "", "; ".join(sources), prices
+    return level(conv, spec), "", "; ".join(sources), prices, list(dict.fromkeys(estimates))
 
 
 # ------------------------------------------------------------------ the rule
@@ -690,20 +755,24 @@ class _Book:
             "usd_per_unit": None, "usd_per_unit_reason": "",
             "research_id": research_id, "research_instance": research_instance, "research_reason": research_why,
             "level_spec": spec_to_dict(spec),
+            "level_estimated": {"entry": "", "prev": "", "now": ""},
         }
         if spec is None:
             for k in ("level_entry", "level_prev", "level_now", "level_change", "usd_per_unit"):
                 out[f"{k}_reason"] = why
             return out
-        entry, entry_why, entry_src, entry_px = self.entry_level(spec)
+        entry, entry_why, entry_src, entry_px, entry_est = self.entry_level(spec)
         now_rows = self.today
-        now, now_why, now_src, now_px = self.level_on(spec, self.as_of, now_rows, fallback=False)
+        now, now_why, now_src, now_px, now_est = self.level_on(spec, self.as_of, now_rows, fallback=False)
         prev_rows = daily.get("rows")
         if prev_rows is None:
             prev_rows = _by_id(self.frames.records(prev_day))
-        prev, prev_why, prev_src, prev_px = self.level_on(spec, prev_day, prev_rows, fallback=True)
+        prev, prev_why, prev_src, prev_px, prev_est = self.level_on(spec, prev_day, prev_rows, fallback=True)
         out.update(level_entry=entry, level_entry_reason=entry_why, level_now=now, level_now_reason=now_why,
-                   level_prev=prev, level_prev_reason=prev_why)
+                   level_prev=prev, level_prev_reason=prev_why,
+                   level_estimated={"entry": "; ".join(entry_est) if entry is not None else "",
+                                    "prev": "; ".join(prev_est) if prev is not None else "",
+                                    "now": "; ".join(now_est) if now is not None else ""})
         if now is not None and prev is not None:
             out["level_change"] = now - prev
         else:
@@ -727,46 +796,56 @@ class _Book:
         return unit_spot(self.conn, spec, day, exact)
 
     def level_on(self, spec: LevelSpec, day: str, rows: Dict[str, dict], fallback: bool
-                 ) -> Tuple[Optional[float], str, str, List[Optional[float]]]:
+                 ) -> Tuple[Optional[float], str, str, List[Optional[float]], List[str]]:
         return level_on(self.conn, spec, day, rows, fallback,
                         lambda leg: str(self.by_id[leg.trade_ids[0]]["expiry_date"]))
 
-    def entry_level(self, spec: LevelSpec) -> Tuple[Optional[float], str, str, List[Optional[float]]]:
-        """(level at entry, why when None, source, average fill per leg): each leg's lots-weighted
-        average fill, a cross-currency leg converted at the exact official SPOT of each trade's date."""
+    def entry_level(self, spec: LevelSpec
+                    ) -> Tuple[Optional[float], str, str, List[Optional[float]], List[str]]:
+        """(level at entry, why when None, source, average fill per leg, estimates): each leg's
+        lots-weighted average fill, a cross-currency leg converted at the official SPOT of each
+        trade's date, or, when that day's is not on file, the valuation's near-marks estimate
+        (``spot_near``, hard rule 2), named in ``estimates`` (one sentence per spot estimated)."""
         prices: List[Optional[float]] = [None] * len(spec.legs)
         conv = []
         fx_days: Dict[str, set] = defaultdict(set)
+        estimates: List[str] = []
         for n, leg in enumerate(spec.legs):
             num = qp = den = 0.0
             for tid in leg.trade_ids:
                 t = self.by_id[tid]
                 q, f = self.lots(tid), _num(t["price"])
                 if q is None or f is None:
-                    return None, f"{tid}: its quantity or fill is not a number, so the entry has no level", "", prices
+                    return None, f"{tid}: its quantity or fill is not a number, so the entry has no level", "", prices, []
                 s_leg = s_unit = None
                 if spec.needs_fx(leg):
                     day = str(t["trade_date"])
-                    s_leg = self.official_spot(leg.currency, day)
+                    s_leg, note, why = spot_near(self.conn, leg.currency, day)
                     if not s_leg:
-                        return None, (f"the entry of {tid} needs the official {leg.currency} SPOT of its trade "
-                                      f"date {day}, which is not on file"), "", prices
-                    s_unit, unit_why = self.unit_spot(spec, day, exact=True)
+                        return None, f"the entry of {tid}: {why}", "", prices, []
+                    if note:
+                        estimates.append(note)
+                    s_unit, unit_note, unit_why = unit_spot_near(self.conn, spec, day)
                     if s_unit is None:
-                        return None, f"the entry of {tid}: {unit_why}", "", prices
+                        return None, f"the entry of {tid}: {unit_why}", "", prices, []
+                    if unit_note:
+                        estimates.append(unit_note)
                     fx_days[leg.currency].add(day)
                 num += q * converted(f, leg, spec, s_leg, s_unit)
                 qp += q * f
                 den += q
             if abs(den) < 1e-12:
-                return None, f"{leg.instrument_id}: its trades net to zero lots, so it has no average fill", "", prices
+                return None, f"{leg.instrument_id}: its trades net to zero lots, so it has no average fill", "", prices, []
             prices[n] = qp / den
             conv.append(num / den)
         src = "the fills, each leg's lots-weighted average"
         if fx_days:
             src += "; " + "; ".join(f"{ccy} at the official USD spot of {', '.join(sorted(days))}"
                                     for ccy, days in sorted(fx_days.items()))
-        return level(conv, spec), "", src, prices
+        estimates = list(dict.fromkeys(estimates))
+        if estimates:
+            src += " (estimated: " + "; ".join(estimates) + ")"
+        return level(conv, spec), "", src, prices, estimates
 
     def usd_per_unit(self, spec: LevelSpec) -> Tuple[Optional[float], str, str]:
         """(USD per 1.0 of the level for the open lots, why when None, source)."""

@@ -1343,3 +1343,13 @@ p { margin: 8px 0; }
   .tk-table td.tk-what.tk-what--cov .tk-clip { max-width: 400px; }
 }
 .blotter-upload-line .book-section-title { font-size: 11px; }
+
+/* Book Size / Entry / Now / Move, 2026-09-30 (user: "on the book the size/entry is messy still"): the
+   lots under "Size (lots)" in two right-aligned slots so the " / " lines up; the level's unit once per
+   row, on Now, in a fixed-width slot so the Now figures line up; Entry and Move bare. */
+.tk-table td.tk-size .tk-sz { display: inline-flex; align-items: baseline; justify-content: flex-end; }
+.tk-table td.tk-size .tk-sz-a { display: inline-block; min-width: 2.4em; text-align: right; }
+.tk-table td.tk-size .tk-sz-b { display: inline-block; min-width: 2.4em; text-align: left; }
+.tk-table td.tk-size .tk-sz-sep { display: inline-block; width: 1.2em; text-align: center; color: var(--muted); }
+.tk-table td.tk-now .tk-unit-slot { display: inline-block; min-width: 50px; text-align: left; }
+.tk-table td.tk-level { white-space: nowrap; font-variant-numeric: tabular-nums; }

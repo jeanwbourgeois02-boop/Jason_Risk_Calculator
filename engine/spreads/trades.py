@@ -40,6 +40,14 @@ for the type) are read per contract root on their OPEN lots.
 two quote units that agree read A - B, a template its unit; a China-against-the-West pair the
 CONVERTED ratio, China on top, user 2026-09-29), else its one calendar's (near - far of the
 largest lots on each side, ``levels.py``); a trade with several parts has its level per part.
+A part of three or more legs that a ``config/spreads/`` template covers (a 3-2-1 crack, a soy
+crush: every leg of the part one leg of the template, signs that fit its weights) reads the
+template's own formula and unit, its lots' ratio against the template's said in ``note``. A trade
+holding options only reads its net premium per unit (``_premium_level``: the open options'
+size-weighted premium over its largest leg, from the fills at entry and the official option
+price or PREMIUM marks on the previous close and now), a single option its price. A level that
+rests on a near-marks estimate (hard rule 2: a spot or mark whose source starts ``INTERP:``) says
+so in ``<key>_estimated`` / ``<key>_estimate_note``, never silently.
 ``level_history`` gives it on past closes, with the rolls marked.
 """
 
@@ -58,8 +66,8 @@ from data.contracts.tickers import format_strike, month_from_code, parse_option_
 
 from engine.pnl.valuation import value_book
 from engine.spreads import strategies as st
-from engine.spreads.book import ValueFn, level_on
-from engine.spreads.grouping import LEFTOVER_FLOOR, TOLERANCE, Leg, calendar_shape
+from engine.spreads.book import ValueFn, is_estimate, level_on
+from engine.spreads.grouping import CALENDAR, LEFTOVER_FLOOR, TOLERANCE, Leg, calendar_shape
 from engine.spreads.hedges import FX_SECTOR, is_hedge
 from engine.spreads.levels import spec_for, spec_from_dict, spec_to_dict, usd_per_level_unit
 from engine.spreads.templates import lot_in_quote_units
@@ -802,7 +810,25 @@ def _blank_level(why: str) -> dict:
             "entry_reason": why, "prev_reason": why, "now_reason": why, "change_reason": why,
             "usd_per_unit": None, "usd_per_unit_reason": why, "label": "", "sources": {},
             "alt": None, "unit_alt": "", "spec": None, "mode": "", "china_leg": -1, "note": "", "source": "",
-            "reason": why}
+            "reason": why, "entry_estimated": False, "prev_estimated": False, "now_estimated": False,
+            "entry_estimate_note": "", "prev_estimate_note": "", "now_estimate_note": "", "estimate_note": "",
+            "template": "", "price_legs": []}
+
+
+def _set_estimates(out: dict, notes: Dict[str, str]) -> dict:
+    """``<key>_estimated`` / ``<key>_estimate_note`` for entry, prev and now from ``notes`` (the
+    sentence naming each near-marks estimate the figure rests on, '' when exact), and
+    ``estimate_note`` joining them. Only a figure that is there is estimated."""
+    words = {"entry": "entry", "prev": "previous close", "now": "now"}
+    joined = []
+    for key in ("entry", "prev", "now"):
+        note = str((notes or {}).get(key) or "") if out.get(key) is not None else ""
+        out[f"{key}_estimated"] = bool(note)
+        out[f"{key}_estimate_note"] = note
+        if note:
+            joined.append(f"{words[key]}: {note}")
+    out["estimate_note"] = "; ".join(joined)
+    return out
 
 
 def _price_level(rows: List[dict], blank: dict) -> dict:
@@ -819,8 +845,119 @@ def _price_level(rows: List[dict], blank: dict) -> dict:
                prev_date=r["prev_mark_date"], change=(now - prev) if now is not None and prev is not None else None,
                change_reason=_join([r["mark_reason"], r["prev_mark_reason"]]), label=r["name"], mode="price",
                source="price", usd_per_unit_reason="an outright's price: see the leg's value",
-               sources={"entry": "the open lots' average fill", "now": r["mark_source"], "prev": r["prev_mark_source"]})
-    return out
+               sources={"entry": "the open lots' average fill", "now": r["mark_source"], "prev": r["prev_mark_source"]},
+               price_legs=[{"instrument_id": r["instrument_id"], "trade_ids": list(r["open_trade_ids"]),
+                            "weight": 1.0, "price_scale": 1.0}])
+    return _set_estimates(out, {
+        "now": f"{r['name']} price estimated ({r['mark_source']})" if is_estimate(r["mark_source"]) else "",
+        "prev": (f"{r['name']} price estimated ({r['prev_mark_source']})"
+                 if is_estimate(r["prev_mark_source"]) else "")})
+
+
+def _premium_level(book, rows: List[dict]) -> Optional[dict]:
+    """A trade holding options only (WTIRR1's call against put, EURVOL1's EURUSD options): its net
+    premium per unit, None when it holds anything else open. The legs are the open non-hedge rows
+    (a trade of currency options alone: all its open rows, they are its position). Each option's
+    open quantity ``q`` (lots; an FX option's notional) and price (a listed option's official
+    FUTURE_PX, an FX option's PREMIUM, as quoted), the level
+
+        sum q x price x price_scale / N,  N = the largest |q|
+
+    at entry from each leg's open lots' average fill, now and on the previous close from each
+    leg's ``value_book`` mark (the price its P&L reads). A listed option's is in its root's quote
+    unit (price x ``price_scale``, like every level); an FX option's premium is a fraction of the
+    pair's base notional, unit ''. Options on two underlyings have no common unit: a blank with
+    its reason. ``usd_per_unit``: N x multiplier / price_scale x the as-of USD spot of the quote
+    currency (an FX option: N x the base currency's), so change x usd_per_unit is the options'
+    P&L on the move. A level only: nothing here enters a P&L figure."""
+    live = [r for r in rows if r["status"] == "open" and not r["unrecognised"]]
+    core = [r for r in live if not r["hedge"]] or live
+    if not core or any(r["product"] not in st.OPTION_PRODUCTS for r in core):
+        return None
+    out = _blank_level("")
+    fx = [r for r in core if r["product"] == "FX_OPTION"]
+    if fx and len(fx) != len(core):
+        return _blank_level("listed options and FX options in one trade: no common premium unit, so no level")
+    if fx:
+        pairs = {r["instrument_id"][:6] for r in core}
+        if len(pairs) != 1:
+            return _blank_level(f"FX options on {len(pairs)} pairs ({', '.join(sorted(pairs))}): no common "
+                                f"premium unit, so no level")
+        pair = pairs.pop()
+        base = pair[:3]
+        unit, scale, ccy_usd = "", 1.0, base
+        unit_words = f"{base} per {base} of notional"
+        size_word = f" {base}"
+        mults = {1.0}
+    else:
+        roots = {r["root_id"] for r in core}
+        root = book.roots.get(next(iter(roots))) if len(roots) == 1 else None
+        if root is None:
+            return _blank_level(f"options on {len(roots)} underlyings ({', '.join(sorted(roots))}): no common "
+                                f"premium unit, so no level" if len(roots) > 1 else
+                                f"{next(iter(roots))} is not in config/contracts.csv, so the premium has no unit")
+        unit, scale, ccy_usd = root.quote_unit, float(root.price_scale), root.currency
+        unit_words = unit
+        size_word = " lots"
+        mults = {_num(book.by_id[t]["multiplier"]) for r in core for t in r["open_trade_ids"]}
+    n_max = max(abs(float(r["quantity"])) for r in core)
+    legs = [{"instrument_id": r["instrument_id"], "trade_ids": list(r["open_trade_ids"]),
+             "weight": float(r["quantity"]) / n_max, "price_scale": scale} for r in core]
+
+    def read(key: str, why_key: str) -> Tuple[Optional[float], str]:
+        missing = [f"{r['name']}: {r[why_key] or 'no price'}" for r in core if r[key] is None]
+        if missing:
+            return None, "; ".join(missing)
+        return float(sum(leg["weight"] * float(r[key]) * scale for leg, r in zip(legs, core))), ""
+
+    entry, entry_why = read("avg_fill", "avg_fill_reason")
+    now, now_why = read("mark", "mark_reason")
+    prev, prev_why = read("prev_mark", "prev_mark_reason")
+    prev_day = next((r["prev_mark_date"] for r in core if r["prev_mark_date"]), "")
+    names = ", ".join(f"{'long' if r['quantity'] > 0 else 'short'} {r['name']}" for r in core)
+    basis = (f"the options' net premium per unit of the largest leg ({abs(n_max):,.0f}{size_word}): "
+             f"sum of quantity x premium / {abs(n_max):,.0f}, in {unit_words}")
+    out.update(unit=unit, entry=entry, entry_reason=entry_why, now=now, now_reason=now_why, prev=prev,
+               prev_reason=prev_why, prev_date=prev_day,
+               change=(now - prev) if now is not None and prev is not None else None,
+               change_reason=_join([now_why, prev_why]), label=names, mode="premium", source="premium",
+               note=basis, price_legs=legs,
+               sources={"entry": "each option's open lots' average fill",
+                        "now": _join(f"{r['name']} {r['mark_source']}" for r in core),
+                        "prev": _join(f"{r['name']} {r['prev_mark_source']}" for r in core)})
+    s, _pair, _src = (1.0, "", "")
+    if ccy_usd != "USD":
+        try:
+            from engine.pnl.valuation import usd_per_quote
+            s, _pair, _src = usd_per_quote(book.conn, ccy_usd, book.as_of)
+        except Exception as exc:  # noqa: BLE001 -- a stored spot that is not a number: named, not raised
+            s, _src = None, f"the {ccy_usd} SPOT of {book.as_of} could not be read ({exc})"
+    s = _num(s)
+    mult = next(iter(mults)) if len(mults) == 1 else None
+    if len(mults) != 1 or mult is None:
+        out["usd_per_unit_reason"] = "the options' multipliers differ or are not numbers: no USD per unit"
+    elif not s:
+        out["usd_per_unit_reason"] = _src or f"no SPOT for USD conversion of {ccy_usd} on {book.as_of}"
+    else:
+        out.update(usd_per_unit=n_max * mult / scale * s, usd_per_unit_reason="")
+    return _set_estimates(out, {
+        "now": _join(f"{r['name']} price estimated ({r['mark_source']})" for r in core if is_estimate(r["mark_source"])),
+        "prev": _join(f"{r['name']} price estimated ({r['prev_mark_source']})" for r in core
+                      if is_estimate(r["prev_mark_source"]))})
+
+
+def _open_blank(book, rows: List[dict]) -> dict:
+    """The level of a trade no level rule fits, with the right reason: 'nothing open' only when
+    nothing is."""
+    live = [r for r in rows if r["status"] == "open"]
+    if not live:
+        unknown = [r["name"] for r in rows if r.get("unrecognised")]
+        if unknown:
+            return _blank_level(f"only contracts the app does not recognise ({', '.join(unknown)}): no level "
+                                f"until they are mapped")
+        return _blank_level("nothing open: no level")
+    return _blank_level("no level rule fits these open legs (" + ", ".join(r["name"] for r in live)
+                        + "): a level is a spread's, one contract's price or an options trade's premium")
 
 
 def _pair_level(book, pair: dict) -> dict:
@@ -836,6 +973,7 @@ def _pair_level(book, pair: dict) -> dict:
                alt=pair.get("level_alt"), unit_alt=pair.get("unit_alt", ""), spec=pair.get("level_spec"),
                mode="ratio" if ratio else "difference", china_leg=int(pair.get("level_china_leg", -1)),
                source="pair")
+    _set_estimates(out, pair.get("level_estimated") or {})
     spec = spec_from_dict(pair.get("level_spec"))
     if spec is not None:
         out["note"] = _closes_apart([book.roots[leg.root_id] for leg in spec.legs if leg.root_id in book.roots],
@@ -879,9 +1017,9 @@ def _calendar_level(book, part: _Part, pleg_by_cid: Dict[str, st.PLeg], prev_day
     if spec is None:
         return _blank_level(why)
     out = _blank_level("")
-    entry, entry_why, entry_src, _ = book.entry_level(spec)
-    now, now_why, now_src, _ = book.level_on(spec, book.as_of, book.today, fallback=False)
-    prev, prev_why, prev_src, _ = book.level_on(spec, prev_day, prev_rows, fallback=True)
+    entry, entry_why, entry_src, _, entry_est = book.entry_level(spec)
+    now, now_why, now_src, _, now_est = book.level_on(spec, book.as_of, book.today, fallback=False)
+    prev, prev_why, prev_src, _, prev_est = book.level_on(spec, prev_day, prev_rows, fallback=True)
     s_unit, s_why = book.unit_spot(spec, book.as_of, exact=False)
     out.update(unit=spec.unit, entry=entry, entry_reason=entry_why, now=now, now_reason=now_why, prev=prev,
                prev_reason=prev_why, prev_date=prev_day,
@@ -894,7 +1032,45 @@ def _calendar_level(book, part: _Part, pleg_by_cid: Dict[str, st.PLeg], prev_day
                usd_per_unit=(None if s_unit is None
                              else usd_per_level_unit(_sign(part.legs[near.contract_id]) * size, spec, s_unit)),
                usd_per_unit_reason=s_why if s_unit is None else "")
-    return out
+    return _set_estimates(out, {"entry": "; ".join(entry_est), "now": "; ".join(now_est), "prev": "; ".join(prev_est)})
+
+
+def _template_level(book, part: _Part, pleg_by_cid: Dict[str, st.PLeg], prev_day: str,
+                    prev_rows: Dict[str, dict]) -> Optional[dict]:
+    """The level of a part of three or more legs that one ``config/spreads/`` template covers
+    whole (a 3-2-1 crack: RBOB, heating oil, WTI; a soy board crush: meal, oil, beans): every leg
+    of the part one leg of the template, signs that fit its weights (``grouping.candidates``, the
+    grouping rule's own matcher; the closest ratio, then the template file's order, when two
+    fit). The level is the template's formula in its unit (``levels.py``, the research app's), at
+    entry from the fills, on the previous close and now from the marks, like every level; a
+    ratio of lots outside the template's 5 % is said in ``note``, and the size (USD per unit) is
+    the template's fitted size, its smallest leg. None when no template covers the part."""
+    plegs = [pleg_by_cid[c] for c in sorted(part.legs) if c in pleg_by_cid]
+    if len(plegs) < 3 or len(plegs) != len(part.legs):
+        return None
+    legs = [pl.as_leg(part.legs[pl.contract_id], pl.trade_ids) for pl in plegs]
+    covering = [m for m in book.candidates(legs) if m.shape.kind != CALENDAR and len(m.legs) == len(legs)]
+    if not covering:
+        return None
+    m = min(covering, key=lambda x: (round(x.deviation, 9), x.shape.order))
+    spec, why = spec_for(m.shape, m.legs, book.roots, book.templates)
+    if spec is None:
+        return _blank_level(why)
+    diff = st._difference(book, spec, prev_day, prev_rows)
+    s_unit, s_why = book.unit_spot(spec, book.as_of, exact=False)
+    out = _blank_level("")
+    note = (f"{m.shape.name}: the lots are {m.deviation:.0%} off the template's ratio; the level is the "
+            f"template's formula, the size its smallest leg" if not m.matched else m.shape.name)
+    label = m.shape.name
+    out.update(unit=spec.unit, entry=diff["entry"], entry_reason=diff["entry_reason"], now=diff["now"],
+               now_reason=diff["now_reason"], prev=diff["prev"], prev_reason=diff["prev_reason"], prev_date=prev_day,
+               change=diff["change"], change_reason=_join([diff["now_reason"], diff["prev_reason"]]),
+               label=label,
+               sources=dict(diff["sources"]), spec=spec_to_dict(spec), mode="difference", source="template",
+               template=m.shape.kind, note=note,
+               usd_per_unit=None if s_unit is None else usd_per_level_unit(m.size, spec, s_unit),
+               usd_per_unit_reason=s_why if s_unit is None else "")
+    return _set_estimates(out, diff.get("estimated") or {})
 
 
 # ------------------------------------------------------------------ carry
@@ -1251,7 +1427,10 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
             part_levels.append(_month_pair_level(book, part, pleg_by_cid, prev_day, prev_rows))
         elif part.kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT):
             fit = [p for p in cross_pairs if {x["root_id"] for x in p["legs"]} <= set(part.roots)]
-            if len(fit) == 1:
+            covered = _template_level(book, part, pleg_by_cid, prev_day, prev_rows) if len(part.legs) >= 3 else None
+            if covered is not None:
+                part_levels.append(covered)
+            elif len(fit) == 1:
                 part_levels.append(_pair_level(book, fit[0]))
             elif not fit:
                 part_levels.append(_blank_level(part.note or "no open pair of legs to read a level from"))
@@ -1265,7 +1444,10 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
     if len(parts) == 1 and parts[0].kind == TYPE_OUTRIGHT:
         level = _price_level(rows, part_levels[0])
     elif not parts:
-        level = _price_level(rows, _blank_level("nothing open: no level"))
+        blank = _open_blank(book, rows)
+        level = _price_level(rows, blank)
+        if level is blank:
+            level = _premium_level(book, rows) or blank
     elif len(parts) == 1:
         level = part_levels[0]
     elif len(cross_idx) == 1:
@@ -1416,7 +1598,7 @@ def _closed_block(conn: sqlite3.Connection, book, name: str, entry: dict, read: 
         else:
             out["reason"] = level.get("now_reason") or "no price on the close it went flat"
         return out
-    if level.get("spec") is None:
+    if level.get("spec") is None and not level.get("price_legs"):
         out["reason"] = level.get("reason") or level.get("now_reason") or "no level"
         return out
     point = level_history(conn, was, [close], read)["points"]
@@ -1474,8 +1656,17 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
       move), prev_date, each with ``<key>_reason``, usd_per_unit / usd_per_unit_reason (USD of a
       1.0 rise on the open size), label, sources, alt / unit_alt (the other form), spec (a
       ``levels.spec_to_dict``; None with ``reason`` for a trade of several spreads), mode ('ratio'
-      | 'difference'), china_leg (the ratio's numerator leg), note ('legs closed ~9h apart ...'),
-      source ('pair' | 'calendar' | ''), reason}.
+      | 'difference' | 'price' (one contract) | 'premium' (options only: the net premium per unit
+      of the largest leg; unit the root's quote unit, '' for FX options, a fraction of the base
+      notional)), china_leg (the ratio's numerator leg), note ('legs closed ~9h apart ...', a
+      template's name and its ratio, the premium's basis), source ('pair' | 'calendar' |
+      'template' | 'price' | 'premium' | ''), template (the ``config/spreads/`` id of a template
+      level, else ''), price_legs ([{instrument_id, trade_ids, weight, price_scale}] of a
+      'price' / 'premium' level, the legs ``level_history`` reads; [] otherwise),
+      entry_estimated / prev_estimated / now_estimated (bool: the figure rests on a near-marks
+      estimate of hard rule 2, a spot or mark whose source starts ``INTERP:``) with
+      entry_estimate_note / prev_estimate_note / now_estimate_note (the sentence naming each
+      estimate, '' when exact) and estimate_note (them joined), reason}.
     - ``carry_per_month`` (USD, research: the legs' roll-downs summed only when every non-hedge
       open leg is on one curve) / ``carry_reason`` / ``carry_research_date``.
     - ``hedge``: {present, currency, hedge_usd, exposure_usd, exposure_basis, coverage (-hedge /
@@ -1563,6 +1754,24 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
     return {"as_of": as_of, "trades": trades, "unassigned": unassigned, "notes": notes + list(book.reasons)}
 
 
+def _price_legs_on(legs: List[dict], rows: Dict[str, dict], day: str) -> Tuple[Optional[float], str, str, str]:
+    """(level, why when None, source, estimate note) of a spec-less level on ``day``: sum weight x
+    the leg's marked row's ``mark`` x price_scale over ``legs`` (``_price_level`` /
+    ``_premium_level``'s ``price_legs``)."""
+    total, srcs, est = 0.0, [], []
+    for leg in legs:
+        hit = next((rows[t] for t in leg["trade_ids"] if t in rows and _num(rows[t].get("mark")) is not None), None)
+        if hit is None:
+            why = next((str(rows[t].get("reason") or "") for t in leg["trade_ids"] if t in rows), "")
+            return None, f"{leg['instrument_id']} has no price on {day}" + (f" ({why})" if why else
+                                                                          " (not held or not valued then)"), "", ""
+        total += float(leg["weight"]) * float(hit["mark"]) * float(leg.get("price_scale") or 1.0)
+        srcs.append(f"{leg['instrument_id']} {hit.get('mark_source') or 'value_book'}")
+        if is_estimate(hit.get("mark_source")):
+            est.append(f"{leg['instrument_id']} price of {day} estimated ({hit.get('mark_source')})")
+    return total, "", "; ".join(srcs), "; ".join(est)
+
+
 def level_history(conn: sqlite3.Connection, trade: dict, dates: Iterable[str], value_fn: ValueFn = value_book) -> dict:
     """A trade's level and LTD on each of ``dates``, with its rolls marked (the panel's chart).
 
@@ -1572,9 +1781,12 @@ def level_history(conn: sqlite3.Connection, trade: dict, dates: Iterable[str], v
     leg not yet held that day reads that day's official FUTURE_PX and SPOT (``book.level_on``'s
     fallback); a ratio China over foreign, converted. The LTD is ``history.position_history``'s
     (the trade's trades' ``value_book`` rows summed, a date with one unpriced left out with its
-    reason). Returns ``{trade, position_id, level_unit, level_mode, level_entry, first_trade_date,
-    dates_left_out, points [{date, ltd_usd, ltd_reasons, ltd_filled, ltd_notes, level,
-    level_reason, level_source, rolls [labels]}], rolls}``. ``value_fn``: a screen passes its
+    reason). A level with no spec (one contract's price, an options trade's net premium) reads its
+    ``price_legs`` off each day's rows: sum weight x mark x price_scale, a leg with no marked row
+    that day leaving the point blank with its reason. Returns ``{trade, position_id, level_unit,
+    level_mode, level_entry, first_trade_date, dates_left_out, points [{date, ltd_usd, ltd_reasons,
+    ltd_filled, ltd_notes, level, level_reason, level_source, level_estimated ('' or the sentence
+    naming each near-marks estimate the point rests on), rolls [labels]}], rolls}``. ``value_fn``: a screen passes its
     memoised filled reader (one whole-book valuation per date otherwise)."""
     from engine.spreads.history import _trade_info, position_history
     read = _cached(value_fn)
@@ -1592,28 +1804,34 @@ def level_history(conn: sqlite3.Connection, trade: dict, dates: Iterable[str], v
     def expiry(leg) -> str:
         return info.get(leg.trade_ids[0], ("", ""))[1]
 
+    price_legs = list(level.get("price_legs") or [])
     points = []
     for p in base["points"]:
         day = p["date"]
         point = {k: p[k] for k in ("date", "ltd_usd", "ltd_reasons", "ltd_filled", "ltd_notes")}
         point.update(level=None, level_reason=level.get("reason") or level.get("now_reason") or "no level",
-                     level_source="", rolls=list(roll_on.get(day, [])))
-        if spec is not None:
+                     level_source="", level_estimated="", rolls=list(roll_on.get(day, [])))
+        if spec is not None or price_legs:
             out = read(conn, day)
             frame = out[0] if isinstance(out, tuple) else out
             rows = ({r["trade_id"]: r for r in frame.to_dict("records")
                      if r["trade_id"] in info and info[r["trade_id"]][0] <= day}
                     if isinstance(frame, pd.DataFrame) and not frame.empty else {})
-            if mode == "ratio" and cn in (0, 1):
-                vc, why_c, src, _ = level_on(conn, st.one_leg_spec(spec, cn), day, rows, True, expiry)
-                vf, why_f, _src, _ = level_on(conn, st.one_leg_spec(spec, 1 - cn), day, rows, True, expiry)
+            if spec is None:
+                lvl, why, src, est = _price_legs_on(price_legs, rows, day)
+                point.update(level=lvl, level_reason=why, level_source=src, level_estimated=est)
+            elif mode == "ratio" and cn in (0, 1):
+                vc, why_c, src, _, est_c = level_on(conn, st.one_leg_spec(spec, cn), day, rows, True, expiry)
+                vf, why_f, _src, _, est_f = level_on(conn, st.one_leg_spec(spec, 1 - cn), day, rows, True, expiry)
                 if vc is None or vf is None or abs(vf) < 1e-12:
                     point["level_reason"] = why_c or why_f or "the foreign leg's price is 0"
                 else:
-                    point.update(level=vc / vf, level_reason="", level_source=src)
+                    point.update(level=vc / vf, level_reason="", level_source=src,
+                                 level_estimated="; ".join(dict.fromkeys(list(est_c) + list(est_f))))
             else:
-                lvl, why, src, _ = level_on(conn, spec, day, rows, True, expiry)
-                point.update(level=lvl, level_reason=why, level_source=src)
+                lvl, why, src, _, est = level_on(conn, spec, day, rows, True, expiry)
+                point.update(level=lvl, level_reason=why, level_source=src,
+                             level_estimated="; ".join(est) if lvl is not None else "")
         points.append(point)
     return {"trade": trade.get("trade", ""), "position_id": trade.get("position_id", ""),
             "level_unit": level.get("unit", ""), "level_mode": mode, "level_entry": level.get("entry"),

@@ -10,3 +10,4 @@
 - [Rolls](rolls.md) — 2026-09-29: rolls from fills, position per trade name, pooled pass, roll-ins kept labelled; real book: 2 cattle roll-ins, 1 HRC roll
 - [Value sizing, one spread per name](value-sizing-one-spread.md) — 2026-09-29: value between commodities, physical for same commodity / cracks; one spread per name; leftover on front leg
 - [Trade book](trade-book.md) — 2026-09-29 Phase G: type rule (roll-aware day calendars), converted CN/West ratio, no-marks hedge fallback
+- [Level gaps filled](level-gaps.md) — 2026-09-30: near-marks entry spot with estimated flags, 3-leg template levels, options net premium level
