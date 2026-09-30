@@ -1,6 +1,7 @@
 """SQLite schema for the risk monitor, transcribed from CLAUDE.md "Data contract -> Tables".
 
-`create_schema(conn)` is idempotent (CREATE ... IF NOT EXISTS) and enables foreign keys.
+`create_schema(conn)` is idempotent, writes only what differs from the schema (nothing on an
+up-to-date database) and enables foreign keys.
 `connect(path)` opens a connection and applies the schema.
 """
 from __future__ import annotations
@@ -185,16 +186,42 @@ OFFICIAL_FALLBACK_SOURCE = {
 }
 
 
+def _view_definitions() -> Dict[str, str]:
+    """view name -> its current ``CREATE VIEW`` statement (no trailing semicolon), in
+    creation order. `create_schema` compares each with the SQL `sqlite_master` holds and
+    drops and recreates the view whenever they differ (never `CREATE VIEW IF NOT EXISTS`:
+    that silently froze a database created before a view-definition change on its old,
+    wrong body forever -- e.g. a pre-2026-09-15 `marks_official` on a live database had
+    no branch for CASHFLOW_USD / GAMMA / THETA / VEGA / RHO / DELTA_PA and the wrong
+    (pre-2026-09-15/17) sources for PV_USD / DELTA / PREMIUM). Until 2026-09-30 every
+    view was dropped and recreated on every call, which wrote to the database on every
+    `connect` and moved the file's mtime, so every (mtime_ns, size)-keyed screen cache
+    re-valued the whole book after each of a pull's connects; comparing first keeps the
+    same guarantee (a changed definition always reaches an existing database) with no
+    write when nothing changed."""
+    return {name: body.strip() for name, body in _split_views(_views_ddl()).items()}
+
+
+def _split_views(script: str) -> Dict[str, str]:
+    """name -> ``CREATE VIEW ...`` statement of every view in `script` (`_views_ddl`'s
+    output: SQL comments dropped, DROP statements skipped)."""
+    out: Dict[str, str] = {}
+    for stmt in _strip_sql_comments(script).split(";"):
+        stmt = stmt.strip()
+        m = re.match(r"CREATE VIEW\s+(\w+)\s+AS\b", stmt)
+        if m:
+            out[m.group(1)] = stmt
+    return out
+
+
+def _normalise_sql(sql: str) -> str:
+    """Whitespace-insensitive form of a stored or generated statement, for comparison."""
+    return " ".join(_strip_sql_comments(sql or "").split()).rstrip(";").strip()
+
+
 def _views_ddl() -> str:
-    """Every view is dropped and recreated unconditionally on every `create_schema` call
-    (not `CREATE VIEW IF NOT EXISTS`): a view holds no data, so re-running its
-    definition is always safe, and `IF NOT EXISTS` silently froze a database created
-    before a view-definition change on its old, wrong body forever -- e.g. a pre-
-    2026-09-15 `marks_official` on a live database had no branch for CASHFLOW_USD /
-    GAMMA / THETA / VEGA / RHO / DELTA_PA and the wrong (pre-2026-09-15/17) sources for
-    PV_USD / DELTA / PREMIUM, and `create_schema` never corrected it because the view
-    already existed. Recreating unconditionally re-syncs every view to the current
-    definition on every app startup."""
+    """The DROP + CREATE script of every view (see `_view_definitions`); `create_schema`
+    runs only the pairs whose definition differs from the database's."""
     cases = "\n".join(
         f"      WHEN '{mt}' THEN '{src}'" for mt, src in OFFICIAL_MARK_SOURCE.items()
     )
@@ -400,7 +427,9 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     an existing table (each has a documented sentinel: '' / 0 / 'VANILLA' / ...)."""
     # Every DDL block, the library's included (2026-09-22: bbg_library_state.code_version was
     # added and never reached an existing database while this list stopped at the bundles).
-    ddl_tables = _parse_ddl_columns(_DDL + _LEDGER_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL)
+    # Since 2026-09-30 that concatenation is `_TABLES_DDL` (below), the one list create_schema
+    # runs and checks too.
+    ddl_tables = _parse_ddl_columns(_TABLES_DDL)
     for table, columns in ddl_tables.items():
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if not existing:
@@ -410,14 +439,61 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
                 conn.execute(f'ALTER TABLE {table} ADD COLUMN "{name}" {coldef}')
 
 
+_TABLES_DDL = _DDL + _LEDGER_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL
+_CREATE_OBJECT_RE = re.compile(r'CREATE\s+(TABLE|INDEX|TRIGGER)\s+IF\s+NOT\s+EXISTS\s+"?(\w+)"?', re.IGNORECASE)
+
+
+def _expected_objects() -> Dict[str, str]:
+    """name -> sqlite_master type ('table' | 'index' | 'trigger') of every object the DDL
+    strings create."""
+    return {m.group(2): m.group(1).lower()
+            for m in _CREATE_OBJECT_RE.finditer(_strip_sql_comments(_TABLES_DDL))}
+
+
+def _schema_incomplete(conn: sqlite3.Connection, present: Dict[str, str]) -> bool:
+    """True when a table, index or trigger of the DDL is missing, a DDL column is missing
+    from its table (what `_migrate_columns` adds), or `bbg_library_state` has no row.
+    Reads only; `present` is sqlite_master's name -> type."""
+    for name, kind in _expected_objects().items():
+        if present.get(name) != kind:
+            return True
+    for table, columns in _parse_ddl_columns(_TABLES_DDL).items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if any(name not in existing for name, _ in columns):
+            return True
+    return conn.execute("SELECT 1 FROM bbg_library_state WHERE id = 1").fetchone() is None
+
+
 def create_schema(conn: sqlite3.Connection) -> None:
-    """Create every table if absent (idempotent); drop and recreate every view
-    unconditionally (see `_views_ddl`'s docstring for why); enable foreign keys."""
+    """Bring the database up to the schema, writing only what differs (2026-09-30): the
+    tables, index and triggers (CREATE ... IF NOT EXISTS) and `_migrate_columns` run only
+    when something is missing; a view is dropped and recreated only when its SQL in
+    `sqlite_master` differs from its current definition (`_view_definitions`), so a
+    view-definition change still always reaches an existing database. An up-to-date
+    database is only read, and its file (and mtime) are untouched. Enables foreign keys."""
     conn.execute("PRAGMA foreign_keys = ON")
     try:
-        conn.executescript(_DDL + _views_ddl() + _LEDGER_DDL + _BUNDLES_DDL + _BBG_LIBRARY_DDL)
-        _migrate_columns(conn)
-        conn.commit()
+        present = {name: kind for kind, name in conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE type IN ('table','index','trigger','view')")}
+        stored_sql = {name: sql for name, sql in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'view'")}
+        incomplete = _schema_incomplete(conn, present)
+        stale_views = [
+            (name, sql) for name, sql in _view_definitions().items()
+            if name not in stored_sql or _normalise_sql(stored_sql[name]) != _normalise_sql(sql)]
+        if not incomplete and not stale_views:
+            return
+        script = _TABLES_DDL if incomplete else ""
+        script += "".join(f"\nDROP VIEW IF EXISTS {name};\n{sql};\n" for name, sql in stale_views)
+        try:
+            conn.executescript("BEGIN;\n" + script + "\nCOMMIT;")
+            if incomplete:
+                _migrate_columns(conn)
+                conn.commit()
+        except sqlite3.Error:
+            if conn.in_transaction:
+                conn.rollback()  # never leave a failed script's transaction (and its snapshot) open
+            raise
     except sqlite3.OperationalError as exc:
         # A read-only connection (ui.app.connect_readonly, used by every tab callback)
         # cannot DROP/CREATE the views. The writable startup path (ui.app.ensure_schema)
@@ -461,6 +537,16 @@ def purge_retired_sources(conn: sqlite3.Connection) -> Dict[str, int]:
     and safe deletion would require checking every other table for references first.
     """
     counts: Dict[str, int] = {}
+    # 2026-09-30: look first and write only when something is there, so a clean database's
+    # start-up leaves the file (and every mtime-keyed screen cache) untouched.
+    present = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('positions','swap_review')")}
+    has_bnp = conn.execute("SELECT 1 FROM trades WHERE source='BNP' LIMIT 1").fetchone() is not None
+    has_retired_marks = conn.execute(
+        "SELECT 1 FROM marks WHERE source IN ('BNP_BVAL','WORKBOOK_REFERENCE') LIMIT 1").fetchone() is not None
+    if not (present or has_bnp or has_retired_marks):
+        return {"trade_legs": 0, "realised_pnl": 0, "trades": 0, "marks": 0,
+                "positions_table_dropped": 0, "swap_review_table_dropped": 0}
     with conn:
         cur = conn.execute("DELETE FROM trade_legs WHERE trade_id IN (SELECT trade_id FROM trades WHERE source='BNP')")
         counts["trade_legs"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0

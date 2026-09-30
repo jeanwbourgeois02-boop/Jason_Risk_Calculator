@@ -4,8 +4,18 @@ Terminal, through git.
 The database (`data/raw/risk.db`) is never committed, so a PC without Bloomberg has no
 marks and every USD figure is blank. `export_snapshot` writes the market-data tables as
 plain CSV under `data/bbg_snapshot/` (tracked by git, one file per table, rows in
-primary-key order so a re-export diffs small); `import_snapshot` reads them back on the
-other PC. Every "Pull Bloomberg now" ends with `save_after_pull` (user, 2026-09-22: "I
+primary-key order so a re-export diffs small; `marks` one file per month of `as_of_date`,
+`marks/<YYYY-MM>.csv`, since 2026-09-30, the months in name order giving the rows of the old
+single `marks.csv` in the same order); `import_snapshot` reads them back on the other PC,
+either layout.
+
+Cost (2026-09-30, the pull was slow and grew with history): each file's content is
+fingerprinted by one aggregate query (row count, rowids and per-column sums), recorded with
+the file's size, mtime and hash in a sidecar next to the database (`<db>.snapshot_state.json`,
+this PC's own record, never committed). A file whose fingerprint and on-disk stat match the
+record is neither read nor rewritten, so a pull rewrites the current month of marks and
+whatever else it changed. The read transaction holds only the fingerprints and the rows of
+the files that changed; the CSV is built and written after it is released. Every "Pull Bloomberg now" ends with `save_after_pull` (user, 2026-09-22: "I
 dont want to need to run step 3 export, just set it up so every pull from bbg triggers the
 saving", then "dont need to trigger commit and push, just need to make sure the bbg data is
 logged and stored locally, I will trigger the commit and push myself"): the export alone,
@@ -39,8 +49,11 @@ contract-master's estimated expiry, and the freeze must see Bloomberg's date.
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -71,6 +84,15 @@ MARKET_TABLES = ("marks", "curves", "curve_quotes", "vol_quotes", "contract_stat
 CONTRACT_STATIC = "contract_static"
 KEPT_SOURCE = "MANUAL"
 PULL_STATUS = "pull_status.json"
+# marks by month of as_of_date (2026-09-30): only the months a pull touched are rewritten.
+# LEGACY_MARKS is the single file of every snapshot before; the import still reads it, and
+# an export in the new layout removes it.
+MARKS = "marks"
+MARKS_DIR = "marks"
+LEGACY_MARKS = "marks.csv"
+_MONTH = re.compile(r"\d{4}-\d{2}")
+STATE_SUFFIX = ".snapshot_state.json"
+STATE_VERSION = 1
 
 
 class SnapshotError(Exception):
@@ -86,27 +108,193 @@ def _table_info(conn: sqlite3.Connection, table: str) -> List[tuple]:
     return conn.execute(f"PRAGMA table_info({_q(table)})").fetchall()
 
 
-def _write_table(conn: sqlite3.Connection, table: str, path: Path, where: str = "") -> tuple:
-    """(rows written, whether the file's bytes changed)."""
-    info = _table_info(conn, table)
+class _File:
+    """One CSV file of the snapshot: its name under the folder, the content's fingerprint,
+    its row count, and (only when the fingerprint or the file on disk no longer match the
+    record) its columns and rows, read inside the export's one read transaction."""
+
+    __slots__ = ("name", "fp", "count", "cols", "rows")
+
+    def __init__(self, name: str, fp: list, count: int, cols: Optional[List[str]] = None,
+                 rows: Optional[List[tuple]] = None):
+        self.name, self.fp, self.count, self.cols, self.rows = name, fp, count, cols, rows
+
+
+def _columns(info: List[tuple]) -> tuple:
+    """(columns in table order, primary key in key order, or every column without one)."""
     cols = [c[1] for c in info]
     key = [c[1] for c in sorted((c for c in info if c[5]), key=lambda c: c[5])] or cols
-    sql = (f"SELECT {', '.join(_q(c) for c in cols)} FROM {_q(table)} {where} "
-           f"ORDER BY {', '.join(_q(c) for c in key)}")
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    n = 0
+    return cols, key
+
+
+_NUMERIC_DECL = ("INT", "REAL", "FLOA", "DOUB", "NUM")
+
+
+def _aggregates(conn: sqlite3.Connection, table: str, info: List[tuple]) -> str:
+    """The fingerprint's aggregate columns, one scan in SQLite with no row reaching Python:
+    the row count, the rowids (INSERT OR REPLACE gives a replaced row a new one, and a
+    deleted row takes its rowid with it), and per column the total of a number, or for text
+    its total length and, for a date or time column (its name ends in 'date' or '_at'), the
+    total of its julian day (a moved settle date, a new snap time or source shows). A write the app makes to these tables moves at least one of them; the
+    only change they could miss is a number moving by less than the rounding of its total (a
+    day's, for marks: about 1e-9 on a day of prices) on a row that also kept its rowid and its
+    snap time."""
+    parts = ["COUNT(*)"]
+    if "WITHOUT ROWID" not in _ddl(conn, table).upper():
+        parts += ["SUM(rowid)", "MAX(rowid)"]
+    for c in info:
+        name = _q(c[1])
+        if any(t in (c[2] or "").upper() for t in _NUMERIC_DECL):
+            parts.append(f"TOTAL({name})")
+        else:
+            parts.append(f"TOTAL(length({name}))")
+            if c[1].lower().endswith(("date", "_at")):
+                parts.append(f"TOTAL(julianday({name}))")
+    return ", ".join(parts)
+
+
+def _same_fp(fp: list, recorded: Optional[dict]) -> bool:
+    return bool(recorded) and json.loads(json.dumps(fp)) == recorded.get("fp")
+
+
+def _stat_matches(recorded: Optional[dict], path: Path) -> bool:
+    """The file on disk is the one this PC last wrote or checked (size and mtime as recorded):
+    a git checkout, an edit or a deletion since makes it unknown again."""
+    if not recorded:
+        return False
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return st.st_size == recorded.get("size") and st.st_mtime_ns == recorded.get("mtime_ns")
+
+
+def _plan(conn: sqlite3.Connection, recorded: dict, out_dir: Path, name: str, table: str, cols: List[str],
+          key: List[str], fp_row: tuple, where: str = "", params: tuple = ()) -> _File:
+    """The file `name`: skipped (rows None) when its fingerprint (the columns and `fp_row`,
+    whose first item is the row count) and the file on disk match the record, else its rows
+    read now, in primary-key order."""
+    fp = [cols] + list(fp_row)
+    rec = recorded.get(name)
+    if _same_fp(fp, rec) and _stat_matches(rec, out_dir / name):
+        return _File(name, fp, int(fp_row[0]))
+    rows = conn.execute(f"SELECT {', '.join(map(_q, cols))} FROM {_q(table)} {where} "
+                        f"ORDER BY {', '.join(map(_q, key))}", params).fetchall()
+    return _File(name, fp, len(rows), cols, rows)
+
+
+def _month_file(month: str) -> str:
+    # an as_of_date that is not ISO still gets a file of its own, named safely
+    return f"{MARKS_DIR}/{month if _MONTH.fullmatch(month) else 'other-' + month.encode('utf-8').hex()}.csv"
+
+
+def _marks_plan(conn: sqlite3.Connection, recorded: dict, out_dir: Path, info: List[tuple]) -> tuple:
+    """marks, one file per month of as_of_date: one fingerprint query grouped by day (it walks
+    the primary key, whose first column is as_of_date, so SQLite sorts nothing), a month's
+    fingerprint being its days' rows; then the rows of the months that changed only (a range
+    on as_of_date). Returns (the files, the first and the last as_of_date)."""
+    cols, key = _columns(info)
+    months: Dict[str, List[list]] = {}
+    first = last = None
+    for row in conn.execute(f"SELECT as_of_date, {_aggregates(conn, MARKS, info)} "
+                            f"FROM marks GROUP BY as_of_date ORDER BY as_of_date"):
+        months.setdefault(str(row[0])[:7], []).append(list(row))
+        first, last = first if first is not None else row[0], row[0]
+    files = []
+    for month, days in months.items():
+        if _MONTH.fullmatch(month):
+            where, params = "WHERE as_of_date >= ? AND as_of_date < ?", (month, month[:-1] + chr(ord(month[-1]) + 1))
+        else:
+            where, params = "WHERE substr(as_of_date, 1, 7) = ?", (month,)
+        count = sum(int(d[1]) for d in days)
+        files.append(_plan(conn, recorded, out_dir, _month_file(month), MARKS, cols, key, (count, days), where, params))
+    return files, first, last
+
+
+def _csv_bytes(cols: List[str], rows: List[tuple]) -> bytes:
     # lineterminator '\n' on every OS: the same book must give the same bytes from Windows
     # and the Mac, or each export would rewrite every line. csv writes a float with repr(),
     # which reads back to the identical float.
-    with tmp.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f, lineterminator="\n")
-        w.writerow(cols)
-        for row in conn.execute(sql):
-            w.writerow(row)
-            n += 1
-    changed = not path.exists() or path.read_bytes() != tmp.read_bytes()
-    os.replace(tmp, path)
-    return n, changed
+    buf = io.StringIO(newline="")
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(cols)
+    w.writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
+def _state_path(db_path: Path) -> Path:
+    return db_path.with_name(db_path.name + STATE_SUFFIX)
+
+
+def _load_state(db_path: Path, out_dir: Path) -> dict:
+    """{file name: {'fp', 'sha1', 'size', 'mtime_ns'}} last recorded for `out_dir`; {} when
+    there is none or it cannot be read (every file is then checked again)."""
+    try:
+        state = json.loads(_state_path(db_path).read_text(encoding="utf-8"))
+        if state.get("version") != STATE_VERSION:
+            return {}
+        return dict(state.get("dirs", {}).get(str(out_dir.resolve()), {}))
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _save_state(db_path: Path, out_dir: Path, files: dict) -> None:
+    """Never fails the export: without the record the next export checks every file again."""
+    path = _state_path(db_path)
+    try:
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict) or state.get("version") != STATE_VERSION:
+                state = {}
+        except (OSError, ValueError):
+            state = {}
+        state = {"version": STATE_VERSION, "dirs": {**(state.get("dirs") or {}), str(out_dir.resolve()): files}}
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _write_files(out_dir: Path, plan: List[_File], recorded: dict) -> tuple:
+    """Write the files of `plan` that changed; remove month files no longer in the book and
+    an older snapshot's single marks.csv. Returns (names whose bytes changed or that were
+    removed, the new record)."""
+    changed: List[str] = []
+    files: Dict[str, dict] = {}
+    for f in plan:
+        path = out_dir / f.name
+        rec = recorded.get(f.name)
+        if f.rows is None:  # unchanged since the record, file untouched on disk
+            files[f.name] = rec
+            continue
+        data = _csv_bytes(f.cols, f.rows)
+        digest = hashlib.sha1(data).hexdigest()
+        if _stat_matches(rec, path):
+            same = rec.get("sha1") == digest  # the file is the one recorded: no need to read it
+        else:
+            try:
+                same = path.read_bytes() == data
+            except OSError:
+                same = False
+        if not same:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+            changed.append(f.name)
+        st = path.stat()
+        files[f.name] = {"fp": json.loads(json.dumps(f.fp)), "sha1": digest, "size": st.st_size,
+                         "mtime_ns": st.st_mtime_ns}
+    keep = {f.name for f in plan}
+    stale = [p for p in (out_dir / MARKS_DIR).glob("*.csv") if f"{MARKS_DIR}/{p.name}" not in keep]
+    if any(f.name.startswith(MARKS_DIR + "/") for f in plan):
+        stale.append(out_dir / LEGACY_MARKS)
+    for p in stale:
+        if p.exists():
+            p.unlink()
+            changed.append(p.relative_to(out_dir).as_posix())
+    return changed, files
 
 
 def _ddl(conn: sqlite3.Connection, table: str) -> str:
@@ -126,7 +314,8 @@ def _copy_pull_status(db_path: Path, out_dir: Path) -> tuple:
         return None, False
     data = src.read_bytes()
     changed = not dst.exists() or dst.read_bytes() != data
-    dst.write_bytes(data)
+    if changed:
+        dst.write_bytes(data)
     try:
         status = json.loads(data.decode("utf-8"))
         return {k: status.get(k) for k in ("time", "connected", "requested", "written", "failed")}, changed
@@ -139,42 +328,66 @@ def export_snapshot(db_path: Union[str, Path], out_dir: Union[str, Path] = SNAPS
     snapshot.json): exported_at, the first and last as_of_date in marks, rows per table,
     each table's DDL, and the last pull's summary line. Raises SnapshotError, touching
     nothing, when there is no database or no mark in it."""
+    return _export(db_path, out_dir)[0]
+
+
+def _export(db_path: Union[str, Path], out_dir: Union[str, Path] = SNAPSHOT_DIR) -> tuple:
+    """export_snapshot's work: (manifest, names of the files whose bytes changed)."""
     db_path, out_dir = Path(db_path), Path(out_dir)
     if not db_path.exists():
         raise SnapshotError(f"no database at {db_path}")
+    recorded = _load_state(db_path, out_dir)
     conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=60.0,
                            isolation_level=None)
     try:
-        conn.execute("BEGIN")  # one read transaction: every table from the same moment
+        # One read transaction, every table from the same moment, held only for the
+        # fingerprints and the rows of the files that changed: the CSV is built and written
+        # after it is released, so a writer waits as little as possible.
+        conn.execute("BEGIN")
         if not _table_info(conn, "marks") or not conn.execute("SELECT 1 FROM marks LIMIT 1").fetchone():
             raise SnapshotError("no marks on file: nothing to export (press Pull Bloomberg now first)")
-        out_dir.mkdir(parents=True, exist_ok=True)
         rows: Dict[str, int] = {}
         ddl: Dict[str, str] = {}
-        rows[INSTRUMENTS], changed = _write_table(
-            conn, INSTRUMENTS, out_dir / f"{INSTRUMENTS}.csv",
-            "WHERE instrument_id IN (SELECT DISTINCT instrument_id FROM marks)")
+        plan: List[_File] = []
+        info = _table_info(conn, INSTRUMENTS)
+        cols, key = _columns(info)
+        where = "WHERE instrument_id IN (SELECT DISTINCT instrument_id FROM marks)"
+        fp_row = conn.execute(f"SELECT {_aggregates(conn, INSTRUMENTS, info)} FROM {_q(INSTRUMENTS)} {where}").fetchone()
+        plan.append(_plan(conn, recorded, out_dir, f"{INSTRUMENTS}.csv", INSTRUMENTS, cols, key, fp_row, where))
+        rows[INSTRUMENTS] = plan[-1].count
         for table in MARKET_TABLES:
-            if _table_info(conn, table):
-                rows[table], table_changed = _write_table(conn, table, out_dir / f"{table}.csv")
-                changed = changed or table_changed
-                ddl[table] = _ddl(conn, table)
-        first, last = conn.execute("SELECT MIN(as_of_date), MAX(as_of_date) FROM marks").fetchone()
+            info = _table_info(conn, table)
+            if not info:
+                continue
+            if table == MARKS:
+                months, first, last = _marks_plan(conn, recorded, out_dir, info)
+                plan += months
+                rows[table] = sum(f.count for f in months)
+            else:
+                cols, key = _columns(info)
+                fp_row = conn.execute(f"SELECT {_aggregates(conn, table, info)} FROM {_q(table)}").fetchone()
+                plan.append(_plan(conn, recorded, out_dir, f"{table}.csv", table, cols, key, fp_row))
+                rows[table] = plan[-1].count
+            ddl[table] = _ddl(conn, table)
     finally:
         conn.close()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written, files = _write_files(out_dir, plan, recorded)
+    _save_state(db_path, out_dir, files)
     last_pull, status_changed = _copy_pull_status(db_path, out_dir)
-    changed = changed or status_changed
+    if status_changed:
+        written.append(PULL_STATUS)
     # The same market data as the last export keeps that export's manifest, time included,
     # so exporting twice commits nothing the second time.
     previous = read_manifest(out_dir)
-    if not changed and previous and previous.get("rows") == rows and previous.get("ddl") == ddl:
-        return previous
+    if not written and previous and previous.get("rows") == rows and previous.get("ddl") == ddl:
+        return previous, written
     manifest = {
         "exported_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "marks_from": first, "marks_through": last, "rows": rows, "ddl": ddl, "last_pull": last_pull,
     }
     (out_dir / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    return manifest
+    return manifest, written + [MANIFEST]
 
 
 def read_manifest(in_dir: Union[str, Path] = SNAPSHOT_DIR) -> Optional[dict]:
@@ -222,6 +435,16 @@ def _insert(conn: sqlite3.Connection, table: str, cols: List[str], rows: List[tu
     return conn.total_changes - before
 
 
+def _marks_files(in_dir: Path) -> List[Path]:
+    """The snapshot's marks files: marks/<YYYY-MM>.csv in name order (2026-09-30), else an
+    older snapshot's single marks.csv; [] when there is neither."""
+    months = sorted((in_dir / MARKS_DIR).glob("*.csv"))
+    if months:
+        return months
+    legacy = in_dir / LEGACY_MARKS
+    return [legacy] if legacy.exists() else []
+
+
 def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSHOT_DIR,
                     as_of: Optional[str] = None) -> dict:
     """Load the snapshot in `in_dir` into `db_path` (created with the schema if absent), in
@@ -230,12 +453,13 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
     'instruments_added', 'skipped_marks', 'contract_dates', 'ledger'}; 'contract_dates' is
     `apply_contract_dates`' own result ({'checked', 'updated', 'missing_dates'}), run after
     the load and before the freeze so the ledger sees Bloomberg's expiries (None if that
-    module cannot be imported). Raises SnapshotError, touching nothing, when `in_dir` holds
-    no marks.csv."""
+    module cannot be imported). Reads marks by month (marks/*.csv) or an older snapshot's
+    single marks.csv. Raises SnapshotError, touching nothing, when `in_dir` holds neither."""
     from data.ingest.schema import connect
 
     in_dir = Path(in_dir)
-    if not (in_dir / "marks.csv").exists():
+    marks_files = _marks_files(in_dir)
+    if not marks_files:
         raise SnapshotError(f"no snapshot in {in_dir} (git pull first; it is written on the "
                             f"Bloomberg PC by marks-export)")
     out = {"manifest": read_manifest(in_dir), "rows": {}, "dropped": {}, "instruments_added": 0,
@@ -250,24 +474,27 @@ def import_snapshot(db_path: Union[str, Path], in_dir: Union[str, Path] = SNAPSH
             known = {r[0] for r in conn.execute("SELECT instrument_id FROM instruments")}
             ddl = (out["manifest"] or {}).get("ddl") or {}
             for table in MARKET_TABLES:
-                path = in_dir / f"{table}.csv"
-                if path.exists() and not _table_info(conn, table) and table == CONTRACT_STATIC:
+                paths = marks_files if table == MARKS else [p for p in [in_dir / f"{table}.csv"] if p.exists()]
+                if paths and not _table_info(conn, table) and table == CONTRACT_STATIC:
                     _ensure_contract_static(conn)
-                if path.exists() and not _table_info(conn, table) and ddl.get(table):
+                if paths and not _table_info(conn, table) and ddl.get(table):
                     conn.execute(ddl[table])  # a table this database never created: the source's own DDL
                 info = _table_info(conn, table)
-                if not path.exists() or not info:
+                if not paths or not info:
                     continue
-                cols, rows = _read_rows(path, info)
-                if table == "marks":
-                    at = cols.index("instrument_id")
-                    n = len(rows)
-                    rows = [r for r in rows if r[at] in known]
-                    out["skipped_marks"] = n - len(rows)
                 out["dropped"][table] = conn.execute(
                     f"DELETE FROM {_q(table)} WHERE source <> ?", (KEPT_SOURCE,)).rowcount
-                _insert(conn, table, cols, rows, "INSERT OR REPLACE")
-                out["rows"][table] = len(rows)
+                loaded = 0
+                for path in paths:  # each file with its own header: a month kept from an older export may differ
+                    cols, rows = _read_rows(path, info)
+                    if table == MARKS:
+                        at = cols.index("instrument_id")
+                        n = len(rows)
+                        rows = [r for r in rows if r[at] in known]
+                        out["skipped_marks"] += n - len(rows)
+                    _insert(conn, table, cols, rows, "INSERT OR REPLACE")
+                    loaded += len(rows)
+                out["rows"][table] = loaded
         if as_of is None:
             # The book date (New York, rolled at 17:00 New York), never the PC's local date: a
             # PC in Asia is a day ahead until early afternoon, and this freeze must be as of
@@ -336,7 +563,7 @@ def save_after_pull(db_path: Union[str, Path], repo_root: Union[str, Path] = REP
     repo_root = Path(repo_root)
     out_dir = Path(out_dir) if out_dir is not None else repo_root / SNAPSHOT_REL
     try:
-        manifest = export_snapshot(db_path, out_dir)
+        manifest, written = _export(db_path, out_dir)
     except SnapshotError as exc:
         out = {"exported": False, "committed": False, "pushed": False, "message": f"marks snapshot: {exc}"}
         log(out["message"])
@@ -346,9 +573,11 @@ def save_after_pull(db_path: Union[str, Path], repo_root: Union[str, Path] = REP
                "message": f"marks snapshot: export failed ({type(exc).__name__}: {exc})"}
         log(out["message"])
         return out
-    head = f"marks snapshot: {manifest['rows'].get('marks', 0)} marks through {manifest['marks_through']} written to {SNAPSHOT_REL}/"
+    marks = f"marks snapshot: {manifest['rows'].get('marks', 0)} marks through {manifest['marks_through']}"
+    head = f"{marks} written to {SNAPSHOT_REL}/" if written else f"{marks}, {SNAPSHOT_REL}/ already up to date"
     if not commit:
-        out = {"exported": True, "committed": False, "pushed": False, "message": head + " (commit and push it yourself)"}
+        out = {"exported": True, "committed": False, "pushed": False,
+               "message": head + (" (commit and push it yourself)" if written else "")}
         log(out["message"])
         return out
     result = commit_snapshot(repo_root, manifest, push=push, rel=str(out_dir.relative_to(repo_root)).replace(os.sep, "/")

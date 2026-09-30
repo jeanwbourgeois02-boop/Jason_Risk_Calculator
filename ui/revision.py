@@ -187,12 +187,26 @@ def components(db_path: Union[str, Path], build: str = "") -> list:
     ]
 
 
-def warm_screens(get_db_path: Callable[[], object]) -> None:
-    """Start the screens' warm-up for the database's new revision (ui/warmup.py, debounced)."""
+def warm_screens(get_db_path: Callable[[], object], after_write: bool = False) -> None:
+    """Start the screens' warm-up for the database's new revision (ui/warmup.py, debounced).
+    An upload or a book switch warms at once; the poll's own call (`after_write=True`) waits
+    while a Bloomberg pull or its backfill is running and only notes the warm-up as owed
+    (`warmup.after_write`), so the warm-up never fights the pull for the CPU and the lock."""
     try:
         from ui import warmup
         from ui.tabs.controls import today_ny
-        warmup.after_change(get_db_path, today_ny)
+        (warmup.after_write if after_write else warmup.after_change)(get_db_path, today_ny)
+    except Exception:  # noqa: BLE001 -- speed only, never the poll's answer
+        pass
+
+
+def warm_if_owed(get_db_path: Callable[[], object]) -> None:
+    """Each poll tick: the warm-up a pull left owed, once the pull has finished (ui/warmup.py).
+    Nothing read when none is owed."""
+    try:
+        from ui import warmup
+        from ui.tabs.controls import today_ny
+        warmup.warm_if_owed(get_db_path, today_ny)
     except Exception:  # noqa: BLE001 -- speed only, never the poll's answer
         pass
 
@@ -245,7 +259,10 @@ def register(app, get_db_path: Callable[[], object], build: str = "", tick=None)
         db_path = get_db_path()
         publish, new_pending = decide(data_rev, pending, file_signature(db_path))
         if publish is None:
+            warm_if_owed(get_db_path)   # a pull that has finished since its last write: warm now
             return (no_update, no_update, (new_pending if new_pending != pending else no_update), stale, *rest)
-        warm_screens(get_db_path)   # a pull, a backfill or any write landed: warm the screens' caches for it
+        # a pull, a backfill or any write landed: warm the screens' caches for it, or, while the
+        # pull is still running, once it has finished
+        warm_screens(get_db_path, after_write=True)
         book = book_signature(db_path)
         return (publish, (book if book and book != book_rev else no_update), new_pending, stale, *rest)

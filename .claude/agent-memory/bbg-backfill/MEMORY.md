@@ -9,3 +9,4 @@ Older notes on backfill.py live in `.claude/agent-memory/bbg-data/` (lane split 
 - [One close, 17:00 NY for every instrument (2026-09-28)](one_close_1700_every_instrument_2026_09_28.md) — 15:00 intraday FX rule gone; close_stamp(day), settle_stamp alias, is_close_row ignores today/instrument_id, CLOSE_HOUR_NY local
 - [Quiet terminal (2026-09-30)](quiet_terminal_2026_09_30.md) — in-app run prints problem lines (`_problem`) + one summary; CLI keeps the table
 - [Fault isolation, Phase G (2026-09-29)](fault_isolation_2026_09_29.md) — _Asks chunks/split/timeout give-up/lock release, not-a-number refusals, guarded steps, transient retry, progress; tests it flips
+- [Pull speed (2026-09-30)](pull_speed_2026_09_30.md) — lent session, listing memo + fingerprint, closing-ledger skip rules, after_last_day kept, connect() writes the DB

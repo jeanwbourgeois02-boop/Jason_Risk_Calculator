@@ -1895,7 +1895,7 @@ def recalc_summary(result: dict) -> str:
 
 def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost", port: int = 8194,
               session_factory: Optional[Callable] = None, today: Optional[date] = None,
-              rates_source=None, vol_source=None) -> dict:
+              rates_source=None, vol_source=None, lend_session: Optional[list] = None) -> dict:
     """One full cycle. Returns and writes the status dict. Never raises: any exception
     becomes connected=False with the traceback in `reason`. `today` (the date every mark of
     this cycle is stamped with, the curves / vol / options steps price and realise_settled
@@ -1960,7 +1960,15 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     after the contract dates (`needed_live`) and handed to every later step; spot and futures
     go 50 tickers a request (REQUEST_CHUNK); a step known to have nothing to ask still runs
     and is recorded, but the progress line is not rewritten for it, nor for a count that did
-    not move. What is asked, written and stamped is unchanged."""
+    not move. What is asked, written and stamped is unchanged.
+
+    `lend_session` (2026-09-30, the pull's speed): a list the cycle's blpapi session is
+    handed into, as its `_SharedSession`, instead of being stopped, so the backfill of the
+    same press asks its history on it rather than opening a second one. It is lent only
+    when the session opened cleanly, the cycle's body ran to its end and the pull is
+    connected (a session whose every request raised is stopped here, as before); the
+    caller then owns it and must call its `stop()` exactly once. The cycle has finished
+    with the session before it is lent: nothing here touches it again."""
     from data.ingest.schema import connect
     clock_started = time.perf_counter()
     started = _now_iso()
@@ -2084,6 +2092,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         diag = pm.Diagnostics()
         shared = _SharedSession(host, port, session_factory, diag)
         conn = connect(Path(db_path))
+        body_done = False
         try:
             if as_of_date is None:
                 as_of_date = today.isoformat()
@@ -2399,13 +2408,21 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                               reason="" if requests or not requests_built else "no open FX legs or futures to price")
             status.update(written=written, curve_points_written=curve_points_written,
                           warnings=list(warnings)[:50], as_of_marks=today.isoformat())
+            body_done = True
         finally:
-            conn.close()
-            # The blpapi session this cycle opened must be stopped here, not left to
-            # garbage collection: one leaked session per cycle (and per "Pull now" click)
-            # was the 2026-09-18 audit's top resource finding. The curves and vol sources
-            # only borrow it (their close() leaves a borrowed session alone).
-            shared.stop()
+            try:
+                conn.close()
+            finally:
+                # The blpapi session this cycle opened must be stopped here, not left to
+                # garbage collection: one leaked session per cycle (and per "Pull now" click)
+                # was the 2026-09-18 audit's top resource finding. The curves and vol sources
+                # only borrow it (their close() leaves a borrowed session alone). The one
+                # exception (2026-09-30): a clean session is lent to the caller, who stops it.
+                if (lend_session is not None and body_done and status.get("connected")
+                        and shared.opened and not shared.open_error and shared.session is not None):
+                    lend_session.append(shared)
+                else:
+                    shared.stop()
     except Exception:
         status["connected"] = False
         status["reason"] = "pull failed: " + traceback.format_exc(limit=3).strip().splitlines()[-1]
@@ -2455,8 +2472,9 @@ class LiveFeed:
             self._wake.clear()
             if self._stop.is_set():
                 return
+            lent: List[_SharedSession] = []
             try:
-                self.last_status = pull_once(self.db_path, host=self.host, port=self.port)
+                self.last_status = pull_once(self.db_path, host=self.host, port=self.port, lend_session=lent)
             except Exception:  # pull_once already catches; this guards the thread itself
                 try:
                     now = _now_iso()
@@ -2470,19 +2488,55 @@ class LiveFeed:
                                        "sentence": "Pull stopped: feed thread error"}})
                 except Exception:  # noqa: BLE001 -- the thread must live to take the next press
                     pass
-            # The backfill hand-off, on its own (2026-09-29): it runs whatever the pull did,
-            # and a failure to start it is said in the backfill's own block -- it used to
-            # overwrite the pull's whole status with a "feed thread error".
-            try:
-                from data.bloomberg.backfill import start_auto_backfill
+            self._backfill(lent[0] if lent else None)
+
+    def _backfill(self, shared: Optional[_SharedSession]) -> None:
+        """The backfill hand-off, on its own (2026-09-29): it runs whatever the pull did,
+        and a failure to start it is said in the backfill's own block -- it used to
+        overwrite the pull's whole status with a "feed thread error".
+
+        `shared` (2026-09-30, the pull's speed): the pull's own session, lent by `pull_once`
+        when it opened cleanly, so the backfill asks its history on it instead of opening a
+        second one. The pull has finished with it, so it is used by one thread at a time.
+        It is stopped exactly once: at once when no backfill run starts (None: a run already
+        in flight) or the start raised; else by a small watcher thread once the backfill
+        thread ends, raised or not, so a new press is never held up by the wait. With no
+        lent session the backfill opens its own, as before."""
+        thread = None
+        try:
+            from data.bloomberg.backfill import start_auto_backfill
+            if shared is None:
                 start_auto_backfill(self.db_path, host=self.host, port=self.port)
+            else:
+                thread = start_auto_backfill(self.db_path, host=self.host, port=self.port,
+                                             session=(shared.session, shared.service))
+        except Exception:  # noqa: BLE001
+            thread = None
+            try:
+                patch_status(self.db_path, "backfill", {
+                    "running": False,
+                    "reason": "backfill failed to start: " + traceback.format_exc().strip().splitlines()[-1]})
             except Exception:  # noqa: BLE001
-                try:
-                    patch_status(self.db_path, "backfill", {
-                        "running": False,
-                        "reason": "backfill failed to start: " + traceback.format_exc().strip().splitlines()[-1]})
-                except Exception:  # noqa: BLE001
-                    pass
+                pass
+        if shared is None:
+            return
+        join = getattr(thread, "join", None)
+        if not callable(join):
+            shared.stop()
+            return
+
+        def _stop_after_backfill() -> None:
+            try:
+                join()
+            except Exception:  # noqa: BLE001 -- the session is stopped whatever the wait did
+                pass
+            finally:
+                shared.stop()
+
+        try:
+            threading.Thread(target=_stop_after_backfill, name="bloomberg-session-return", daemon=True).start()
+        except Exception:  # noqa: BLE001 -- no watcher: wait here rather than leak the session
+            _stop_after_backfill()
 
 
 def start_feed_if_available(db_path, host: str = "localhost", port: int = 8194) -> Tuple[Optional[LiveFeed], str]:

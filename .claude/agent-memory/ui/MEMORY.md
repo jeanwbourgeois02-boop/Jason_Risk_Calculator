@@ -52,3 +52,4 @@
 - [Quiet terminal 2026-09-30](quiet-terminal-2026-09-30.md) — one INFO line per upload, warm-up at DEBUG, WARNING only for real failures; research DB absent = not available
 - [Bloomberg errors in one place 2026-09-30](bloomberg-errors-one-place-2026-09-30.md) — pull/backfill errors only on the Data tab card; elsewhere a state + DATA_POINTER link; bar_state counts pull_problems
 - [Trades card + HK pull time 2026-09-30](trades-card-hk-pull-time-2026-09-30.md) — Data Trades card owns every trade problem (parse check inside), Blotter links to it; pull_time HK; render 15 outputs
+- [Warm-up waits for the pull 2026-09-30](warmup-waits-for-pull-2026-09-30.md) — poll's warm-up owed while progress/backfill running (15 min stale); warm_if_owed each tick; uploads still at once

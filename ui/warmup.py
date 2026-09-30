@@ -40,6 +40,16 @@ server and never raises: each step's failure is recorded in `last_run` and the n
 `start` and `after_change` share one worker: a call while a run is going sets a flag, and the
 worker runs once more when it finishes, never two runs at once. A run that sees the database
 change under it (a pull writing while it warms) runs again on the new revision.
+
+Not during a pull (2026-09-30, user: the pull is slow and wasteful). While a Bloomberg pull or
+its backfill is running (the status file's `progress.running` or `backfill.running`, fresh
+within `STALE_BUSY_SECONDS`, as `ui/diagnostics_runner.py` reads it), every commit moves the
+database file, the revision poll publishes, and a warm-up re-valued all 15 steps on each
+revision, fighting the backfill for the CPU and the database lock. So the poll's trigger
+(`after_write`) only notes that a warm-up is owed while one runs, a run stops rerunning when a
+pull has started, and the poll's every tick (`warm_if_owed`) runs the owed warm-up once the
+status says finished. An upload and a book switch (`after_change`) and the start-up (`start`)
+still warm at once.
 """
 from __future__ import annotations
 
@@ -53,8 +63,10 @@ from typing import Callable, Dict, Optional
 log = logging.getLogger(__name__)
 
 _GUARD = threading.Lock()
-_STATE = {"running": False, "pending": False, "db_path_fn": None, "as_of_fn": None}
+# owed: a pull's write was published while the pull ran; warm once it has finished
+_STATE = {"running": False, "pending": False, "owed": False, "db_path_fn": None, "as_of_fn": None}
 MAX_RERUNS = 3            # a database changing on every run (a pull mid-write) is left to the next call
+STALE_BUSY_SECONDS = 15 * 60   # a "running" pull or backfill not updated for this long is a crashed one
 
 # The last completed run, for the Data tab's diagnostics: {started_at (UTC ISO), finished_at,
 # db_path, as_of, seconds {step: s}, total, ok, reason, errors {step: sentence}, runs (count),
@@ -71,6 +83,7 @@ def status() -> dict:
         out["seconds"] = dict(last_run.get("seconds") or {})
         out["errors"] = dict(last_run.get("errors") or {})
         out["running"] = bool(_STATE["running"])
+        out["owed"] = bool(_STATE["owed"])
     return out
 
 
@@ -91,7 +104,8 @@ def status_line() -> tuple:
         outcome = f"{len(errors)} step{'s' if len(errors) != 1 else ''} failed ({', '.join(sorted(errors))})"
     else:
         outcome = str(s.get("reason") or "not complete")
-    line = f"Warm-up: {float(s.get('total') or 0):.1f} s at {at}, {outcome}" + (", running again" if s["running"] else "")
+    line = (f"Warm-up: {float(s.get('total') or 0):.1f} s at {at}, {outcome}"
+            + (", running again" if s["running"] else ", again once the pull has finished" if s.get("owed") else ""))
     steps = ", ".join(f"{k} {v:.1f} s" for k, v in (s.get("seconds") or {}).items() if k not in ("as_of", "trades"))
     hover = "; ".join(p for p in (
         f"Fills every screen's caches in the background after a start, an upload or a pull, for {s.get('as_of')}",
@@ -111,10 +125,101 @@ def after_change(db_path_fn: Callable[[], object], as_of_fn: Callable[[], Option
     _request(db_path_fn, as_of_fn)
 
 
+def after_write(db_path_fn: Callable[[], object], as_of_fn: Callable[[], Optional[str]]) -> bool:
+    """The revision poll's trigger, when a write to the database has settled (a pull, a
+    backfill, anything). While a Bloomberg pull or its backfill is running this starts nothing
+    and only notes that a warm-up is owed (`warm_if_owed` runs it once the pull has finished);
+    otherwise it is `after_change`. True when a warm-up was asked for now. Never raises."""
+    try:
+        if pull_busy(_path_of(db_path_fn)):
+            with _GUARD:
+                _STATE["owed"] = True
+                _STATE["db_path_fn"], _STATE["as_of_fn"] = db_path_fn, as_of_fn
+            return False
+    except Exception:  # noqa: BLE001 -- when in doubt, warm as before
+        pass
+    _request(db_path_fn, as_of_fn)
+    return True
+
+
+def warm_if_owed(db_path_fn: Callable[[], object], as_of_fn: Callable[[], Optional[str]]) -> bool:
+    """Every poll tick: run the warm-up a pull's writes left owed, once the pull and its backfill
+    have finished (or their running flag has gone stale). Costs nothing when none is owed (no
+    file read). True when it started one. Never raises."""
+    with _GUARD:
+        if not _STATE["owed"]:
+            return False
+    try:
+        if pull_busy(_path_of(db_path_fn)):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    _request(db_path_fn, as_of_fn)
+    return True
+
+
+def _path_of(db_path_fn) -> str:
+    return str(db_path_fn()) if db_path_fn is not None else ""
+
+
+def _stamp_age(stamp) -> Optional[float]:
+    """Seconds since an ISO timestamp (a naive one read as this PC's local time); None when it
+    is missing or unreadable."""
+    if not stamp:
+        return None
+    try:
+        at = dt.datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return None
+    if at.tzinfo is None:
+        at = at.astimezone()
+    return (dt.datetime.now(dt.timezone.utc) - at).total_seconds()
+
+
+def pull_busy(db_path) -> bool:
+    """True while a Bloomberg pull or its backfill on `db_path` is running: the status file's
+    `progress.running` or `backfill.running`, updated within `STALE_BUSY_SECONDS` (an older
+    running flag is a crashed run, i.e. finished). The backfill block carries no time of its
+    own, so it is aged by the progress block's backfill time, then the progress block's, then
+    the status file's own. An unreadable status file is "not running". Never raises."""
+    if not db_path:
+        return False
+    try:
+        from data.bloomberg.live import PROGRESS_KEY, read_status, status_path
+        status = read_status(db_path) or {}
+    except Exception:  # noqa: BLE001
+        return False
+    progress = status.get(PROGRESS_KEY) if isinstance(status.get(PROGRESS_KEY), dict) else {}
+    backfill = status.get("backfill") if isinstance(status.get("backfill"), dict) else {}
+    nested = progress.get("backfill") if isinstance(progress.get("backfill"), dict) else {}
+
+    def file_age() -> Optional[float]:
+        try:
+            return time.time() - status_path(db_path).stat().st_mtime
+        except OSError:
+            return None
+
+    def fresh(*stamps) -> bool:
+        for s in stamps:
+            age = _stamp_age(s)
+            if age is not None:
+                return age < STALE_BUSY_SECONDS
+        age = file_age()
+        return age is None or age < STALE_BUSY_SECONDS
+
+    if progress.get("running") and fresh(progress.get("updated_at"), progress.get("started_at")):
+        return True
+    if backfill.get("running") and fresh(backfill.get("updated_at"), nested.get("updated_at"),
+                                         progress.get("updated_at")):
+        return True
+    return False
+
+
 def _request(db_path_fn, as_of_fn) -> None:
     try:
         with _GUARD:
             _STATE["db_path_fn"], _STATE["as_of_fn"] = db_path_fn, as_of_fn
+            _STATE["owed"] = False          # this run covers whatever a pull left owed
             if _STATE["running"]:
                 _STATE["pending"] = True
                 return
@@ -137,7 +242,16 @@ def _worker() -> None:
                 changed = _run_once(db_path_fn, as_of_fn)
             except Exception:  # noqa: BLE001 -- never out of the thread
                 log.exception("warm-up failed")
+            # The database moved under the run because a pull is writing: no rerun now, one is
+            # owed for when it has finished (`warm_if_owed`), so the warm-up never races it.
+            try:
+                busy = changed and pull_busy(_path_of(db_path_fn))
+            except Exception:  # noqa: BLE001
+                busy = False
             with _GUARD:
+                if busy and not _STATE["pending"]:
+                    _STATE["owed"], _STATE["running"] = True, False
+                    return
                 if _STATE["pending"]:              # asked again meanwhile: one more run
                     _STATE["pending"], reruns = False, 0
                 elif changed and reruns < MAX_RERUNS:

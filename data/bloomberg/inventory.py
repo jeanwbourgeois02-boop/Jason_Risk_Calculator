@@ -62,8 +62,33 @@ def _option_needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool 
     return list(fn(conn, as_of, historical=historical))
 
 
+def _historical_rows_on(lib_rows: List[dict], as_of: str, include_unrequestable: bool) -> List[dict]:
+    """`library.needed_on(conn, as_of, historical=True, include_unrequestable=...)` worked on
+    library rows already read (`library.rows`), so a loop over many days reads the library
+    once (2026-09-30: close_completeness used to read it three times per day). Same rows in
+    the same order: in force that day, requestable unless `include_unrequestable`, a past
+    close's need (`library._is_historical_need`). The historical list has no realised filter
+    and no CONTRACT_DATES row, so nothing else of needed_on applies."""
+    from data.bloomberg import library
+    return [r for r in lib_rows
+            if r["needed_from"] <= as_of <= r["needed_until"]
+            and (include_unrequestable or r["requestable"]) and library._is_historical_need(r)]
+
+
+def _rows_on(conn: sqlite3.Connection, as_of: str, historical: bool, include_unrequestable: bool,
+             lib_rows: Optional[List[dict]]) -> List[dict]:
+    """The library rows in force on `as_of`: `library.needed_on`, or with `lib_rows` (a past
+    close only) the same filter in memory."""
+    if lib_rows is None:
+        from data.bloomberg import library
+        return library.needed_on(conn, as_of, historical=historical, include_unrequestable=include_unrequestable)
+    if not historical:
+        raise ValueError("lib_rows is for a past close's needs only (historical=True)")
+    return _historical_rows_on(lib_rows, as_of, include_unrequestable)
+
+
 def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False,
-                  include_unrequestable: bool = False) -> List[dict]:
+                  include_unrequestable: bool = False, lib_rows: Optional[List[dict]] = None) -> List[dict]:
     """Same (instrument_id, settle_date, mark_type) set as live.build_requests, without
     requiring blpapi (RequestRow construction there is Bloomberg-request specific).
 
@@ -93,10 +118,12 @@ def _needed_marks(conn: sqlite3.Connection, as_of: str, historical: bool = False
     library.unrequestable_reason) is left out -- nothing can fill it -- unless
     `include_unrequestable`, when it is listed with a `reason` key (the other items carry
     none), so a listing can show the gap. A non-USD future's USD-conversion SPOT is a SPOT
-    like any other and is in the list."""
+    like any other and is in the list.
+
+    `lib_rows` (2026-09-30, with `historical=True` only): `library.rows(conn)` read once by a
+    caller looping over days; the day's rows are filtered from it in memory, same result."""
     from data.bloomberg import library
-    needed = [r for r in library.needed_on(conn, as_of, historical=historical,
-                                           include_unrequestable=include_unrequestable)
+    needed = [r for r in _rows_on(conn, as_of, historical, include_unrequestable, lib_rows)
               if r["kind"] in library.MARK_KINDS]
     needed.sort(key=lambda r: (r["kind"] == "FUTURE_PX", r["product"] == "FX_OPTION", r["key"],
                                r["kind"] != "SPOT", r["settle_date"]))
@@ -116,13 +143,14 @@ LME_CURVE = "LME_CURVE"     # data.bloomberg.library.LME_CURVE: an inventory ite
 
 
 def _lme_curve_items(conn: sqlite3.Connection, as_of: str, historical: bool = False,
-                     include_unrequestable: bool = False) -> List[dict]:
+                     include_unrequestable: bool = False, lib_rows: Optional[List[dict]] = None) -> List[dict]:
     """One item per LME metal whose curve the book needs on `as_of` (library kind LME_CURVE,
     2026-09-24): {instrument_id: the root id, settle_date: as_of, mark_type: 'LME_CURVE'},
-    with a `reason` key when it cannot be asked for (only with `include_unrequestable`)."""
+    with a `reason` key when it cannot be asked for (only with `include_unrequestable`).
+    `lib_rows` as in `_needed_marks` (a past close only)."""
     from data.bloomberg import library
     out, seen = [], set()
-    for r in library.needed_on(conn, as_of, historical=historical, include_unrequestable=include_unrequestable):
+    for r in _rows_on(conn, as_of, historical, include_unrequestable, lib_rows):
         if r["kind"] != library.LME_CURVE or r["key"] in seen:
             continue
         seen.add(r["key"])
@@ -144,16 +172,22 @@ def lme_curve_status(conn: sqlite3.Connection, day: str, root_id: str, today: Op
     own date, the one close stamp of every mark since 2026-09-28; a live press's row is not
     a close). {complete, missing: ['cash' | '3M' ...], snapped_at (the later anchor's, ''
     when missing)}."""
-    from data.bloomberg import library
-    from data.bloomberg.backfill import is_close_row
     if today is None:
         from data.bloomberg.live import book_today
         today = book_today().isoformat()
+    return _lme_curve_state(day, root_id, today, lambda d, item: _official_snap(conn, d, item))
+
+
+def _lme_curve_state(day: str, root_id: str, today: str, snap) -> dict:
+    """`lme_curve_status` with the official-mark lookup passed in (`snap(day, item)`, the
+    shape of `_official_snap`), so close_completeness can answer it from one read of the span."""
+    from data.bloomberg import library
+    from data.bloomberg.backfill import is_close_row
     three_m = next((p["settle_date"] for p in library.lme_curve_pillars(root_id, day) if p["kind"] == "3M"), None)
     anchors = [("cash", "SPOT", day)] + ([("3M", "FWD_OUTRIGHT", three_m)] if three_m else [])
     missing, snaps = ([] if three_m else ["3M"]), []
     for name, mark_type, settle in anchors:
-        hit = _official_snap(conn, day, {"instrument_id": root_id, "settle_date": settle, "mark_type": mark_type})
+        hit = snap(day, {"instrument_id": root_id, "settle_date": settle, "mark_type": mark_type})
         if hit and (day >= today or is_close_row(mark_type, day, hit[0], today, instrument_id=root_id)):
             snaps.append(hit[0])
         else:
@@ -287,6 +321,30 @@ def inputs_missing(conn: sqlite3.Connection, day: str) -> List[dict]:
     return out
 
 
+def _held_in_span(conn: sqlite3.Connection, sql: str, start: str, end: str) -> set:
+    """{(as_of_date, key)} of one quotes table over [start, end], read once (the per-day
+    `_holds_vol_smile` / `_holds_ois_curve` questions answered from it); empty with no table."""
+    try:
+        return {(d, k) for d, k in conn.execute(sql, (start, end))}
+    except sqlite3.OperationalError:
+        return set()
+
+
+_VOL_HELD_SQL = ("SELECT DISTINCT as_of_date, pair FROM vol_quotes WHERE as_of_date BETWEEN ? AND ? "
+                 "AND source LIKE 'BBG%'")
+_OIS_HELD_SQL = ("SELECT DISTINCT as_of_date, ccy FROM curve_quotes WHERE as_of_date BETWEEN ? AND ? "
+                 "AND quote_type = 'OIS' AND source LIKE 'BBG%'")
+
+
+def _history_inputs_on(lib_rows: List[dict], day: str, ois_index) -> List[dict]:
+    """`library.history_inputs_needed(conn, day)` worked on library rows already read: the
+    VOL_SMILE rows and the OIS_CURVE rows of a currency in `ois_index`, in force that day,
+    requestable, one per (kind, key), sorted."""
+    found = {(r["kind"], r["key"]) for r in _historical_rows_on(lib_rows, day, False)
+             if r["kind"] == "VOL_SMILE" or (r["kind"] == "OIS_CURVE" and r["key"] in ois_index)}
+    return [{"kind": kind, "key": key} for kind, key in sorted(found)]
+
+
 def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Optional[str] = None) -> pd.DataFrame:
     """One row per business day in [start, end]: as_of_date, needed, present, complete,
     missing (list of {instrument_id, settle_date, mark_type} still missing that day),
@@ -342,31 +400,53 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     cash and 3M are official at the close (`lme_curve_status`); a missing one carries
     `detail` ("cash, 3M not on file"). An option on a future needs its own FUTURE_PX, its
     underlying future's FUTURE_PX (its Greeks) and, when non-USD, its conversion SPOT on
-    every day it is open; its OIS curve is one of the day's `inputs_missing` until held."""
+    every day it is open; its OIS curve is one of the day's `inputs_missing` until held.
+
+    2026-09-30 (the pull's speed): the library, the official marks of its keys over the span
+    and the vol / OIS quotes held over the span are each read once per call and answered
+    per day in memory; the rows are exactly what the per-day reads gave."""
+    from data.bloomberg import library
     from data.bloomberg.backfill import business_days, is_close_row
     from datetime import date as _date
     if today is None:
         from data.bloomberg.live import book_today
         today = book_today().isoformat()
     days = business_days(_date.fromisoformat(start), _date.fromisoformat(end))
+    lib_rows = library.rows(conn)
+    official = _official_snaps_in_span(conn, start, end, {r["key"] for r in lib_rows})
+
+    def snap(day: str, item: dict):
+        return official.get((day, item["instrument_id"], item["settle_date"], item["mark_type"]))
+
+    try:
+        from data.bloomberg.rates_marketdata import OIS_INDEX
+    except Exception:  # noqa: BLE001 -- as library.history_inputs_needed: no rates layer, no curve to ask
+        OIS_INDEX = {}
+    vol_held = _held_in_span(conn, _VOL_HELD_SQL, start, end)
+    ois_held = _held_in_span(conn, _OIS_HELD_SQL, start, end)
+
+    def day_inputs_missing(day: str) -> List[dict]:
+        return [{"kind": item["kind"], "key": item["key"]} for item in _history_inputs_on(lib_rows, day, OIS_INDEX)
+                if (day, item["key"]) not in (vol_held if item["kind"] == "VOL_SMILE" else ois_held)]
+
     rows = []
     for d in days:
         day = d.isoformat()
-        listed = _needed_marks(conn, day, historical=True, include_unrequestable=True)
+        listed = _needed_marks(conn, day, historical=True, include_unrequestable=True, lib_rows=lib_rows)
         needed_items = [i for i in listed if "reason" not in i]
         present = not_closed = 0
         missing = []
         for item in needed_items:
-            hit = _official_snap(conn, day, item)
+            hit = snap(day, item)
             if hit and (day >= today or is_close_row(item["mark_type"], day, hit[0], today,
                                                      instrument_id=item["instrument_id"])):
                 present += 1
             else:
                 missing.append(item)
                 not_closed += 1 if hit else 0
-        unrequestable = [i for i in listed if "reason" in i and _official_snap(conn, day, i) is None]
-        for item in _lme_curve_items(conn, day, historical=True, include_unrequestable=True):
-            state = lme_curve_status(conn, day, item["instrument_id"], today=today)
+        unrequestable = [i for i in listed if "reason" in i and snap(day, i) is None]
+        for item in _lme_curve_items(conn, day, historical=True, include_unrequestable=True, lib_rows=lib_rows):
+            state = _lme_curve_state(day, item["instrument_id"], today, snap)
             if "reason" in item:
                 if not state["complete"]:
                     unrequestable.append(item)
@@ -378,7 +458,7 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
                 missing.append({**item, "detail": ", ".join(state["missing"]) + " not on file"})
         rows.append({"as_of_date": day, "needed": len(needed_items), "present": present,
                      "complete": len(needed_items) > 0 and present >= len(needed_items), "missing": missing,
-                     "not_closed": not_closed, "inputs_missing": inputs_missing(conn, day) if day < today else [],
+                     "not_closed": not_closed, "inputs_missing": day_inputs_missing(day) if day < today else [],
                      "not_requestable": unrequestable})
     return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete", "missing", "not_closed",
                                        "inputs_missing", "not_requestable"])
@@ -391,6 +471,23 @@ def _official_snap(conn: sqlite3.Connection, day: str, item: dict):
         "AND settle_date=:settle AND mark_type=:mark_type",
         {"as_of": day, "instrument_id": item["instrument_id"], "settle": item["settle_date"],
          "mark_type": item["mark_type"]}).fetchone()
+
+
+def _official_snaps_in_span(conn: sqlite3.Connection, start: str, end: str, keys) -> dict:
+    """{(as_of_date, instrument_id, settle_date, mark_type): (snapped_at,)} of every official
+    SPOT / FWD_OUTRIGHT / FUTURE_PX of the instruments `keys` dated in [start, end]: one read
+    for close_completeness's whole span, each value shaped as `_official_snap`'s answer
+    (marks_official is unique on that key)."""
+    out: dict = {}
+    ids = sorted(keys)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        for as_of, iid, settle, mark_type, snapped in conn.execute(
+                "SELECT as_of_date, instrument_id, settle_date, mark_type, snapped_at FROM marks_official "
+                "WHERE as_of_date BETWEEN ? AND ? AND mark_type IN ('SPOT', 'FWD_OUTRIGHT', 'FUTURE_PX') "
+                f"AND instrument_id IN ({','.join('?' * len(chunk))})", [start, end, *chunk]):
+            out.setdefault((as_of, iid, settle, mark_type), (snapped,))
+    return out
 
 
 STATUS_ON_FILE = "ON_FILE"

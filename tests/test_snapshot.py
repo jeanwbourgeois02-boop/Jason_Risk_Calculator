@@ -103,12 +103,15 @@ def test_export_is_byte_stable_so_a_second_export_of_the_same_marks_commits_noth
     _bloomberg_pc(tmp_path / "pc.db")
     snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "a")
     snapshot.export_snapshot(tmp_path / "pc.db", tmp_path / "b")
-    for table in ("instruments",) + snapshot.MARKET_TABLES:
-        data = (tmp_path / "a" / f"{table}.csv").read_bytes()
-        assert data.count(b"\n") >= 2, table  # header and at least one row: every table is exported
-        assert data == (tmp_path / "b" / f"{table}.csv").read_bytes()
+    # marks by month of as_of_date since 2026-09-30: the fixture's marks are all September
+    names = ["instruments.csv", "marks/2026-09.csv"] + [f"{t}.csv" for t in snapshot.MARKET_TABLES if t != "marks"]
+    for name in names:
+        data = (tmp_path / "a" / name).read_bytes()
+        assert data.count(b"\n") >= 2, name  # header and at least one row: every table is exported
+        assert data == (tmp_path / "b" / name).read_bytes()
         assert b"\r" not in data  # '\n' on every OS
-    assert not list((tmp_path / "a").glob("*.tmp"))
+    assert not (tmp_path / "a" / "marks.csv").exists()
+    assert not list((tmp_path / "a").rglob("*.tmp"))
 
     # exporting over an unchanged snapshot keeps its manifest, export time included
     manifest = tmp_path / "a" / snapshot.MANIFEST
@@ -229,7 +232,7 @@ def test_save_after_pull_only_writes_the_files_unless_asked_to_commit(tmp_path, 
                    "message": "marks snapshot: 5 marks through 2026-09-14 written to data/bbg_snapshot/ (commit and push it yourself)"}
     assert lines == [out["message"]] and _log(repo) == []
     status = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=repo, capture_output=True, text=True).stdout
-    assert "?? data/bbg_snapshot/marks.csv" in status and "?? stray.txt" in status   # written, untracked, for the user's commit
+    assert "?? data/bbg_snapshot/marks/2026-09.csv" in status and "?? stray.txt" in status   # written, untracked, for the user's commit
 
 
 def test_save_after_pull_with_commit_commits_the_snapshot_folder_alone_and_says_so(tmp_path, monkeypatch):

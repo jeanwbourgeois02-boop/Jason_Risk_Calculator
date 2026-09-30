@@ -7,5 +7,5 @@ Older notes on these files (live.py, pull_marks.py, pull_report.py) are in `.cla
 - [Phase 5 options on futures and LME (2026-09-24)](phase5_options_lme_2026_09_24.md) — option date fields, CMDTY PX_MID, _lme_step and status["lme"], LME source/key rule
 - [15:00 futures close built and reversed (2026-09-28, morning)](eod_1500_futures_2026_09_28.md) — history: superseded the same day by the one 17:00 close; shared-test-file traps still apply
 - [Fault isolation and progress (2026-09-29)](fault_isolation_progress_2026_09_29.md) — guarded steps, chunked asks, connected rule, status progress/steps keys, tests it flips
-- [Pull speed (2026-09-30)](pull_speed_2026_09_30.md) — where a press's time goes, chunks 50, one library read, quiet steps, requests to backfill/snapshot/ui, harness
+- [Pull speed (2026-09-30)](pull_speed_2026_09_30.md) — where a press's time goes, chunks 50, one library read, quiet steps, session lent to the backfill, harness
 - [One close, 17:00 New York (2026-09-28)](one_close_1700_2026_09_28.md) — CLOSE_HOUR_NY 17 for every instrument, intraday helpers gone, build_future_rows `snapped`, daily_close probe, leftovers for other lanes

@@ -1508,6 +1508,9 @@ _scale_reports: Dict[str, dict] = {}
 # db -> what the last run's requests and steps did (2026-09-29): {"errors", "error_count",
 # "requests", "not_numbers", "not_number_count"}, published under the "backfill" block.
 _run_reports: Dict[str, dict] = {}
+# db -> rows the last auto run's backfill() call wrote on its connection (`total_changes`: marks,
+# quotes, instruments, the ledger's own rows), read by `_closing_step_needed` (2026-09-30)
+_run_writes: Dict[str, int] = {}
 
 
 def _empty_run_report() -> dict:
@@ -1552,7 +1555,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
              scale_fetch: Optional[Callable] = None, order: Optional[List[date]] = None,
              on_day: Optional[Callable[[dict], None]] = None, today: Optional[date] = None,
              quote_fetch: Optional[Callable] = None,
-             on_stage: Optional[Callable[[str], None]] = None) -> List[dict]:
+             on_stage: Optional[Callable[[str], None]] = None,
+             session: Optional[Tuple] = None) -> List[dict]:
     """Run the backfill. Returns one dict per business day of [start, end], in date order:
     {day, status: DONE|SKIPPED|NO_CLOSES|ERROR, closes, fwd_outrights, future_px,
     missing_pairs, missing_pair_reasons, missing_marks, realised, unrealisable,
@@ -1620,11 +1624,18 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     has a session, else to `fut_fetch` (a test that injects the three fetchers and no
     session has no daily-history fetcher but that one). `scale_fetch`: see
     `_fetch_points_scales`. `session_factory` defaults to pull_marks.open_session. All are
-    injectable so the loop is testable without blpapi."""
+    injectable so the loop is testable without blpapi.
+
+    `session` (2026-09-30, the pull's speed): a `(session, service)` pair borrowed from the
+    caller -- the live pull's own, still open once its cycle is done -- used for every
+    history request of this call in place of opening one (1-3 s per press). It is never
+    stopped here: the lender stops it once this call is over. It takes precedence over
+    `session_factory`; without it the session is opened (and stopped) here, as before."""
     from data.ingest.schema import connect
     from data.bloomberg.inventory import close_completeness, _needed_marks
     from data.bloomberg.live import _ensure_fx_instruments, book_today
     from data.bloomberg import pull_marks as pm
+    borrowed = session           # the caller's (session, service), never stopped here (2026-09-30)
     realise_settled = _import_realise_settled()
     price_close = _import_price_close()
     today = today or book_today()
@@ -1645,6 +1656,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                 pass
 
     conn = connect(Path(db_path))
+    changes_before = conn.total_changes
     asks = _Asks(conn, log)
     try:
         # A conversion pair or an option's pair may never have been traded outright, and
@@ -1707,19 +1719,24 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     fwd_fetch, fwd_fields = pm.fetch_historical_series, ["PX_LAST"]
                 if fut_fetch is None:
                     fut_fetch = pm.fetch_historical_series
-                if session_factory is None:
+                if borrowed is not None:
+                    session, service = borrowed
+                elif session_factory is None:
                     _tell("opening the Bloomberg session")
                     session, service = pm.open_session(host, port)
                     own_session = True
                 else:
                     session, service = session_factory()
+            elif borrowed is not None:
+                session, service = borrowed
             elif session_factory is not None:
                 session, service = session_factory()
         except Exception as exc:  # noqa: BLE001 -- no session: recorded, nothing asked, the rest runs
             asks.no_session = _plain_error(exc)
             asks.error("session", f"no Bloomberg session: {asks.no_session}")
         if quote_fetch is None:
-            quote_fetch = pm.fetch_historical_series if (own_session or session_factory is not None) else fut_fetch
+            quote_fetch = (pm.fetch_historical_series
+                           if (own_session or borrowed is not None or session_factory is not None) else fut_fetch)
 
         try:
             # FWD_OUTRIGHT / FUTURE_PX history: requests per kind per stretch of days being
@@ -2125,7 +2142,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         finally:
             # 2026-09-18 fix: a session THIS call opened itself (pm.open_session, not an
             # injected session_factory the caller controls) was leaked. Never stop a
-            # caller-supplied session.
+            # caller-supplied session, a borrowed one included (2026-09-30).
             if own_session and session is not None:
                 try:
                     session.stop()
@@ -2133,6 +2150,11 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     pass
     finally:
         _merge_asks(db_path, asks)
+        try:
+            key = _db_key(db_path)
+            _run_writes[key] = _run_writes.get(key, 0) + conn.total_changes - changes_before
+        except Exception:  # noqa: BLE001 -- unknown means written: the closing step then runs
+            _run_writes[_db_key(db_path)] = 1
         try:
             conn.close()
         except Exception:  # noqa: BLE001
@@ -2371,6 +2393,127 @@ def _earliest_trade_date(conn: sqlite3.Connection) -> Optional[date]:
     return date.fromisoformat(row[0]) if row and row[0] else None
 
 
+# --------------------------------------------------------------------------- the day listing, remembered (2026-09-30)
+# User, 2026-09-30, at the Bloomberg PC: "the bloomberg pull is quite slow and looks wasteful".
+# Every press listed every business day since the first trade (`close_completeness`, a few ms
+# a day, growing with the book's age) although a past day's answer changes only when what it
+# reads changes. `_listing_memo` keeps each day's row with a fingerprint of what the row was
+# worked out from: per day, that day's rows of `marks`, `vol_quotes` and `curve_quotes`
+# (count, highest rowid -- an INSERT OR REPLACE moves it --, the sum of the values and, for
+# marks, of the settle dates, so an in-place UPDATE such as `apply_contract_dates` shows);
+# for the whole book, the library's state (dirty, synced_at, code version), the library and
+# `instruments` tables' shape, `state_version()` and the config files the library and the
+# calendar read. A day whose fingerprint is unchanged keeps its row; every other day is
+# worked out afresh, in stretches of consecutive business days (`_runs`), the same call on
+# the same data. A table that cannot be read gives a fingerprint that never matches, so
+# nothing is kept on it. In process only: a restart lists every day once.
+_listing_memo: Dict[str, dict] = {}   # db -> {"global": tuple, "days": {day_iso: (day fingerprint, row)}}
+
+_DAY_FP_SQL = (
+    "SELECT as_of_date, COUNT(*), MAX(rowid), TOTAL(value), TOTAL(julianday(settle_date)) FROM marks "
+    "WHERE as_of_date BETWEEN ? AND ? GROUP BY as_of_date",
+    "SELECT as_of_date, COUNT(*), MAX(rowid), TOTAL(value) FROM vol_quotes "
+    "WHERE as_of_date BETWEEN ? AND ? GROUP BY as_of_date",
+    "SELECT as_of_date, COUNT(*), MAX(rowid), TOTAL(value) FROM curve_quotes "
+    "WHERE as_of_date BETWEEN ? AND ? GROUP BY as_of_date",
+)
+_GLOBAL_FP_SQL = (
+    "SELECT dirty, synced_at, code_version FROM bbg_library_state WHERE id = 1",
+    "SELECT COUNT(*), MAX(rowid) FROM bbg_library",
+    "SELECT COUNT(*), MAX(rowid), TOTAL(julianday(expiry_date)), TOTAL(length(bbg_ticker)) FROM instruments",
+)
+
+
+def _config_stats() -> tuple:
+    """(name, mtime_ns, size) of the config files a day's needs are worked out from: the
+    contract list (tickers, LME curves), the FX calendar and the exchange calendars."""
+    root = Path(__file__).resolve().parents[2] / "config"
+    files = [root / "contracts.csv", root / "holidays.txt"]
+    try:
+        files += sorted((root / "calendars").iterdir())
+    except OSError:
+        pass
+    out = []
+    for f in files:
+        try:
+            st = f.stat()
+            out.append((f.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((f.name, None, None))
+    return tuple(out)
+
+
+def _listing_fingerprint(conn: sqlite3.Connection, start: str, end: str, version: str) -> Tuple[tuple, Dict[str, tuple]]:
+    """(the book's fingerprint, {day: that day's fingerprint}) over [start, end], read
+    before the rows they vouch for, so a write landing in between is seen next time."""
+    unreadable = object()                      # never equal to anything: nothing is kept
+    parts: list = [version, _config_stats(), frozenset(load_holidays())]
+    for sql in _GLOBAL_FP_SQL:
+        try:
+            parts.append(tuple(conn.execute(sql).fetchall()))
+        except sqlite3.Error:
+            parts.append(unreadable)
+    per_day: Dict[str, list] = {}
+    for i, sql in enumerate(_DAY_FP_SQL):
+        try:
+            for row in conn.execute(sql, (start, end)):
+                per_day.setdefault(row[0], [None] * len(_DAY_FP_SQL))[i] = tuple(row[1:])
+        except sqlite3.Error:
+            parts.append(unreadable)
+    return tuple(parts), {day: tuple(v) for day, v in per_day.items()}
+
+
+def _listed_days(conn: sqlite3.Connection, key: str, start: date, end: date, version: str) -> List[dict]:
+    """`close_completeness(conn, start, end)` as rows (dicts), every day with its own
+    columns, each day's row kept from the last listing when nothing it reads has changed
+    since (`_listing_memo`), the other days worked out afresh per stretch."""
+    from data.bloomberg.inventory import close_completeness
+    s_iso, e_iso = start.isoformat(), end.isoformat()
+    book_fp, day_fps = _listing_fingerprint(conn, s_iso, e_iso, version)
+    memo = _listing_memo.get(key)
+    days = [d.isoformat() for d in business_days(start, end)]
+    rows: Dict[str, dict] = {}
+    if memo is not None and memo["global"] == book_fp:
+        for day in days:
+            kept = memo["days"].get(day)
+            if kept is not None and kept[0] == day_fps.get(day):
+                rows[day] = kept[1]
+    for a, b in _runs([date.fromisoformat(d) for d in days if d not in rows]):
+        for row in close_completeness(conn, a.isoformat(), b.isoformat()).to_dict("records"):
+            rows[row["as_of_date"]] = row
+    _listing_memo[key] = {"global": book_fp,
+                          "days": {day: (day_fps.get(day), rows[day]) for day in days if day in rows}}
+    return [rows[day] for day in days if day in rows]
+
+
+def _listing_connection(db_path) -> sqlite3.Connection:
+    """The listing's connection (2026-09-30). `schema.connect` rewrites the views and commits
+    on every call, which moves the database's mtime -- the key every screen's cache is read
+    on -- although nothing changed; on a database whose schema is already in place (the
+    pull's own connect has just run it) the listing opens a plain connection, foreign keys
+    on and the same busy timeout, so a press with nothing to backfill writes nothing. A
+    database without the views yet gets `schema.connect`, as before."""
+    from data.ingest.schema import BUSY_TIMEOUT_SECONDS, connect
+    path = Path(db_path)
+    if path.exists():
+        conn = sqlite3.connect(str(path), timeout=BUSY_TIMEOUT_SECONDS)
+        try:
+            views = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'view'")}
+            if {"marks_official", "trades_official"} <= views:
+                conn.execute("PRAGMA foreign_keys = ON")
+                return conn
+        except sqlite3.Error:
+            pass
+        conn.close()
+    return connect(path)
+
+
+def _is_open(row: dict) -> bool:
+    """A listed day the backfill still has to finish: marks needed and not all at the
+    close, or a smile / curve its FX options price from missing."""
+    return bool((row["needed"] > 0 and not row["complete"]) or row["inputs_missing"])
+
+
 def reference_dates(today: date) -> List[date]:
     """The past closes the header's period figures difference against, newest first:
     t-1 and t-2 business days (Daily, Previous day), t-5 (5d), the last business day of
@@ -2488,6 +2631,59 @@ def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) ->
                 pass
 
 
+def _closing_step_needed(db_path, today: date, session, written: int) -> bool:
+    """False only when the closing `realise_settled(conn, today)` could do nothing but repeat
+    the live pull's own call of the same press (2026-09-30, the pull's speed: a press ran the
+    ledger on the same date and the same marks twice): the backfill runs on a session borrowed
+    from that pull (so it follows it straight away), wrote no row since, and the pull's status
+    holds a ledger call dated `today` that went through (no error, not skipped), with no
+    upload since that pull started and the library not marked out of date (the trades did
+    not change). Anything unknown, or any doubt, is True: the step runs as before."""
+    if session is None or written:
+        return True
+    try:
+        from data.bloomberg.live import read_status
+        status = read_status(db_path) or {}
+        led = status.get("ledger")
+        if (not isinstance(led, dict) or led.get("as_of_date") != today.isoformat() or "error" in led
+                or "skipped" in led or led.get("realised") is None):
+            return True
+        pulled = datetime.fromisoformat(str(status.get("time") or ""))
+        if pulled.tzinfo is None:
+            return True
+        from data.ingest.schema import BUSY_TIMEOUT_SECONDS
+        conn = sqlite3.connect(str(Path(db_path)), timeout=BUSY_TIMEOUT_SECONDS)   # a read: no schema pass
+        try:
+            state = conn.execute("SELECT dirty FROM bbg_library_state WHERE id = 1").fetchone()
+            if state is None or state[0]:
+                return True
+            try:
+                last = conn.execute("SELECT MAX(uploaded_at) FROM upload_report").fetchone()
+            except sqlite3.OperationalError:
+                last = None                      # no upload ever recorded on this database
+        finally:
+            conn.close()
+        if last and last[0]:
+            uploaded = datetime.fromisoformat(str(last[0]))
+            if uploaded.tzinfo is None or uploaded >= pulled:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 -- in doubt, the step runs
+        return True
+
+
+def _pull_ledger_repeat(db_path, today: date) -> dict:
+    """What the closing call would have returned when `_closing_step_needed` is False: the
+    same call on the same trades and marks as the pull's, so nothing newly frozen, repaired
+    or re-frozen, and the same trades unrealisable or kept (the ledger works both lists out
+    afresh on every call). Recorded as the run's "closing" step, so the status never shows
+    an earlier run's re-freeze as this one's."""
+    from data.bloomberg.live import read_status
+    led = (read_status(db_path) or {}).get("ledger") or {}
+    return ledger_block({"realised": 0, "unrealisable": list(led.get("unrealisable") or []), "repaired": [],
+                         "refrozen": [], "kept": list(led.get("kept") or [])}, today.isoformat())
+
+
 def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                    fetch: Optional[Callable] = None, fwd_fetch: Optional[Callable] = None,
                    fut_fetch: Optional[Callable] = None, session_factory: Optional[Callable] = None,
@@ -2496,7 +2692,8 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                    scale_fetch: Optional[Callable] = None,
                    clock: Callable[[], float] = __import__("time").monotonic,
                    quote_fetch: Optional[Callable] = None,
-                   on_stage: Optional[Callable[[str], None]] = None) -> List[dict]:
+                   on_stage: Optional[Callable[[str], None]] = None,
+                   session: Optional[Tuple] = None) -> List[dict]:
     """Fill every business day from the earliest trade date to yesterday that needs marks
     and lacks a complete official close (per `data.bloomberg.inventory.close_completeness`
     -- SPOT + FWD_OUTRIGHT + FUTURE_PX, 2026-09-18) or a smile / curve its FX options
@@ -2527,9 +2724,13 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     run's report (`_run_reports`, published as "errors"); the closing step
     (`_realise_after_backfill`) runs whatever the backfill did, as long as there are trades
     and a past day. A day whose failures include a request that failed or was not sent, or a
-    step that raised (`is_transient`), is due again on the next press whatever its age."""
-    from data.ingest.schema import connect
-    from data.bloomberg.inventory import close_completeness
+    step that raised (`is_transient`), is due again on the next press whatever its age.
+
+    The pull's speed (2026-09-30): `session`, a `(session, service)` borrowed from the live
+    pull, is handed to `backfill()` and never stopped here. The listing of the past days
+    keeps each day's answer while nothing it reads has changed (`_listed_days`). The closing
+    step is left out when it could only repeat the pull's own ledger call
+    (`_closing_step_needed`)."""
     from data.bloomberg.live import book_today
     key = _db_key(db_path)
     _run_reports[key] = _empty_run_report()      # this run's errors, requests and refused values (2026-09-29)
@@ -2539,6 +2740,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     refs: List[date] = []
     planned = False       # the days were listed: their outcome is recorded whatever happens next
     closing = True        # the closing ledger step runs unless there is no trade or no past day
+    _run_writes.pop(key, None)    # rows the backfill() call writes, if one runs (2026-09-30)
 
     def _tell(words: str) -> None:
         if on_stage:
@@ -2556,7 +2758,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
 
     try:
         _tell("listing the past days that lack a close")
-        conn = connect(Path(db_path))
+        conn = _listing_connection(db_path)
         try:
             earliest = _earliest_trade_date(conn)
             if earliest is None:
@@ -2567,18 +2769,18 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             if earliest > yesterday:
                 closing = False
                 return []
-            completeness = close_completeness(conn, earliest.isoformat(), yesterday.isoformat())
+            version = state_version()
+            listed = _listed_days(conn, key, earliest, yesterday, version)
         finally:
             conn.close()
-        lacks_input = completeness["inputs_missing"].map(bool)
-        open_rows = completeness[((completeness["needed"] > 0) & ~completeness["complete"]) | lacks_input]
-        signatures = {row.as_of_date: _signature(row.missing, row.inputs_missing) for row in open_rows.itertuples()}
+        open_rows = [row for row in listed if _is_open(row)]
+        signatures = {row["as_of_date"]: _signature(row["missing"], row["inputs_missing"]) for row in open_rows}
         # Days that hold marks which are not that day's close (a row stamped at a live pull's
         # own time, or at the 15:00 New York close of the FX rule retired on 2026-09-28): said
         # once in the log and in the status block, since the first run after a rule change asks
         # for every such day again (2026-09-28: every past close is the daily close, 17:00 New
         # York, whatever the instrument).
-        restamp = sum(1 for row in open_rows.itertuples() if getattr(row, "not_closed", 0) > 0)
+        restamp = sum(1 for row in open_rows if (row.get("not_closed") or 0) > 0)
         note = ""
         if restamp:
             note = (f"{restamp} past day(s) hold marks that are not that day's close (a row stamped at a live pull's "
@@ -2592,7 +2794,6 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         for stale in [k for k in _day_state if k[0] == key and k[1] not in signatures]:
             del _day_state[stale]                     # complete since (or no longer needed): nothing to report
         now = clock()
-        version = state_version()
         recent = recent_business_days(today)
         due = []
         for day_iso, signature in signatures.items():
@@ -2626,7 +2827,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         try:
             backfill(db_path, min(order), max(order), fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
                      session_factory=session_factory, host=host, port=port, log=log, scale_fetch=scale_fetch,
-                     order=order, on_day=_on_day, quote_fetch=quote_fetch, on_stage=on_stage)
+                     order=order, on_day=_on_day, quote_fetch=quote_fetch, on_stage=on_stage, session=session)
         except Exception as exc:  # noqa: BLE001 -- recorded; the closing step and the bookkeeping still run
             log(_problem(f"Auto-backfill: the backfill stopped: {exc!r}"))
             _report_error(db_path, "plan", f"the backfill stopped: {_plain_error(exc)}")
@@ -2636,6 +2837,12 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         _report_error(db_path, "plan", f"the list of past days to backfill could not be built: {_plain_error(exc)}")
         return results
     finally:
+        if closing and not _closing_step_needed(db_path, today, session, _run_writes.get(key, 0)):
+            closing = False                            # it would repeat the pull's own call (2026-09-30)
+            try:
+                _record_ledger(db_path, "closing", _pull_ledger_repeat(db_path, today))
+            except Exception:  # noqa: BLE001 -- the status file is a report
+                pass
         if closing:
             _tell("the closing ledger step")
             _realise_after_backfill(db_path, today, log)   # guarded inside: a raise is recorded
@@ -2661,8 +2868,13 @@ def _record_outcome(db_path, key: str, results: List[dict], signatures: Dict[str
         version = state_version()
         conn = connect(Path(db_path))
         try:
+            # one call per stretch of worked days (2026-09-30), not one per day: the same rows
+            after: Dict[str, dict] = {}
+            for a, b in _runs([date.fromisoformat(r["day"]) for r in results]):
+                for row in close_completeness(conn, a.isoformat(), b.isoformat()).to_dict("records"):
+                    after[row["as_of_date"]] = row
             for result in results:
-                row = close_completeness(conn, result["day"], result["day"]).iloc[0]
+                row = after[result["day"]]
                 if (row["complete"] or not row["missing"]) and not row["inputs_missing"]:
                     _day_state.pop((key, result["day"]), None)
                     signatures.pop(result["day"], None)
@@ -2752,12 +2964,8 @@ class _BackfillProgress:
         self.total = self.done = 0
         self.what = ""
 
-    def _ours(self) -> bool:
-        try:
-            from data.bloomberg.live import read_status
-            current = (read_status(self.db_path) or {}).get("progress") or {}
-        except Exception:  # noqa: BLE001
-            return True
+    def _ours(self, status: Optional[dict]) -> bool:
+        current = (status or {}).get("progress") or {}
         return not current or current.get("started_at") in (None, self.owner)
 
     def _sentence(self) -> str:
@@ -2766,11 +2974,17 @@ class _BackfillProgress:
         return f"{head} · {self.what}" if self.what else head
 
     def _publish(self, block: dict) -> None:
+        # One read of the status file per publish (2026-09-30; it was read twice, once to check
+        # the block is still ours and once by live.set_progress), the check and the write under
+        # the status file's own lock, as set_progress does it.
         try:
-            if not self._ours():
-                return
-            from data.bloomberg.live import set_progress
-            set_progress(self.db_path, block)
+            from data.bloomberg import live
+            with live._STATUS_LOCK:
+                status = live.read_status(self.db_path)
+                if status is None or not self._ours(status):
+                    return
+                status[live.PROGRESS_KEY] = block
+                live._replace_status_file(live.status_path(self.db_path), status)
         except Exception:  # noqa: BLE001 -- progress is a courtesy, never a failure of the backfill
             pass
 
@@ -2819,7 +3033,8 @@ class _BackfillProgress:
 def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                         fetch: Optional[Callable] = None, fwd_fetch: Optional[Callable] = None,
                         fut_fetch: Optional[Callable] = None, session_factory: Optional[Callable] = None,
-                        scale_fetch: Optional[Callable] = None, quote_fetch: Optional[Callable] = None):
+                        scale_fetch: Optional[Callable] = None, quote_fetch: Optional[Callable] = None,
+                        session: Optional[Tuple] = None):
     """Run `auto_backfill` in a background daemon thread when a Terminal is available,
     writing progress into the existing Bloomberg status file under key "backfill" so the
     Market data tab can show "Backfill: n days remaining". Without a Terminal, writes
@@ -2875,7 +3090,15 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     (`failure_sentence`), '' otherwise. live.pull_once rewrites the whole status file
     without this key on every cycle, so every call here publishes the whole remembered
     block again. The top bar's status["progress"] is carried on by `_BackfillProgress`
-    while the run lasts ("Backfilling closes: 3 of 7 days · ...")."""
+    while the run lasts ("Backfilling closes: 3 of 7 days · ...").
+
+    `session` (2026-09-30, the pull's speed): the live pull's own `(session, service)`, lent
+    for the whole run, which then asks every history request on it instead of opening a
+    second session. It is never stopped here. Returns the thread when a run starts (the
+    lender stops the session once `thread.join()` returns) and None when none does (a run
+    already in flight, or no Terminal): the session is then not used at all. A lent session
+    counts as a real pull (the snapshot is saved) and stands in for the availability probe;
+    `session_factory` keeps meaning a test's own session (no probe, no snapshot)."""
     import threading
     from data.bloomberg.live import availability, patch_status
     key = _db_key(db_path)
@@ -2892,7 +3115,7 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
 
     real_pull = (session_factory is None and fetch is None and fwd_fetch is None and fut_fetch is None
                  and quote_fetch is None)
-    if real_pull:
+    if real_pull and session is None:
         ok, why = availability(host, port)
         if not ok:
             _publish({"running": False, "reason": why})
@@ -2935,7 +3158,7 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                 results = auto_backfill(db_path, host=host, port=port, fetch=fetch, fwd_fetch=fwd_fetch,
                                         fut_fetch=fut_fetch, session_factory=session_factory,
                                         scale_fetch=scale_fetch, quote_fetch=quote_fetch, log=_QuietLog(),
-                                        on_progress=_on_progress, on_stage=progress.stage) or []
+                                        on_progress=_on_progress, on_stage=progress.stage, session=session) or []
             except Exception as exc:  # never let a background thread take the process down
                 crashed = f"auto-backfill failed: {exc!r}"
                 _publish({"running": False, "reason": crashed})

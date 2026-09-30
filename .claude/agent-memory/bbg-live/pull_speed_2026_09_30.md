@@ -30,6 +30,16 @@ read per call (bbg-library); snapshot only when marks changed / incrementally (b
 no warm-up while status progress is running (ui). Once the backfill takes a session, LiveFeed
 keeps the pull's _SharedSession open until the backfill thread ends, then stops it.
 
+**Session lent to the backfill (landed later 2026-09-30):** `pull_once(lend_session=[])`
+appends its `_SharedSession` instead of stopping it only when it opened cleanly, the body ran
+to its end and the pull is connected (an all-raised pull still stops its own). `LiveFeed._backfill`
+passes `session=(s.session, s.service)` to `start_auto_backfill`; None or a raise -> stop at
+once in the feed thread; a thread -> watcher thread "bloomberg-session-return" joins it and
+stops (also when the backfill thread raises). backfill.py reads `status["ledger"]`,
+`status["time"]`, `_STATUS_LOCK`, `_replace_status_file`, `status_path`, `PROGRESS_KEY`:
+never rename them. Harness: scratchpad lend_harness.py pattern (patch pm.open_session,
+live.availability, backfill.start_auto_backfill; RISK_SNAPSHOT=0; log thread names).
+
 **How to apply:** verify speed work with a harness (fake fetch_reference / fetch_historical /
 request_lme_pillars / request_fwd_curves, fixed `_now_iso`, rates_source / vol_source fakes,
 count `_replace_status_file`) on a copy of data/raw/risk.db (Jason's real 89 trades, no marks)
