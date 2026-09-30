@@ -102,3 +102,8 @@ user says the site looks and works as wanted. Add to it instead of running anyth
 - Re-pin to the renamed P&L slice and headings (Trade → Spread, Type → Strategy, Commodity → Commodity family; the P&L CSV's "Type" column is now "Strategy") wherever a test names them.
 - New coverage owed: `ui/tabs/book_contracts.py` (one row per contract, never netted across exchanges, a net-zero contract kept, the clearer map and a two-clearer split, the total equal to the trade view and the header); the P&L Contract slice (every fill once, each row's parts add up, the total equal to `period_pnl` for every period).
 - infra: `tools/ui_check.py` should also render the Book's By contract view (`view="contract"`) and the P&L Contract slice (`state={"group": "contract"}`).
+
+## Upload result box in two lines (2026-09-30): owed, not run
+
+- Delete (the box was rebuilt, not re-pinned), in `tests/test_uploads.py`: `test_headline_keeps_whatever_the_list_does_not_reproduce`, `test_notes_render_as_a_list_under_the_headline_with_nothing_lost_or_doubled`, `test_real_ingest_report_on_the_sample_names_its_two_rejects_and_stays_open`, `test_real_ingest_report_on_the_clean_sample_is_structured_clean_and_lists_its_notes`, `test_real_ingest_report_with_one_unreadable_row_is_sticky`.
+- New coverage owed: `report_result` on a clean report (one line, --info) and a problem report (two lines, --warning, the Data tab link).

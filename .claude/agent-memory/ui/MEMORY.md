@@ -54,3 +54,4 @@
 - [Warm-up waits for the pull 2026-09-30](warmup-waits-for-pull-2026-09-30.md) — poll's warm-up owed while progress/backfill running (15 min stale); warm_if_owed each tick; uploads still at once
 - [Book by contract + P&L Contract slice 2026-09-30](book-by-contract-pnl-contract-slice-2026-09-30.md) — book_contracts.rows_of shared, view switch, c- filters, group contract = none on Book/Risk, slice labels
 - [Book two-line What + chips 2026-09-30](book-what-two-lines-chips-2026-09-30.md) — long side first / grey sizes + hedge words, flag chips, "2 spreads" cell, signed moves, research missing said once, z hidden
+- [Upload box two lines 2026-09-30](upload-box-two-lines-2026-09-30.md) — top-bar upload result = loaded counts + problems link to Data Trades card; no paragraph/notes; navy link CSS

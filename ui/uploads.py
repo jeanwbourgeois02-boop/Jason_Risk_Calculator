@@ -3,13 +3,12 @@ accepting the trade blotter (`data.ingest.upload.import_blotter`, tolerant of fo
 variation per that module's docstring). No date picker: each blotter row carries its
 own dates.
 
-Flow: choose file -> "Confirm insert" -> dcc.Loading -> one status line. Nothing is
+Flow: choose file -> "Confirm insert" -> dcc.Loading -> a short confirmation. Nothing is
 written before Confirm; the file-picked callback only decodes enough to validate
 size/shape and show the file name. On success the Confirm row is hidden again and the
 top-bar source line (`describe_source`, whole-database totals from `ui.app.load_summary`)
-is the permanent record. The loader's summary sentence (new/updated trades, excluded and
-rejected rows) renders verbatim as `.source-result--info`; errors render in
-`.source-result--error` with the Confirm row left in place for a retry.
+is the permanent record. Errors render in `.source-result--error` with the Confirm row
+left in place for a retry.
 
 On a successful import `_confirm` also publishes both `ui.revision` stores (2026-09-18),
 which is what makes the header, the Ladder, the Blotter and Market data redraw from the
@@ -27,9 +26,9 @@ to go"); the source line is the durable record and is untouched by any of this:
   * a clean import (`source-result--info`) dismisses itself after `RESULT_DISMISS_MS`.
     The timer (`RESULT_TIMER_ID`) is enabled only while such a message is showing and is
     disabled again the moment the box empties, so it never ticks in the background;
-  * an import that skipped unreadable rows (`source-result--warning`) or any error
-    (`source-result--error`) never dismisses itself: the user has to be able to read
-    which rows failed;
+  * an import with problems (`source-result--warning`) or any error
+    (`source-result--error`) never dismisses itself: the user has to see it and follow
+    the link;
   * every message has a x button (`RESULT_CLOSE_ID`) that clears it at once;
   * choosing a new file clears whatever was showing.
 
@@ -46,19 +45,20 @@ whole file after the import and choosing the very same file again did nothing at
 The "Pull Bloomberg now" button and its status line in the same row live in
 `ui/feed_controls.py`; this module only places them and registers them.
 
-Structured import report (2026-09-18, coordinator contract). `run_import` prefers
-`data.ingest.upload.import_blotter_report(payload, filename, db_path) -> {"message",
-"rejects", "warnings", "notes"}` when the ingest module has it, and otherwise calls
-`import_blotter` exactly as before, so either side can land first. With the structure:
+Structured import report. `run_import` prefers
+`data.ingest.upload.import_blotter_report(payload, filename, db_path)` when the ingest
+module has it, and otherwise calls `import_blotter` exactly as before. With the structure
+the box is two short lines at most (user, 2026-09-30: the whole summary paragraph and its
+notes list were a "massive text thing"; they are persisted and shown on the Blotter tab's
+last-upload line and the Data tab's Trades card, the one place a trade problem is written out):
 
-  * the box is `--warning` (sticky) when `rejects > 0` OR `need_fix > 0` (rows on file whose
-    contract is not recognised, 2026-09-29) OR `warnings > 0` (cells the parser
-    had to rebuild, ignore or distrust), else `--info` (dismisses itself). The old
-    `REJECTS_PHRASE` rule still applies on top, so a sentence that says rows could not
-    be read is never auto-dismissed even if a counter disagrees with it;
-  * `notes` render as a short list under the headline instead of one run-on line. The
-    ingest sentence carries the notes too, so the headline is that sentence minus
-    whatever is reproduced verbatim in the list: nothing is dropped, nothing shown twice.
+  * "Loaded <file>: N new, N updated, N removed as cancelled · N trades on file" (the
+    cancelled part only when there were any);
+  * only when there are problems (rows that need a fix, rows not loaded, parser warnings,
+    or the `REJECTS_PHRASE` sentence): "2 rows need a fix · 3 warnings · See Trades on the
+    Data tab", the last part a link to the Data tab. The box is then `--warning` and stays
+    until closed; otherwise `--info` and it dismisses itself. Information-only notes (an
+    option with no strike) never make that line: they are on the Data tab.
 
 One rule is easy to miss: the structure is used only while the `import_blotter` bound in
 THIS module is still the ingest module's own function. `import_blotter` here is the seam
@@ -69,13 +69,13 @@ function instead would silently import something else.
 from __future__ import annotations
 
 import logging
-import re
 
 from dash import Input, Output, State, dcc, html, no_update
 
 from data.ingest import upload as _ingest
 from data.ingest.upload import decode, import_blotter, preview_frame, validate_blotter_shape
 from ui import feed_controls, revision
+from ui.tabs.formatting import DATA_TAB_KEY, tab_link
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,9 @@ RESULT_CLOSE_ID = "report-result-close"
 RESULT_TIMER_ID = "report-result-timer"
 
 RESULT_DISMISS_MS = 8_000
-NOTES_MAX_HEIGHT = "240px"      # see report_result: measured, not guessed
+# The problems line's link to the Data tab's Trades card (the one place a trade problem is written out).
+TRADES_POINTER = "See Trades on the Data tab"
+TRADES_LINK_IDX = "top-bar-trade-problems"
 BOX_CLOSED = "source-result-box"
 BOX_OPEN = "source-result-box source-result-box--open"
 
@@ -162,7 +164,8 @@ def _count(value):
 
 
 def normalise_report(raw) -> dict:
-    """`{"message", "rejects", "warnings", "notes", "structured"}` from whatever the import
+    """`{"message", "rejects", "warnings", "need_fix", "notes", "merge", "filename", "structured"}`
+    (`merge`: added / replaced / removed / on_file_after, those the ingest gave) from whatever the import
     returned: the contract's dict, or the plain sentence `import_blotter` returns.
 
     Tolerant on purpose (the ingest side is being written in parallel): a missing or
@@ -183,9 +186,10 @@ def normalise_report(raw) -> dict:
             # every row loads (2026-09-29): rows on file whose contract is not recognised
             "need_fix": _count(raw.get("need_fix")) or 0,
             "notes": [str(n).strip() for n in notes if str(n).strip()],
-            # the merge's counts as the ingest reported them, for the one log line (`log_line`)
-            "merge": {k: _count(raw.get(k)) for k in ("added", "replaced", "removed")
+            # the merge's counts as the ingest reported them, for the log line and the box's first line
+            "merge": {k: _count(raw.get(k)) for k in ("added", "replaced", "removed", "on_file_after")
                       if _count(raw.get(k)) is not None},
+            "filename": str(raw.get("filename") or ""),
             "structured": True}
 
 
@@ -205,7 +209,7 @@ def log_line(filename, report: dict) -> str:
     need_fix = report.get("need_fix", 0) or 0
     fix = f", {_plural(need_fix, 'row')} to fix" if need_fix else ""
     return (f"Upload: {filename} -- {loaded}; {_plural(report['rejects'], 'row')} rejected{fix}, "
-            f"{_plural(report['warnings'], 'warning')}, {_plural(len(report['notes']), 'note')}: see the Blotter tab.")
+            f"{_plural(report['warnings'], 'warning')}, {_plural(len(report['notes']), 'note')}: see the Data tab.")
 
 
 def is_sticky(report: dict) -> bool:
@@ -216,42 +220,62 @@ def is_sticky(report: dict) -> bool:
             or REJECTS_PHRASE in report["message"].lower())
 
 
-def headline_without_notes(message: str, notes) -> str:
-    """The ingest sentence minus each note it reproduces verbatim, for display above the
-    notes list. Only text that reappears in the list is removed, so nothing is lost; a
-    note the sentence words differently simply stays in both. Falls back to the whole
-    sentence if stripping would leave next to nothing."""
-    text = message
-    for note in sorted(notes, key=len, reverse=True):      # longest first: one note may contain another
-        core = note.strip().rstrip(".").strip()
-        if core:
-            text = re.sub(re.escape(core) + r"\.?", "", text, count=1)
-    text = re.sub(r"\s+([.;,:])", r"\1", text)              # " ." left behind by a removed note
-    text = re.sub(r"([;,])(\s*[;,.])+", r"\1", text)         # "; ; ." -> ";"
-    text = re.sub(r"\s{2,}", " ", text).strip(" ;,:")
-    return text if len(text) >= 12 else message
+def _n(n: int) -> str:
+    return f"{n:,}"
 
 
-def report_result(report: dict):
-    """The box's content for one import. Same single-Div shape as `import_result` when
-    there are no notes to list; with notes, a headline and a short list under it."""
-    kind = "warning" if is_sticky(report) else "info"
+def loaded_line(report: dict, filename=None) -> str:
+    """'Loaded book.csv: 12 new, 77 updated · 89 trades on file', the cancelled count only when
+    there were any; the counts the ingest reported, nothing recomputed."""
+    name = str(filename or report.get("filename") or "").strip()
+    head = f"Loaded {name}" if name else "Loaded"
+    merge = report.get("merge") or {}
+    parts = []
+    if "added" in merge:
+        parts.append(f"{_n(merge['added'])} new")
+    if "replaced" in merge:
+        parts.append(f"{_n(merge['replaced'])} updated")
+    if merge.get("removed"):
+        parts.append(f"{_n(merge['removed'])} removed as cancelled")
+    text = f"{head}: {', '.join(parts)}" if parts else head
+    if "on_file_after" in merge:
+        text += f" · {_n(merge['on_file_after'])} {'trade' if merge['on_file_after'] == 1 else 'trades'} on file"
+    return text
+
+
+def problems_text(report: dict) -> str:
+    """'2 rows need a fix · 1 row not loaded · 3 warnings'; '' when the import had none. The
+    phrase rule stays on top: a sentence saying rows could not be read with no counter behind it
+    still makes a line. Information-only notes never do (they are on the Data tab)."""
+    need_fix, rejects, warnings = report.get("need_fix", 0) or 0, report["rejects"], report["warnings"]
+    parts = []
+    if need_fix:
+        parts.append(f"{_n(need_fix)} {'row needs' if need_fix == 1 else 'rows need'} a fix")
+    if rejects:
+        parts.append(f"{_n(rejects)} {'row' if rejects == 1 else 'rows'} not loaded")
+    if warnings:
+        parts.append(f"{_n(warnings)} {'warning' if warnings == 1 else 'warnings'}")
+    if not parts and REJECTS_PHRASE in report["message"].lower():
+        parts.append("Some rows could not be read")
+    return " · ".join(parts)
+
+
+def report_result(report: dict, filename=None):
+    """The box's content for one import: at most two short lines (user, 2026-09-30). Line one
+    says what loaded; line two, only when there are problems, counts them and links to the
+    Data tab's Trades card, where each is written out. The unstructured path keeps the
+    import's own sentence (`import_result`)."""
     if not report["structured"]:
         return import_result(report["message"])
-    if not report["notes"]:
-        return html.Div(report["message"], className=f"source-result--{kind}")
-    # Inline styles, not the stylesheet: the list must stay compact and, when the ingest
-    # side sends many notes, scroll inside the box rather than grow down the page. The
-    # cap is sized from the REAL notes, which run to ~190 characters (three lines each in
-    # the 560px box): four of them measured 180px in the browser at 1366px, so 240px shows
-    # four to five whole and only a longer list scrolls. (132px, sized from the contract's
-    # short examples, hid the end of the fourth note.)
-    return html.Div(className=f"source-result--{kind}", children=[
-        html.Div(headline_without_notes(report["message"], report["notes"]), className="source-result-headline"),
-        html.Ul([html.Li(note, style={"margin": "2px 0"}) for note in report["notes"]],
-                className="source-result-notes",
-                style={"margin": "6px 0 0", "paddingLeft": "18px", "maxHeight": NOTES_MAX_HEIGHT, "overflowY": "auto"}),
-    ])
+    kind = "warning" if is_sticky(report) else "info"
+    lines = [html.Div(loaded_line(report, filename), className="source-result-headline")]
+    problems = problems_text(report)
+    if kind == "warning":
+        link = tab_link(TRADES_POINTER, DATA_TAB_KEY, TRADES_LINK_IDX,
+                        title="Every problem with the trades on file is written out under Trades on the Data tab: "
+                              "click to open it")
+        lines.append(html.Div([problems or "Some rows need a look", " · ", link], className="source-result-problems"))
+    return html.Div(lines, className=f"source-result--{kind}")
 
 
 def run_import(payload, filename, db_path) -> dict:
@@ -367,7 +391,7 @@ def register(app, get_db_path):
         revision.warm_screens(get_db_path)   # fill the screens' caches for the new book (ui/warmup.py)
         from ui.app import load_summary
         data = load_summary(db_path)
-        result = report_result(report)
+        result = report_result(report, filename)
         # Publish both revisions now (ui/revision.py) so the header and every tab redraw
         # from the new book straight away, no browser reload and no wait for the poll.
         return (result, describe_source(data), {"display": "none"},

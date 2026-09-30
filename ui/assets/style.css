@@ -433,6 +433,13 @@ p { margin: 8px 0; }
 .source-result-box--open > :first-child { flex: 1 1 auto; min-width: 0; }
 .source-result-box--open .source-result { margin-top: 0; }
 .source-result-box--open .source-result-close { display: inline-block; }
+/* The upload's two-line confirmation (ui/uploads.py::report_result, 2026-09-30): the loaded line
+   in plain text, the problems line amber with its link to the Data tab dark on the white card
+   (`.top-bar .tab-link` is white for the navy bar). */
+.source-result--warning .source-result-headline { color: var(--text); font-weight: 400; }
+.source-result-problems { margin-top: 4px; }
+.top-bar .source-result-box .tab-link { color: var(--navy); opacity: 1; font-weight: 600; text-decoration: underline; }
+.top-bar .source-result-box .tab-link:hover { color: var(--navy); }
 
 /* ---------------------------------------------------------------- Blotter FX: P&L by currency
    (ui/tabs/blotter_fx.py, 2026-09-21). Two compact tables above the trade table: side by
