@@ -21,6 +21,11 @@ like 'XXZ6-USAA') newly ambiguous; (bbg_root, key) must be unique (the loader re
 the canonical contract ids ('SSZ26 Comdty'), so instruments / marks under the old id are orphaned:
 tell the Bloomberg lanes whenever a fix batch changes roots.
 
+Terminal check 2026-10-01: COMEX:HG and SGX:XUC verified (bbg root XUC, yellow key Curncy; not UC).
+Quirk: Bloomberg's CRNCY for cents-quoted COMEX copper reads 'USD', not 'USd'; FUT_VAL_PT (250) is
+the decisive witness of the price scale, not CRNCY. CME:HRC sits under Bloomberg exchange code CMX;
+root id stays CME:HRC. 21 roots verified after that batch.
+
 Fixes worksheet (bbg-ticker-check writes it; columns root_id, field, current, suggested, verdict,
 reason, apply): `apply_fixes` refuses stale `current`, unknown root/field, bad values (a decimal
 comma '0,01' and Bloomberg minor-unit currencies 'GBp'/'USd' are refused: those are price_scale

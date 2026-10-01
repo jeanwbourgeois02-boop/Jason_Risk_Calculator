@@ -243,6 +243,10 @@ BBG_EXCHANGE_CODES: Dict[str, Tuple[str, ...]] = {
     "EEX": ("EEX",),
     "GME": ("GME", "DME"),
 }
+# A root Bloomberg lists on another venue of the same exchange group: these codes are also right for it.
+ROOT_EXCHANGE_CODES: Dict[str, Tuple[str, ...]] = {
+    "CME:HRC": ("CMX",),  # CME Group lists HRC on its COMEX venue, confirmed on the terminal 2026-10-01
+}
 # Words Bloomberg uses for each exchange in a search result's description (upper case, whole words).
 EXCHANGE_WORDS: Dict[str, Tuple[str, ...]] = {
     "SHFE": ("SHFE", "SHANGHAI FUTURES", "SHANGHAI"),
@@ -448,8 +452,12 @@ def words_fit(ours: str, theirs: str) -> bool:
     return False
 
 
-def exchange_matches(exchange: str, exch_code: str) -> bool:
+def exchange_matches(exchange: str, exch_code: str, root_id: str = "") -> bool:
+    """Whether Bloomberg's EXCH_CODE fits our exchange; `root_id` adds that root's own codes
+    (ROOT_EXCHANGE_CODES), never widening the exchange for its other roots."""
     code = str(exch_code or "").strip().upper()
+    if code in ROOT_EXCHANGE_CODES.get(root_id, ()):
+        return True
     return code in BBG_EXCHANGE_CODES.get(exchange, (exchange.upper(),)) or code == exchange.upper()
 
 
@@ -570,7 +578,7 @@ def check_root(root: ContractRoot, answer: Optional[Answer]) -> RootResult:
         notes.append("Bloomberg gave no CRNCY: the currency and the cents / pence question were not checked")
 
     exch = str(values.get("EXCH_CODE") or "").strip().upper()
-    if exch and not exchange_matches(root.exchange, exch):
+    if exch and not exchange_matches(root.exchange, exch, root.root_id):
         known = _exchange_named_by(exch)
         meaning = f"which this check reads as {'/'.join(known)}" if known else "a code this check does not know"
         findings.append(Finding(
@@ -624,12 +632,14 @@ def _scale_findings(root: ContractRoot, ticker: str, values: Mapping[str, object
     theirs = (f"Bloomberg values a 1.0 move of {ticker!r} at {_g(vp)} {major or root.currency} per contract "
               f"({vp_source})")
     if kind == "same":
-        if ccy_factor is None:
-            return []
-        return [Finding(
-            SCALE_MISMATCH, f"{theirs}, which agrees with {ours}{ccy_text}",
-            f"the value per point and the currency disagree: check the quote on the terminal ({ticker} DES); "
-            "no change is suggested until they agree")]
+        # The value per point agreeing with our multiplier is decisive: a currency that reads the other
+        # way (COMEX copper comes back 'USD' while quoted in cents) is only a note.
+        if ccy_factor is not None:
+            minor_word = "pence" if same_currency(root.currency, "GBP") else "cents"
+            ours_words = minor_word if ours_minor else f"whole {major or root.currency}"
+            notes.append(f"Bloomberg gives its currency as {ccy_raw!r} while the value per point "
+                         f"({_g(vp)}, {vp_source}) confirms the price is in {ours_words}: the value per point is taken")
+        return []
     if kind in ("x100", "x0.01"):
         factor = 100.0 if kind == "x100" else 0.01
         suggested = root.price_scale * factor
@@ -2749,7 +2759,7 @@ def judge_pull(it: PullItem, roots: Mapping[str, ContractRoot], as_of: date) -> 
                 "is another contract and bbg_root is wrong", *fix))
         elif it.kind == PK_FUTURE:
             it.findings.extend(_scale_findings(root, t, v, ccy_raw, major, minor, it.notes))
-        if exch and not exchange_matches(root.exchange, exch):
+        if exch and not exchange_matches(root.exchange, exch, root.root_id):
             known = _exchange_named_by(exch)
             meaning = f"which this check reads as {'/'.join(known)}" if known else "a code this check does not know"
             it.findings.append(Finding(
@@ -4637,7 +4647,7 @@ def _candidate_score(root: ContractRoot, key: str, answer: Answer, search_score:
     priced = _num(v.get("PX_LAST")) is not None or _num(v.get("PX_SETTLE")) is not None
     exch = str(v.get("EXCH_CODE") or "").strip().upper()
     major, _minor = currency_parts(str(v.get("CRNCY") or ""))
-    score = (8.0 if priced else 0.0) + (4.0 if exch and exchange_matches(root.exchange, exch) else 0.0)
+    score = (8.0 if priced else 0.0) + (4.0 if exch and exchange_matches(root.exchange, exch, root.root_id) else 0.0)
     score += 2.0 if major and same_currency(major, root.currency) else 0.0
     score += 1.0 if words_fit(root.name, f"{v.get('NAME') or ''} {v.get('SECURITY_DES') or ''}") else 0.0
     score += 1.0 if key == root.bbg_yellow_key else 0.0
