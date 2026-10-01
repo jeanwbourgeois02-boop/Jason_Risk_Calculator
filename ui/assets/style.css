@@ -1495,25 +1495,24 @@ p { margin: 8px 0; }
   .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 220px; }
   .book-main .book-table.book-grid.tk-trades td, .book-main .book-table.book-grid.tk-trades th { padding-left: 6px; padding-right: 6px; }
 }
-/* The Book's trade table of 2026-10-01 (user: "lets make these improvements straight away"): a trade of several
-   spreads with a row per spread, always showing; every leg hidden until the trade's caret is clicked
-   (ui/assets/book_filters.js writes the rule that shows a trade's legs); hedges at the spreads' level, never
-   under one spread; the narrow Action column; What it is takes the room Next date and Check gave back. */
-#book-table tr.tk-leg-row { display: none; }
-.tk-table.tk-trades .tk-legs-caret { cursor: pointer; color: var(--navy); font-size: 13px; width: 16px; text-align: center;
-  transition: transform .12s ease; transform-origin: 50% 55%; }
-.tk-table.tk-trades .tk-legs-caret:hover { color: var(--gold); }
-.tk-table.tk-trades .tk-chev--none { width: 14px; }
-.book-table.tk-trades tr.tk-leg-row--top td.tk-leg-name { padding-left: 22px; }
-.book-table.tk-trades tr.tk-part-row td.tk-part-name { padding-left: 24px; }
-.book-table.tk-trades tr.tk-leg-row td.tk-leg-name { padding-left: 36px; }
-.book-table.tk-trades tr.tk-row--multi + tr.tk-part-row td,
-.book-table.tk-trades tr.tk-part-row td { border-bottom-color: #eceef3; }
-.tk-table.tk-trades td.tk-action-cell { white-space: nowrap; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
-.tk-table.tk-trades td.tk-action-cell .tk-action-more { color: var(--muted); font-size: 11.5px; }
-.tk-table.tk-trades td.tk-level { white-space: nowrap; }
-.tk-table.tk-trades td.tk-qty .tk-clip { max-width: 240px; }
-@media (min-width: 1401px) and (max-width: 1999px) {
-  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 390px; }
-  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 380px; }
-}
+/* The Book's trade table, second rebuild of 2026-10-01 (user: "surely you want both legs of the trade there"):
+   13 columns at 1680 px with no sideways scroll. A bold row per trade (its name, the spread in words, a chip
+   when something needs doing; the cell may wrap to two lines), a row per spread under a trade of several, every
+   leg always showing, lighter and indented, hedges last in italics; units as small grey suffixes. */
+.tk-table.tk-trades td.tk-trade-cell { white-space: normal; min-width: 200px; max-width: 330px; line-height: 17px; }
+.tk-table.tk-trades td.tk-trade-cell .tk-label { color: var(--ink-2); font-weight: 400; }
+.tk-table.tk-trades td.tk-trade-cell .tk-sep { color: var(--muted); }
+.tk-table.tk-trades .tk-act { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 9px; font-size: 11px;
+  font-weight: 600; line-height: 17px; white-space: nowrap; vertical-align: 1px; }
+.tk-table.tk-trades .tk-act--red { background: #fdecec; color: var(--neg); }
+.tk-table.tk-trades .tk-act--amber { background: #fdf3dc; color: #8a5a00; }
+.tk-table.tk-trades .tk-act--grey { background: #f1f2f6; color: var(--muted); }
+.tk-table.tk-trades .tk-act .tk-act-more { font-weight: 400; }
+.tk-table.tk-trades tr.tk-row-click { cursor: pointer; }
+.tk-table.tk-trades tr.tk-row-click:hover td { background: var(--hover, #f4f6fb); }
+.book-table.tk-trades tr.tk-part-row td.tk-part-name { padding-left: 20px; }
+.book-table.tk-trades tr.tk-leg-row td.tk-leg-name { padding-left: 22px; }
+.book-table.tk-trades tr.tk-leg-row--deep td.tk-leg-name { padding-left: 36px; }
+.tk-table.tk-trades td.tk-level, .tk-table.tk-trades td.tk-qty { white-space: nowrap; }
+.tk-table.tk-trades td.tk-level .tk-unit-slot { display: inline-block; min-width: 40px; margin-left: 3px; text-align: left; }
+.book-main .book-table.book-grid.tk-trades td, .book-main .book-table.book-grid.tk-trades th { padding-left: 6px; padding-right: 6px; }

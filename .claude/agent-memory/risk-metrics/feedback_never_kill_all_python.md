@@ -22,3 +22,7 @@ chained command: two venv python processes spun on CPU (PIDs 35428 / 27868) and 
 for 10 minutes. Never put `python -` / `py -3 -` in a command, even empty, even as a no-op. Also: long
 multi-line heredocs holding Python with quotes can break the Bash tool's parser; write such scripts with
 the Write tool instead. `sqlite3` CLI is not installed: query scratch dbs from a small script file.
+
+2026-10-01: a stray `cat > "$TEMP/../rm_dummy"` with no input at the head of a chained command hung the
+same way (cat.exe PID 7332 left waiting on stdin, reported, not killed). Never start a command with a
+redirect target and no input source.

@@ -70,6 +70,7 @@ from engine.spreads.book import ValueFn, is_estimate, level_on
 from engine.spreads.grouping import CALENDAR, LEFTOVER_FLOOR, TOLERANCE, Leg, calendar_shape
 from engine.spreads.hedges import FX_SECTOR, is_hedge
 from engine.spreads.levels import spec_for, spec_from_dict, spec_to_dict, usd_per_level_unit
+from engine.spreads.ratio import spread_ratio, trade_ratio
 from engine.spreads.templates import lot_in_quote_units
 from engine.spreads.trade_type import CROSS_EXCHANGE, CROSS_PRODUCT, TERM_STRUCTURE
 
@@ -2100,6 +2101,10 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         if nxt is not None:
             nxt = {**nxt, "hedge": False}
     subs = _leg_portions(subs, rows)
+    # the price ratio of each two-leg spread, both legs in USD, China on top (user, 2026-10-01): display only
+    subs = [{**sub, **spread_ratio(book, sub.get("legs") or [], rows_by_cid, sub.get("type", ""), sub.get("level"))}
+            for sub in subs]
+    ratio = trade_ratio(subs, name)
     pnl = entry.get("pnl_usd") or {}
     pnl_open, pnl_locked, pnl_split_reason = _split_trade(rows, pnl.get("ltd"),
                                                           (entry.get("pnl_reasons") or {}).get("ltd"))
@@ -2111,7 +2116,7 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         "type": kind, "type_note": type_note, "type_mismatch": mismatch, "sub_spreads": subs,
         "commodity_family": families[0] if len(families) == 1 else (FAMILY_CROSS if families else ""),
         "what_it_is": _what_it_is(book, kind, parts, rows, hedge),
-        "legs": rows, "size": size, "size_sides": size_sides, "level": level,
+        "legs": rows, "size": size, "size_sides": size_sides, "level": level, **ratio,
         "carry_per_month": carry, "carry_reason": carry_why, "carry_history_date": carry_date,
         "hedge": hedge, "leftover": leftover,
         "rolls": [r for r in (roll_data or {}).get("rolls") or [] if r.get("trade_name") == name],
@@ -2254,6 +2259,14 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
       (``_row_sides``): an FX spot / forward its base amount and an FX option its notional
       (basis 'notional', unit the base currency, 'oz' for a precious metal), an option on a future
       its lots; 'nothing open' only when nothing is.
+    - ``ratio_entry``, ``ratio_now``, ``ratio_basis``, ``ratio_reason``, ``ratio_entry_reason``,
+      ``ratio_now_reason``, ``ratio_estimate_note``, ``ratio_spec`` (each sub, and the trade when
+      it holds exactly one spread; user, 2026-10-01): the price ratio of a two-leg spread, both
+      legs in USD, the Chinese leg on top (``engine.spreads.ratio``: the rule, ``ratio_spec`` for
+      its history, ``ratio_value`` the one formula). Display only, never in a P&L figure.
+    - ``spread_usd_entry``, ``spread_usd_now``, ``spread_usd_unit`` ('USD/t'; None across two units),
+      ``spread_usd_reason`` (same places, 2026-10-01): numerator - denominator of the same USD
+      prices (``ratio.spread_value``). Display only.
     - ``commodity_family`` ('copper', 'ferrous', 'cattle' ...; 'cross-product' when two families
       mix), ``what_it_is`` ('COMEX vs LME copper, Nov/Dec26').
     - ``legs``: one per contract, open first, hedges last: {contract_id, instrument_id, root_id,

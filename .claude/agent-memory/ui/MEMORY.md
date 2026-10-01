@@ -68,5 +68,6 @@
 - [Title Case names 2026-10-01](title-case-names-2026-10-01.md) — title_name / plain_leg_name / titled_trade_book; joining words lower; engine prose left as is
 - [Marks check CLOSED status 2026-10-01](marks-check-closed-status-2026-10-01.md) — exchange shut on a past day: grey "Exchange closed", out of the Marks X of Y count and the diagnosis bad list
 - [Poll signature + build check 2026-10-01](poll-signature-and-build-check-2026-10-01.md) — never change _poll/tick outputs casually (26ad429 broke old tabs); answer_unknown_polls + build_check.js
+- [Book two legs + ratio table 2026-10-01](book-two-legs-ratio-table-2026-10-01.md) — CURRENT Book: 13 cols, legs always showing, spread/ratio/usual/z, action chip; supersedes the next line
 - [Book trade table three levels 2026-10-01](book-trade-table-three-levels-2026-10-01.md) — spread rows, legs behind a JS caret, Size "a side", Action column, funnels on text only; supersedes legs-always-showing
 - [Book z entry/now + sectors 2026-10-01](book-z-entry-now-sectors-2026-10-01.md) — spread_z z cells (z exit in fold), size_sides Quantity, sector order + Summary Sector, "2 calendars"/"Unmatched legs", 1680 CSS, proof recipe

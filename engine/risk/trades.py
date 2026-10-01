@@ -77,6 +77,21 @@ Per trade (parameters in `config/risk.yaml`; W = `trade_window_bd`, 252; a figur
   z_entry / z_exit the same on the spread's first fill date (entry) and on the day it went flat
                    (exit, a closed trade's `closed.close_date`; None while open), each against
                    the year ending that day (the last close on or before it).
+  z_basis          since 2026-10-01 (user: "their usual ratio, z score - this at entry and now")
+                   z, z_entry, z_exit and the percentiles are on the spread's PRICE RATIO
+                   ('ratio') wherever spreads-engine gives the spread a `ratio_spec` (two legs,
+                   both in USD, the Chinese leg on top; `engine.spreads.ratio`, its definition and
+                   `ratio_value` its one formula, never re-derived here): each leg's quoted close
+                   as the level reads it (`_leg_prices`) times its currency's USD per unit from
+                   the price history's own FX closes (CNY through USDCNH, so against the Book's
+                   ratio now, converted at the valuation's USDCNY, the CNH-CNY basis), on the days
+                   both legs closed. A spread with no ratio (three legs or more, an outright, a
+                   missing input) keeps z on its level as before ('level'); `z_basis_reason` says
+                   which and why.
+  ratio_usual      the mean of that price ratio over the same window as z now (a closed
+                   spread: z at exit), with `ratio_usual_window`, `ratio_usual_days`,
+                   `ratio_usual_reason` (None with it on the level basis or a short window);
+                   `ratio_usual_entry` / `_now` / `_exit` the mean on each point's own window.
   spreads_z        the three z-scores per SPREAD of the trade: one per `sub_spreads` entry of
                    spreads-engine's trade_book (whatever their number: a trade split into several
                    equal-size calendars gives each its own), each on its own level formula and its
@@ -111,6 +126,7 @@ from engine.risk.config import load_config
 from engine.risk.history import load_history
 from engine.risk.positions import _contract_name, position_risk, var_of
 from engine.spreads.levels import LevelSpec, converted, spec_from_dict
+from engine.spreads.ratio import ratio_value
 
 NAN = float("nan")
 CHINA = "CN"
@@ -192,10 +208,13 @@ def _levels_key(book_trades: Optional[Dict[str, dict]]) -> tuple:
         lv = t.get("level") or {}
         closed = t.get("closed") or {}
         return (str(t.get("status") or ""), repr(lv.get("spec")), repr(lv.get("change")), str(lv.get("mode") or ""),
+                repr(t.get("ratio_spec")),
                 tuple((repr((s.get("level") or {}).get("spec")), str(s.get("entry_date") or ""),
-                       str(s.get("exit_date") or s.get("close_date") or "")) for s in t.get("sub_spreads") or []),
+                       str(s.get("exit_date") or s.get("close_date") or ""), repr(s.get("ratio_spec")))
+                      for s in t.get("sub_spreads") or []),
                 (str(closed.get("close_date") or ""), str(closed.get("open_date") or ""), repr(closed.get("spec")),
-                 repr([(s.get("level") or {}).get("spec") for s in closed.get("sub_spreads") or []])))
+                 repr([((s.get("level") or {}).get("spec"), s.get("ratio_spec"))
+                       for s in closed.get("sub_spreads") or []])))
     return ("trade_book",) + tuple(sorted((pid, one(t or {})) for pid, t in book_trades.items()))
 
 
@@ -766,7 +785,7 @@ def _usd_per(history, ccy: str, index: pd.DatetimeIndex) -> Tuple[Optional[pd.Se
     conv = history.usd_per_unit(ccy)
     if conv.empty:
         return None, (f"no {ccy} FX history in the Bloomberg price history ({conv.attrs.get('reason') or 'none'}), "
-                      f"so the level cannot be converted")
+                      f"so the price cannot be converted to USD")
     return _asof(conv, index), ""
 
 
@@ -829,6 +848,81 @@ def level_history(history, spec: LevelSpec, roots: Dict[str, Any], as_of: str
     return level, kind, unit, ""
 
 
+class _RatioLeg:
+    """One side of spreads-engine's `ratio_spec` in the shape `_leg_prices` reads (an LME leg is
+    instrument_id == root_id, read at its month)."""
+
+    def __init__(self, side: dict):
+        self.instrument_id = str(side.get("instrument_id") or side.get("contract_id") or "")
+        self.root_id = str(side.get("root_id") or "")
+        self.month_key = str(side.get("month") or side.get("prompt") or "")[:7]
+
+
+def _ratio_side_name(side: dict) -> str:
+    leg = _RatioLeg(side)
+    return leg.instrument_id + (f" {leg.month_key}" if leg.instrument_id == leg.root_id else "")
+
+
+def ratio_history(history, rspec: dict, as_of: str) -> Tuple[Optional[pd.Series], str]:
+    """(the spread's daily PRICE RATIO on or before as_of, why None): spreads-engine's definition
+    (`engine.spreads.ratio`, user 2026-10-01: both legs in USD, the Chinese leg on top), never
+    re-derived here. Each side's quoted close as the level history reads it (`_leg_prices`: its own
+    contract, before its first close the contract at its place on the strip; an LME leg at its
+    month's prompt), times the USD per unit of its currency from the price history's own FX closes
+    (CNY through USDCNH: the CNH-CNY basis against today's figure, which the valuation converts at
+    USDCNY), through `ratio.ratio_value`. Only the days both legs closed. Risk context only: never
+    a mark, never in P&L, delta or a total."""
+    sides = [rspec.get("numerator") or {}, rspec.get("denominator") or {}]
+    prices: List[pd.Series] = []
+    held: List[pd.Series] = []
+    own_from: List[str] = []
+    for side in sides:
+        leg = _RatioLeg(side)
+        if not leg.instrument_id or not leg.root_id:
+            return None, "the ratio's definition names no contract"
+        raw, why, first, ids = _leg_prices(history, leg, as_of)
+        if raw is None:
+            return None, why
+        prices.append(raw)
+        held.append(ids)
+        if first:
+            own_from.append(first)
+    frame = pd.concat(prices, axis=1, join="inner").dropna()
+    if frame.empty:
+        return None, "the two legs have no close on the same day"
+    frame.columns = [0, 1]
+    usd = []
+    for side in sides:
+        s, why = _usd_per(history, str(side.get("currency") or "USD"), frame.index)
+        if s is None:
+            return None, why
+        usd.append(s)
+    den = frame[1].where((frame[1] * float(sides[1].get("factor") or 0.0) * usd[1]).abs() > 1e-12)
+    ratio = ratio_value(rspec, frame[0], den, usd[0], usd[1]).dropna().sort_index()
+    if not len(ratio):
+        return None, (f"no close of both legs has a USD conversion within {FX_TOLERANCE_DAYS} days"
+                      if any(str(s.get("currency") or "USD") != "USD" for s in sides) else "no ratio could be formed")
+    ratio.attrs["own_from"] = max(own_from) if own_from else None
+    switch = pd.Series(False, index=ratio.index)
+    for h in held:
+        ids = h.reindex(ratio.index).astype(str)
+        switch |= ids != ids.shift()
+    ratio.attrs["switch"] = switch.to_numpy()
+    return ratio, ""
+
+
+def _ratio_of(history, rspec: dict, end: str, memo: dict) -> Tuple[Optional[pd.Series], str, dict]:
+    """`ratio_history` to `end`, kept in `memo` per (definition, end): (ratio with no attrs, why, attrs)."""
+    key = ("ratio", repr(sorted((k, repr(v)) for k, v in rspec.items())), str(end))
+    if key not in memo:
+        r, why = ratio_history(history, rspec, end)
+        attrs = dict(r.attrs) if r is not None else {}
+        if r is not None:
+            r.attrs = {}
+        memo[key] = (r, why, attrs)
+    return memo[key]
+
+
 def _day_text(day: Any) -> str:
     """'14 Apr 2024'."""
     ts = pd.Timestamp(day)
@@ -839,7 +933,7 @@ def _span_text(years: int) -> str:
     return "year" if years == 1 else f"{years} years"
 
 
-def _z_point(level: pd.Series, day: str, years: int, floor: int, what: str) -> dict:
+def _z_point(level: pd.Series, day: str, years: int, floor: int, what: str, noun: str = "level") -> dict:
     """The level's z-score and percentile on `day` (`what`: 'the entry', 'today', 'the exit')
     against its own closes in the `years` calendar years ending that day: the window is every
     close dated after day - years and on or before day. z = (the last close in it - their mean)
@@ -852,6 +946,7 @@ def _z_point(level: pd.Series, day: str, years: int, floor: int, what: str) -> d
     frm = at - pd.DateOffset(years=years)
     span = _span_text(years)
     out = {"date": _iso(at), "close_date": None, "level": None, "z": None, "percentile": None,
+           "mean": None, "sd": None,
            "window": {"start": None, "end": None, "closes": 0, "from": _iso(frm), "full_year": False},
            "reason": "", "note": ""}
     first = level.index[0]
@@ -861,7 +956,7 @@ def _z_point(level: pd.Series, day: str, years: int, floor: int, what: str) -> d
         return out
     w = s[s.index > frm]
     if w.empty:
-        out["reason"] = (f"no close of the level in the {span} to {_day_text(at)} "
+        out["reason"] = (f"no close of the {noun} in the {span} to {_day_text(at)} "
                          f"(the last is {_day_text(s.index[-1])})")
         return out
     full = bool(first <= frm + pd.Timedelta(days=7))
@@ -870,11 +965,12 @@ def _z_point(level: pd.Series, day: str, years: int, floor: int, what: str) -> d
     if len(w) < floor:
         out["reason"] = (f"the history starts {_day_text(first)}, after the start of the {span} to "
                          f"{_day_text(at)}: {len(w)} closes, needs {floor}" if not full else
-                         f"{len(w)} closes of the level in the {span} to {_day_text(at)}, needs {floor}")
+                         f"{len(w)} closes of the {noun} in the {span} to {_day_text(at)}, needs {floor}")
         return out
     sd = _std(w)
+    out["mean"], out["sd"] = float(w.mean()), sd
     if not sd:
-        out["reason"] = f"the level did not move over the {span} to {_day_text(at)}"
+        out["reason"] = f"the {noun} did not move over the {span} to {_day_text(at)}"
         return out
     v = float(w.iloc[-1])
     out["z"] = (v - float(w.mean())) / sd
@@ -922,16 +1018,26 @@ Z_POINTS = ("entry", "now", "exit")
 
 
 def _spread_z(history, spec: Optional[LevelSpec], spec_why: str, roots: Dict[str, Any], config: Dict[str, Any],
-              as_of: str, entry_date: Optional[str], exit_date: Optional[str], memo: dict) -> dict:
+              as_of: str, entry_date: Optional[str], exit_date: Optional[str], memo: dict,
+              rspec: Optional[dict] = None, rspec_why: str = "") -> dict:
     """One spread's three z-scores (module docstring): {status ('open' | 'closed'), entry_date,
-    exit_date, level_kind, level_unit, level_legs, level_own_from, level_note, reason (no level at
-    all), z_entry / percentile_entry / z_entry_reason, z_now / ..., z_exit / ..., and entry / now /
-    exit: `_z_point`'s dict, None where it does not apply}."""
+    exit_date, z_basis ('ratio' | 'level' | '' when neither), z_basis_reason, level_kind, level_unit,
+    level_legs, level_own_from, level_note, reason (no series at all), z_entry / percentile_entry /
+    z_entry_reason, z_now / ..., z_exit / ..., entry / now / exit (`_z_point`'s dict, None where it
+    does not apply), ratio_usual (the mean of the price ratio over the window ending today, or on
+    the exit day of a closed spread), ratio_usual_date, ratio_usual_window, ratio_usual_days,
+    ratio_usual_reason, ratio_usual_entry / _now / _exit (the same mean on each point's window)}.
+    `rspec`: spreads-engine's `ratio_spec` of the spread; with it, and a history of it, z is on the
+    price ratio; without, on the level (`spec`) as before, the reason saying why."""
     out: Dict[str, Any] = {"status": "closed" if exit_date else "open", "entry_date": entry_date,
-                           "exit_date": exit_date, "level_kind": None, "level_unit": "", "level_legs": [],
-                           "level_own_from": None, "level_note": "", "reason": ""}
+                           "exit_date": exit_date, "z_basis": "", "z_basis_reason": "",
+                           "level_kind": None, "level_unit": "", "level_legs": [],
+                           "level_own_from": None, "level_note": "", "reason": "",
+                           "ratio_usual": None, "ratio_usual_date": None, "ratio_usual_window": None,
+                           "ratio_usual_days": 0, "ratio_usual_reason": ""}
     for p in Z_POINTS:
-        out.update({f"z_{p}": None, f"percentile_{p}": None, f"z_{p}_reason": "", p: None})
+        out.update({f"z_{p}": None, f"percentile_{p}": None, f"z_{p}_reason": "", p: None,
+                    f"ratio_usual_{p}": None})
 
     def every(why: str) -> dict:
         out["reason"] = why
@@ -939,19 +1045,44 @@ def _spread_z(history, spec: Optional[LevelSpec], spec_why: str, roots: Dict[str
             out[f"z_{p}_reason"] = why
         if not exit_date:
             out["z_exit_reason"] = "still open: no exit"
+        out["ratio_usual_reason"] = out["ratio_usual_reason"] or why
         return out
 
-    if spec is None:
-        return every(spec_why or "no level formula for this spread")
-    out["level_legs"] = [lg.instrument_id + (f" {lg.month_key}" if lg.instrument_id == lg.root_id else "")
-                         for lg in spec.legs]
-    if not getattr(history, "available", False):
-        return every(f"no settlement history: {getattr(history, 'reason', '')}")
+    available = getattr(history, "available", False)
     end = exit_date or as_of
-    level, kind, unit, why, attrs = _level_of(history, spec, roots, end, memo)
-    out.update(level_kind=kind, level_unit=unit)
-    if level is None:
-        return every(why)
+    series, attrs, noun = None, {}, "level"
+    if rspec:
+        if not available:
+            ratio_why = f"no settlement history: {getattr(history, 'reason', '')}"
+        else:
+            series, ratio_why, attrs = _ratio_of(history, rspec, end, memo)
+        if series is not None:
+            noun = "price ratio"
+            out.update(z_basis="ratio", level_kind=LEVEL_RATIO,
+                       level_unit=f"price ratio, {rspec.get('unit') or 'both legs in USD'}",
+                       level_legs=[_ratio_side_name(rspec.get(k) or {}) for k in ("numerator", "denominator")],
+                       z_basis_reason=f"z on the price ratio ({rspec.get('basis') or rspec.get('unit') or 'both legs in USD'})")
+        else:
+            no_ratio = f"no history of the price ratio ({ratio_why})"
+    else:
+        no_ratio = rspec_why or "no price ratio for this spread"
+    if series is None:
+        lower = no_ratio[:1].isupper() and no_ratio[1:2].islower()     # 'Ratio is ...', never 'SCO1 holds ...'
+        out["ratio_usual_reason"] = (no_ratio[:1].lower() + no_ratio[1:]) if lower else no_ratio
+        no_level = spec_why or "no level formula for this spread"
+        out["z_basis_reason"] = f"no z: {out['ratio_usual_reason']}, and {no_level}"
+        if spec is None:
+            return every(no_level)
+        out["level_legs"] = [lg.instrument_id + (f" {lg.month_key}" if lg.instrument_id == lg.root_id else "")
+                             for lg in spec.legs]
+        if not available:
+            return every(f"no settlement history: {getattr(history, 'reason', '')}")
+        series, kind, unit, why, attrs = _level_of(history, spec, roots, end, memo)
+        out.update(level_kind=kind, level_unit=unit)
+        if series is None:
+            out["z_basis_reason"] = f"no z: {out['ratio_usual_reason']}, and the level has no history ({why})"
+            return every(why)
+        out.update(z_basis="level", z_basis_reason=f"z on the level: {out['ratio_usual_reason']}")
     years, floor = int(config.get("z_window_years") or 1), int(config["level_min_days"])
     own = attrs.get("own_from")
     out["level_own_from"] = own
@@ -963,12 +1094,21 @@ def _spread_z(history, spec: Optional[LevelSpec], spec_why: str, roots: Dict[str
                                     "now": f"closed on {_day_text(exit_date)}: no z now" if exit_date else "",
                                     "exit": "still open: no exit"}[p]
             continue
-        pt = _z_point(level, day, years, floor, what)
+        pt = _z_point(series, day, years, floor, what, noun)
         out[p] = pt
         out[f"z_{p}"], out[f"percentile_{p}"], out[f"z_{p}_reason"] = pt["z"], pt["percentile"], pt["reason"]
+        if out["z_basis"] == "ratio":
+            out[f"ratio_usual_{p}"] = pt["mean"]
+    if out["z_basis"] == "ratio":
+        last = "exit" if exit_date else "now"
+        pt = out[last] or {}
+        out.update(ratio_usual=pt.get("mean"), ratio_usual_date=pt.get("close_date") or pt.get("date"),
+                   ratio_usual_window=pt.get("window"), ratio_usual_days=(pt.get("window") or {}).get("closes") or 0)
+        if out["ratio_usual"] is None:
+            out["ratio_usual_reason"] = (pt.get("reason") if pt else "") or f"no z {last}: no window to average"
     starts = [out[p]["window"]["start"] for p in Z_POINTS if out[p] and out[p]["window"]["start"]]
     if own and starts and own > min(starts):
-        out["level_note"] = (f"before {own} the level reads the contracts at the same place on the curve "
+        out["level_note"] = (f"before {own} the {noun} reads the contracts at the same place on the curve "
                              f"(the P&L history's rule)")
     return out
 
@@ -1005,17 +1145,18 @@ def _book_spread_z(conn: sqlite3.Connection, as_of: str, book_trades: Optional[D
         closed = t.get("closed") if str(t.get("status") or "") == "closed" else None
         exit_date = str((closed or {}).get("close_date") or "")[:10] or None
         level, subs, why = dict(t.get("level") or {}), list(t.get("sub_spreads") or []), ""
+        src: dict = t                              # where the trade's own ratio_spec is read
         if closed is not None:
             if closed.get("spec") or closed.get("sub_spreads"):
                 level = {"spec": closed.get("spec"), "reason": closed.get("reason") or ""}
-                subs = list(closed.get("sub_spreads") or [])
+                subs, src = list(closed.get("sub_spreads") or []), closed
             elif closed.get("open_date"):
                 old, why = was(name, str(closed["open_date"]))
                 level = dict((old or {}).get("level") or {"spec": None, "reason": why})
-                subs = list((old or {}).get("sub_spreads") or [])
+                subs, src = list((old or {}).get("sub_spreads") or []), (old or {})
             else:
                 why = closed.get("reason") or "no close on which it was open, so no level"
-                level, subs = {"spec": None, "reason": why}, []
+                level, subs, src = {"spec": None, "reason": why}, [], {}
         trade_spec = spec_from_dict(level.get("spec")) if level.get("spec") else None
         trade_why = "" if trade_spec else str(level.get("reason") or level.get("now_reason") or why
                                               or "the trade has no single level")
@@ -1027,14 +1168,23 @@ def _book_spread_z(conn: sqlite3.Connection, as_of: str, book_trades: Optional[D
             entry = (str(sub.get("entry_date"))[:10] if sub.get("entry_date") else
                      _spread_entry_date(spec, legs, first_dates, [x.get("contract_id") for x in sub.get("legs") or []]))
             z = _spread_z(history, spec, str(lv.get("reason") or lv.get("now_reason") or "this spread has no level"),
-                          roots, config, as_of, entry, sub_exit, memo)
+                          roots, config, as_of, entry, sub_exit, memo, sub.get("ratio_spec"),
+                          str(sub.get("ratio_reason") or ""))
             z.update(spread=i, what_it_is=sub.get("what_it_is") or "", type=sub.get("type") or "",
                      legs=[x.get("contract_id") for x in sub.get("legs") or []],
                      trade_level=bool(trade_spec is not None and lv.get("spec") == level.get("spec")))
             spreads.append(z)
         entry = (_spread_entry_date(trade_spec, legs, first_dates) if trade_spec is not None else None) or (
             str(t.get("first_trade_date") or "")[:10] or None)
-        tl = _spread_z(history, trade_spec, trade_why, roots, config, as_of, entry, exit_date, memo)
+        # the trade's ratio: its own (trade_book sets it when the trade is exactly one spread), else that
+        # of the one spread whose level is the trade's level, so the row and that spread agree
+        rspec, rwhy = src.get("ratio_spec"), str(src.get("ratio_reason") or "")
+        if not rspec and trade_spec is not None:
+            mine = [s for s in subs if s.get("ratio_spec") and (s.get("level") or {}).get("spec") == level.get("spec")]
+            if len(mine) == 1:
+                rspec = mine[0]["ratio_spec"]
+        tl = _spread_z(history, trade_spec, trade_why, roots, config, as_of, entry, exit_date, memo, rspec,
+                       rwhy or ("the trade holds no single spread" if not trade_spec else ""))
         out[pid] = {"trade": name, "status": "closed" if closed is not None else "open",
                     "entry_date": str(t.get("first_trade_date") or "")[:10] or None, "exit_date": exit_date,
                     "trade_level": tl, "spreads": spreads}
@@ -1061,6 +1211,12 @@ def _z_block(history, spec: Optional[LevelSpec], spec_why: str, as_of: str, entr
            "z_exit_reason": one["z_exit_reason"], "z_exit_date": one["exit_date"],
            "z_exit_window": ext.get("window"), "z_exit_note": ext.get("note") or "",
            "level_own_from": one["level_own_from"], "level_note": one["level_note"],
+           "z_basis": one.get("z_basis") or "", "z_basis_reason": one.get("z_basis_reason") or "",
+           "ratio_usual": one.get("ratio_usual"), "ratio_usual_date": one.get("ratio_usual_date"),
+           "ratio_usual_window": one.get("ratio_usual_window"), "ratio_usual_days": one.get("ratio_usual_days") or 0,
+           "ratio_usual_reason": one.get("ratio_usual_reason") or "",
+           "ratio_usual_entry": one.get("ratio_usual_entry"), "ratio_usual_now": one.get("ratio_usual_now"),
+           "ratio_usual_exit": one.get("ratio_usual_exit"),
            "spreads_z": list((ctx.spread_z or {}).get("spreads") or []),
            "level_sd": None, "level_sd_reason": one["reason"] or spec_why, "level_sd_days": 0,
            "level_move": None, "move_sigma": None, "move_sigma_reason": one["reason"] or spec_why}
@@ -1278,7 +1434,11 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
                 best_fit_ratio, lot_ratio, leg_correlation, best_fit_reason, ratio_legs [A, B],
                 lots_a, lots_b, best_fit_moves, best_fit_days,
                 z, percentile (percent), level_now, level_date, level_days (closes in the
-                window), level_kind ('ratio' | 'difference'), level_unit, level_legs, z_reason,
+                window), z_basis ('ratio': the price ratio | 'level' | ''), z_basis_reason,
+                level_kind ('ratio' | 'difference'; 'ratio' on the ratio basis), level_unit,
+                level_legs (the series z reads), z_reason, ratio_usual, ratio_usual_date,
+                ratio_usual_window, ratio_usual_days, ratio_usual_reason, ratio_usual_entry,
+                ratio_usual_now, ratio_usual_exit,
                 z_window {start, end, closes, from, full_year}, z_note,
                 z_entry, percentile_entry, level_at_entry, z_entry_reason, z_entry_date,
                 z_entry_window, z_entry_note, z_exit, percentile_exit, level_at_exit,
@@ -1300,11 +1460,14 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
       spread_z {position_id: {trade, status ('open' | 'closed'), entry_date, exit_date,
                 trade_level (`_spread_z` of the trade's own level), spreads [as spreads_z]}}:
                 every trade of trade_book, closed included ({} without trade_book)}.
-    A `_spread_z`: {status, entry_date, exit_date, level_kind, level_unit, level_legs,
-      level_own_from, level_note, reason, z_entry / percentile_entry / z_entry_reason, z_now /
+    A `_spread_z`: {status, entry_date, exit_date, z_basis, z_basis_reason, level_kind,
+      level_unit, level_legs, level_own_from, level_note, reason, ratio_usual, ratio_usual_date,
+      ratio_usual_window, ratio_usual_days, ratio_usual_reason, ratio_usual_entry / _now / _exit,
+      z_entry / percentile_entry / z_entry_reason, z_now /
       percentile_now / z_now_reason, z_exit / percentile_exit / z_exit_reason, entry / now / exit
-      (None where it does not apply, else {date, close_date, level, z, percentile, window {start,
-      end, closes, from, full_year}, reason, note})}.
+      (None where it does not apply, else {date, close_date, level (the ratio on the ratio
+      basis), z, percentile, mean, sd (of the window), window {start, end, closes, from,
+      full_year}, reason, note})}.
     Every figure a number or None with its reason."""
     history, config, fx_history = _defaults(conn, history, config, fx_history)
     book_trades = ({str(t.get("position_id")): t for t in (trade_book or {}).get("trades") or []
