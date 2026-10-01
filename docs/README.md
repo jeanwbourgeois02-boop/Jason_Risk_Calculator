@@ -5,9 +5,10 @@ Commodity relative-value risk monitor for Jason's book (futures and their spread
 **What it does and what the numbers mean: [HOW_IT_WORKS.md](HOW_IT_WORKS.md).**
 
 There are exactly two entry points: double-click `1_setup.cmd` (repo root) once; then type `chelsea`.
-The repo root itself holds only three files: `1_setup.cmd` (this section), `2_launcher.py` (setup,
+The repo root itself holds only three working files: `1_setup.cmd` (this section), `2_launcher.py` (setup,
 launch and doctor logic — see section 3 and "For developers" below), and
-`3_diagnostic.py` (runs the Bloomberg diagnostics checks — `py 3_diagnostic.py`).
+`3_diagnostic.py` (runs the Bloomberg diagnostics checks — `py 3_diagnostic.py`), and beside them
+the plain user guide, `4_user_guide.md` (set up, launch and every tab).
 Everything else, including this file, lives in `docs/`.
 
 ---

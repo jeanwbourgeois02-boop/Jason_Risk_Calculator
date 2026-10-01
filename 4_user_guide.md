@@ -1,8 +1,8 @@
 # Jason Risk Monitor: user guide
 
 A short guide to setting up the app, starting it, and what each screen does. For the
-technical detail behind the numbers, see [HOW_IT_WORKS.md](HOW_IT_WORKS.md); for
-troubleshooting commands, see [README.md](README.md).
+technical detail behind the numbers, see [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md); for
+troubleshooting commands, see [docs/README.md](docs/README.md).
 
 ---
 
