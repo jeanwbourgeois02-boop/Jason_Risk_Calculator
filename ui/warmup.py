@@ -17,7 +17,7 @@ arguments as the tabs, so each tab's first render is a memo hit:
   7. header     `header._build_figures(conn, as_of)` inside the header's own `pricing_snapshot`,
                 `header.needed_marks(conn, as_of)`
   8. series     `engine.pnl.series.daily_series(conn, as_of, value_fn=raw_value_book)` (P&L, header chart)
-  9. pnl        `pnl.base(conn, as_of)`, `pnl.periods(conn, as_of)` (the table's five period columns)
+  9. pnl        `pnl.base(conn, as_of)`, `pnl.periods(conn, as_of)` (the table's six period columns)
  10. curve      `shared_spreads(conn, as_of)` (the engine's own reader), `shared_curve(conn, as_of)`
  11. risk       `risk.gather(conn, as_of)`, `shared_trade_risk(conn, as_of, wait=True)`
  12. risk_folds `risk_folds.book_positions(conn, as_of)`, `risk.stress_result(conn, as_of)` (the
@@ -391,7 +391,7 @@ def _screens(conn, as_of: str, step) -> None:
     def pnl():
         from ui.tabs import pnl as pnl_tab
         pnl_tab.base(conn, as_of)
-        pnl_tab.periods(conn, as_of)          # every column of the table: Today, 5d, MTD, YTD, All
+        pnl_tab.periods(conn, as_of)          # every column of the table: Today, 2d, 5d, MTD, YTD, All
     step("pnl", pnl)
 
     def curve():

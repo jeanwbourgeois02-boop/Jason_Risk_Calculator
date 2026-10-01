@@ -8,8 +8,9 @@ and split the per-fill figures of the fills in it summed, a click giving the tra
 then the headline of the rows showing, then:
   - the controls: Total | By month, the slice, a Download CSV link;
   - the table (2026-10-01, user: the chart removed, "the today last 2 days 5d onwards - that should
-    be in the table"): one row per slice value, the total row first (unfiltered, each column = the
-    top bar's figure for that period), columns Today | 5d | MTD | YTD | All (since entry, LTD), each
+    be in the table"): one row per slice value, the total row first (unfiltered, each column but 2d =
+    the top bar's figure for that period), columns Today | 2d | 5d | MTD | YTD | All (since entry, LTD;
+    2d, the user's yes 2026-10-01, from the close 2 business days back, which the top bar lacks), each
     period's split into Spread, FX, Hedge, New, Realised (Other) on hover of its cell (All: Realised
     and Open); sorted by the size of MTD, each period heading sortable; By month: one column per
     month and a Total; a click on a row opens its legs (sliced by Trade) or its trades, each
@@ -70,14 +71,15 @@ PERIODS = ("daily", "d5", "mtd", "ytd", "ltd")
 PERIOD_TITLES = {"daily": "Daily", "d5": "5d", "mtd": "MTD", "ytd": "YTD", "ltd": "LTD"}
 
 # The tab's period columns (2026-10-01: columns of the one table, no switch); MTD orders the rows.
-PERIOD_CHOICES = (("today", "Today"), ("d5", "5d"), ("mtd", "MTD"), ("ytd", "YTD"), ("all", "All"))
+PERIOD_CHOICES = (("today", "Today"), ("d2", "2d"), ("d5", "5d"), ("mtd", "MTD"), ("ytd", "YTD"), ("all", "All"))
 PERIOD_KEYS = tuple(k for k, _t in PERIOD_CHOICES)
 DEFAULT_PERIOD = "mtd"
-ENGINE_KEY = {"today": "daily", "d5": "d5", "mtd": "mtd", "ytd": "ytd", "all": "ltd"}
-# the top bar's figure each column's total equals (unfiltered)
+ENGINE_KEY = {"today": "daily", "d5": "d5", "mtd": "mtd", "ytd": "ytd", "all": "ltd"}   # 2d: `_two_day`
+# the top bar's figure each column's total equals (unfiltered; the top bar has no 2d)
 HEADER_WORDS = {"today": "the top bar's Daily", "d5": "the 5d on the top bar's Daily hover",
                 "mtd": "the top bar's MTD", "ytd": "the top bar's YTD", "all": "the top bar's LTD"}
 PERIOD_TIPS = {"today": "Today's P&L: each fill's change since the previous close, by the header's own Daily rule.",
+               "d2": "The last 2 business days: each fill's change since the close 2 business days back.",
                "d5": "The last 5 business days: each fill's change since the close 5 business days back.",
                "mtd": "Month to date: each fill's change since the last close of the previous month.",
                "ytd": "Year to date: each fill's change since the last close of the previous year.",
@@ -291,7 +293,7 @@ def period(conn: sqlite3.Connection, as_of: str, choice: str) -> dict:
 
 
 def periods(conn: sqlite3.Connection, as_of: str) -> Dict[str, dict]:
-    """{period key: `period`} for the five columns, in order."""
+    """{period key: `period`} for the six columns, in order."""
     return {k: period(conn, as_of, k) for k in PERIOD_KEYS}
 
 
@@ -307,6 +309,8 @@ def _period(conn: sqlite3.Connection, as_of: str, choice: str) -> dict:
     if not series.days:
         out["reason"] = f"no trade dated on or before {as_of}"
         return out
+    if choice == "d2":
+        return _two_day(conn, as_of, series, out)
     ex = period_explain(conn, as_of, ENGINE_KEY[choice], series=series, spreads=b.get("spreads"))
     out.update(start_ref=ex.get("start_ref"), ref_used=ex.get("ref_used"), end=as_of if as_of in series.days
                else series.days[-1], total=ex.get("total"), available=bool(ex.get("available")),
@@ -317,6 +321,31 @@ def _period(conn: sqlite3.Connection, as_of: str, choice: str) -> dict:
         # the engine's own bucket per fill: all of a fill's LTD is realised or open, never split
         for r in ex.get("by_trade") or []:
             out["by_trade"][str(r["trade_id"])]["open"] = (r.get("total") if r.get("bucket") == "open" else 0.0)
+    return out
+
+
+def _two_day(conn: sqlite3.Connection, as_of: str, series, out: Dict[str, Any]) -> dict:
+    """The 2d column (user yes, 2026-10-01; the top bar has none): `engine.pnl.series.period_pnl`
+    from the close 2 business days before the as-of (`period_reference_dates`' T-2, the trading
+    calendar of `config/holidays.txt`; its own step-back when that close has no value) to the
+    as-of, split by `period_explain.classify_trades`, as the Custom range did."""
+    from data.contracts import load_roots
+    from engine.pnl.ledger import period_reference_dates
+    from engine.pnl.series import period_pnl
+    from engine.spreads.period_explain import COMPONENTS as PARTS, _currencies, classify_trades
+    ref = period_reference_dates(as_of)["previous_day"]
+    try:
+        pp = period_pnl(series, ref, as_of)
+    except Exception as exc:  # noqa: BLE001 -- the column then says why, as period_explain does
+        out.update(start_ref=ref, reason=f"{as_of} is not a business day of the daily series ({exc})")
+        return out
+    out.update(start_ref=ref, ref_used=pp.ref_used, end=as_of, total=pp.total, available=pp.available,
+               reason=pp.reason, excluded=list(pp.excluded), ref_note=pp.ref_note or "")
+    if pp.available and pp.total is not None:
+        ids = [str(i) for i in (pp.frame_end["instrument_id"] if not pp.frame_end.empty else [])]
+        parts, _bucket, others = classify_trades(pp, load_roots(), _currencies(conn, ids), False)
+        out["by_trade"] = {tid: {**{c: p[c] for c in PARTS}, "total": p["_amount"]} for tid, p in parts.items()}
+        out["other_trades"] = others
     return out
 
 
@@ -610,9 +639,18 @@ def _cells(ps: Dict[str, dict], b: dict, ids: Sequence[str], cols, mode: str, mo
         if key not in PERIOD_KEYS:
             continue
         p = ps[key]
-        hover = _lines(f"Equals {HEADER_WORDS[key]}" if header_match else "", *split_lines(p, ids))
+        hover = _lines(_total_words(b, p, key) if header_match else "", *split_lines(p, ids))
         out.append(_money_td(part_sum(p, ids), hover=hover, full=full, badge=badge))
     return out
+
+
+def _total_words(b: dict, p: dict, key: str) -> str:
+    """The unfiltered total row's first hover line: the top bar's figure it equals, or for 2d (the
+    top bar has none) the close it is measured from."""
+    if key in HEADER_WORDS:
+        return f"Equals {HEADER_WORDS[key]}"
+    ref = p.get("ref_used") or p.get("start_ref")
+    return f"Measured from the {day_text(ref, b.get('as_of'))} close" if ref else ""
 
 
 def _row_id(key: str) -> dict:
@@ -636,7 +674,7 @@ def leg_rows(ps: Dict[str, dict], b: dict, t: dict, cols, mode, months) -> List[
     return rows
 
 
-TOTAL_TIP = "Each column equals the top bar's figure for its period"
+TOTAL_TIP = "Each column but 2d equals the top bar's figure for its period (the top bar has no 2d)"
 
 
 def contract_table(b: dict, ps: Dict[str, dict], s: dict, mode: str, opened: set, cols, months,
@@ -933,7 +971,7 @@ def issue_items(b: dict, ps: Dict[str, dict]) -> List[Any]:
 
 
 def _csv_figures(row: dict, ps: Dict[str, dict], ids: Sequence[str]) -> None:
-    """The five periods' P&L of these fills, then each period's split, close and fills left out."""
+    """Each period's P&L of these fills, then each period's split, close and fills left out."""
     for k, title in PERIOD_CHOICES:
         row[title] = part_sum(ps[k], ids)[0]
     for k, title in PERIOD_CHOICES:
