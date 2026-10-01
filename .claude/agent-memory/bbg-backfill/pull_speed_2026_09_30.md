@@ -23,14 +23,8 @@ status keys; proved by a before/after harness):
   library / contracts functions between two runs on one db) - clear `_listing_memo` there.
 - `_record_outcome`: one close_completeness per stretch of worked days, not per day (NOT one
   call over min..max: the YTD reference date would make that span a year).
-- **Closing ledger skip** (`_closing_step_needed`): only with a lent session, 0 rows written by
-  backfill() (`_run_writes`, conn.total_changes), the pull's status ledger dated today with no
-  error/skipped, library not dirty, no upload_report.uploaded_at >= the pull's status "time".
-  The skipped step is still recorded as "closing" with the no-op call's block
-  (`_pull_ledger_repeat`), so an older run's re-freeze never shows as this one's.
-- **after_last_day NOT skipped:** it runs at span_end (a past day), the closing at today; a
-  future expiring on span_end is re-frozen at its close only by the today call. Not the
-  "same date and marks" bbg-live assumed.
+- **Closing ledger skip and after_last_day: both GONE 2026-10-01** - superseded by
+  [[ledger-once-per-press-2026-10-01]] (one unconditional closing call, live pull drops its own).
 - `_BackfillProgress._publish`: one read under `live._STATUS_LOCK`, writes with
   `live._replace_status_file` (bbg-live privates; a rename there silently stops progress).
 - **`schema.connect` writes the DB every call** (views dropped/recreated: 4 transactions, mtime

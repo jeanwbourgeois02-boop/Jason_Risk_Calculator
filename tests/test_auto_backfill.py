@@ -872,10 +872,9 @@ def test_closing_step_records_the_ledgers_refreeze_in_the_status_file(tmp_path):
     assert [s["step"] for s in published["steps"]] == ["closing"]
 
 
-def test_closing_step_merges_the_after_last_day_call_and_starts_afresh_next_run(tmp_path):
-    """auto_backfill's re-freeze at a past close lands in backfill()'s call after the last
-    worked day, then the closing step runs at today: the published block sums both, and a
-    later run with no due days (closing alone) does not carry the earlier run's."""
+def test_each_ledger_call_starts_the_published_block_afresh(tmp_path):
+    """Since 2026-10-01 a run makes one ledger call (`LEDGER_AT_END`): each recorded call
+    starts the published block afresh, so a later call never carries an earlier one's."""
     p, conn = _db(tmp_path, _book_today().isoformat())
     conn.close()
     backfill._published.pop(backfill._db_key(p), None)
@@ -884,11 +883,11 @@ def test_closing_step_merges_the_after_last_day_call_and_starts_afresh_next_run(
     closing = live.ledger_block({"realised": 0, "refrozen": ["b2"], "kept": [{"trade_id": "k1"}]}, "2026-09-22")
     backfill._record_ledger(p, "closing", closing)
     block = live.read_status(p)["backfill"]["ledger"]
-    assert block["as_of_date"] == "2026-09-22" and block["realised"] == 1
-    assert block["refrozen"] == [{"trade_id": "a1", "why": "close"}, {"trade_id": "b2"}]
+    assert block["as_of_date"] == "2026-09-22" and block["realised"] == 0
+    assert block["refrozen"] == [{"trade_id": "b2"}]
     assert block["kept"] == [{"trade_id": "k1"}]
-    assert block["refrozen_count"] == 2 and block["refrozen_summary"] == "2 settled trades re-frozen at the close"
-    assert [s["step"] for s in block["steps"]] == ["after_last_day", "closing"]
+    assert block["refrozen_count"] == 1 and block["refrozen_summary"] == "1 settled trade re-frozen at the close"
+    assert [s["step"] for s in block["steps"]] == ["closing"]
     # the next run has nothing due: its closing step alone, nothing of the last run
     backfill._record_ledger(p, "closing", live.ledger_block({"realised": 0}, "2026-09-23"))
     block = live.read_status(p)["backfill"]["ledger"]
@@ -913,8 +912,8 @@ def test_start_auto_backfill_keeps_the_ledger_block_in_the_published_backfill_bl
     assert not thread.is_alive()
     block = live.read_status(p)["backfill"]
     assert block["running"] is False
-    assert seen and seen[-1] == _book_today().isoformat()                      # the closing step ran at today
+    assert seen == [_book_today().isoformat()]                    # one ledger call, the closing step at today
     assert block["ledger"]["as_of_date"] == _book_today().isoformat()
     assert block["ledger"]["refrozen"][0] == {"trade_id": "a1"}                 # the old bare-id shape tolerated
     assert block["ledger"]["refrozen_count"] == len(seen) and block["ledger"]["refrozen_summary"].endswith("re-frozen at the close")
-    assert [s["step"] for s in block["ledger"]["steps"]] == ["after_last_day", "closing"]
+    assert [s["step"] for s in block["ledger"]["steps"]] == ["closing"]

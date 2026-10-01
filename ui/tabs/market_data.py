@@ -55,7 +55,7 @@ from ui.tabs import data_checks
 from ui.tabs import data_kit as kit
 from ui.tabs.formatting import cap, compact, plain_ids, tidy
 from ui.tabs.formatting import (MISSING, about, contract_name, fx_name, is_fx_pair, issues_drawer, lme_name,
-                                missing_cell, parse_contract_id, plain_words, price_text, quoted_unit, short_date,
+                                missing_cell, parse_contract_id, plain_words, quoted_unit, short_date,
                                 short_root_name)
 
 BBG_CHECK_BUTTON_ID = "market-data-bbg-check-button"   # "Run Bloomberg check" (2026-09-30: a background run)
@@ -1155,7 +1155,7 @@ def _suspect_display(conn: sqlite3.Connection, rows: List[dict]) -> List[dict]:
         rec = dict(r)
         for col in ("value", "previous"):
             v = r.get(col)
-            rec[col] = "" if v is None else price_text(v, unit)     # the unit's tick, an FX pair its own
+            rec[col] = "" if v is None else data_checks.mark_price_text(v, unit)   # the unit's tick, an FX pair its own
         out.append(rec)
     return out
 
@@ -1758,7 +1758,7 @@ def _link(text: str, target: str, hover: str = "", warn: bool = False) -> html.A
 
 
 # ---- 1. the status line
-def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, int], closes: List[dict],
+def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, ...], closes: List[dict],
                 dates: Tuple[int, int], trades: Optional[Tuple[int, List[dict]]] = None) -> list:
     """Last pull (ok / N problems) · Marks 43 of 47 · Reference closes Daily ✓ 5d ✓ MTD ✓ YTD ✗ ·
     Contract dates 9 from Bloomberg, 2 estimated: each green or amber, each a jump to its detail,
@@ -1778,13 +1778,18 @@ def status_line(status: Optional[dict], pull_problems: int, marks: Tuple[int, in
             pull = _link(f"{words} · not connected", BBG_CARD_ID, line, warn=True)
         else:
             pull = _link(f"{words} · ok", BBG_CARD_ID, line)
-    total, arrived = marks
+    total, arrived = marks[0], marks[1]
+    closed = marks[2] if len(marks) > 2 else 0     # prices on a day their exchange was shut: not due, not counted
+    closed_words = (f" {closed:,} more not counted: their exchange was closed that day." if closed else "")
     if not total:
-        marks_link = _link("Marks: none needed", MARKS_SECTION_ID, "The book needs no official price on this date.")
+        marks_link = _link("Marks: none needed" + (f" · {closed:,} exchange closed" if closed else ""),
+                           MARKS_SECTION_ID, "The book needs no official price on this date." + closed_words)
     else:
-        marks_link = _link(f"Marks {arrived:,} of {total:,}", MISSING_PANEL_ID if arrived < total else MARKS_SECTION_ID,
-                           f"{total - arrived:,} of the {total:,} official prices the book needs are not on file for "
-                           "the date." if arrived < total else "Every official price the book needs is on file.",
+        marks_link = _link(f"Marks {arrived:,} of {total:,}" + (f" · {closed:,} exchange closed" if closed else ""),
+                           MISSING_PANEL_ID if arrived < total else MARKS_SECTION_ID,
+                           (f"{total - arrived:,} of the {total:,} official prices the book needs are not on file for "
+                            "the date." if arrived < total else "Every official price the book needs is on file.")
+                           + closed_words,
                            warn=arrived < total)
     bits = [f"{c['period']} {kit.CROSS if c['flag'] else kit.TICK}" for c in closes]
     ref = _link("Reference closes " + " ".join(bits) if bits else "Reference closes: none", PAST_CLOSES_PANEL_ID,
@@ -2290,8 +2295,11 @@ def render(as_of_date: Optional[str], db_path, diag: bool = True) -> tuple:
             history = price_history_summary(conn)
         except Exception as exc:  # noqa: BLE001 -- the card says it could not be read
             history = {"rows": 0, "contracts": 0, "first": "", "last": "", "error": f"{type(exc).__name__}: {exc}"}
-        arrived = sum(1 for r in mark_rows if r["arrived"])
-        line = status_line(feed_status, n_pull, (len(mark_rows), arrived), closes, dates, trades_part)
+        # a price on a past day its exchange was shut (status CLOSED) was never due: left out of the count, named
+        due = [r for r in mark_rows if r["status"] != "CLOSED"]
+        arrived = sum(1 for r in due if r["arrived"])
+        line = status_line(feed_status, n_pull, (len(due), arrived, len(mark_rows) - len(due)), closes, dates,
+                           trades_part)
     finally:
         conn.close()
     drawer = issues_drawer(issues, id=f"{ISSUES_ID}-drawer") or blank

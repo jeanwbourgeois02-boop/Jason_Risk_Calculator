@@ -35,9 +35,11 @@ from ui.tabs.formatting import (
     MINUS, MISSING, is_fx_pair, missing_cell, parse_contract_id, plain_ids, plain_words, price_text, short_date,
 )
 
-STATUS_ORDER = {"MISSING": 0, "CHECK": 1, "OK": 2}
-STATUS_WORDS = {"MISSING": "Missing", "CHECK": "Check", "OK": "OK"}
-STATUS_LEVEL = {"MISSING": "red", "CHECK": "amber", "OK": "green"}
+# CLOSED (2026-10-01, `inventory.CHECK_CLOSED`): a past day the contract's exchange was shut, so no
+# close exists and nothing is to fix; grey, after CHECK and before OK.
+STATUS_ORDER = {"MISSING": 0, "CHECK": 1, "CLOSED": 2, "OK": 3}
+STATUS_WORDS = {"MISSING": "Missing", "CHECK": "Check", "CLOSED": "Exchange closed", "OK": "OK"}
+STATUS_LEVEL = {"MISSING": "red", "CHECK": "amber", "CLOSED": "grey", "OK": "green"}
 
 # What a failed or partial pull step leaves the book with, in plain words (display only).
 STEP_EFFECT = {
@@ -99,10 +101,28 @@ def price_name(instrument_id: str, mark_type: str, settle_date: str, root_id: st
                     strike=parsed["strike"] if parsed["option_type"] else None, option_type=parsed["option_type"] or "")
 
 
-def _signed(value: Optional[float], unit: str) -> str:
+def size_ref(value) -> Optional[float]:
+    """A price's whole part, passed to `price_text` as its reference so a tonne price under
+    1,000 (SGX iron ore at 96.5 USD/t) takes the 2 decimals its tick needs (1 in CNY), while the
+    value's own decimals never add one (copper at 9,512.5 stays "9,512"; 2026-10-01)."""
+    try:
+        return float(int(abs(float(value))))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def mark_price_text(value, unit: str) -> str:
+    """A mark or close on the Data tab's lists at its tick: `price_text` with the price's own
+    size as the reference ("96.50" for iron ore, "9,512" for copper)."""
+    return price_text(value, unit, fill=size_ref(value))
+
+
+def _signed(value: Optional[float], unit: str, ref=None) -> str:
+    """A move with its sign, at the tick of the price it moved (`ref`, the mark): an iron ore
+    move reads "+0.50", a copper move of 35 "+35"."""
     if value is None:
         return MISSING
-    text = price_text(abs(value), unit)
+    text = price_text(abs(value), unit, fill=size_ref(ref) if ref is not None else None)
     try:
         zero = float(text.replace(",", "")) == 0
     except ValueError:
@@ -192,19 +212,19 @@ def mark_rows(conn: sqlite3.Connection, as_of: str, frame: pd.DataFrame) -> List
         blocks = [str(t) for t in (r.get("blocks") if isinstance(r.get("blocks"), list) else [])]
         name = price_name(iid, mt, settle, _s(r.get("root_id")), roots)
         rows.append({
-            "status": status, "status_rank": STATUS_ORDER.get(status, 3),
+            "status": status, "status_rank": STATUS_ORDER.get(status, len(STATUS_ORDER)),
             "name": name, "name_tip": " · ".join(x for x in (iid, mt, settle, f"plays {_s(r.get('roles'))}"
                                                               if _s(r.get("roles")) else "") if x),
             "sector": sector, "group": _sector_label(sector), "commodity": commodity,
-            "mark": price_text(value, unit) if value is not None else (_s(r.get("value")) or MISSING),
+            "mark": mark_price_text(value, unit) if value is not None else (_s(r.get("value")) or MISSING),
             "mark_tip": ("" if mark_date == as_of or not mark_date
                          else f"no mark for {short_date(as_of)}: the last on file is from {short_date(mark_date)}"),
             "source": source_label(_s(r.get("source"))) or MISSING, "source_code": _s(r.get("source")),
             "time": mark_time_words(mark_date or as_of, snapped) if snapped else MISSING, "snapped_at": snapped,
-            "prev": price_text(prev, unit) if prev is not None else MISSING, "prev_raw": prev,
+            "prev": mark_price_text(prev, unit) if prev is not None else MISSING, "prev_raw": prev,
             "prev_date": short_date(_s(r.get("prev_date"))) if _s(r.get("prev_date")) else "",
             "prev_date_iso": _s(r.get("prev_date")),
-            "change": _signed(change, unit), "change_raw": change, "pct": _pct(pct), "pct_raw": pct,
+            "change": _signed(change, unit, value if value is not None else prev), "change_raw": change, "pct": _pct(pct), "pct_raw": pct,
             "arrived": _bool(r.get("arrived")), "arrived_reason": _s(r.get("arrived_reason")),
             "fresh": _bool(r.get("fresh")), "fresh_reason": _s(r.get("fresh_reason")),
             "sane": _bool(r.get("sane")), "sane_reason": _s(r.get("sane_reason")),
@@ -494,7 +514,7 @@ MARK_NUMBER_PARTS = ("mark", "prev", "change")
 MARK_FILTER_DEFAULT: Dict[str, Any] = {"status": [], "group": [], "source": [], "mark": "", "prev": "", "change": ""}
 MARK_COL_TYPE = "md-col"            # a heading funnel's control: {"type", "part"}
 STATUS_OPTIONS = [{"label": "Missing", "value": "MISSING"}, {"label": "Check", "value": "CHECK"},
-                  {"label": "OK", "value": "OK"}]
+                  {"label": "Exchange closed", "value": "CLOSED"}, {"label": "OK", "value": "OK"}]
 
 
 def normal_marks_filter(state: Optional[dict]) -> Dict[str, Any]:
@@ -609,8 +629,10 @@ def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: i
     shown = kit.sort_records(rows, sort, MARK_SORT)
     n_missing = sum(1 for r in rows if r["status"] == "MISSING")
     n_check = sum(1 for r in rows if r["status"] == "CHECK")
+    n_closed = sum(1 for r in rows if r["status"] == "CLOSED")
     label = f"All prices · {total:,}" if len(rows) == total else f"Filtered · {len(rows):,} of {total:,} prices"
-    label += "".join(f" · {n:,} {words}" for n, words in ((n_missing, "missing"), (n_check, "to check")) if n)
+    label += "".join(f" · {n:,} {words}" for n, words in ((n_missing, "missing"), (n_check, "to check"),
+                                                                 (n_closed, "exchange closed")) if n)
     # one previous-close date for every row: said once, in the heading, not beside every figure
     prev_dates = {r["prev_date"] for r in rows if r["prev_raw"] is not None}
     one_prev = next(iter(prev_dates)) if len(prev_dates) == 1 else ""
@@ -630,14 +652,15 @@ def marks_table(rows: List[dict], sort: Optional[dict], sort_type: str, total: i
         sane_ok = None if r["sane_reason"] in ("no mark to compare", "no earlier close to compare") else r["sane"]
         body.append(html.Tr([
             kit.td(kit.chip(STATUS_WORDS.get(r["status"], r["status"]), STATUS_LEVEL.get(r["status"], "grey"),
-                            r["arrived_reason"] if r["status"] == "MISSING" else None), left=True),
+                            r["arrived_reason"] if r["status"] in ("MISSING", "CLOSED") else None), left=True),
             kit.td(r["name"], left=True, title=r["name_tip"]),
             kit.td(mark),
             kit.td(r["source"], left=True, title=_tip(r["source_code"])),
             kit.td(r["time"], left=True, title=_tip(r["snapped_at"])),
             kit.td(prev, title=_tip(r["prev_date_iso"])),
             kit.td(change),
-            kit.td(kit.check_cell(r["arrived"], r["arrived_reason"])),
+            # an exchange shut that day: nothing was due, so the dash with its reason, not a red cross
+            kit.td(kit.check_cell(None if r["status"] == "CLOSED" else r["arrived"], r["arrived_reason"])),
             kit.td(kit.check_cell(r["fresh"] if r["arrived"] else None, r["fresh_reason"])),
             kit.td(kit.check_cell(sane_ok, r["sane_reason"])),
             kit.td(kit.check_cell(units_ok, r["units_reason"],

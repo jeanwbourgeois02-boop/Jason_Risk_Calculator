@@ -26,7 +26,8 @@ not hold yet (`inputs_missing`); the backfill asks Bloomberg's history for those
 `mark_checks(conn, as_of)` (2026-09-29, Screens redesign Phase G) is the Data tab's marks
 check: every mark of `mark_inventory` checked four ways (arrived, fresh, a sane move, units
 against the fills), with the trades it prices and what a problem does to them, MISSING and
-CHECK first. It reports only: a flagged mark stays the official mark.
+CHECK first; on a past day its exchange was shut, a key with no close is CLOSED, not MISSING
+(2026-10-01). It reports only: a flagged mark stays the official mark.
 
 `unrecognised(conn)` (2026-09-29, every row loads) lists the trades whose contract the parser
 could not resolve (product 'UNRECOGNISED'): no mark, no Bloomberg ask, no P&L until mapped.
@@ -678,7 +679,8 @@ def contract_dates_inventory(conn: sqlite3.Connection, as_of: str) -> pd.DataFra
 CHECK_OK = "OK"
 CHECK_CHECK = "CHECK"
 CHECK_MISSING = "MISSING"
-_CHECK_ORDER = {CHECK_MISSING: 0, CHECK_CHECK: 1, CHECK_OK: 2}
+CHECK_CLOSED = "CLOSED"     # a past day its exchange was shut: no close exists, nothing to fix (2026-10-01)
+_CHECK_ORDER = {CHECK_MISSING: 0, CHECK_CHECK: 1, CHECK_CLOSED: 2, CHECK_OK: 3}
 
 SANE_MULTIPLE = 5.0         # a move beyond 5 x the median absolute daily change is flagged
 SANE_HISTORY = 60           # ... over the key's last 60 closes on file
@@ -695,7 +697,7 @@ MARK_CHECK_COLUMNS = [
     "instrument_id", "root_id", "exchange", "mark_type", "settle_date", "value", "mark_date", "source",
     "snapped_at", "arrived", "arrived_reason", "fresh", "fresh_reason", "prev_close", "prev_date", "change",
     "change_pct", "usual_move_pct", "sane_limit_pct", "sane", "sane_reason", "avg_fill", "units_ok", "units_reason", "roles", "blocks",
-    "trade_names", "blocks_what", "requestable", "status"]
+    "trade_names", "blocks_what", "requestable", "exchange_closed", "status"]
 
 
 def _num(value) -> Optional[float]:
@@ -861,8 +863,21 @@ def mark_checks(conn: sqlite3.Connection, as_of: str, today: Optional[str] = Non
       ("COPAR3: no P&L"), a flagged mark still in use ("COPAR3's P&L uses this price: check
       it"); '' on an OK row.
     - requestable: False for a mark no pull can ask for (library.unrequestable_reason).
-    - status: MISSING (not arrived) | CHECK (arrived, a check failed) | OK; sorted MISSING,
-      CHECK, OK, then by instrument.
+    - exchange_closed: the exchange calendar id (`config/contracts.csv`'s, 'CN', 'LME') when
+      `as_of` is a past day on which the key's own exchange was shut (`exchange_shut`, the rule
+      `close_completeness` applies), else ''. Never set for an FX pair (a USD-conversion SPOT
+      included: config/holidays.txt, as before) nor on today.
+    - status: MISSING (not arrived) | CHECK (arrived, a check failed) | CLOSED (not arrived on a
+      past day its exchange was shut: no close exists, so nothing is missing; arrived_reason says
+      "exchange closed" and blocks_what what the trades use instead) | OK; sorted MISSING, CHECK,
+      CLOSED, OK, then by instrument.
+
+    Exchange holidays (2026-10-01, the follow-up of `close_completeness`'s): on a past day a key
+    whose exchange was shut is never flagged missing (status CLOSED, said in words, never
+    dropped), and a row on file for that day that is not the 17:00 close (a live press on the
+    holiday) is not flagged stale either, since no close will ever replace it. "Yesterday" for a
+    key on an exchange calendar is its exchange's last open business day, so the first close
+    after a holiday week reads as a day's move against the last close before it.
 
     A pure read: never writes marks, never asks Bloomberg (it may bring the library up to date
     first, as every library reader does). A flagged mark stays the official mark the valuation
@@ -877,6 +892,7 @@ def mark_checks(conn: sqlite3.Connection, as_of: str, today: Optional[str] = Non
     inv = inv[inv["mark_type"] != LME_CURVE]
     if inv.empty:
         return pd.DataFrame([], columns=MARK_CHECK_COLUMNS)
+    calendar_of = _exchange_calendars(conn, set(inv["instrument_id"]))
 
     # Which trades each mark prices, and in which role (the keys mark_inventory uses).
     uses: dict = {}
@@ -918,9 +934,16 @@ def mark_checks(conn: sqlite3.Connection, as_of: str, today: Optional[str] = Non
         return exchanges[root_id]
 
     day = _date.fromisoformat(as_of)
-    back = business_days(day - timedelta(days=10), day - timedelta(days=1))
-    yesterday = back[-1].isoformat() if back else ""
+    back = [d.isoformat() for d in business_days(day - timedelta(days=21), day - timedelta(days=1))]
     live_day = as_of >= today
+    yesterdays: dict = {}
+
+    def yesterday_of(cal: str) -> str:
+        """The last business day before as_of on which the exchange calendar `cal` was open (the
+        FX calendar's for '' or an FX pair), so a holiday week is not read as days of no close."""
+        if cal not in yesterdays:
+            yesterdays[cal] = next((d for d in reversed(back) if not exchange_shut(cal, d)), back[-1] if back else "")
+        return yesterdays[cal]
 
     out = []
     for rec in inv.to_dict("records"):
@@ -929,6 +952,9 @@ def mark_checks(conn: sqlite3.Connection, as_of: str, today: Optional[str] = Non
         root_id = root_id if library.is_contract_root(root_id) else ""
         use = uses.get((iid, settle, mark_type), {"trades": [], "roles": {}})
         requestable = not rec.get("reason")
+        cal = calendar_of.get(iid, "")
+        closed_cal = cal if not live_day and exchange_shut(cal, as_of) else ""
+        yesterday = yesterday_of(cal)
         series = _series(conn, iid, mark_type, settle, as_of, SANE_HISTORY + 1)
         today_row = series[0] if series and series[0][0] == as_of else None
         past = [s for s in series if s[0] < as_of]
@@ -941,11 +967,17 @@ def mark_checks(conn: sqlite3.Connection, as_of: str, today: Optional[str] = Non
                "mark_date": shown[0] if shown else None, "source": shown[2] if shown else None,
                "snapped_at": shown[3] if shown else None, "roles": ", ".join(sorted(use["roles"])),
                "blocks": list(use["trades"]), "trade_names": ", ".join(_trade_names(use["trades"], trades)),
-               "requestable": requestable}
+               "requestable": requestable, "exchange_closed": closed_cal}
 
         # 1. Arrived: an official mark dated as_of.
         if arrived:
             row["arrived"], row["arrived_reason"] = True, ""
+        elif closed_cal:
+            why = (f"exchange closed: {row['exchange'] or closed_cal} was shut on {_day_words(as_of)}, "
+                   "so there is no close that day")
+            if past:
+                why += f"; last close on file {_day_words(past[0][0])}"
+            row["arrived"], row["arrived_reason"] = False, why
         else:
             why = f"no official mark for {_day_words(as_of)}"
             if rec["status"] in (STATUS_INTERP, STATUS_MANUAL):
@@ -961,11 +993,16 @@ def mark_checks(conn: sqlite3.Connection, as_of: str, today: Optional[str] = Non
         # 2. Fresh: as_of's own mark, not one carried or re-dated.
         if not arrived:
             row["fresh"] = False
-            row["fresh_reason"] = f"carried from {_day_words(past[0][0])}" if past else "nothing on file"
+            row["fresh_reason"] = (("exchange closed that day; " if closed_cal else "")
+                                   + (f"carried from {_day_words(past[0][0])}" if past else "nothing on file"))
         else:
             stamp = str(today_row[3] or "")
             is_close = is_close_row(mark_type, as_of, stamp, today, instrument_id=iid)
-            if not live_day:
+            if closed_cal:
+                # The exchange was shut: no close will ever replace this row (the backfill does
+                # not ask a shut day), so a live press's row stands and is not stale.
+                ok, reason = True, ""
+            elif not live_day:
                 ok = is_close
                 reason = "" if ok else (f"stamped {stamp or 'without a time'}, not the {_day_words(as_of)} close "
                                         "(the next pull's backfill replaces it)")
@@ -1055,7 +1092,7 @@ def mark_checks(conn: sqlite3.Connection, as_of: str, today: Optional[str] = Non
 
         # Status, and what a problem does to the trades it prices.
         if not arrived:
-            status = CHECK_MISSING
+            status = CHECK_CLOSED if closed_cal else CHECK_MISSING
         elif row["fresh"] and row["sane"] and row["units_ok"]:
             status = CHECK_OK
         else:
@@ -1068,7 +1105,7 @@ def mark_checks(conn: sqlite3.Connection, as_of: str, today: Optional[str] = Non
             if not tids:
                 continue
             names = _trade_names(tids, trades)
-            if status == CHECK_MISSING:
+            if status in (CHECK_MISSING, CHECK_CLOSED):
                 if estimate is None:
                     # The near-marks rule's order (valuation._mark_near): a forward along the
                     # day's own curve first, then the same mark on the nearest closes in time.

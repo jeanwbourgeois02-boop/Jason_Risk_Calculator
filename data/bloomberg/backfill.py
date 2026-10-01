@@ -165,7 +165,9 @@ the close are left as they are.
 
 Only if `engine.pnl.ledger.realise_settled` is importable, trades settled before a day are
 frozen once that day's marks are on file: every day's SPOT and FUTURE_PX (all a freeze
-reads) are written together before anything else, see `backfill`. This module no longer writes a
+reads) are written together before anything else, see `backfill`. The automatic run after a
+pull freezes once, at its end (`LEDGER_AT_END`, 2026-10-01: one ledger call per press, the
+live pull leaving its own out); a standalone call freezes as it goes. This module no longer writes a
 `pnl_snapshots` row; that table and its "one snapshot per day" model are retired by the
 pnl-engine task, which recomputes `ltd(conn, date)` straight from `marks` instead.
 
@@ -1663,9 +1665,17 @@ _scale_reports: Dict[str, dict] = {}
 # db -> what the last run's requests and steps did (2026-09-29): {"errors", "error_count",
 # "requests", "not_numbers", "not_number_count"}, published under the "backfill" block.
 _run_reports: Dict[str, dict] = {}
-# db -> rows the last auto run's backfill() call wrote on its connection (`total_changes`: marks,
-# quotes, instruments, the ledger's own rows), read by `_closing_step_needed` (2026-09-30)
-_run_writes: Dict[str, int] = {}
+# One ledger call per press (user yes, 2026-10-01: "the ledger runs up to three times per press"):
+# the auto-backfill a pull starts (`start_auto_backfill` -> `auto_backfill`) ends with exactly ONE
+# `realise_settled(conn, today)`, whatever the run did (nothing written, no past day due, no
+# trade, a backfill that raised or was cut short), unless the database cannot be opened. The
+# live pull reads this to leave out its own call on a press whose auto-backfill runs (a thread
+# returned by `start_auto_backfill`; None means no run started and no ledger call was made).
+# The standalone `backfill()` / CLI keeps its own ledger calls.
+LEDGER_AT_END = True
+# db -> True once this run's closing ledger step was made (or attempted), so `start_auto_backfill`
+# makes it itself when `auto_backfill` stopped before reaching it (2026-10-01)
+_ledger_ran: Dict[str, bool] = {}
 
 
 def _empty_run_report() -> dict:
@@ -1717,7 +1727,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
              on_day: Optional[Callable[[dict], None]] = None, today: Optional[date] = None,
              quote_fetch: Optional[Callable] = None,
              on_stage: Optional[Callable[[str], None]] = None,
-             session: Optional[Tuple] = None, reuse_listing: bool = False) -> List[dict]:
+             session: Optional[Tuple] = None, reuse_listing: bool = False,
+             ledger: bool = True) -> List[dict]:
     """Run the backfill. Returns one dict per business day of [start, end], in date order:
     {day, status: DONE|SKIPPED|NO_CLOSES|ERROR, closes, fwd_outrights, future_px,
     missing_pairs, missing_pair_reasons, missing_marks, realised, unrealisable,
@@ -1772,7 +1783,8 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     header's reference dates first, then newest first); a day it leaves out, or one
     already complete, is SKIPPED. Without it every incomplete day runs in date order and
     realise_settled is called after each day, as before; with it realise_settled runs
-    once, after the last day. `on_day(result)` is called as each day finishes.
+    once, after the last day; with `ledger=False` (auto_backfill) never here, see below.
+    `on_day(result)` is called as each day finishes.
 
     `fetch(session, service, tickers, field, day) -> {ticker: value|None}` (SPOT, per
     day; the field is PX_LAST) defaults to pull_marks.fetch_historical_series
@@ -1797,13 +1809,19 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     these days; what each day lacks is then read through the same listing memo
     (`_listed_days`), every day kept whose fingerprint has not moved since and the others
     worked out afresh, instead of `close_completeness` over the whole span a second time. The
-    same rows: it applies only when `today` is the book's today (the listing's own)."""
+    same rows: it applies only when `today` is the book's today (the listing's own).
+
+    `ledger` (2026-10-01, one ledger call per press): False leaves out every
+    `realise_settled` call of this function (after each day and after the last day), every
+    day's `realised` then None and its flag "realisation at the end of the run". Only
+    `auto_backfill` passes it, since its closing step makes the press's one ledger call
+    (`LEDGER_AT_END`); a standalone call or the CLI keeps the default and freezes here."""
     from data.ingest.schema import connect
     from data.bloomberg.inventory import close_completeness, _needed_marks
     from data.bloomberg.live import _ensure_fx_instruments, book_today
     from data.bloomberg import pull_marks as pm
     borrowed = session           # the caller's (session, service), never stopped here (2026-09-30)
-    realise_settled = _import_realise_settled()
+    realise_settled = _import_realise_settled() if ledger else None
     price_close = _import_price_close()
     today = today or book_today()
     today_iso = today.isoformat()
@@ -1823,7 +1841,6 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                 pass
 
     conn = connect(Path(db_path))
-    changes_before = conn.total_changes
     asks = _Asks(conn, log)
     try:
         # A conversion pair or an option's pair may never have been traded outright, and
@@ -1865,7 +1882,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
             work = todo
         log(f"Backfill {start} .. {end}: {len(days)} business days, {len(work)} to compute, {len(pairs)} pairs "
             f"(SPOT + FWD_OUTRIGHT + FUTURE_PX).")
-        if realise_settled is None:
+        if ledger and realise_settled is None:
             log(_problem("  note: engine.pnl.ledger.realise_settled not importable; marks only, no realisation "
                          "this run."))
         if price_close is None:
@@ -2254,18 +2271,20 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     options_note = step_errors["options"]
                 # -- step 4: the ledger, after each day when no order is given
                 realised, unrealisable, flag = None, [], "realisation after the last day"
-                ledger = ledger_block(None)          # what the ledger did on this day, re-freeze included
-                if realise_settled is None:
+                day_ledger = ledger_block(None)      # what the ledger did on this day, re-freeze included
+                if not ledger:
+                    flag = "realisation at the end of the run"   # auto_backfill's one call (2026-10-01)
+                elif realise_settled is None:
                     flag = "no realisation (realise_settled unavailable)"
                 elif order is None:
                     try:
                         _release_lock(conn)
                         led = realise_settled(conn, day)
-                        ledger = ledger_block(led, day)
-                        realised, unrealisable = ledger["realised"], ledger["unrealisable"]
+                        day_ledger = ledger_block(led, day)
+                        realised, unrealisable = day_ledger["realised"], day_ledger["unrealisable"]
                         flag = "complete" if not unrealisable else f"unrealisable={[u['trade_id'] for u in unrealisable]}"
-                        if ledger["refrozen_summary"]:
-                            flag += f"  {ledger['refrozen_summary']}"
+                        if day_ledger["refrozen_summary"]:
+                            flag += f"  {day_ledger['refrozen_summary']}"
                     except Exception as exc:  # engine/pnl/ledger.py is owned by another task; never let its
                         # in-progress state stop marks from being written -- report and move on.
                         flag = f"realise_settled raised: {exc!r}"
@@ -2286,14 +2305,14 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                         + (f"  realised={realised}" if realised is not None else "") + f"  {flag}"
                         + (f"  stopped: {', '.join(step_errors)}" if step_errors else ""))
                 # a problem line (the in-app log keeps it) when a step stopped or the ledger has news
-                log(_problem(line) if step_errors or unrealisable or ledger["refrozen_summary"] else line)
+                log(_problem(line) if step_errors or unrealisable or day_ledger["refrozen_summary"] else line)
                 results[d] = {"day": day, "status": status, "closes": len(p["spot_rows"]),
                               "fwd_outrights": fwd_written, "future_px": len(p["fut_rows"]),
                               "missing_pairs": p["missing_pairs"], "missing_pair_reasons": p["pair_reasons"],
                               "missing_marks": missing_marks, "realised": realised, "unrealisable": unrealisable,
-                              "refrozen": ledger["refrozen"], "kept": ledger["kept"],
-                              "refrozen_count": ledger["refrozen_count"],
-                              "refrozen_summary": ledger["refrozen_summary"],
+                              "refrozen": day_ledger["refrozen"], "kept": day_ledger["kept"],
+                              "refrozen_count": day_ledger["refrozen_count"],
+                              "refrozen_summary": day_ledger["refrozen_summary"],
                               "options_priced": options_priced, "options_skipped": options_skipped,
                               "options_note": options_note, "options_closed_out": options_closed_out,
                               "futures_options_priced": futures_options_priced,
@@ -2307,12 +2326,12 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                 try:
                     _release_lock(conn)
                     led = realise_settled(conn, span_end.isoformat())
-                    ledger = _record_ledger(db_path, "after_last_day", ledger_block(led, span_end.isoformat()))
-                    unrealisable = ledger.get("unrealisable") or []
-                    line = (f"  realised after the last day: {ledger['realised']}"
-                            + (f"  {ledger['refrozen_summary']}" if ledger["refrozen_summary"] else "")
+                    last = _record_ledger(db_path, "after_last_day", ledger_block(led, span_end.isoformat()))
+                    unrealisable = last.get("unrealisable") or []
+                    line = (f"  realised after the last day: {last['realised']}"
+                            + (f"  {last['refrozen_summary']}" if last["refrozen_summary"] else "")
                             + (f"  unrealisable={[u.get('trade_id') if isinstance(u, dict) else u for u in unrealisable]}" if unrealisable else ""))
-                    log(_problem(line) if ledger["refrozen_summary"] or unrealisable else line)
+                    log(_problem(line) if last["refrozen_summary"] or unrealisable else line)
                 except Exception as exc:  # noqa: BLE001 -- as above: report and move on
                     _rollback(conn)
                     asks.error("ledger", f"realise_settled after the last day raised: {_plain_error(exc)}",
@@ -2347,11 +2366,6 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
                     pass
     finally:
         _merge_asks(db_path, asks)
-        try:
-            key = _db_key(db_path)
-            _run_writes[key] = _run_writes.get(key, 0) + conn.total_changes - changes_before
-        except Exception:  # noqa: BLE001 -- unknown means written: the closing step then runs
-            _run_writes[_db_key(db_path)] = 1
         try:
             conn.close()
         except Exception:  # noqa: BLE001
@@ -2783,21 +2797,17 @@ def _record_ledger(db_path, step: str, block: dict) -> dict:
     status records what the ledger's re-freeze did) under the status file's "backfill" key
     as "ledger": one block of `live.ledger_block`'s shape (the live pull's `status["ledger"]`
     exactly: as_of_date, realised, unrealisable, repaired, refrozen, kept, refrozen_count,
-    refrozen_summary) summed over the run's calls -- `backfill()`'s call after the last
-    worked day (step "after_last_day", which is where a re-freeze at a past close lands)
-    and the closing step (`_realise_after_backfill`, "closing") -- with each call's own
-    block under "steps". The after-last-day call, the run's first, starts the block
-    afresh; the closing step merges into it unless the block already holds a closing (a
-    run with no due days makes no after-last-day call), so a stale run never shows.
+    refrozen_summary), with the call's own block under "steps" as [{"step": step, ...}].
+    Since 2026-10-01 a run makes ONE ledger call (`LEDGER_AT_END`): an auto run's closing step
+    (`_realise_after_backfill`, "closing"), or a standalone `backfill()`'s call after the last
+    worked day ("after_last_day"). Each call starts the block afresh, so a stale run never
+    shows (until 2026-10-01 an auto run made both and the block summed them).
     Returns the step's block."""
     from data.bloomberg.live import patch_status, refrozen_summary
     key = _db_key(db_path)
     with _publish_lock:
         published = _published.setdefault(key, {})
-        current = published.get("ledger") if step == "closing" else None
-        if current and any(s.get("step") == "closing" for s in current.get("steps") or []):
-            current = None
-        steps = list((current or {}).get("steps") or []) + [{"step": step, **block}]
+        steps = [{"step": step, **block}]
         refrozen = [r for s in steps for r in s.get("refrozen") or []]
         merged = {"as_of_date": block.get("as_of_date"),
                   "realised": sum(s.get("realised") or 0 for s in steps),
@@ -2815,16 +2825,24 @@ def _record_ledger(db_path, step: str, block: dict) -> dict:
 
 
 def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) -> Optional[dict]:
-    """The backfill's closing step: the ledger's plain `realise_settled(conn, today)` once
-    the past closes are on file, so a trade settled since the live pull's own freeze (which
-    runs before the backfill of the same button press) is frozen at its settlement date's
-    close, and one the ledger froze at a live row is frozen again at the close that replaced
-    it (the ledger's rule, 2026-09-22). The call is the ledger's plain one. Returns the call's `live.ledger_block` (None when the ledger is not
-    importable or raised), after recording it in the status file (`_record_ledger`). A raise,
-    the connection's included, is recorded in the run's "errors" (step "closing"), never raised
-    (2026-09-29)."""
+    """The backfill's closing step, the press's ONE ledger call (`LEDGER_AT_END`, user yes
+    2026-10-01): the ledger's plain `realise_settled(conn, today)` once the past closes are on
+    file, so a trade settled before today is frozen at its settlement date's close, and one
+    the ledger froze at a live row (an earlier press) is frozen again at the close that
+    replaced it (the ledger's rule, 2026-09-22). Until 2026-10-01 the live pull froze first,
+    backfill() again after its last worked day and this step a third time; the one call at
+    today covers both, since the ledger looks at every row whose value date is before its
+    as-of and freezes from the marks on or before each trade's own settlement, never from the
+    as-of. Returns the call's `live.ledger_block` (None when the ledger is not importable or
+    raised), after recording it in the status file (`_record_ledger`). A raise, the
+    connection's included, and a ledger that cannot be imported are recorded in the run's
+    "errors" (step "closing"), never raised (2026-09-29)."""
+    _ledger_ran[_db_key(db_path)] = True
     realise_settled = _import_realise_settled()
     if realise_settled is None:
+        log(_problem("Auto-backfill: engine.pnl.ledger.realise_settled not importable; no trade frozen this press."))
+        _report_error(db_path, "closing", "the ledger could not be loaded, so no settled trade was frozen this press",
+                      today.isoformat())
         return None
     from data.ingest.schema import connect
     conn = None
@@ -2841,6 +2859,8 @@ def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) ->
             log(_problem(f"Auto-backfill: {len(ids)} settled trade(s) could not be frozen: {ids}."))
         return block
     except Exception as exc:  # noqa: BLE001 -- as in backfill(): report and move on
+        if conn is not None:
+            _rollback(conn)
         log(_problem(f"  realise_settled raised: {exc!r}"))
         _report_error(db_path, "closing", f"the closing realise_settled raised: {_plain_error(exc)}",
                       today.isoformat())
@@ -2851,59 +2871,6 @@ def _realise_after_backfill(db_path, today: date, log: Callable[[str], None]) ->
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
-
-
-def _closing_step_needed(db_path, today: date, session, written: int) -> bool:
-    """False only when the closing `realise_settled(conn, today)` could do nothing but repeat
-    the live pull's own call of the same press (2026-09-30, the pull's speed: a press ran the
-    ledger on the same date and the same marks twice): the backfill runs on a session borrowed
-    from that pull (so it follows it straight away), wrote no row since, and the pull's status
-    holds a ledger call dated `today` that went through (no error, not skipped), with no
-    upload since that pull started and the library not marked out of date (the trades did
-    not change). Anything unknown, or any doubt, is True: the step runs as before."""
-    if session is None or written:
-        return True
-    try:
-        from data.bloomberg.live import read_status
-        status = read_status(db_path) or {}
-        led = status.get("ledger")
-        if (not isinstance(led, dict) or led.get("as_of_date") != today.isoformat() or "error" in led
-                or "skipped" in led or led.get("realised") is None):
-            return True
-        pulled = datetime.fromisoformat(str(status.get("time") or ""))
-        if pulled.tzinfo is None:
-            return True
-        from data.ingest.schema import BUSY_TIMEOUT_SECONDS
-        conn = sqlite3.connect(str(Path(db_path)), timeout=BUSY_TIMEOUT_SECONDS)   # a read: no schema pass
-        try:
-            state = conn.execute("SELECT dirty FROM bbg_library_state WHERE id = 1").fetchone()
-            if state is None or state[0]:
-                return True
-            try:
-                last = conn.execute("SELECT MAX(uploaded_at) FROM upload_report").fetchone()
-            except sqlite3.OperationalError:
-                last = None                      # no upload ever recorded on this database
-        finally:
-            conn.close()
-        if last and last[0]:
-            uploaded = datetime.fromisoformat(str(last[0]))
-            if uploaded.tzinfo is None or uploaded >= pulled:
-                return True
-        return False
-    except Exception:  # noqa: BLE001 -- in doubt, the step runs
-        return True
-
-
-def _pull_ledger_repeat(db_path, today: date) -> dict:
-    """What the closing call would have returned when `_closing_step_needed` is False: the
-    same call on the same trades and marks as the pull's, so nothing newly frozen, repaired
-    or re-frozen, and the same trades unrealisable or kept (the ledger works both lists out
-    afresh on every call). Recorded as the run's "closing" step, so the status never shows
-    an earlier run's re-freeze as this one's."""
-    from data.bloomberg.live import read_status
-    led = (read_status(db_path) or {}).get("ledger") or {}
-    return ledger_block({"realised": 0, "unrealisable": list(led.get("unrealisable") or []), "repaired": [],
-                         "refrozen": [], "kept": list(led.get("kept") or [])}, today.isoformat())
 
 
 # --------------------------------------------------------------------------- risk history (2026-09-30)
@@ -3473,16 +3440,21 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
 
     Fault isolation (2026-09-29, Phase G): this never raises. The listing of the days, the
     backfill and the bookkeeping are guarded on their own and a failure is recorded in the
-    run's report (`_run_reports`, published as "errors"); the closing step
-    (`_realise_after_backfill`) runs whatever the backfill did, as long as there are trades
-    and a past day. A day whose failures include a request that failed or was not sent, or a
-    step that raised (`is_transient`), is due again on the next press whatever its age.
+    run's report (`_run_reports`, published as "errors"). A day whose failures include a
+    request that failed or was not sent, or a step that raised (`is_transient`), is due again
+    on the next press whatever its age.
+
+    One ledger call per press (user yes, 2026-10-01; `LEDGER_AT_END`): `backfill()` is called
+    with `ledger=False`, and the run ends, in a `finally`, with the closing step
+    (`_realise_after_backfill`, `realise_settled(conn, today)`) UNCONDITIONALLY: with or
+    without trades, past days due or rows written, whether the listing or the backfill raised.
+    The live pull leaves out its own call on such a press. Until 2026-10-01 the step was left
+    out with no trade or no past day, or when it could only repeat the pull's own call, and
+    `backfill()` made a second call after its last worked day.
 
     The pull's speed (2026-09-30): `session`, a `(session, service)` borrowed from the live
     pull, is handed to `backfill()` and never stopped here. The listing of the past days
-    keeps each day's answer while nothing it reads has changed (`_listed_days`). The closing
-    step is left out when it could only repeat the pull's own ledger call
-    (`_closing_step_needed`)."""
+    keeps each day's answer while nothing it reads has changed (`_listed_days`)."""
     from data.bloomberg.live import book_today
     key = _db_key(db_path)
     _run_reports[key] = _empty_run_report()      # this run's errors, requests and refused values (2026-09-29)
@@ -3492,8 +3464,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     signatures: Dict[str, frozenset] = {}
     refs: List[date] = []
     planned = False       # the days were listed: their outcome is recorded whatever happens next
-    closing = True        # the closing ledger step runs unless there is no trade or no past day
-    _run_writes.pop(key, None)    # rows the backfill() call writes, if one runs (2026-09-30)
+    _ledger_ran.pop(key, None)    # set by the closing step below (2026-10-01)
     seconds = _step_seconds[key] = {}   # where this run's time went (2026-10-01)
     started = t0 = _perf()
 
@@ -3518,11 +3489,9 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             earliest = _earliest_trade_date(conn)
             if earliest is None:
                 log("Auto-backfill: no trades in the database; nothing to do.")
-                closing = False
-                return []
+                return []                             # the closing step still runs (2026-10-01)
             yesterday = today - timedelta(days=1)
             if earliest > yesterday:
-                closing = False
                 return []
             version = state_version()
             listed = _listed_days(conn, key, earliest, yesterday, version)
@@ -3587,7 +3556,7 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             backfill(db_path, min(order), max(order), fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
                      session_factory=session_factory, host=host, port=port, log=log, scale_fetch=scale_fetch,
                      order=order, on_day=_on_day, quote_fetch=quote_fetch, on_stage=on_stage, session=session,
-                     reuse_listing=True)
+                     reuse_listing=True, ledger=False)   # the one ledger call is the closing step below
         except Exception as exc:  # noqa: BLE001 -- recorded; the closing step and the bookkeeping still run
             log(_problem(f"Auto-backfill: the backfill stopped: {exc!r}"))
             _report_error(db_path, "plan", f"the backfill stopped: {_plain_error(exc)}")
@@ -3600,15 +3569,9 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     finally:
         seconds.setdefault("listing", round(_perf() - t0, 2))   # a run that worked no day
         started = _perf()
-        if closing and not _closing_step_needed(db_path, today, session, _run_writes.get(key, 0)):
-            closing = False                            # it would repeat the pull's own call (2026-09-30)
-            try:
-                _record_ledger(db_path, "closing", _pull_ledger_repeat(db_path, today))
-            except Exception:  # noqa: BLE001 -- the status file is a report
-                pass
-        if closing:
-            _tell("the closing ledger step")
-            _realise_after_backfill(db_path, today, log)   # guarded inside: a raise is recorded
+        # the press's one ledger call, always (2026-10-01, `LEDGER_AT_END`)
+        _tell("the closing ledger step")
+        _realise_after_backfill(db_path, today, log)   # guarded inside: a raise is recorded
         seconds["closing"] = round(_perf() - started, 2)
         started = _perf()
         if planned:
@@ -3994,8 +3957,8 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
       "seconds": where the press's backfill time went (2026-10-01, read off the Data tab's
               diagnosis report): {"listing" (the past days and what each lacks), "past_closes"
               (the backfill() call: closes, forwards, futures, LME, option inputs and past-close
-              pricing; absent when no day was due), "closing" (the closing ledger step, or its
-              skip check), "bookkeeping" (each worked day's outcome), "risk_history" and
+              pricing; absent when no day was due), "closing" (the closing ledger step, the
+              press's one ledger call since 2026-10-01), "bookkeeping" (each worked day's outcome), "risk_history" and
               "snapshot" (a real pull only), "total"}, seconds rounded to 0.01.
       "snapshot": the export's one line; since 2026-10-01 SNAPSHOT_UNCHANGED ("marks snapshot:
               nothing new, snapshot not rewritten") when nothing the snapshot carries changed
@@ -4082,6 +4045,7 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         run_started = _perf()
         seconds: Dict[str, float] = {}       # where this press's backfill time went (2026-10-01)
         _step_seconds.pop(key, None)
+        _ledger_ran.pop(key, None)           # auto_backfill's closing step sets it (2026-10-01)
         try:
             try:
                 _publish({"running": True, "reason": ""})
@@ -4095,6 +4059,14 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             except Exception as exc:  # never let a background thread take the process down
                 crashed = f"auto-backfill failed: {exc!r}"
                 _publish({"running": False, "reason": crashed})
+            if not _ledger_ran.get(key):
+                # auto_backfill stopped before its closing step (it never should): the press's
+                # one ledger call is made here, since the live pull left its own out (2026-10-01)
+                try:
+                    from data.bloomberg.live import book_today
+                    _realise_after_backfill(db_path, book_today(), _QuietLog())
+                except Exception as exc:  # noqa: BLE001 -- recorded, never raised into the thread
+                    _report_error(db_path, "closing", f"the closing ledger step could not run: {_plain_error(exc)}")
             seconds.update(_step_seconds.get(key) or {})
             if real_pull:
                 # The Risk tab's daily history (2026-09-30), after the closes and the closing

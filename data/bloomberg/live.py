@@ -114,6 +114,20 @@ def ledger_block(led, as_of: Optional[str] = None) -> dict:
     return {"as_of_date": as_of, **block} if as_of is not None else block
 
 
+# One ledger call per press (user yes, 2026-10-01): the step's detail and the block's
+# "skipped" when the pull leaves the call to the auto-backfill that follows it.
+LEDGER_BY_BACKFILL = "ledger: run by the backfill at its end"
+
+
+def deferred_ledger_block(as_of: str) -> dict:
+    """status["ledger"] on a press whose ledger call is the auto-backfill's closing one
+    (`pull_once(ledger_by_backfill=True)`): `ledger_block`'s keys, empty (realised None,
+    nothing re-frozen or kept, refrozen_summary ''), plus "skipped" (LEDGER_BY_BACKFILL) and
+    "deferred": True. What the call did is in the backfill's own "ledger" block; `LiveFeed`
+    replaces this block with the call's when it has to make the call itself."""
+    return {**ledger_block({}, as_of), "skipped": LEDGER_BY_BACKFILL, "deferred": True}
+
+
 def refrozen_summary(n: int) -> str:
     """'' for none, else 'N settled trade(s) re-frozen at the close'."""
     return f"{n} settled trade{'' if n == 1 else 's'} re-frozen at the close" if n else ""
@@ -637,11 +651,18 @@ def contract_dates_summary(block: dict) -> str:
     options = sum(1 for u in updated if isinstance(u, dict)
                   and parse_option_ticker(str(u.get("instrument_id") or "")) is not None)
     moved = len(updated) - options
-    failed = len(block.get("failed") or [])
+    # 2026-10-01: tickers not sent because Bloomberg had stopped answering are said apart,
+    # never as "gave no date".
+    not_asked = sum(1 for f in block.get("failed") or []
+                    if isinstance(f, dict) and str(f.get("reason") or "").startswith("not asked:"))
+    failed = len(block.get("failed") or []) - not_asked
     known = int(block.get("known_empty") or 0)
     # 2026-09-30: contracts Bloomberg already answered with no date, not asked again today.
     known_text = (f"{known} contract{'' if known == 1 else 's'} Bloomberg gave no date for "
                   f"not asked again today") if known else ""
+    if not_asked:
+        stopped = (f"{not_asked} ticker{'' if not_asked == 1 else 's'} not asked: Bloomberg stopped answering")
+        known_text = stopped + ("; " + known_text if known_text else "")
     if not (requested or stored or moved or options or failed):
         return known_text[:1].upper() + known_text[1:] if known_text else ""
     what = f"{moved} future{'' if moved == 1 else 's'}"
@@ -791,7 +812,7 @@ def _contract_dates_entries(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[
 
 
 def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Callable, diag=None,
-                        seconds: Optional[dict] = None) -> dict:
+                        seconds: Optional[dict] = None, net: Optional["_NetLog"] = None) -> dict:
     """Bloomberg's contract dates for every future the library lists for today's pull
     (`library.contract_dates_needed`: CONTRACT_DATES, open, a verified ticker, no dates on
     file yet): one ReferenceDataRequest of FUT_LAST_TRADE_DT and FUT_NOTICE_FIRST for all
@@ -834,7 +855,15 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
     (about 15 ms for 20 futures with nothing to move, measured), and a gate in front of it
     (only when this press stored a date) would miss a move an upload or a snapshot import
     left undone, or one stored under a differently spelt id that only
-    data.contracts.static_dates normalises."""
+    data.contracts.static_dates normalises.
+
+    `net` (2026-10-01, user yes: a hung Terminal cuts the press short): the pull's `_NetLog`.
+    Each request's answer or failure is counted in it (a timeout towards the timeouts in a
+    row the marks steps stop at), and once Bloomberg has stopped answering
+    (`net.gave_up`) a request is not sent: its tickers are listed under `failed` with
+    "not asked: " + `stopped_answering()`, never remembered as empty, and when nothing at
+    all was sent the block's "skipped" is that sentence. `requested` / `asked` count only
+    the tickers sent. Nothing changes when Bloomberg answers."""
     block: dict = {"requested": 0, "stored": 0, "failed": [], "applied": {},
                    "asked": 0, "on_file": 0, "empty": 0, "empty_tickers": [], "known_empty": 0}
     day = today.isoformat()
@@ -884,7 +913,15 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
                 by_fields[entry["fields"]].append(entry["ticker"])
         data: Dict[str, dict] = {}
         asked_ok = set()
+        not_sent: set = set()
+
         def _ask(tickers: List[str], fields: tuple, may_split: bool) -> None:
+            if net is not None and net.gave_up:
+                # Bloomberg stopped answering earlier in this press (2026-10-01): not sent.
+                not_sent.update(tickers)
+                block["failed"].extend({"ticker": t, "reason": "not asked: " + stopped_answering()}
+                                       for t in tickers)
+                return
             try:
                 session, service = get_session()
                 got = fetch_reference(session, service, tickers, list(fields), diag=diag,
@@ -892,7 +929,11 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
                 for t in tickers:
                     data[t] = got.get(t) or {}
                 asked_ok.update(tickers)
+                if net is not None:
+                    net.ok()
             except Exception as exc:  # noqa: BLE001 -- these tickers fail with the reason, the pull goes on
+                if net is not None and not isinstance(exc, SessionUnavailable):
+                    net.failed("contract_dates", exc)
                 # One ticker that breaks the request must not cost the others their dates
                 # (2026-09-29): asked again one by one, unless Bloomberg timed out or there is
                 # no session at all.
@@ -904,6 +945,10 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
 
         for fields, tickers in sorted(by_fields.items()):
             _ask(sorted(tickers), fields, True)
+        if not_sent:
+            block["requested"] = len({e["ticker"] for e in ask.values()} - not_sent)
+            if not block["requested"]:
+                block["skipped"] = stopped_answering()
         ask = {k: e for k, e in ask.items() if e["ticker"] in asked_ok}
         store_static_dates = None
         if ask:
@@ -1088,9 +1133,23 @@ class _NetLog:
         self.raised.append({"step": step, "reason": _plain_error(exc), "traceback": traceback.format_exc()})
         self.timeouts_in_row = self.timeouts_in_row + 1 if _is_timeout(exc) else 0
 
+    def timed_out(self, step: str, reason: str) -> None:
+        """A request that came back with every ticker timed out instead of raising (the LME
+        pillars' own event loop, `fwd_curve.request_lme_pillars`): counted as a timeout in a
+        row, with its reason and no traceback."""
+        self.raised.append({"step": step, "reason": reason, "traceback": ""})
+        self.timeouts_in_row += 1
+
     @property
     def gave_up(self) -> bool:
         return self.timeouts_in_row >= TIMEOUTS_BEFORE_GIVING_UP
+
+
+def stopped_answering() -> str:
+    """The one sentence a step that sent nothing because Bloomberg had stopped answering
+    carries (2026-10-01): its block's "skipped", its step's detail."""
+    return (f"Bloomberg stopped answering: not asked after {TIMEOUTS_BEFORE_GIVING_UP} requests "
+            "in a row of this pull went unanswered")
 
 
 def _ask_in_chunks(step: str, requests, size: int, ask: Callable, net: _NetLog, progress=None) -> dict:
@@ -1900,6 +1959,8 @@ def lme_summary(block: dict) -> str:
         text += f"; {missing} pillar{'' if missing == 1 else 's'} or prompt{'' if missing == 1 else 's'} without a mark"
     if block.get("error"):
         text += f"; stopped ({block['error']})"
+    if isinstance(block.get("skipped"), str) and block["skipped"]:
+        text += f"; {block['skipped']}"
     return text
 
 
@@ -1926,8 +1987,15 @@ def _has_lme_curve(needed: List[dict]) -> bool:
     return any(r["kind"] == LME_CURVE for r in _requestable(needed))
 
 
+def _lme_timed_out(quotes: Dict[str, dict], tickers: List[str]) -> bool:
+    """Did `fwd_curve.request_lme_pillars` come back on a timeout, with nothing answered?
+    Its event loop never raises on one: every ticker left unanswered carries 'TIMEOUT'."""
+    return bool(tickers) and all(str((quotes.get(t) or {}).get("error") or "") == "TIMEOUT"
+                                 and (quotes.get(t) or {}).get("value") is None for t in tickers)
+
+
 def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snapped: Optional[str] = None,
-              needed: Optional[List[dict]] = None) -> dict:
+              needed: Optional[List[dict]] = None, net: Optional[_NetLog] = None) -> dict:
     """The LME curves of the book's open LME forwards (2026-09-24, commodity conversion
     Phase 5): for each metal the library lists (`library.lme_curves_needed`: in force,
     requestable, its pillars trimmed to the furthest open prompt), Bloomberg's PX_LAST and
@@ -1953,7 +2021,14 @@ def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snap
 
     `needed` (2026-09-30): the cycle's one library read (`needed_live`). With no LME curve
     in it the step ends before reading anything else; otherwise the metals' pillars are
-    read as before (`library.lme_curves_needed`) and the open prompts off `needed`."""
+    read as before (`library.lme_curves_needed`) and the open prompts off `needed`.
+
+    `net` (2026-10-01, user yes: a hung Terminal cuts the press short): the pull's `_NetLog`.
+    Once Bloomberg has stopped answering (`net.gave_up`) the pillars are not asked: the
+    block's "skipped" is `stopped_answering()` and every pillar is listed under `missing`
+    with that reason. Otherwise each request is counted in it: an answer, a raise, or a
+    request whose every pillar came back 'TIMEOUT' (`request_lme_pillars` does not raise on
+    a timeout) as a timeout in a row. Nothing changes when Bloomberg answers."""
     block: dict = {"roots": [], "written": 0, "interp_written": 0, "missing": [], "reasons": []}
 
     def _done() -> dict:
@@ -1980,12 +2055,31 @@ def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snap
         block["error"] = f"data.bloomberg.fwd_curve LME helpers not importable: {exc!r}"
         return _done()
     tickers = sorted({p["ticker"] for e in needs for p in e["pillars"] if p.get("ticker")})
+    if net is not None and net.gave_up:
+        # Bloomberg stopped answering earlier in this press (2026-10-01): not asked.
+        block["skipped"] = stopped_answering()
+        block["missing"] = [{"root_id": e["root_id"], "ticker": p["ticker"], "settle_date": p.get("settle_date", ""),
+                             "reason": "not asked: " + stopped_answering()}
+                            for e in needs for p in e["pillars"]]
+        return _done()
+
+    def _count(quotes_got: Dict[str, dict], asked: List[str]) -> None:
+        if net is None:
+            return
+        if _lme_timed_out(quotes_got, asked):
+            net.timed_out("lme", "Bloomberg did not answer (LME pillars)")
+        else:
+            net.ok()
+
     _release_lock(conn)             # no write lock held across the Bloomberg request below
     try:
         from data.bloomberg.pull_marks import _get_blpapi
         session, service = get_session()
         quotes = request_lme_pillars(_get_blpapi(), session, service, tickers) or {}
+        _count(quotes, tickers)
     except Exception as exc:  # noqa: BLE001 -- the pull goes on without the LME marks
+        if net is not None and not isinstance(exc, SessionUnavailable):
+            net.failed("lme", exc)
         if len(needs) < 2 or _is_timeout(exc) or isinstance(exc, SessionUnavailable):
             block["error"] = f"LME pillar request failed: {exc}"
             return _done()
@@ -1995,9 +2089,18 @@ def _lme_step(conn: sqlite3.Connection, today: date, get_session: Callable, snap
         quotes = {}
         for entry in needs:
             own = sorted({p["ticker"] for p in entry["pillars"] if p.get("ticker")})
+            if net is not None and net.gave_up:
+                quotes.update({t: {"value": None, "prompt_date": None,
+                                   "error": "not asked: " + stopped_answering()} for t in own})
+                block["reasons"].append(f"{entry['root_id']}: {stopped_answering()}")
+                continue
             try:
-                quotes.update(request_lme_pillars(_get_blpapi(), session, service, own) or {})
+                got_one = request_lme_pillars(_get_blpapi(), session, service, own) or {}
+                quotes.update(got_one)
+                _count(got_one, own)
             except Exception as exc_one:  # noqa: BLE001
+                if net is not None:
+                    net.failed("lme", exc_one)
                 quotes.update({t: {"value": None, "prompt_date": None,
                                    "error": f"LME pillar request failed: {exc_one}"} for t in own})
                 block["reasons"].append(f"{entry['root_id']}: LME pillar request failed ({exc_one})")
@@ -2102,7 +2205,8 @@ def recalc_summary(result: dict) -> str:
 
 def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost", port: int = 8194,
               session_factory: Optional[Callable] = None, today: Optional[date] = None,
-              rates_source=None, vol_source=None, lend_session: Optional[list] = None) -> dict:
+              rates_source=None, vol_source=None, lend_session: Optional[list] = None,
+              ledger_by_backfill: bool = False) -> dict:
     """One full cycle. Returns and writes the status dict. Never raises: any exception
     becomes connected=False with the traceback in `reason`. `today` (the date every mark of
     this cycle is stamped with, the curves / vol / options steps price and realise_settled
@@ -2182,7 +2286,17 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     contract dates apart from their apply), so a slow press can be read off the status file
     and the Data tab's diagnosis report; `status["timings"]` stays as it was. The spots and
     the futures share one PX_LAST request when they can (`_CombinedPxLast`: same tickers,
-    same field, one round trip fewer); each step's status, items and outcome are as before."""
+    same field, one round trip fewer); each step's status, items and outcome are as before.
+
+    `ledger_by_backfill` (2026-10-01, user yes: one ledger call per press): given True by
+    `LiveFeed` only, when the auto-backfill it starts right after ends with its own
+    `realise_settled(conn, today)` (`backfill.LEDGER_AT_END`). The cycle's own call is then
+    left out on a press that has a Bloomberg session: the ledger step is recorded "skipped"
+    with LEDGER_BY_BACKFILL and status["ledger"] is `deferred_ledger_block` (the usual keys,
+    empty, plus "skipped" and "deferred": True); `LiveFeed` runs the call itself when no
+    backfill run starts. A press with no session, and every other caller (the default
+    False: the command line, the tests), runs the ledger here as before. A crash of the
+    cycle and a press with no Bloomberg at all are unchanged."""
     from data.ingest.schema import connect
     clock_started = time.perf_counter()
     started = _now_iso()
@@ -2328,17 +2442,14 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # instrument, legs and marks onto Bloomberg's; the legs' change marks the
             # library out of date, so build_requests below reads the futures as moved and
             # their FUTURE_PX lands under Bloomberg's expiry.
+            # Its requests are counted in `net` as they go (2026-10-01): a timeout there counts
+            # towards the timeouts in a row every later step stops at.
             done, block = _run("contract_dates", timings, "futures", contract_dates_step, conn, today, shared.get, diag,
-                               seconds=seconds)
+                               seconds=seconds, net=net)
             if not done:
                 block = {"requested": 0, "stored": 0, "failed": [], "applied": {}, "error": _plain_error(block)}
                 block["summary"] = contract_dates_summary(block)
             status["contract_dates"] = block
-            asked_failed = [f for f in block.get("failed") or [] if str(f.get("reason", "")).startswith("request failed")]
-            if int(block.get("requested") or 0) > len({f.get("ticker") for f in asked_failed}):
-                net.ok()
-            elif asked_failed and not shared.open_error:
-                net.raised.append({"step": "contract_dates", "reason": asked_failed[0]["reason"], "traceback": ""})
             no_session = bool(shared.open_error)
 
             # The library, read once for the cycle (2026-09-30), after the contract dates
@@ -2515,14 +2626,14 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 _skip("lme", f"no Bloomberg session ({shared.open_error})")
             else:
                 no_lme = today_needed is not None and not _has_lme_curve(today_needed)
+                # Its request is counted in `net` by the step itself (2026-10-01), and not sent
+                # once Bloomberg has stopped answering.
                 done, lme = _run("lme", timings, "forwards", _lme_step, conn, today, shared.get, snapped,
-                                 today_needed, quiet=no_lme)
+                                 today_needed, net, quiet=no_lme)
                 status["lme"] = lme if done else {"roots": [], "written": 0, "interp_written": 0, "missing": [],
                                                   "reasons": [], "error": _plain_error(lme)}
                 if not done:
                     status["lme"]["summary"] = lme_summary(status["lme"])
-                if status["lme"].get("roots") and not status["lme"].get("error"):
-                    net.ok()
                 if status["lme"].get("summary"):
                     warnings.extend(f"LME {m['root_id']} {m['ticker'] or 'prompt'} {m['settle_date']}: {m['reason']}"
                                     for m in status["lme"].get("missing") or [])
@@ -2592,12 +2703,21 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 # What the ledger did, its re-freeze included (2026-09-22): see ledger_block.
                 return ledger_block(realise_settled(conn, today.isoformat()), today.isoformat())
 
-            done, got = _run("ledger", timings, "ledger", _ledger)
-            if done:
-                status["ledger"] = got
+            if ledger_by_backfill and not no_session:
+                # One ledger call per press (user yes, 2026-10-01): the auto-backfill the feed
+                # starts right after this pull ends with realise_settled(conn, today) itself
+                # (backfill.LEDGER_AT_END), after the past closes land; this call would only be
+                # repeated by it. Said in the step and the block, never silent.
+                progress.step("ledger", publish=False)
+                status["ledger"] = deferred_ledger_block(today.isoformat())
+                _record("ledger", "skipped", LEDGER_BY_BACKFILL, 0.0)
             else:
-                status["ledger"] = {"error": f"{got!r}"}
-                warnings.append(f"realise_settled failed: {got!r}")
+                done, got = _run("ledger", timings, "ledger", _ledger)
+                if done:
+                    status["ledger"] = got
+                else:
+                    status["ledger"] = {"error": f"{got!r}"}
+                    warnings.append(f"realise_settled failed: {got!r}")
 
             # Items: one per requested mark, OK only when its row was written.
             failures = spot["failures"] + forwards["failures"] + futures["failures"]
@@ -2675,6 +2795,52 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     return _finish()
 
 # --------------------------------------------------------------------------- feed thread
+def _backfill_runs_ledger() -> bool:
+    """Does the auto-backfill a press starts end with its own realise_settled(conn, today)
+    (`backfill.LEDGER_AT_END`, 2026-10-01)? False when it cannot be told: the pull then
+    makes its own call, as before."""
+    try:
+        from data.bloomberg import backfill
+        return bool(getattr(backfill, "LEDGER_AT_END", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ledger_now(db_path, as_of: str) -> dict:
+    """The press's ledger call made by the feed itself (2026-10-01): the pull left it to the
+    backfill and no backfill run started. `realise_settled(conn, as_of)`, its block written
+    as status["ledger"] in place of the deferred one (`ledger_block`, or {"error"}). Never
+    raises."""
+    from data.ingest.schema import connect
+    conn = None
+    try:
+        from engine.pnl.ledger import realise_settled
+        conn = connect(Path(db_path))
+        block = ledger_block(realise_settled(conn, as_of), as_of)
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 -- said in the status, never raised into the feed thread
+        block = {"as_of_date": as_of, "error": f"{exc!r}"}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+    try:
+        with _STATUS_LOCK:          # the whole block replaced: the deferred one's keys must go
+            current = read_status(db_path) or {}
+            current["ledger"] = block
+            outcome, detail = (("failed", block["error"]) if block.get("error")
+                               else _step_outcome("ledger", block))
+            for step in current.get("steps") or []:
+                if isinstance(step, dict) and step.get("step") == "ledger":
+                    step.update(outcome=outcome, detail=("made after the pull: " + str(detail or ""))[:500])
+            _replace_status_file(status_path(db_path), current)
+    except Exception:  # noqa: BLE001
+        pass
+    return block
+
+
 @dataclass
 class LiveFeed:
     """Pulls Bloomberg ON REQUEST only (user decision 2026-09-21: "make it only pull the
@@ -2713,8 +2879,13 @@ class LiveFeed:
             if self._stop.is_set():
                 return
             lent: List[_SharedSession] = []
+            owed: Optional[str] = None      # the book date of a ledger call left to the backfill
             try:
-                self.last_status = pull_once(self.db_path, host=self.host, port=self.port, lend_session=lent)
+                self.last_status = pull_once(self.db_path, host=self.host, port=self.port, lend_session=lent,
+                                             ledger_by_backfill=_backfill_runs_ledger())
+                led = (self.last_status or {}).get("ledger")
+                if isinstance(led, dict) and led.get("deferred"):
+                    owed = led.get("as_of_date")
             except Exception:  # pull_once already catches; this guards the thread itself
                 try:
                     now = _now_iso()
@@ -2728,9 +2899,9 @@ class LiveFeed:
                                        "sentence": "Pull stopped: feed thread error"}})
                 except Exception:  # noqa: BLE001 -- the thread must live to take the next press
                     pass
-            self._backfill(lent[0] if lent else None)
+            self._backfill(lent[0] if lent else None, owed)
 
-    def _backfill(self, shared: Optional[_SharedSession]) -> None:
+    def _backfill(self, shared: Optional[_SharedSession], ledger_owed: Optional[str] = None) -> None:
         """The backfill hand-off, on its own (2026-09-29): it runs whatever the pull did,
         and a failure to start it is said in the backfill's own block -- it used to
         overwrite the pull's whole status with a "feed thread error".
@@ -2741,12 +2912,18 @@ class LiveFeed:
         It is stopped exactly once: at once when no backfill run starts (None: a run already
         in flight) or the start raised; else by a small watcher thread once the backfill
         thread ends, raised or not, so a new press is never held up by the wait. With no
-        lent session the backfill opens its own, as before."""
+        lent session the backfill opens its own, as before.
+
+        `ledger_owed` (2026-10-01, one ledger call per press): the book date of the ledger
+        call the pull left to the backfill (`pull_once(ledger_by_backfill=True)`). A run that
+        starts makes it at its end (`backfill.LEDGER_AT_END`); when none starts (no Terminal,
+        a run already in flight, or the start raised) it is made here, at once
+        (`_ledger_now`), so a press never goes without its ledger call."""
         thread = None
         try:
             from data.bloomberg.backfill import start_auto_backfill
             if shared is None:
-                start_auto_backfill(self.db_path, host=self.host, port=self.port)
+                thread = start_auto_backfill(self.db_path, host=self.host, port=self.port)
             else:
                 thread = start_auto_backfill(self.db_path, host=self.host, port=self.port,
                                              session=(shared.session, shared.service))
@@ -2758,6 +2935,8 @@ class LiveFeed:
                     "reason": "backfill failed to start: " + traceback.format_exc().strip().splitlines()[-1]})
             except Exception:  # noqa: BLE001
                 pass
+        if ledger_owed and not callable(getattr(thread, "join", None)):
+            _ledger_now(self.db_path, ledger_owed)
         if shared is None:
             return
         join = getattr(thread, "join", None)

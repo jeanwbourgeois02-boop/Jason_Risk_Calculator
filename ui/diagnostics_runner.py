@@ -294,9 +294,11 @@ def _missing_lines(db_path, as_of: str) -> List[str]:
         rows = mark_rows(conn, as_of, check_frame(conn, as_of))
     finally:
         conn.close()
-    bad = [r for r in rows if r["status"] != "OK"]
+    # CLOSED: a past day the exchange was shut, no close exists, nothing to fix: counted, never listed as bad
+    bad = [r for r in rows if r["status"] not in ("OK", "CLOSED")]
     out = [f"Official prices the book uses on {as_of}: {len(rows)}; missing "
-           f"{sum(1 for r in rows if r['status'] == 'MISSING')}; to check {sum(1 for r in rows if r['status'] == 'CHECK')}"]
+           f"{sum(1 for r in rows if r['status'] == 'MISSING')}; to check {sum(1 for r in rows if r['status'] == 'CHECK')}"
+           f"; exchange closed (not due) {sum(1 for r in rows if r['status'] == 'CLOSED')}"]
     for r in bad:
         why = "; ".join(x for x in (r.get("arrived_reason"), r.get("fresh_reason") if r.get("fresh") is False else "",
                                     r.get("sane_reason") if r.get("sane") is False else "",

@@ -13,3 +13,4 @@ Older notes on backfill.py live in `.claude/agent-memory/bbg-data/` (lane split 
 - [Only new data asked (2026-09-30)](cache_only_new_data_2026_09_30.md) — key-level asks, hourly retry kept, risk empty-stretch sidecar, status "cache"
 - [Risk history step (2026-09-30)](risk_history_step_2026_09_30.md) — price_history from Bloomberg for the Risk tab: edges-only asks, late-OI refresh, own status block, real pull only
 - [Pull speed 2 (2026-10-01)](pull_speed_2026_10_01.md) — risk asks grouped by alike windows, whole-window empty stands a week, listing reused, snapshot skip, seconds
+- [One ledger call per press (2026-10-01)](ledger_once_per_press_2026_10_01.md) — auto run ends with one unconditional realise_settled(today); LEDGER_AT_END for bbg-live
