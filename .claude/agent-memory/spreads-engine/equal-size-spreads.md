@@ -1,6 +1,6 @@
 ---
 name: equal-size-spreads
-description: 2026-10-01 user rule - a part of 3+ legs is cut into equal-size spreads (trades._split_parts), unmatched remainder, size_sides units, Title Case names, closed spec/sub_spreads; what the real book became
+description: 2026-10-01 user rule - a part of 3+ legs is cut into equal-size spreads (trades._split_parts), unmatched remainder, size_sides units incl. FX/options, shared-leg portions per sub, Title Case, closed spec; what the real book became
 metadata:
   type: project
 ---
@@ -27,6 +27,16 @@ User decisions 2026-10-01 ("yes to those decisions"), built in engine/spreads/tr
   `_FillView` of its fills in the spread's unit, so Entry agrees with the leg rows' avg_fill. Real book moved:
   STEEL Nov/Dec 130 -> -8, COPAR3 62.88 -> 65.00 $/t; CATTLE did not (its level is the Oct/Oct pair, one fill a
   leg). `levels.py` line 39 docstring still says lots-weighted (not edited: brief was book.py only).
+
+- **Leg portions (user, 2026-10-01 "lets fix this")**: each sub's `legs` are portions of the trade's leg rows
+  (`_leg_portions`, run last in `_trade`, after roll-downs mutate rows): share = this sub's |lots| / the |lots| of
+  every sub holding the leg (normalised, so a leg in ONE sub stays whole even when a tail sits outside the parts,
+  ZNA1's LME 125.4 of 126 lots); figures x share, non-last rounded to the cent, last = the rest; portion locked =
+  its ltd - its open. STEEL Dec26 175/25 = 0.875/0.125; SCO1 and the sample have no shared leg. The UI still
+  listed a leg once and summed from the frame by trade ids until the ui lane switches to the portions.
+- **size_sides for trades with no futures/LME leg** (`_row_sides`): basis 'notional' (unit = base ccy, 'oz' for
+  XAU/XAG/XPT/XPD) for FX spot/fwd/option, 'lots' for options on futures; calls v puts "10 v 10 lots"; an
+  unrecognised-only trade says so instead of "nothing open"; two units -> reason, never added.
 
 **How to apply:** verify on the real export loaded into a scratch DB with made-up marks (load.py / marks.py /
 run.py pattern); force UNMATCHED by making a root net to zero with 2 unequal legs each way.

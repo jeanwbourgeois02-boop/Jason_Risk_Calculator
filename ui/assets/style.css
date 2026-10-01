@@ -658,7 +658,8 @@ p { margin: 8px 0; }
 .book-tile .v .marker { font-size: 10px; vertical-align: middle; }
 .book-table td.book-name { max-width: 330px; overflow: hidden; text-overflow: ellipsis; }
 .book-side { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.book-h { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+/* a small heading in sentence case as written (user, 2026-10-01: no all-caps labels) */
+.book-h { font-size: 12px; font-weight: 700; letter-spacing: 0; text-transform: none; color: var(--muted); margin: 0 0 4px; }
 .book-load { padding: 8px 14px; font-size: 12.5px; }
 .book-loaded-line { font-size: 12.5px; color: var(--muted); margin: -2px 0 12px; }
 .book-loaded-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--gold); margin-right: 8px; }
@@ -1024,7 +1025,7 @@ p { margin: 8px 0; }
 .tk-table.tk-kv tr:nth-child(even) td { background: #f8f9fb; }
 /* the hedge line under the legs: one designed line, like the flags line above them */
 .tk-hedge-line { font-size: 12px; margin: 8px 2px 0; color: var(--text); }
-.tk-hedge-line .tk-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-right: 6px; }
+.tk-hedge-line .tk-k { font-size: 12px; font-weight: 700; letter-spacing: 0; text-transform: none; color: var(--muted); margin-right: 6px; }
 .tk-hedge-line[title] { cursor: help; }
 .tk-chart { flex: 0 1 900px; min-width: 320px; }
 .tk-table.tk-legs { font-size: 12px; }

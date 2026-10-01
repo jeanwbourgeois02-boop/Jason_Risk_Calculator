@@ -31,6 +31,14 @@ showing" rule and the Next date / Check columns.
 - CSS: `.tk-strip .tk-title` and `.tk-strip .tk-k` no uppercase on every tab. Panel "HEDGE"/"LEVEL SINCE..."
   (.tk-hedge-line .tk-k, .book-h) still uppercase — not asked.
 
+- Follow-up same day: spreads-engine's `sub_spreads[i].legs[j]` are now leg PORTIONS (`share`, `shared`,
+  `leg_lots`, portion `pnl_usd`/`pnl_open`/`pnl_locked`); `leg_sequence` lists each spread's own portions
+  (merged over the t["legs"] row, `shared_with` added), `leg_fig`/`legs_fig` read a shared portion's own P&L,
+  else `fill_sum`; `panel_legs` lists each contract once via `_leg_order`. size_sides now filled for FX
+  (basis 'notional') and options. `.book-h` and `.tk-hedge-line .tk-k` no longer uppercase.
+- Console "Invalid prop ... date ... header-as-of-picker": the day roll's spare output wrote `date` on a
+  dcc.Store (no such prop); now `data` (ui/app.py). Console clean on load and every tab switch.
+
 **Why:** the user found the table hard to follow; one shape per trade, three levels.
 **How to apply:** proof = scratch `shot.py <db> <as_of> <prefix> TRADE,...` with `.venv/Scripts/python.exe`
 (playwright lives there, not py -3): counts panels and visible leg rows after caret clicks. Heredoc trap again:

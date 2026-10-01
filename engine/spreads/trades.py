@@ -1797,6 +1797,129 @@ def _size_sides(book, items: Sequence[Tuple[st.PLeg, float]], names: Dict[str, s
     return out
 
 
+def _row_unit(book, row: dict) -> str:
+    """The unit an open leg row of no futures part is sized in (user, 2026-10-01): an FX spot,
+    forward or option its base currency ('EUR', 'USD'), troy ounces for a precious-metal pair;
+    an option on a future (or any listed contract) its lots."""
+    if row["product"] in st.FX_PRODUCTS or row["product"] == "FX_OPTION":
+        ids = row.get("open_trade_ids") or row.get("trade_ids") or []
+        base = str(book.by_id[ids[0]]["base_ccy"] or "") if ids and ids[0] in book.by_id else ""
+        if not base:
+            base = str(row.get("instrument_id") or "")[:3]
+        return "oz" if base in _PRECIOUS_FAMILY else base
+    return "lots"
+
+
+def _row_sides(book, rows: Sequence[dict]) -> dict:
+    """``_size_sides`` for a trade with no open futures or LME leg (user, 2026-10-01): its open FX
+    spot / forward, FX option or option-on-future legs in their own unit, the same shape. An FX
+    trade its base amount ('Short 100 oz' on XAUUSD, 'Long 10,000,000 EUR'; basis 'notional', unit
+    the base currency or 'oz'), an FX option its notional in the base currency, an option on a
+    future its lots (basis 'lots'); calls against puts their lots a side ('10 v 10 lots'). The
+    trade's own legs first, its hedges only when it holds nothing else. 'nothing open' only when
+    nothing is (an open leg the contract list does not know says so instead); legs in two units are
+    never added (each leg's size is on its row)."""
+    out = {"basis": "", "unit": "", "long": None, "short": None, "long_label": "", "short_label": "", "text": "",
+           "reason": ""}
+    live = [r for r in rows if r.get("status") == "open" and not r.get("unrecognised")
+            and abs(_num(r.get("lots")) or 0.0) > _EPS]
+    sel = [r for r in live if not r.get("hedge")] or live
+    if not sel:
+        unknown = [r for r in rows if r.get("unrecognised")]
+        out["reason"] = ("contract not recognised: no size until it is mapped ("
+                         + ", ".join(str(r.get("name") or r["contract_id"]) for r in unknown) + ")"
+                         if unknown else "nothing open")
+        return out
+    units = {_row_unit(book, r) for r in sel}
+    if len(units) != 1 or "" in units:
+        out["reason"] = ("its legs are sized in different units (" + ", ".join(sorted(u or "unknown" for u in units))
+                         + "): each leg's size is on its row")
+        return out
+    unit = units.pop()
+    basis = "lots" if unit == "lots" else "notional"
+    longs = float(sum(float(r["lots"]) for r in sel if float(r["lots"]) > 0))
+    shorts = float(-sum(float(r["lots"]) for r in sel if float(r["lots"]) < 0))
+    out.update(basis=basis, unit=unit, long=longs, short=shorts,
+               long_label=" + ".join(str(r.get("name") or r["contract_id"]) for r in sel if float(r["lots"]) > 0),
+               short_label=" + ".join(str(r.get("name") or r["contract_id"]) for r in sel if float(r["lots"]) < 0))
+    if basis == "lots":
+        body = (lambda x: _amount_text(x, "lots"))
+        tail = " lots"
+    else:
+        body = (lambda x: f"{x:,.0f} {unit}")
+        tail = ""
+    if longs > _EPS and shorts > _EPS:
+        out["text"] = f"{body(longs)} v {body(shorts)}{tail}"
+    else:
+        word, x = ("Long", longs) if longs > _EPS else ("Short", shorts)
+        out["text"] = f"{word} {body(x)}{tail}"
+    return out
+
+
+_PORTION_FIGS = ("daily", "ltd", "open", "locked", "quantity", "value_local", "value_usd", "roll_down_usd_per_month")
+
+
+def _shares(total: Optional[float], weights: Sequence[float], cents: bool = True) -> List[Optional[float]]:
+    """``total`` cut by ``weights`` (shares summing to 1): each portion but the last rounded to the
+    cent, the last the rest, so the portions add up to ``total`` exactly (None stays None)."""
+    if total is None:
+        return [None] * len(weights)
+    out: List[Optional[float]] = []
+    for w in weights[:-1]:
+        x = float(total) * w
+        out.append(round(x, 2) if cents else x)
+    out.append(float(total) - sum(out))
+    return out
+
+
+def _leg_portions(subs: List[dict], rows: Sequence[dict]) -> List[dict]:
+    """Each spread's legs carry their own portion of the leg (user, 2026-10-01): a leg two spreads
+    share (STEEL's HRC Dec26 short 200: 175 in Oct/Dec, 25 in Nov/Dec) is cut by the lots each
+    spread holds of it, so each spread's row is the sum of its own legs. A portion is the trade's
+    leg row with ``lots`` (the lots this spread holds, as before), ``share`` (its part of the leg:
+    its lots / the lots every spread holding the leg holds, so a leg in one spread is whole, share
+    1, as before), ``shared`` (another spread holds part of it too), ``leg_lots`` (the whole leg's
+    open lots) and quantity, value_local, value_usd, roll_down_usd_per_month, pnl_usd {daily, ltd},
+    pnl_open and pnl_locked times the share; fill, mark and reasons unchanged. Each portion but the
+    last rounded to the cent and the last the rest, so a leg's portions add up to the leg exactly
+    (pnl_locked of a portion = its ltd - its open, the last the leg's rest). A split for display:
+    no trade's, leg's or ``value_book`` figure changes."""
+    by_cid = {r["contract_id"]: r for r in rows}
+    holders: Dict[str, List[Tuple[int, int, float]]] = defaultdict(list)
+    for i, sub in enumerate(subs):
+        for j, leg in enumerate(sub.get("legs") or []):
+            if leg.get("contract_id") in by_cid:
+                holders[leg["contract_id"]].append((i, j, abs(float(_num(leg.get("lots")) or 0.0))))
+    new_legs = [list(sub.get("legs") or []) for sub in subs]
+    for cid, held in holders.items():
+        row = by_cid[cid]
+        tot = sum(w for _i, _j, w in held)
+        weights = [w / tot for _i, _j, w in held] if tot > _EPS else [1.0 / len(held)] * len(held)
+        figs = {
+            "daily": (row.get("pnl_usd") or {}).get("daily"), "ltd": (row.get("pnl_usd") or {}).get("ltd"),
+            "open": row.get("pnl_open"), "locked": row.get("pnl_locked"),
+            "quantity": _num(row.get("quantity")), "value_local": _num(row.get("value_local")),
+            "value_usd": _num(row.get("value_usd")),
+            "roll_down_usd_per_month": _num(row.get("roll_down_usd_per_month")),
+        }
+        cut = {k: _shares(v, weights, cents=k not in ("quantity",)) for k, v in figs.items()}
+        if figs["ltd"] is not None and figs["open"] is not None and figs["locked"] is not None:
+            # locked in = the portion's ltd - its open, the last the leg's rest (open + locked = ltd)
+            lk = [cut["ltd"][n] - cut["open"][n] for n in range(len(held) - 1)]
+            cut["locked"] = lk + [float(figs["locked"]) - sum(lk)]
+        for n, (i, j, _w) in enumerate(held):
+            leg = new_legs[i][j]
+            portion = {**row, **leg}
+            portion.update(share=weights[n], shared=len(held) > 1, leg_lots=_num(row.get("lots")),
+                           quantity=cut["quantity"][n], value_local=cut["value_local"][n],
+                           value_usd=cut["value_usd"][n], roll_down_usd_per_month=cut["roll_down_usd_per_month"][n],
+                           pnl_usd={**(row.get("pnl_usd") or {}), "daily": cut["daily"][n], "ltd": cut["ltd"][n]},
+                           pnl_reasons=dict(row.get("pnl_reasons") or {}),
+                           pnl_open=cut["open"][n], pnl_locked=cut["locked"][n])
+            new_legs[i][j] = portion
+    return [{**sub, "legs": legs} for sub, legs in zip(subs, new_legs)]
+
+
 def _level_meta(book, level: dict, legs: Dict[str, float], rows_by_cid: Dict[str, dict]) -> dict:
     """``level`` with the spread it is read on (2026-10-01, so each spread's level stands alone):
     ``legs`` [{contract_id, instrument_id, root_id, name, month, prompt, lots}] and ``entry_date``
@@ -1928,6 +2051,9 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         level = _level_meta(book, level, {r["contract_id"]: float(r["lots"]) for r in core}, rows_by_cid)
     names = {c: r["name"] for c, r in rows_by_cid.items()}
     size_sides = _size_sides(book, [(leg, leg.lots) for leg in legs], names, one)
+    if not any(abs(leg.lots) > LEFTOVER_FLOOR for leg in legs):
+        # no open futures or LME leg: its FX, FX option or option-on-future legs in their own unit
+        size_sides = _row_sides(book, rows)
     carry, carry_why, carry_date = _roll_downs(book, rows, pleg_by_cid, history, memo)
     hedge = _hedge_block(book, entry, legs)
     size = _size_block(book, entry, legs)
@@ -1973,6 +2099,7 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
                 r.update(hedge=False, roll_down_reason="a currency trade: no roll-down")
         if nxt is not None:
             nxt = {**nxt, "hedge": False}
+    subs = _leg_portions(subs, rows)
     pnl = entry.get("pnl_usd") or {}
     pnl_open, pnl_locked, pnl_split_reason = _split_trade(rows, pnl.get("ltd"),
                                                           (entry.get("pnl_reasons") or {}).get("ltd"))
@@ -2107,18 +2234,26 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
       ``first_trade_date``, ``pb_roots``, ``type_labels`` (the PBRoot decimals' codes).
     - ``type`` (``CALENDAR`` | ``CROSS_EXCHANGE`` | ``CROSS_PRODUCT`` | ``MIXED`` | ``OUTRIGHT`` |
       '' for hedges only), ``type_note``, ``type_mismatch`` ('' or the sentence),
-      ``sub_spreads`` ([{type, what_it_is, root_ids, closed_root_ids, legs [{contract_id, name,
-      lots}], lots (a calendar's size), level (as ``level``), note, unmatched (bool), size_sides
-      (as below)}], one per spread: a part of three or more legs is cut into its equal-size spreads
-      by ``_split_parts`` (user, 2026-10-01), each with its own level; legs no rule pairs are one
-      sub of type ``UNMATCHED`` with a blank level and its reason, never in the trade's type).
-    - ``size_sides`` (trade and each sub, 2026-10-01): {basis ('lots' | 'physical' | 'value'), unit
-      ('lots', 't', 'bbl', 'oz' ..., 'USD'), long, short (sizes >= 0; None with ``reason`` when the
-      value at the fill is not known), long_label, short_label (the legs' names, '+'-joined; a
-      one-spread trade its commodities), text ('2,521 v 2,521 lots', '3,135 t v 3,135 t',
-      '$15,094,650 v $14,928,200', 'Short 2 lots'), reason}: one root in lots (an LME ticket in
-      tonnes), one commodity across exchanges or a crack in its shared physical unit, two
-      commodities in USD at the fill. Lots of two contracts are never added.
+      ``sub_spreads`` ([{type, what_it_is, root_ids, closed_root_ids, legs, lots (a calendar's
+      size), level (as ``level``), note, unmatched (bool), size_sides (as below)}], one per spread:
+      a part of three or more legs is cut into its equal-size spreads by ``_split_parts`` (user,
+      2026-10-01), each with its own level; legs no rule pairs are one sub of type ``UNMATCHED``
+      with a blank level and its reason, never in the trade's type). Each sub's ``legs`` are its
+      own portions of the trade's leg rows (``_leg_portions``, 2026-10-01): the leg row's keys
+      with ``lots`` the lots this spread holds, ``share``, ``shared``, ``leg_lots``, and quantity,
+      value_local, value_usd, roll_down_usd_per_month, pnl_usd {daily, ltd}, pnl_open, pnl_locked
+      times the share, so each spread is the sum of its legs and a leg's portions add up to it.
+    - ``size_sides`` (trade and each sub, 2026-10-01): {basis ('lots' | 'physical' | 'value' |
+      'notional'), unit ('lots', 't', 'bbl', 'oz' ..., 'USD'; a currency for 'notional'), long,
+      short (sizes >= 0; None with ``reason`` when the value at the fill is not known), long_label,
+      short_label (the legs' names, '+'-joined; a one-spread trade its commodities), text ('2,521 v
+      2,521 lots', '3,135 t v 3,135 t', '$15,094,650 v $14,928,200', 'Short 2 lots', 'Short 100
+      oz', 'Long 10,000,000 EUR'), reason}: one root in lots (an LME ticket in tonnes), one
+      commodity across exchanges or a crack in its shared physical unit, two commodities in USD at
+      the fill. Lots of two contracts are never added. A trade with no open futures or LME leg
+      (``_row_sides``): an FX spot / forward its base amount and an FX option its notional
+      (basis 'notional', unit the base currency, 'oz' for a precious metal), an option on a future
+      its lots; 'nothing open' only when nothing is.
     - ``commodity_family`` ('copper', 'ferrous', 'cattle' ...; 'cross-product' when two families
       mix), ``what_it_is`` ('COMEX vs LME copper, Nov/Dec26').
     - ``legs``: one per contract, open first, hedges last: {contract_id, instrument_id, root_id,

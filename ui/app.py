@@ -328,7 +328,9 @@ def build_layout(data: dict, db_path=None, build: str = "") -> html.Div:
         # The page URL: `?as_of=YYYY-MM-DD` sets the as-of (`_as_of_from_url`), no control on screen.
         dcc.Location(id=header.URL_ID, refresh=False),
         # Not a picker: an empty store under the old picker's id, so the poll's outputs (the day roll
-        # writes `date` here, always no_update) keep the shape a page of an older build asks for.
+        # writes its `data`, always no_update) keep the shape a page of an older build asks for. A Store
+        # has no `date` prop: an output on it was the console's "Invalid prop" error on every page load
+        # (2026-10-01); a page of an older build reloads on the source fingerprint anyway.
         dcc.Store(id=header.DATE_PICKER_ID),
         # The trade tabs' shared filter (ui/tabs/trade_filter.py, Phase G): one session store outside
         # every tab, so what is set on Book is set on P&L and Risk; "See fills" writes the Blotter's.
@@ -408,7 +410,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
 
     revision.register(app, get_db_path=active_db_path, build=build, tick=(
         [Output(header.AS_OF_STORE_ID, "data", allow_duplicate=True),
-         Output(header.DATE_PICKER_ID, "date", allow_duplicate=True)],
+         Output(header.DATE_PICKER_ID, "data", allow_duplicate=True)],
         [State(header.AS_OF_STORE_ID, "data"), State(header.AS_OF_PICKED_ID, "data")],
         _roll_to_today))
 

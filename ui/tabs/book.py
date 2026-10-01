@@ -2559,7 +2559,6 @@ def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequen
     """A spread's head row under a trade of several spreads (its legs follow it): its name, its size
     per side, its own level and z (user, 2026-10-01: each spread's z on its own row) and its legs'
     P&L summed (display). "Other legs" (legs in no spread) carries the P&L only."""
-    ids = [str(i) for leg in legs for i in leg.get("trade_ids") or []]
     other = "level" not in sub and not sub.get("type")
     level = None if other else (sub.get("level") or {})
     z_cells = {} if other else part_z_cells(t, sub, zd, ready, legs)
@@ -2568,9 +2567,9 @@ def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequen
         "qty": html.Td("") if other else sub_qty_td(sub),
         "entry": _part_level_td(level, "entry", legs, data, t), "now": _part_level_td(level, "now", legs, data, t),
         "z_entry": z_cells.get("z_entry"), "z_now": z_cells.get("z_now"),
-        "daily": money_td(*fill_sum(data, "daily", ids), row=True),
+        "daily": money_td(*legs_fig(data, legs, "daily"), row=True),
         "open": _split_sum_td(legs, "open"), "locked": _split_sum_td(legs, "locked"),
-        "ltd": money_td(*fill_sum(data, "ltd", ids), row=True),
+        "ltd": money_td(*legs_fig(data, legs, "ltd"), row=True),
     }
     return html.Tr([cells.get(key) or html.Td("") for key, *_ in columns(hidden) if key != "what"],
                    className="tk-part-row")
@@ -2587,16 +2586,34 @@ def leg_sequence(t: dict) -> List[Tuple[str, dict, List[dict]]]:
     out: List[Tuple[str, dict, List[dict]]] = []
     subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
     if len(subs) > 1:
+        # each spread lists its own portion of every leg it holds (spreads-engine, 2026-10-01: a leg two
+        # calendars share, STEEL's Dec26, is split 175 / 25 lots, each portion with its own P&L), so the
+        # spreads add up to the trade; a trade_book without portions takes each leg once, as before
+        order = {str(leg.get("contract_id")): n for n, leg in enumerate(plain)}
+        by_cid = {str(leg.get("contract_id")): leg for leg in plain}
+        holders: Dict[str, List[str]] = {}
+        for sub in subs:
+            for x in sub.get("legs") or []:
+                holders.setdefault(str(x.get("contract_id")), []).append(part_name(sub))
         taken: set = set()
         for sub in subs:
-            cids = {x.get("contract_id") for x in sub.get("legs") or []}
-            mine = [leg for leg in plain if leg.get("contract_id") not in taken and leg.get("contract_id") in cids]
+            mine = []
+            for x in sub.get("legs") or []:
+                cid = str(x.get("contract_id"))
+                if cid not in by_cid:
+                    continue
+                if "share" in x:
+                    others = [n for n in holders.get(cid, []) if n != part_name(sub)]
+                    mine.append(dict(by_cid[cid], **x, shared_with=others))
+                elif cid not in taken:
+                    mine.append(by_cid[cid])
+                taken.add(cid)
             if not mine:
                 continue
-            taken.update(leg.get("contract_id") for leg in mine)
+            mine.sort(key=lambda leg: order.get(str(leg.get("contract_id")), 99))
             out.append(("part", sub, mine))
             out.extend(("leg", leg, []) for leg in mine)
-        rest = [leg for leg in plain if leg.get("contract_id") not in taken]
+        rest = [leg for leg in plain if str(leg.get("contract_id")) not in taken]
         if rest:
             out.append(("part", {"what_it_is": "Other legs"}, rest))
             out.extend(("leg", leg, []) for leg in rest)
@@ -2604,6 +2621,42 @@ def leg_sequence(t: dict) -> List[Tuple[str, dict, List[dict]]]:
         out.extend(("leg", leg, []) for leg in plain)
     out.extend(("leg", leg, []) for leg in legs if leg.get("hedge"))
     return out
+
+
+def leg_fig(data: dict, leg: dict, key: str) -> Tuple[Optional[float], int, List[str]]:
+    """(figure, count excluded, reasons) of a leg row for `key` ('daily' | 'ltd'): a portion of a leg two
+    spreads share reads its own share from the engine (`pnl_usd`); any other leg its fills' figures summed
+    (`fill_sum`, the header's split), so the legs add up to their trade."""
+    if leg.get("shared"):
+        v = _num((leg.get("pnl_usd") or {}).get(key))
+        if v is None:
+            why = str((leg.get("pnl_reasons") or {}).get(key) or "no figure for this portion of the leg")
+            return None, 1, [f"{leg.get('name')}: {why}"]
+        return v, 0, []
+    return fill_sum(data, key, [str(i) for i in leg.get("trade_ids") or []])
+
+
+def legs_fig(data: dict, legs: Sequence[dict], key: str) -> Tuple[Optional[float], int, List[str]]:
+    """`leg_fig` added over `legs` (display): the known figures summed, the rest counted with their reasons."""
+    total, n, reasons, known = 0.0, 0, [], False
+    for leg in legs:
+        v, k, r = leg_fig(data, leg, key)
+        if v is not None:
+            total += v
+            known = True
+        n += k
+        reasons += r
+    return (total if known else None), n, reasons
+
+
+def shared_words(leg: dict) -> str:
+    """'Part of a 200-lot leg shared with CME HRC Nov/Dec26 Calendar' for a shared portion; '' otherwise."""
+    if not leg.get("shared"):
+        return ""
+    whole = _num(leg.get("leg_lots"))
+    size = f"a {_count_words(whole)}-lot leg" if whole is not None else "a leg"
+    others = [str(x) for x in leg.get("shared_with") or []]
+    return f"Part of {size} shared with {_names_words(others)}" if others else f"Part of {size} shared with another spread"
 
 
 def leg_qty_words(leg: dict) -> str:
@@ -2648,12 +2701,13 @@ def leg_row(data: dict, t: dict, leg: dict, hidden: Sequence[str] = (), last: bo
     tag_hover = (leg.get("unrecognised_reason") or "Contract not recognised") if unrec else (
         "A currency hedge of the whole trade, never of one spread" if hedge
         else "Nothing held on this contract any more")
-    name_td = html.Td([html.Span(name, title=plain_words(_leg_hover(data, leg)) or None),
+    name_td = html.Td([html.Span(name, title=plain_words(_lines(shared_words(leg), _leg_hover(data, leg))) or None),
                        html.Span(tag, className="tk-leg-tag" + (" tk-leg-tag--red" if unrec else ""),
                                  title=plain_words(tag_hover)) if tag else None],
                       colSpan=2, className="l tk-leg-name")
     qty = leg_qty_words(leg)
-    qty_td = html.Td(html.Span(qty, title=plain_words(_lines(lots_hover, "As in the file" if unrec else "")) or None)
+    qty_td = html.Td(html.Span(qty, title=plain_words(_lines(shared_words(leg), lots_hover,
+                                                             "As in the file" if unrec else "")) or None)
                      if qty else missing_cell("no size read"), className="l tk-qty")
     fill = _num(leg.get("avg_fill"))
     entry_td = html.Td(html.Span(price_text(fill, unit, fill), title=plain_words(_lines("Average fill", fill_hover)))
@@ -2661,7 +2715,7 @@ def leg_row(data: dict, t: dict, leg: dict, hidden: Sequence[str] = (), last: bo
                        className="tk-level")
     mark = _num(leg.get("mark"))
     est = is_estimated_mark(leg.get("mark_source"))
-    note = str((t.get("level") or {}).get("note") or "")
+    note = "" if is_multi(t) else str((t.get("level") or {}).get("note") or "")   # the trade level is not shown
     m_hover = _lines(mark_hover(data, leg, unit, fill, note), *(f"Price to check: {x}" for x in check))
     now_td = html.Td(html.Span(("≈ " if est or check else "") + price_text(mark, unit, fill), title=plain_words(m_hover),
                                className=("cell-estimated" if est else "") + (" cell-amber" if check else "") or None)
@@ -2678,9 +2732,10 @@ def leg_row(data: dict, t: dict, leg: dict, hidden: Sequence[str] = (), last: bo
                        f"Realised: {full_signed(realised)} USD" if realised is not None else "")
     cells: Dict[str, Any] = {
         "trade": name_td, "qty": qty_td, "entry": entry_td, "now": now_td,
-        "daily": money_td(*fill_sum(data, "daily", ids), check=check, row=True),
+        "daily": money_td(*leg_fig(data, leg, "daily"), hover=shared_words(leg), check=check, row=True),
         "open": _leg_split_td(data, t, leg, "open", check), "locked": _leg_split_td(data, t, leg, "locked", check),
-        "ltd": money_td(*fill_sum(data, "ltd", ids), hover=ltd_hover, check=check, row=True),
+        "ltd": money_td(*leg_fig(data, leg, "ltd"), hover=_lines(shared_words(leg), "" if leg.get("shared") else ltd_hover),
+                        check=check, row=True),
     }
     return html.Tr([cells.get(key) or html.Td("") for key, *_ in columns(hidden) if key != "what"],
                    className="tk-leg-row" + (" tk-leg-row--hedge" if hedge else "") + (" tk-leg-row--flat" if flat else "")
@@ -2728,8 +2783,8 @@ def panel_legs(data: dict, t: dict) -> Optional[html.Table]:
     the opened trade no longer repeats their sizes, prices and P&L): each open leg's value in USD (the
     local value and the spot on hover) and its roll-down a month, the trade's gross value and carry in
     the foot. None when nothing is open."""
-    legs = [leg for kind, leg, _l in leg_sequence(t) if kind == "leg" and leg.get("status") == "open"
-            and not leg.get("unrecognised")]
+    # each contract once (a leg two spreads share is one leg here, never its two portions), hedges last
+    legs = [leg for leg in _leg_order(t) if leg.get("status") == "open" and not leg.get("unrecognised")]
     if not legs:
         return None
     body = []
