@@ -352,7 +352,7 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     build_fingerprint is the source fingerprint this process runs (the launcher passes the
     one its identity route answers; computed here otherwise): every page bakes it in and
     reloads itself once a restart serves another (ui/revision.py)."""
-    from ui.launch import source_fingerprint
+    from ui.launch import identity, source_fingerprint
     resolved = Path(db_path) if db_path is not None else get_db_path()
     ensure_schema(resolved)
     # The database this app was built for is the active one.
@@ -367,7 +367,10 @@ def create_app(db_path: Union[str, Path, None] = None, start_feed: bool = False,
     # filter callback logic itself was correct when called directly in Python, but never
     # fired in the browser because of this). See CLAUDE.md ownership: this is app-wide
     # config, not a per-tab fix.
-    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    # The page's build in a <meta> tag (2026-10-01): `ui/assets/build_check.js` compares it with the
+    # identity route (`ui.launch`) and reloads a page left open across a restart, with no Dash callback.
+    app = dash.Dash(__name__, suppress_callback_exceptions=True,
+                    meta_tags=[{"name": revision.BUILD_META, "content": identity(build)}])
     # Never a stale page (user, 2026-09-28: "make sure there is never a stale page that loads
     # when you load the app"). Every response but the fingerprinted resources is told
     # `Cache-Control: no-store`: the index, `_dash-layout` (the layout the page starts from),

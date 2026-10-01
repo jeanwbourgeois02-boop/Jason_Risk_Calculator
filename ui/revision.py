@@ -56,19 +56,24 @@ the same string the launcher's identity route answers) into `BUILD_ID`; the poll
 differ, sets `STALE_ID`, whose clientside listener does `window.location.reload()`: the
 one browser reload in the app, and only because the CODE changed, never for data (data is
 the in-place refresh above). `_poll`'s ids never change, so a page from any older
-build still reaches it.
+build still reaches it. Since 2026-10-01 the primary reload is `ui/assets/build_check.js` (the
+baked build against the identity route, no Dash callback), and a poll this build no longer
+knows is answered with a reload (`answer_unknown_polls`) instead of a 500.
 
 Nothing here reads a mark or computes a number; every listener re-runs its own
 unchanged render.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
 
 from dash import Input, Output, State, dcc, html, no_update
+
+log = logging.getLogger(__name__)
 
 DATA_REVISION_ID = "data-revision"
 BOOK_REVISION_ID = "book-revision"
@@ -81,6 +86,51 @@ RELOAD_SINK_ID = "page-reload-sink"  # the clientside reload's (unused) output
 # Never in a layout: the input of the legacy `_build_check` (see `register`), which answers a page
 # built before 2026-09-29 so it still reloads once onto the new build.
 LEGACY_POLL_ID = "build-check-legacy-poll"
+
+
+BUILD_META = "risk-monitor-build"     # the <meta> the page's own build is baked into (`ui.app`, assets/build_check.js)
+UPDATE_ROUTE = "/_dash-update-component"
+_UNKNOWN_SEEN: set = set()           # the unknown poll keys already logged (once each per process)
+
+
+def unknown_poll_answer(output: str, known) -> Optional[dict]:
+    """The answer to a callback request from a page of another build whose poll this process no longer
+    registers (its output key is not in the callback map, `known`, but writes `STALE_ID`): a Dash
+    response that sets only `page-stale` to True, so the old page's own clientside listener reloads it
+    onto this build. None for any other request (Dash answers it as usual). Generic: any future change
+    of `_poll`'s outputs is covered, not one key."""
+    key = str(output or "")
+    if not key or key in known:
+        return None
+    parts = [p for p in key.strip(".").split("...") if p] if key.startswith("..") else [key]
+    if not any(p.split("@", 1)[0] == f"{STALE_ID}.data" for p in parts):
+        return None
+    return {"multi": True, "response": {STALE_ID: {"data": True}}}
+
+
+def answer_unknown_polls(app) -> None:
+    """A `before_request` on Dash's update route: an old page's poll that this build no longer knows
+    gets `unknown_poll_answer` (a 200 that reloads it) instead of Dash's KeyError and a 500 every 15 s;
+    logged once per key at info level. Everything else passes through untouched."""
+    import flask
+
+    @app.server.before_request
+    def _old_page_poll():
+        req = flask.request
+        if req.method != "POST" or not req.path.endswith(UPDATE_ROUTE):
+            return None
+        body = req.get_json(silent=True) or {}
+        answer = unknown_poll_answer(body.get("output") if isinstance(body, dict) else "", app.callback_map)
+        if answer is None:
+            return None
+        key = str(body.get("output"))
+        if key not in _UNKNOWN_SEEN:
+            _UNKNOWN_SEEN.add(key)
+            log.info("A page of another build polled with outputs this build does not register; told it to "
+                     "reload (%s)", key[:160])
+        response = flask.jsonify(answer)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
 
 
 def page_is_stale(page_build, build) -> bool:
@@ -219,6 +269,8 @@ def register(app, get_db_path: Callable[[], object], build: str = "", tick=None)
     `(outputs, states, fn)`, `fn(*state_values)` returning one value per output (the header's
     17:00 New York day roll, `ui.app`)."""
     extra_outputs, extra_states, extra_fn = tick if tick is not None else ([], [], None)
+    # an old page's poll this build no longer registers: answered with a reload, never a 500
+    answer_unknown_polls(app)
 
     # A page built before 2026-09-29 asks for `page-stale.data` alone (its own `_build_check`).
     # This answers it (the server matches a request by its output, not its input ids), so that
@@ -239,6 +291,16 @@ def register(app, get_db_path: Callable[[], object], build: str = "", tick=None)
         prevent_initial_call=True,
     )
 
+    # The code-change reload has two paths since 2026-10-01. The PRIMARY one needs no Dash callback:
+    # `ui/assets/build_check.js` compares the page's baked build (the `BUILD_META` tag, `ui.app`) with
+    # `/_risk_monitor_identity` every 20 s and reloads once on a difference. This poll's `STALE_ID`
+    # output is the second path. Its output signature (the outputs below plus the shell's `tick`
+    # outputs, `ui.app`'s day roll) still matters: a page of THIS build asks a later build for exactly
+    # these keys. A change of them (2026-10-01: the day roll's spare output `.date` -> `.data`) made an
+    # older page's poll a KeyError and a 500 every 15 s on the user's PC, and its reload, riding on
+    # the same poll, never came. `answer_unknown_polls` now answers any unknown poll that writes
+    # `STALE_ID` with a reload, so a change is survivable, but keep the outputs as they are unless the
+    # change is needed, and never drop `STALE_ID` from them.
     @app.callback(
         Output(DATA_REVISION_ID, "data"),
         Output(BOOK_REVISION_ID, "data"),
