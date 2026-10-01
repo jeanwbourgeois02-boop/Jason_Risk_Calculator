@@ -76,6 +76,13 @@ SRC_INTERP = "BBG_INTERP"
 # Keys of status["timings"], seconds per step of one cycle (see pull_once). "curves" was
 # "rates" until 2026-09-24, when the step stopped pricing swaps.
 TIMING_KEYS = ("session", "spot", "forwards", "futures", "curves", "vol", "options", "ledger", "total")
+# Keys of status["seconds"] (2026-10-01), seconds per step of one press, each step on its own
+# (status["timings"] lumps the contract dates under futures and the LME under forwards): the
+# blpapi session's opening apart, Bloomberg's contract dates apart from their apply, then each
+# step of PULL_STEPS, "recalc" on a PC with no Bloomberg, and the whole press. 0.0 for a step
+# that did not run; rounded to 0.01 s.
+SECONDS_KEYS = ("session", "contract_dates", "apply_contract_dates", "requests", "spot", "forwards", "futures",
+                "write_marks", "lme", "curves", "vol", "options", "ledger", "recalc", "total")
 
 
 # --------------------------------------------------------------------------- ledger result
@@ -783,7 +790,8 @@ def _contract_dates_entries(conn: sqlite3.Connection, as_of: str) -> Tuple[Dict[
     return entries, bool(in_force)
 
 
-def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Callable, diag=None) -> dict:
+def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Callable, diag=None,
+                        seconds: Optional[dict] = None) -> dict:
     """Bloomberg's contract dates for every future the library lists for today's pull
     (`library.contract_dates_needed`: CONTRACT_DATES, open, a verified ticker, no dates on
     file yet): one ReferenceDataRequest of FUT_LAST_TRADE_DT and FUT_NOTICE_FIRST for all
@@ -818,7 +826,15 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
     tickers sent), on_file (contracts needing dates today not asked because they are
     stored), empty (tickers Bloomberg answered with no date this press), known_empty
     (contracts not asked because an earlier answer of no date still stands), empty_tickers
-    (this press's then the known ones, at most CONTRACT_DATES_EMPTY_LISTED)."""
+    (this press's then the known ones, at most CONTRACT_DATES_EMPTY_LISTED).
+
+    `seconds` (2026-10-01, the pull's speed): a dict given by `pull_once`, into which the
+    time of the apply is written under "apply_contract_dates" (status["seconds"]). The apply
+    still runs on every press with a commodity contract open: it is the cheap test itself
+    (about 15 ms for 20 futures with nothing to move, measured), and a gate in front of it
+    (only when this press stored a date) would miss a move an upload or a snapshot import
+    left undone, or one stored under a differently spelt id that only
+    data.contracts.static_dates normalises."""
     block: dict = {"requested": 0, "stored": 0, "failed": [], "applied": {},
                    "asked": 0, "on_file": 0, "empty": 0, "empty_tickers": [], "known_empty": 0}
     day = today.isoformat()
@@ -934,11 +950,15 @@ def contract_dates_step(conn: sqlite3.Connection, today: date, get_session: Call
     except ImportError as exc:
         block["applied"] = {"error": f"data.ingest.contract_dates.apply_contract_dates not importable: {exc!r}"}
         return _done()
+    apply_started = time.perf_counter()
     try:
         applied = apply_contract_dates(conn)
         block["applied"] = dict(applied) if isinstance(applied, dict) else {"result": applied}
     except Exception as exc:  # noqa: BLE001
         block["applied"] = {"error": f"{exc!r}"}
+    finally:
+        if seconds is not None:
+            seconds["apply_contract_dates"] = time.perf_counter() - apply_started
     return _done()
 
 
@@ -1119,6 +1139,50 @@ def _ask_in_chunks(step: str, requests, size: int, ask: Callable, net: _NetLog, 
         if progress is not None:
             progress.add_done(sum(len(by_ticker[t]) for t in chunk))
     return out
+
+
+class _CombinedPxLast:
+    """One live PX_LAST ReferenceDataRequest for the spots and the futures of a press
+    together (2026-10-01, user: "Pull Bloomberg now is slow"): the two used to go one after
+    the other, each its own round trip, for the same field. Built by `pull_once` only when
+    both have something to ask, no future is a listed option (those also take PX_MID, a
+    field the spots are never asked), and the two together fit in one marks chunk
+    (REQUEST_CHUNK), so each step would have been a single request anyway.
+
+    The spot step sends it (its time is the spot step's) and the futures step reads its
+    answer: `for_chunk(tickers)` gives {ticker: {"PX_LAST": value}} for a chunk all of whose
+    tickers it asked, else None (the step then asks as before). A request that raises is
+    raised to the step that sent it, once, exactly as that step's own request would have,
+    and from then on None, so the spot step's per-ticker retry and the futures' own request
+    go to Bloomberg as before: a failed combined request never fails the futures unasked.
+    Tagged purpose LIVE_SPOT in the diagnostics, which is what the spot rows' "Bloomberg
+    said" reads; nothing reads the futures' FUTURE_PX_LIVE tag."""
+
+    def __init__(self, tickers, get_session: Callable, diag=None):
+        self.tickers = sorted(set(tickers))
+        self._get_session, self._diag = get_session, diag
+        self.data: Optional[Dict[str, dict]] = None
+        self.error: Optional[BaseException] = None
+        self._raised = False
+
+    def for_chunk(self, chunk_tickers) -> Optional[Dict[str, dict]]:
+        if not set(chunk_tickers) <= set(self.tickers):
+            return None
+        if self.data is None and self.error is None:
+            from data.bloomberg import pull_marks as pm
+            session, service = self._get_session()          # SessionUnavailable raised on
+            try:
+                self.data = pm.fetch_reference(session, service, self.tickers, ["PX_LAST"], diag=self._diag,
+                                               tag={"purpose": "LIVE_SPOT", "combined": "LIVE_SPOT+FUTURE_PX_LIVE"}
+                                               ) or {}
+            except Exception as exc:  # noqa: BLE001 -- raised once below, then asked as before
+                self.error = exc
+        if self.error is not None:
+            if not self._raised:
+                self._raised = True
+                raise self.error
+            return None
+        return self.data
 
 
 # --------------------------------------------------------------------------- progress
@@ -1329,20 +1393,29 @@ def _bloomberg_said(diag, ticker: str) -> str:
     return _bloomberg_said_for(diag, ticker, "LIVE_SPOT")
 
 
-def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str):
+def _live_spot_rows(session, service, requests, as_of: date, diag, snapped: str,
+                    prefetched: Optional[Dict[str, dict]] = None):
     """Live PX_LAST via ReferenceDataRequest (intraday), unlike pull_marks' close-of-day
     historical path, for every SPOT request in ONE request. A failure carries Bloomberg's
     own reason when it gave one. Returns (rows, failures).
 
     A request that raises (a timeout, a dead session) raises to the caller since 2026-09-29:
     `pull_once` asks in chunks (`_ask_in_chunks`), which fails that chunk's rows with the
-    reason and goes on. A value that is not a finite number fails its own row."""
+    reason and goes on. A value that is not a finite number fails its own row.
+
+    `prefetched` (2026-10-01): the answer of the press's one PX_LAST request for the spots
+    and the futures together (`_CombinedPxLast`), {ticker: {"PX_LAST": value}}; given, no
+    request is sent here and the rows are read off it exactly as off this function's own."""
     from data.bloomberg.pull_marks import fetch_reference, _plain_number
     spot_reqs = [r for r in requests if r.mark_type == "SPOT"]
     if not spot_reqs:
         return [], []
     tickers = sorted({r.bbg_ticker for r in spot_reqs})
-    data = fetch_reference(session, service, tickers, ["PX_LAST"], diag=diag, tag={"purpose": "LIVE_SPOT"}) or {}
+    if prefetched is not None:
+        data = prefetched
+    else:
+        data = fetch_reference(session, service, tickers, ["PX_LAST"], diag=diag,
+                               tag={"purpose": "LIVE_SPOT"}) or {}
     rows, failures = [], []
     for r in spot_reqs:
         value = (data.get(r.bbg_ticker) or {}).get("PX_LAST")
@@ -2102,7 +2175,14 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     when the session opened cleanly, the cycle's body ran to its end and the pull is
     connected (a session whose every request raised is stopped here, as before); the
     caller then owns it and must call its `stop()` exactly once. The cycle has finished
-    with the session before it is lent: nothing here touches it again."""
+    with the session before it is lent: nothing here touches it again.
+
+    Faster press (2026-10-01, user: "Pull Bloomberg now is slow"): `status["seconds"]`
+    gives each step's own time (SECONDS_KEYS, 0.01 s; the session's opening apart, the
+    contract dates apart from their apply), so a slow press can be read off the status file
+    and the Data tab's diagnosis report; `status["timings"]` stays as it was. The spots and
+    the futures share one PX_LAST request when they can (`_CombinedPxLast`: same tickers,
+    same field, one round trip fewer); each step's status, items and outcome are as before."""
     from data.ingest.schema import connect
     clock_started = time.perf_counter()
     started = _now_iso()
@@ -2110,22 +2190,27 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
               "as_of_date": as_of_date, "requested": 0, "written": 0, "failed": 0, "items": [], "warnings": []}
     timings = {key: 0.0 for key in TIMING_KEYS}
     other = {"build_requests": 0.0, "write_marks": 0.0}
+    seconds = {key: 0.0 for key in SECONDS_KEYS}
     shared: Optional[_SharedSession] = None
     conn: Optional[sqlite3.Connection] = None
     net = _NetLog()
     steps: List[dict] = []
     progress = _Progress(db_path, started)
 
-    def _timed(book: dict, key: str, fn, *args, **kwargs):
+    def _timed(book: dict, key: str, fn, *args, step: str = "", **kwargs):
         """fn(*args, **kwargs), its wall time added to book[key] -- less whatever it spent
-        opening the shared session, which is reported once, under "session"."""
+        opening the shared session, which is reported once, under "session" -- and, under
+        the same rule, to seconds[step] when a step name is given (status["seconds"])."""
         opening = shared.seconds if shared is not None else 0.0
         step_started = time.perf_counter()
         try:
             return fn(*args, **kwargs)
         finally:
             opened = (shared.seconds if shared is not None else 0.0) - opening
-            book[key] += time.perf_counter() - step_started - opened
+            spent = time.perf_counter() - step_started - opened
+            book[key] += spent
+            if step:
+                seconds[step] = seconds.get(step, 0.0) + spent
 
     def _record(name: str, outcome: str, detail, seconds: float) -> None:
         steps.append({"step": name, "label": STEP_LABELS.get(name, name), "outcome": outcome,
@@ -2142,7 +2227,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         progress.step(name, publish=not quiet)
         step_started = time.perf_counter()
         try:
-            result = _timed(book, key, fn, *args, **kwargs)
+            result = _timed(book, key, fn, *args, step=name, **kwargs)
         except Exception as exc:  # noqa: BLE001 -- the step fails alone
             if conn is not None:
                 try:
@@ -2171,6 +2256,11 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         timings["total"] = time.perf_counter() - clock_started
         status["timings"] = {key: round(timings[key], 1) for key in TIMING_KEYS}
         status["timings_other"] = {key: round(value, 1) for key, value in other.items()}
+        seconds["session"] = timings["session"]
+        seconds["total"] = timings["total"]
+        # The contract dates step's own time less its apply, which is reported apart.
+        seconds["contract_dates"] = max(seconds["contract_dates"] - seconds["apply_contract_dates"], 0.0)
+        status["seconds"] = {key: round(seconds.get(key, 0.0), 2) for key in SECONDS_KEYS}
         status["steps"] = steps
         if not status.get("connected"):
             outcome = "failed"
@@ -2217,7 +2307,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             progress.block["step_count"] = 1
             step_started = time.perf_counter()
             progress.step("recalc")
-            status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today)
+            status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today, step="recalc")
             status["recalc_summary"] = recalc_summary(status["recalc"])
             _record("recalc", "failed" if status["recalc"].get("error") else "ok", status["recalc_summary"],
                     time.perf_counter() - step_started)
@@ -2238,7 +2328,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # instrument, legs and marks onto Bloomberg's; the legs' change marks the
             # library out of date, so build_requests below reads the futures as moved and
             # their FUTURE_PX lands under Bloomberg's expiry.
-            done, block = _run("contract_dates", timings, "futures", contract_dates_step, conn, today, shared.get, diag)
+            done, block = _run("contract_dates", timings, "futures", contract_dates_step, conn, today, shared.get, diag,
+                               seconds=seconds)
             if not done:
                 block = {"requested": 0, "stored": 0, "failed": [], "applied": {}, "error": _plain_error(block)}
                 block["summary"] = contract_dates_summary(block)
@@ -2283,10 +2374,27 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
 
             # Spot: live PX_LAST, in chunks of REQUEST_CHUNK["spot"] tickers.
             spot_reqs = [r for r in requests if r.mark_type == "SPOT"]
+            # The futures and listed options, told apart here (they were after the forwards)
+            # so the spots and futures can share one PX_LAST request (2026-10-01).
+            fut_reqs = [r for r in requests if r.mark_type == "FUTURE_PX"]
+            try:
+                listed = _listed_option_ids(conn) if fut_reqs else set()
+            except Exception as exc:  # noqa: BLE001 -- the options then take PX_LAST, said
+                listed = set()
+                warnings.append(f"listed options not told apart from futures (PX_LAST used): {_plain_error(exc)}")
+            # One PX_LAST request for the spots and futures together when both have something
+            # to ask, no future is a listed option (PX_MID, a field the spots never take) and
+            # they fit one chunk: the same tickers and field, one round trip instead of two.
+            px_tickers = {r.bbg_ticker for r in spot_reqs} | {r.bbg_ticker for r in fut_reqs}
+            combined: Optional[_CombinedPxLast] = None
+            if (spot_reqs and fut_reqs and not any(r.instrument_id in listed for r in fut_reqs)
+                    and len(px_tickers) <= min(REQUEST_CHUNK["spot"], REQUEST_CHUNK["futures"])):
+                combined = _CombinedPxLast(px_tickers, shared.get, diag)
 
             def _ask_spot(chunk):
-                session, service = shared.get()
-                rows, failures = _live_spot_rows(session, service, chunk, today, diag, snapped)
+                prefetched = combined.for_chunk({r.bbg_ticker for r in chunk}) if combined is not None else None
+                session, service = (None, None) if prefetched is not None else shared.get()
+                rows, failures = _live_spot_rows(session, service, chunk, today, diag, snapped, prefetched=prefetched)
                 return {"rows": rows, "failures": failures}
 
             spot = empty
@@ -2340,18 +2448,16 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # its live price is Bloomberg's mid: the last trade of one strike can be hours
             # old. snapped (2026-09-28): the press time, so a press's FUTURE_PX row never
             # looks like the day's 17:00 close and the backfill replaces it once the day is past.
-            fut_reqs = [r for r in requests if r.mark_type == "FUTURE_PX"]
-            try:
-                listed = _listed_option_ids(conn) if fut_reqs else set()
-            except Exception as exc:  # noqa: BLE001 -- the options then take PX_LAST, said
-                listed = set()
-                warnings.append(f"listed options not told apart from futures (PX_LAST used): {_plain_error(exc)}")
+            # (fut_reqs and listed are read above, before the spots.) When the spots' request
+            # carried the futures too, its answer stands in for their own PX_LAST request.
 
             def _ask_futures(chunk):
+                prefetched = combined.for_chunk({r.bbg_ticker for r in chunk}) if combined is not None else None
                 session, service = shared.get()
                 rows, warns, failures = pm.build_future_rows(
                     session, service, chunk, today, diag, live=True,
-                    mid_first={r.bbg_ticker for r in chunk if r.instrument_id in listed}, snapped=snapped)
+                    mid_first={r.bbg_ticker for r in chunk if r.instrument_id in listed}, snapped=snapped,
+                    prefetched=prefetched)
                 return {"rows": rows, "warnings": warns, "failures": failures}
 
             futures = empty
@@ -2460,7 +2566,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 # Bloomberg is not available at all.
                 progress.step("recalc")
                 step_started = time.perf_counter()
-                status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today)
+                status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today, step="recalc")
                 status["recalc_summary"] = recalc_summary(status["recalc"])
                 _record("recalc", "failed" if status["recalc"].get("error") else "ok", status["recalc_summary"],
                         time.perf_counter() - step_started)
@@ -2564,7 +2670,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
         if today is not None and not (shared is not None and shared.opened) and "recalc" not in status:
             # The cycle could not run at all before a session was opened: no Bloomberg for
             # this press either, so the options are re-priced from the marks on file.
-            status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today)
+            status["recalc"] = _timed(timings, "options", recalc_options_on_file, db_path, today, step="recalc")
             status["recalc_summary"] = recalc_summary(status["recalc"])
     return _finish()
 

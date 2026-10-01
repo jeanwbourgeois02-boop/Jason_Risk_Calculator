@@ -849,7 +849,10 @@ def price_decimals(unit: str = "", fill=None, floor: Optional[int] = None) -> in
     cents, oz 1, bbl / MWh / therm 2, a tonne in CNY or USD 0; an FX pair passed as the unit
     by `fx_pair_decimals`, no unit 4), never fewer than the
     fill's own decimals (`decimals_of(fill)`, so a 2,588.6 fill keeps its .6), never more
-    than 6."""
+    than 6. A tonne price under 1,000 (`fill` the reference: iron ore at 96.5 USD/t, gasoil,
+    Matif wheat, DCE iron ore at 780 CNY/t) trades in cents or half-units, so it takes 2
+    decimals (1 in CNY) where copper or zinc in the thousands keep 0 (2026-10-01: an iron ore
+    calendar's level of -0.2 read "0")."""
     ccy, _sep, qty = str(unit or "").partition("/")
     ccy, qty = ccy.strip().upper(), qty.strip().lower()
     cents = ccy in ("¢", "P")          # quoted in cents or pence: two decimals is the tick
@@ -866,8 +869,14 @@ def price_decimals(unit: str = "", fill=None, floor: Optional[int] = None) -> in
             floor = 2
         elif qty in ("oz", "g"):
             floor = 1
-        elif qty in ("t",) or ccy in ("JPY", "KRW"):
+        elif ccy in ("JPY", "KRW"):
             floor = 0
+        elif qty in ("t",):
+            try:
+                ref = None if _is_missing(fill) else abs(float(fill))
+            except (TypeError, ValueError):
+                ref = None
+            floor = (1 if ccy == "CNY" else 2) if ref is not None and 0 < ref < 1000 else 0
         else:
             floor = 2
     # The fill's own decimals are the fallback, never more than half a tick finer than the unit's

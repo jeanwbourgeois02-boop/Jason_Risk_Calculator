@@ -345,6 +345,54 @@ def _history_inputs_on(lib_rows: List[dict], day: str, ois_index) -> List[dict]:
     return [{"kind": kind, "key": key} for kind, key in sorted(found)]
 
 
+def _exchange_calendars(conn: sqlite3.Connection, keys) -> dict:
+    """{instrument_id: exchange-calendar id} of the library keys that trade on an exchange: a
+    commodity future, an option on one (`instruments.base_ccy` is its contract root) or an LME
+    metal (the key is the root id itself, 'LME:CA'), from `config/contracts.csv`'s `calendar`
+    column (2026-10-01). An FX pair, a key with no instrument row or an unknown root has none:
+    its days are config/holidays.txt's, as before."""
+    from data.bloomberg import library
+    ids = sorted(keys)
+    base_of: dict = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        base_of.update(dict(conn.execute(
+            f"SELECT instrument_id, base_ccy FROM instruments WHERE instrument_id IN ({','.join('?' * len(chunk))})",
+            chunk)))
+    out, cal_of_root = {}, {}
+    for iid in ids:
+        base = base_of.get(iid)
+        root = base if library.is_contract_root(base) else (iid if library.is_contract_root(iid) else "")
+        if not root:
+            continue
+        if root not in cal_of_root:
+            try:
+                from data.contracts import get_root
+                cal_of_root[root] = get_root(root).calendar
+            except Exception:  # noqa: BLE001 -- an unknown root or no contract master: the FX calendar's days
+                cal_of_root[root] = ""
+        if cal_of_root[root]:
+            out[iid] = cal_of_root[root]
+    return out
+
+
+def exchange_shut(calendar_id: str, day: str) -> bool:
+    """Is `day` a full-day closure of the exchange calendar `calendar_id`
+    (`engine.calendars`: China's National Day week on 'CN', a UK bank holiday on 'LME')? A day
+    outside the calendar file's `coverage()` is never called shut (nothing is guessed), nor is
+    any day of an unknown calendar or an empty id."""
+    if not calendar_id:
+        return False
+    try:
+        from engine import calendars
+        first, last = calendars.coverage(calendar_id)
+        if not first.isoformat() <= day <= last.isoformat():
+            return False
+        return not calendars.is_business_day(calendar_id, day)
+    except Exception:  # noqa: BLE001 -- an unreadable calendar: the day counts, as before
+        return False
+
+
 def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Optional[str] = None) -> pd.DataFrame:
     """One row per business day in [start, end]: as_of_date, needed, present, complete,
     missing (list of {instrument_id, settle_date, mark_type} still missing that day),
@@ -404,7 +452,17 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
 
     2026-09-30 (the pull's speed): the library, the official marks of its keys over the span
     and the vol / OIS quotes held over the span are each read once per call and answered
-    per day in memory; the rows are exactly what the per-day reads gave."""
+    per day in memory; the rows are exactly what the per-day reads gave.
+
+    2026-10-01 (exchange holidays): on a day before `today`, a mark of a commodity future, an
+    option on one or an LME metal (cash, prompt, LME_CURVE) whose own exchange was shut that
+    day (`exchange_shut` on `config/contracts.csv`'s calendar of its root; the LME's for an LME
+    metal) is not needed: neither in `needed` nor `missing`, so the Marks chip reports no gap
+    and the backfill never asks Bloomberg for a close that will never exist. Such items are
+    listed in `exchange_closed` ([{instrument_id, settle_date, mark_type, calendar}]). FX pairs
+    (a USD-conversion SPOT included) keep config/holidays.txt; a day outside a calendar's
+    coverage counts as open. Today is untouched (the live pull still asks), and so is the
+    valuation: the near-marks rule values that day from the neighbouring closes."""
     from data.bloomberg import library
     from data.bloomberg.backfill import business_days, is_close_row
     from datetime import date as _date
@@ -414,6 +472,12 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     days = business_days(_date.fromisoformat(start), _date.fromisoformat(end))
     lib_rows = library.rows(conn)
     official = _official_snaps_in_span(conn, start, end, {r["key"] for r in lib_rows})
+    calendar_of = _exchange_calendars(conn, {r["key"] for r in lib_rows})
+
+    def shut(day: str, item: dict) -> str:
+        """The exchange calendar id when `item`'s exchange was shut on past `day`, else ''."""
+        cal = calendar_of.get(item["instrument_id"], "")
+        return cal if day < today and exchange_shut(cal, day) else ""
 
     def snap(day: str, item: dict):
         return official.get((day, item["instrument_id"], item["settle_date"], item["mark_type"]))
@@ -432,7 +496,14 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
     rows = []
     for d in days:
         day = d.isoformat()
-        listed = _needed_marks(conn, day, historical=True, include_unrequestable=True, lib_rows=lib_rows)
+        listed, closed = [], []
+        for item in _needed_marks(conn, day, historical=True, include_unrequestable=True, lib_rows=lib_rows):
+            cal = shut(day, item)
+            if cal:
+                closed.append({"instrument_id": item["instrument_id"], "settle_date": item["settle_date"],
+                               "mark_type": item["mark_type"], "calendar": cal})
+            else:
+                listed.append(item)
         needed_items = [i for i in listed if "reason" not in i]
         present = not_closed = 0
         missing = []
@@ -446,6 +517,11 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
                 not_closed += 1 if hit else 0
         unrequestable = [i for i in listed if "reason" in i and snap(day, i) is None]
         for item in _lme_curve_items(conn, day, historical=True, include_unrequestable=True, lib_rows=lib_rows):
+            cal = shut(day, item)
+            if cal:
+                closed.append({"instrument_id": item["instrument_id"], "settle_date": item["settle_date"],
+                               "mark_type": item["mark_type"], "calendar": cal})
+                continue
             state = _lme_curve_state(day, item["instrument_id"], today, snap)
             if "reason" in item:
                 if not state["complete"]:
@@ -459,9 +535,9 @@ def close_completeness(conn: sqlite3.Connection, start: str, end: str, today: Op
         rows.append({"as_of_date": day, "needed": len(needed_items), "present": present,
                      "complete": len(needed_items) > 0 and present >= len(needed_items), "missing": missing,
                      "not_closed": not_closed, "inputs_missing": day_inputs_missing(day) if day < today else [],
-                     "not_requestable": unrequestable})
+                     "not_requestable": unrequestable, "exchange_closed": closed})
     return pd.DataFrame(rows, columns=["as_of_date", "needed", "present", "complete", "missing", "not_closed",
-                                       "inputs_missing", "not_requestable"])
+                                       "inputs_missing", "not_requestable", "exchange_closed"])
 
 
 def _official_snap(conn: sqlite3.Connection, day: str, item: dict):

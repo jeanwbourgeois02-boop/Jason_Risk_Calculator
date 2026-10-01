@@ -5,4 +5,5 @@
 - [Marks check, Phase G (2026-09-29)](mark_checks_phase_g_2026_09_29.md) — mark_checks rules, choices on ambiguities, sanity-rule noise
 - [Unrecognised trades (2026-09-29)](unrecognised_trades_2026_09_29.md) — never in the library; inventory.unrecognised lists them; kept out of mark_checks
 - [Risk history needs (2026-09-30)](risk_history_needs_2026_09_30.md) — read-time chain per held root, USDCNH for CNY, LME cash+3M; not in bbg_library
+- [Exchange holidays in close completeness (2026-10-01)](exchange_holidays_close_completeness_2026_10_01.md) — past close on its exchange's holiday not needed; exchange_closed column
 - Older notes on these files: `.claude/agent-memory/bbg-data/` (library/inventory history before the 2026-09-24 split)

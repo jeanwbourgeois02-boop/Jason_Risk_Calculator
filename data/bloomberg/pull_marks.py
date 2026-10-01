@@ -1064,7 +1064,9 @@ def build_spot_rows(session, service, requests: Sequence[RequestRow], as_of: dat
 def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: date,
                        diag: Optional[Diagnostics] = None, live: bool = False,
                        lookback_days: int = 7, mid_first=(),
-                       snapped: Optional[str] = None) -> Tuple[List[dict], List[str], List[dict]]:
+                       snapped: Optional[str] = None,
+                       prefetched: Optional[Dict[str, Dict[str, object]]] = None,
+                       ) -> Tuple[List[dict], List[str], List[dict]]:
     """FUTURE_PX. Default (`live=False`, the historical/backfill CLI path): unchanged --
     HistoricalDataRequest PX_SETTLE for `as_of` alone.
 
@@ -1094,6 +1096,13 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
 
     See build_spot_rows for the (rows, warnings, failures) contract.
 
+    `prefetched` (live only, 2026-10-01): {ticker: {"PX_LAST": value}}, the answer of the
+    live press's one PX_LAST request for its spots and futures together
+    (data.bloomberg.live._CombinedPxLast). Given, the live PX_LAST request is not sent and
+    the answer is read off it exactly as off this function's own; the PX_SETTLE fallback is
+    asked as ever. The caller passes it only when no ticker here takes PX_MID (the fields
+    asked are then the same, PX_LAST alone).
+
     A value that is not a finite number (Bloomberg's 'N.A.', a NaN; 2026-09-29, Phase G
     "Smooth and contained") is never written and never stops the other rows: live, it counts
     as no PX_LAST (the PX_SETTLE fallback is tried); otherwise the row fails with its reason."""
@@ -1105,8 +1114,13 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
     out, warnings, failures = [], [], []
     if live:
         mid_first = set(mid_first or ())
-        live_data = fetch_reference(session, service, tickers, ["PX_LAST"] + (["PX_MID"] if mid_first else []),
-                                    diag=diag, tag={"purpose": "FUTURE_PX_LIVE"})
+        if prefetched is not None and not mid_first:
+            # copies: the mid substitution below never writes into the shared answer
+            live_data = {t: dict(prefetched[t]) for t in tickers if t in prefetched}
+        else:
+            live_data = fetch_reference(session, service, tickers,
+                                        ["PX_LAST"] + (["PX_MID"] if mid_first else []),
+                                        diag=diag, tag={"purpose": "FUTURE_PX_LIVE"})
         for ticker in mid_first:       # a listed option: Bloomberg's mid stands in for the last trade
             got = live_data.get(ticker) or {}
             if _plain_number(got.get("PX_MID")) is not None:

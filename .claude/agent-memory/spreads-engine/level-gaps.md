@@ -23,3 +23,8 @@ User 2026-09-30: "the size/entry is messy still" (half the sample's open trades 
   usd_per_unit = N x mult / scale x spot: change x usd_per_unit == Daily on WTIRR1 / JPYVOL1 exactly.
 - `price_legs` in the level lets `level_history` chart 'price' and 'premium' levels (no spec).
 - The ui still greys only on INTERP leg marks: reading `entry_estimated` is a request to ui (2026-09-30).
+- 2026-10-01: a cross part whose other side is flat (`part.closed_roots`, SILARB1: COMEX silver
+  bought and sold, SHFE silver short, USD/CNH hedge) takes the open side's own level
+  (`_open_side_level`): one contract -> its price level, several months long/short -> calendar,
+  else blank; the flat-side sentence stays as `note`. Type, P&L, grouping untouched.
+  The real file loads into a scratch DB with `upload.import_blotter(bytes, name, db)` (PYTHONPATH=.).

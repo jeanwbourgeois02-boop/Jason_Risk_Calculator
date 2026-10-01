@@ -10,3 +10,4 @@ Older notes on these files (live.py, pull_marks.py, pull_report.py) are in `.cla
 - [Pull speed (2026-09-30)](pull_speed_2026_09_30.md) — where a press's time goes, chunks 50, one library read, quiet steps, session lent to the backfill, harness
 - [Contract dates: no re-ask of empty answers (2026-09-30)](contract_dates_empty_state_2026_09_30.md) — <db>.contract_dates_state.json, skip rule, new status keys
 - [One close, 17:00 New York (2026-09-28)](one_close_1700_2026_09_28.md) — CLOSE_HOUR_NY 17 for every instrument, intraday helpers gone, build_future_rows `snapped`, daily_close probe, leftovers for other lanes
+- [Pull speed, second pass (2026-10-01)](pull_speed_2026_10_01.md) — status["seconds"] per step, apply kept every press, spot+futures one PX_LAST request, timeout findings

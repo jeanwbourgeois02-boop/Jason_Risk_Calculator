@@ -63,4 +63,5 @@
 - [P&L chart two panels 2026-09-30](pnl-chart-two-panels-2026-09-30.md) — HISTORY: the chart was removed 2026-10-01; plotly traps kept for reference
 - [Data tab three cards 2026-09-30](data-tab-three-cards-2026-09-30.md) — Blotter | Bloomberg | Diagnosis cards, render 17 outputs, diagnosis_text in the runner, clipboard ::after, proof recipe
 - [Small pass 2026-09-30](small-pass-2026-09-30.md) — Book summary without %, hedge % text = variance reduction, P&L CSV as a link
-- [P&L period columns 2026-10-01](pnl-period-columns-2026-10-01.md) — chart + period switch gone; Today|5d|MTD|YTD|All columns, split on hover, MTD order, heading sort, periods()
+- [P&L period columns 2026-10-01](pnl-period-columns-2026-10-01.md) — chart + period switch gone; Today|2d|5d|MTD|YTD|All columns, split on hover, MTD order, heading sort, periods()
+- [Level precision 2026-10-01](level-precision-2026-10-01.md) — spread levels at their legs' precision (level_decimals, legs=); tonne prices < 1,000 get 2 dp (CNY 1) with a fill

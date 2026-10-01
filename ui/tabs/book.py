@@ -62,7 +62,7 @@ from ui.tabs.formatting import (
     cap, cap_parts, tidy,
     EN_DASH, MINUS, MISSING, about, compact, contract_name, day_text, format_cell, full_signed, fx_name, is_fx_pair,
     issues_drawer, km_cell, km_text, marker, missing_cell, month_label, parse_contract_id, pct_text,
-    plain_words, price_text, quoted_unit, row_info, short_date, short_root_name, sign_class, size_words, strike_text,
+    plain_words, price_decimals, price_text, quoted_unit, row_info, short_date, short_root_name, sign_class, size_words, strike_text,
     sum_known, z_text,
 )
 from ui.tabs.header import AS_OF_STORE_ID
@@ -175,19 +175,53 @@ def unit_words(unit: Optional[str]) -> str:
     return u.replace("USD/", "$/").replace("/mwh", "/MWh").replace("/mmbtu", "/MMBtu")
 
 
-def level_text(value: Any, level: dict, signed: bool = False) -> str:
-    """A level in its own format: a ratio at 4 decimals, a price difference at the unit's tick,
-    with a real minus. `signed`: a move of the level (the Move column), a real sign both ways
-    ('−0.0023', '+20'): brackets are for money only (user, 2026-09-30; CLAUDE.md "Tabs as views")."""
+def level_decimals(level: dict, legs: Sequence[dict] = ()) -> Optional[int]:
+    """The decimals of a level in its legs' own price unit (a calendar, one contract's price, an
+    options trade's net premium): the most any of its legs' price cells shows (`price_decimals` on
+    the leg's average fill, else its mark), so the level reads at the legs' precision, never coarser
+    (2026-10-01: an SGX iron ore calendar of 96.5 / 96.7 read "0"). None for a ratio, a level in a
+    template's own unit, or no priced leg: the unit's tick then."""
+    if not level or level.get("mode") == "ratio" or level.get("unit") == "ratio":
+        return None
+    spec = level.get("spec") or {}
+    spec_legs = spec.get("legs") or []
+    same_unit = (level.get("source") in ("calendar", "price", "premium")
+                 or (spec_legs and len({str(x.get("root_id") or "") for x in spec_legs}) == 1))
+    if not same_unit:
+        return None
+    ids = ({str(x.get("instrument_id") or "") for x in spec_legs}
+           | {str(x.get("instrument_id") or "") for x in level.get("price_legs") or []}) - {""}
+    unit = str(level.get("unit") or "")
+    best: Optional[int] = None
+    for leg in legs or ():
+        if leg.get("hedge") or leg.get("unrecognised") or (ids and str(leg.get("instrument_id") or "") not in ids):
+            continue
+        ref = _num(leg.get("avg_fill"))
+        ref = ref if ref is not None else _num(leg.get("mark"))
+        if ref is not None:
+            d = price_decimals(unit, ref)
+            best = d if best is None else max(best, d)
+    return best
+
+
+def level_text(value: Any, level: dict, signed: bool = False, legs: Sequence[dict] = ()) -> str:
+    """A level in its own format: a ratio at 4 decimals, a price difference at its legs' precision
+    (`level_decimals`; the unit's tick without legs), with a real minus. `signed`: a move of the level
+    (the Move column), a real sign both ways ('−0.0023', '+20'): brackets are for money only (user,
+    2026-09-30; CLAUDE.md "Tabs as views")."""
     v = _num(value)
     if v is None:
         return MISSING
     if level.get("mode") == "ratio" or level.get("unit") == "ratio":
         body = f"{abs(v):.4f}"
     else:
-        body = price_text(abs(v), str(level.get("unit") or ""))
+        unit = str(level.get("unit") or "")
+        d = level_decimals(level, legs)
+        if d is None:
+            d = price_decimals(unit)
+        body = price_text(abs(v), unit, decimals=d)
         if not signed:
-            return price_text(v, str(level.get("unit") or ""))
+            return price_text(v, unit, decimals=d)
     moved = bool(body.strip("0.,"))
     if signed:
         return ((MINUS if v < 0 else "+") if moved else "") + body
@@ -195,7 +229,7 @@ def level_text(value: Any, level: dict, signed: bool = False) -> str:
 
 
 def _level_cell(value: Any, level: dict, reason: str, hover: str = "", estimated: bool = False,
-                className: str = "", with_unit: bool = False) -> Any:
+                className: str = "", with_unit: bool = False, legs: Sequence[dict] = ()) -> Any:
     """A level figure at the row's one precision (`level_text`: the unit's tick, 4 decimals for a
     ratio or a premium with no unit), grey after a "≈" when `estimated`. The unit (`with_unit`, on
     Entry and Now since 2026-09-30; "ratio" for a ratio) sits in a fixed-width slot so the figures
@@ -206,7 +240,7 @@ def _level_cell(value: Any, level: dict, reason: str, hover: str = "", estimated
     unit = ""
     if with_unit:
         unit = "ratio" if level.get("mode") == "ratio" or level.get("unit") == "ratio" else unit_words(level.get("unit"))
-    return html.Span([("≈ " if estimated else "") + level_text(v, level),
+    return html.Span([("≈ " if estimated else "") + level_text(v, level, legs=legs),
                       html.Span(unit or NBSP, className="cell-unit tk-unit-slot") if with_unit else None],
                      className=" ".join(c for c in (className, "cell-estimated" if estimated else "") if c) or None,
                      title=plain_words(hover) or None)
@@ -1425,7 +1459,8 @@ def _entry_td(t: dict, data: Optional[dict] = None) -> html.Td:
                    (level.get("sources") or {}).get("entry", ""), *estimate_words(level, "entry"),
                    level_unit_line(level))
     return html.Td(_level_cell(level.get("entry"), level, str(level.get("entry_reason") or level.get("reason") or ""),
-                               hover, estimated=bool(level.get("entry_estimated")), with_unit=True),
+                               hover, estimated=bool(level.get("entry_estimated")), with_unit=True,
+                               legs=t.get("legs") or ()),
                    className="tk-level tk-entry")
 
 
@@ -1443,10 +1478,11 @@ def _now_td(t: dict, check: Sequence[str] = (), data: Optional[dict] = None, r: 
                    *estimate_words(level, "now"), *(f"Price to check: {x}" for x in check))
     estimated = bool(level.get("now_estimated")) or _estimated_level(t) or bool(check)
     return html.Td(_level_cell(level.get("now"), level, str(level.get("now_reason") or level.get("reason") or ""),
-                               hover, estimated=estimated, with_unit=True), className="tk-level tk-now")
+                               hover, estimated=estimated, with_unit=True, legs=t.get("legs") or ()),
+                   className="tk-level tk-now")
 
 
-def sigma_words(r: Optional[dict], ready: bool, level: dict) -> str:
+def sigma_words(r: Optional[dict], ready: bool, level: dict, legs: Sequence[dict] = ()) -> str:
     """'Move in σ: +1.4 (a daily σ of 0.21 $/bbl over 251 changes)' from
     `trade_risk`'s move_sigma / level_sd, or the engine's reason."""
     if not ready:
@@ -1460,13 +1496,14 @@ def sigma_words(r: Optional[dict], ready: bool, level: dict) -> str:
     if sd is not None:
         unit = unit_words(r.get("level_unit") or level.get("unit"))
         days = r.get("level_sd_days")
-        sd_text = (f" (a daily σ of {level_text(sd, level)}{' ' + unit if unit else ''}"
+        sd_text = (f" (a daily σ of {level_text(sd, level, legs=legs)}{' ' + unit if unit else ''}"
                    + (f" over {days} daily changes" if days else "") + ")")
     return f"Move in σ: {z_text(ms)}{sd_text}"
 
 
 def _today_td(t: dict, r: Optional[dict] = None, ready: bool = True, check: Sequence[str] = ()) -> html.Td:
     level = t.get("level") or {}
+    legs = t.get("legs") or ()
     ch = _num(level.get("change"))
     if ch is None:
         return html.Td(missing_cell(level.get("change_reason") or level.get("reason") or "no move"))
@@ -1477,12 +1514,12 @@ def _today_td(t: dict, r: Optional[dict] = None, ready: bool = True, check: Sequ
         leg = _price_leg(t)
         held = _num((leg or {}).get("lots")) or 0.0
         cls = sign_class(ch * held) if held else ""      # a rise helps a long, hurts a short (display only)
-    since = f"Since the {level.get('prev_date') or 'previous'} close ({level_text(level.get('prev'), level)})"
+    since = f"Since the {level.get('prev_date') or 'previous'} close ({level_text(level.get('prev'), level, legs=legs)})"
     notes = estimate_words(level, "prev", "now")
     hover = _lines(since, level_unit_line(level),
                    f"Worth {full_signed(effect)} USD to the trade" if effect is not None else "",
-                   sigma_words(r, ready, level), *notes, *(f"Price to check: {x}" for x in check))
-    text = level_text(ch, level, signed=True)
+                   sigma_words(r, ready, level, legs), *notes, *(f"Price to check: {x}" for x in check))
+    text = level_text(ch, level, signed=True, legs=legs)
     if not text.strip("+()" + MINUS + "0.,"):
         # nothing moved at the level's precision: one dash for the whole column, never 0.0000 / 0.00 / 0.0
         return html.Td(missing_cell(_lines(f"No move {since[0].lower()}{since[1:]}", *notes,
@@ -1644,15 +1681,15 @@ def parts_count(t: dict) -> int:
     return 0
 
 
-def part_level_words(sub: dict) -> str:
+def part_level_words(sub: dict, legs: Sequence[dict] = ()) -> str:
     """One part's level as the engine gave it ('SGX iron ore Oct/Nov26 vs Feb/Mar27: entry 12.50,
-    now 13.00 $/t'), or its reason."""
+    now 13.00 $/t'), or its reason; at the precision of `legs` (the trade's legs, `level_decimals`)."""
     lv = sub.get("level") or {}
     unit = unit_words(lv.get("unit"))
     what = cap(str(sub.get("what_it_is") or ""))
     if _num(lv.get("now")) is None and _num(lv.get("entry")) is None:
         return f"{what}: no level ({lv.get('reason') or 'none'})"
-    return (f"{what}: entry {level_text(lv.get('entry'), lv)}, now {level_text(lv.get('now'), lv)}"
+    return (f"{what}: entry {level_text(lv.get('entry'), lv, legs=legs)}, now {level_text(lv.get('now'), lv, legs=legs)}"
             + (f" {unit}" if unit else ""))
 
 
@@ -1662,7 +1699,7 @@ def _parts_td(t: dict, n: int, opened: bool) -> html.Td:
     subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
     word = "parts" if any(str(x.get("type") or "") == "OUTRIGHT" for x in subs) else "spreads"
     hover = _lines(f"{n} {word}, each with its own level on its row under the trade",
-                   *(part_level_words(x) for x in subs))
+                   *(part_level_words(x, t.get("legs") or ()) for x in subs))
     return html.Td(html.Span(f"{n} {word} " + ("\u25be" if opened else "\u25b8"), className="tk-sub tk-parts",
                              title=plain_words(hover)), colSpan=2, className="tk-level tk-parts-cell")
 
@@ -2054,17 +2091,17 @@ def _split_sum_td(legs: Sequence[dict], kind: str) -> html.Td:
                     marker(f"excl. {n}", _lines(*list(dict.fromkeys(reasons))[:4]), "marker--small") if n else None])
 
 
-def _part_level_td(level: Optional[dict], end: str) -> html.Td:
+def _part_level_td(level: Optional[dict], end: str, legs: Sequence[dict] = ()) -> html.Td:
     """A part's own level at `end` ('entry' | 'now') from the engine, its unit on Now; blank when the
     trade has one level for all its parts (it is on the trade's row)."""
     if level is None:
         return html.Td("")
     ch = _num(level.get("change"))
     hover = _lines("Level at entry" if end == "entry" else "Level now", level_unit_line(level),
-                   f"Move since the previous close: {level_text(ch, level, signed=True)}" if ch is not None else "",
+                   f"Move since the previous close: {level_text(ch, level, signed=True, legs=legs)}" if ch is not None else "",
                    level.get("note") or "")
     return html.Td(_level_cell(level.get(end), level, str(level.get(end + "_reason") or level.get("reason") or ""),
-                               hover, with_unit=end == "now"), className="tk-level")
+                               hover, with_unit=end == "now", legs=legs), className="tk-level")
 
 
 def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequence[str] = ()) -> html.Tr:
@@ -2077,7 +2114,7 @@ def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequen
     level = sub.get("level") if parts_count(t) else None
     cells: Dict[str, Any] = {
         "trade": html.Td(cap(text), colSpan=2, className="l tk-part-name"),
-        "entry": _part_level_td(level, "entry"), "now": _part_level_td(level, "now"),
+        "entry": _part_level_td(level, "entry", legs), "now": _part_level_td(level, "now", legs),
         "daily": money_td(*fill_sum(data, "daily", ids), row=True),
         "open": _split_sum_td(legs, "open"), "locked": _split_sum_td(legs, "locked"),
         "ltd": money_td(*fill_sum(data, "ltd", ids), row=True),

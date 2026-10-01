@@ -203,6 +203,7 @@ import sqlite3
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from time import perf_counter as _perf
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -1716,7 +1717,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
              on_day: Optional[Callable[[dict], None]] = None, today: Optional[date] = None,
              quote_fetch: Optional[Callable] = None,
              on_stage: Optional[Callable[[str], None]] = None,
-             session: Optional[Tuple] = None) -> List[dict]:
+             session: Optional[Tuple] = None, reuse_listing: bool = False) -> List[dict]:
     """Run the backfill. Returns one dict per business day of [start, end], in date order:
     {day, status: DONE|SKIPPED|NO_CLOSES|ERROR, closes, fwd_outrights, future_px,
     missing_pairs, missing_pair_reasons, missing_marks, realised, unrealisable,
@@ -1790,7 +1791,13 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
     caller -- the live pull's own, still open once its cycle is done -- used for every
     history request of this call in place of opening one (1-3 s per press). It is never
     stopped here: the lender stops it once this call is over. It takes precedence over
-    `session_factory`; without it the session is opened (and stopped) here, as before."""
+    `session_factory`; without it the session is opened (and stopped) here, as before.
+
+    `reuse_listing` (2026-10-01, the pull's speed): the caller (`auto_backfill`) has just listed
+    these days; what each day lacks is then read through the same listing memo
+    (`_listed_days`), every day kept whose fingerprint has not moved since and the others
+    worked out afresh, instead of `close_completeness` over the whole span a second time. The
+    same rows: it applies only when `today` is the book's today (the listing's own)."""
     from data.ingest.schema import connect
     from data.bloomberg.inventory import close_completeness, _needed_marks
     from data.bloomberg.live import _ensure_fx_instruments, book_today
@@ -1842,9 +1849,13 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         by_ticker = {t: p for p, t in pairs}
         ticker_of = {p: t for p, t in pairs}
         days = business_days(start, end)
-        completeness = close_completeness(conn, start.isoformat(), end.isoformat(), today=today_iso)
-        complete_by_day = dict(zip(completeness["as_of_date"], completeness["complete"]))
-        inputs_by_day = dict(zip(completeness["as_of_date"], completeness["inputs_missing"]))
+        if reuse_listing and today == book_today():
+            # the caller's listing of these days, re-checked day by day (2026-10-01)
+            listed = _listed_days(conn, _db_key(db_path), start, end, state_version())
+        else:
+            listed = close_completeness(conn, start.isoformat(), end.isoformat(), today=today_iso).to_dict("records")
+        complete_by_day = {r["as_of_date"]: r["complete"] for r in listed}
+        inputs_by_day = {r["as_of_date"]: r["inputs_missing"] for r in listed}
         todo = [d for d in days if overwrite or not complete_by_day.get(d.isoformat(), False)
                 or inputs_by_day.get(d.isoformat())]
         if order is not None:
@@ -1868,7 +1879,7 @@ def backfill(db_path, start: date, end: date, fetch: Optional[Callable] = None,
         # Only the marks each day still lacks are asked (2026-09-30, "only pull any new data");
         # an overwrite run asks everything. None = every key.
         want = (None if overwrite else
-                _wanted_keys(dict(zip(completeness["as_of_date"], completeness["missing"])), work))
+                _wanted_keys({r["as_of_date"]: r["missing"] for r in listed}, work))
         spot_want = None if want is None else want["spot"]
         session = service = None
         own_session = False  # did THIS call open the session itself (pm.open_session)?
@@ -2396,6 +2407,7 @@ _published: Dict[str, dict] = {}               # db -> the whole "backfill" bloc
 _notes: Dict[str, str] = {}                    # db -> the last run's "note" (past days being re-requested at the close)
 _waiting: Dict[str, str] = {}                  # db -> the last run's "waiting_on_tickers" sentence (2026-09-22)
 _cache_stats: Dict[str, dict] = {}             # db -> the last listing's day counts (2026-09-30, `_listing_stats`)
+_step_seconds: Dict[str, dict] = {}            # db -> seconds per step of the last auto run (2026-10-01)
 
 
 def _listing_stats(listed: List[dict]) -> dict:
@@ -2685,8 +2697,14 @@ def _listed_days(conn: sqlite3.Connection, key: str, start: date, end: date, ver
     for a, b in _runs([date.fromisoformat(d) for d in days if d not in rows]):
         for row in close_completeness(conn, a.isoformat(), b.isoformat()).to_dict("records"):
             rows[row["as_of_date"]] = row
+    # The days outside [start, end] are kept while the book's fingerprint holds (2026-10-01:
+    # backfill() re-reads a sub-span of the listing); each is still checked against its own
+    # day's fingerprint before it is used again.
+    kept_days = ({d: v for d, v in memo["days"].items() if d not in rows}
+                 if memo is not None and memo["global"] == book_fp else {})
     _listing_memo[key] = {"global": book_fp,
-                          "days": {day: (day_fps.get(day), rows[day]) for day in days if day in rows}}
+                          "days": {**kept_days,
+                                   **{day: (day_fps.get(day), rows[day]) for day in days if day in rows}}}
     return [rows[day] for day in days if day in rows]
 
 
@@ -2986,6 +3004,12 @@ def _risk_asks(needs: List[dict], stored: Dict[str, tuple], last_day: date) -> L
 # every press, and an expired contract whose last close fell before its estimated last trade
 # date its last days, for nothing each time.
 RISK_EMPTY_FINAL_DAYS = 7
+# 2026-10-01 (user: the press pulls too much): a security Bloomberg answered with no row at all
+# over its whole window (nothing of it on file: an unknown contract month, one not listed
+# yet) is asked again at most once every RISK_EMPTY_WHOLE_DAYS days, not on every book day;
+# the stretch is kept with "whole": true and is dropped, as every stretch, when its ticker
+# changes. It is still reported each press, as known empty.
+RISK_EMPTY_WHOLE_DAYS = 7
 
 
 def _risk_state_path(db_path) -> Path:
@@ -3014,8 +3038,13 @@ def _usable_empty(entry: dict, ticker: str, today: date) -> Optional[Tuple[date,
         lo, hi, on = (date.fromisoformat(str(entry[k])) for k in ("lo", "hi", "on"))
     except (KeyError, TypeError, ValueError):
         return None
+    reason = str(entry.get("reason") or RISK_HISTORY_NO_ROWS)
     if entry.get("rejected") or on == today or (on - hi).days >= RISK_EMPTY_FINAL_DAYS:
-        return lo, hi, str(entry.get("reason") or RISK_HISTORY_NO_ROWS)
+        return lo, hi, reason
+    if entry.get("whole") and 0 <= (today - on).days < RISK_EMPTY_WHOLE_DAYS:
+        # nothing at all over its whole window (2026-10-01): stands for a week, and covers the
+        # days the window has gained since, so the security is not asked one new day at a time
+        return lo, max(hi, today), reason
     return None
 
 
@@ -3064,10 +3093,32 @@ def _trim_known_empty(ask: dict, entries: List[dict], today: date) -> Tuple[Opti
     return {**ask, "lo": lo, "hi": hi}, ""
 
 
+# A request's window is the union of its securities' stretches (`risk_history_step`). Since
+# 2026-10-01 (user: "Pull Bloomberg now" slow and pulling too much) securities share a request
+# only when that union is at most RISK_WINDOW_SLACK_DAYS calendar days, or RISK_WINDOW_SLACK_SHARE
+# of its own stretch when that is more, longer than each one's own stretch: a 1-3 day tail ask
+# never rides on a 900-day ask (a never-filled security, a new contract's early gap), which
+# made every security of the request fetch 900 days only to keep its last two.
+RISK_WINDOW_SLACK_DAYS = 7
+RISK_WINDOW_SLACK_SHARE = 0.10
+
+
+def _window_days(lo: date, hi: date) -> int:
+    return (hi - lo).days + 1
+
+
+def _window_slack(days: int) -> int:
+    """The extra calendar days a stretch of `days` may be asked over by sharing a request."""
+    return max(RISK_WINDOW_SLACK_DAYS, int(days * RISK_WINDOW_SLACK_SHARE))
+
+
 def _risk_chunks(asks: List[dict]) -> List[List[dict]]:
-    """`asks` packed into requests: one field list per request, in order of their stretch so
-    that the securities of one request want about the same days, HISTORY_CHUNK securities at
-    most and never one ticker twice (its window is then the union of its securities')."""
+    """`asks` packed into requests: one field list per request, HISTORY_CHUNK securities at
+    most, never one ticker twice, and (2026-10-01) only securities whose stretches are alike:
+    the request's window (the union of its securities' stretches) is never longer than any
+    member's own stretch by more than `_window_slack` of it. Greedy over the stretches in
+    order of (start, end), so a run of whole windows, a run of head gaps ending on about the
+    same day and a run of tail asks of the last few days each make their own requests."""
     chunks: List[List[dict]] = []
     by_fields: Dict[tuple, List[dict]] = {}
     for a in asks:
@@ -3075,10 +3126,21 @@ def _risk_chunks(asks: List[dict]) -> List[List[dict]]:
     for group in by_fields.values():
         group.sort(key=lambda a: (a["lo"], a["hi"], a["ticker"]))
         current: List[dict] = []
+        lo = hi = None
+        shortest = 0
         for a in group:
-            if len(current) >= HISTORY_CHUNK or any(c["ticker"] == a["ticker"] for c in current):
-                chunks.append(current)
-                current = []
+            own = _window_days(a["lo"], a["hi"])
+            if current:
+                union = _window_days(min(lo, a["lo"]), max(hi, a["hi"]))
+                tightest = min(shortest, own)
+                if (len(current) >= HISTORY_CHUNK or any(c["ticker"] == a["ticker"] for c in current)
+                        or union - tightest > _window_slack(tightest)):
+                    chunks.append(current)
+                    current = []
+            if not current:
+                lo, hi, shortest = a["lo"], a["hi"], own
+            else:
+                lo, hi, shortest = min(lo, a["lo"]), max(hi, a["hi"]), min(shortest, own)
             current.append(a)
         if current:
             chunks.append(current)
@@ -3157,12 +3219,15 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
     recorded = _load_risk_empty(db_path)    # the empty stretches on record (2026-09-30)
     record_changed = False
 
-    def _record_empty(instrument_id: str, ticker: str, lo: date, hi: date, reason: str, rejected: bool) -> None:
+    def _record_empty(instrument_id: str, ticker: str, lo: date, hi: date, reason: str, rejected: bool,
+                      whole: bool = False) -> None:
         nonlocal record_changed
         if lo > hi:
             return
         entry = {"ticker": ticker, "lo": lo.isoformat(), "hi": hi.isoformat(), "on": today.isoformat(),
                  "reason": reason, "rejected": bool(rejected)}
+        if whole:
+            entry["whole"] = True       # its whole window came back empty: stands a week (2026-10-01)
         entries = [e for e in recorded.get(instrument_id, [])
                    if (e.get("ticker"), e.get("lo"), e.get("hi")) != (ticker, entry["lo"], entry["hi"])]
         recorded[instrument_id] = entries + [entry]
@@ -3258,7 +3323,7 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
         sess, service = session
         asks = _Asks(conn, log)
         snapped = datetime.now(NY).isoformat(timespec="seconds")
-        for chunk in _risk_chunks(wanted):
+        for chunk in _risk_chunks(wanted):      # securities with alike stretches only (2026-10-01)
             fields = list(chunk[0]["fields"])
             lo, hi = min(a["lo"] for a in chunk), max(a["hi"] for a in chunk)
             key_of = {a["ticker"]: a["instrument_id"] for a in chunk}
@@ -3278,8 +3343,10 @@ def risk_history_step(db_path, session: Optional[Tuple] = None, fetch: Optional[
                               else f"{RISK_HISTORY_NO_ROWS} for {a['ticker']} ({a['lo']}..{a['hi']})")
                     if rejected or a["fresh"]:
                         _fail(a["ticker"], a["instrument_id"], reason)
-                    # recorded: not asked again today, nor ever once final (2026-09-30)
-                    _record_empty(a["instrument_id"], a["ticker"], a["lo"], a["hi"], reason, rejected)
+                    # recorded: not asked again today, nor ever once final (2026-09-30); a whole
+                    # window with nothing on file, not for RISK_EMPTY_WHOLE_DAYS (2026-10-01)
+                    _record_empty(a["instrument_id"], a["ticker"], a["lo"], a["hi"], reason, rejected,
+                                  whole=bool(a["fresh"]))
                     empty_now.setdefault(a["ticker"], {"ticker": a["ticker"], "instrument_id": a["instrument_id"],
                                                        "reason": reason})
                     continue
@@ -3427,6 +3494,8 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
     planned = False       # the days were listed: their outcome is recorded whatever happens next
     closing = True        # the closing ledger step runs unless there is no trade or no past day
     _run_writes.pop(key, None)    # rows the backfill() call writes, if one runs (2026-09-30)
+    seconds = _step_seconds[key] = {}   # where this run's time went (2026-10-01)
+    started = t0 = _perf()
 
     def _tell(words: str) -> None:
         if on_stage:
@@ -3512,19 +3581,25 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             results.append(result)
             _remaining(len(order) - len(results))
 
+        seconds["listing"] = round(_perf() - started, 2)
+        started = _perf()
         try:
             backfill(db_path, min(order), max(order), fetch=fetch, fwd_fetch=fwd_fetch, fut_fetch=fut_fetch,
                      session_factory=session_factory, host=host, port=port, log=log, scale_fetch=scale_fetch,
-                     order=order, on_day=_on_day, quote_fetch=quote_fetch, on_stage=on_stage, session=session)
+                     order=order, on_day=_on_day, quote_fetch=quote_fetch, on_stage=on_stage, session=session,
+                     reuse_listing=True)
         except Exception as exc:  # noqa: BLE001 -- recorded; the closing step and the bookkeeping still run
             log(_problem(f"Auto-backfill: the backfill stopped: {exc!r}"))
             _report_error(db_path, "plan", f"the backfill stopped: {_plain_error(exc)}")
+        seconds["past_closes"] = round(_perf() - started, 2)
         return results
     except Exception as exc:  # noqa: BLE001 -- the listing of the days raised: said, and the closing step runs
         log(_problem(f"Auto-backfill: the list of days could not be built: {exc!r}"))
         _report_error(db_path, "plan", f"the list of past days to backfill could not be built: {_plain_error(exc)}")
         return results
     finally:
+        seconds.setdefault("listing", round(_perf() - t0, 2))   # a run that worked no day
+        started = _perf()
         if closing and not _closing_step_needed(db_path, today, session, _run_writes.get(key, 0)):
             closing = False                            # it would repeat the pull's own call (2026-09-30)
             try:
@@ -3534,12 +3609,15 @@ def auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         if closing:
             _tell("the closing ledger step")
             _realise_after_backfill(db_path, today, log)   # guarded inside: a raise is recorded
+        seconds["closing"] = round(_perf() - started, 2)
+        started = _perf()
         if planned:
             try:
                 _record_outcome(db_path, key, results, signatures, refs, clock, today)
             except Exception as exc:  # noqa: BLE001 -- the status file is a report, never a reason to stop
                 _report_error(db_path, "bookkeeping", f"the backfill's day status could not be saved: "
                                                       f"{_plain_error(exc)}")
+        seconds["bookkeeping"] = round(_perf() - started, 2)
 
 
 def _record_outcome(db_path, key: str, results: List[dict], signatures: Dict[str, frozenset],
@@ -3697,6 +3775,58 @@ def _cache_block_of(db_path, report: dict, risk: dict) -> dict:
             "asked": asked, "skipped_stored": skipped, "empty": empty, "empty_tickers": empty_tickers,
             "known_empty": int((steps.get("risk_history") or {}).get("known_empty") or 0),
             "steps": steps, "sentence": sentence}
+
+
+# --------------------------------------------------------------------------- snapshot only after a write (2026-10-01)
+# User, 2026-10-01: "Pull Bloomberg now" is slow. The export (`snapshot.save_after_pull`)
+# fingerprints every market table month by month on every press; when nothing the snapshot
+# carries changed since this process's last export (the live pull, the backfill and the risk
+# history wrote no row, and nothing else did either), it is not run and the status says
+# SNAPSHOT_UNCHANGED. What "changed" means: `_market_fingerprint`, one read per table --
+# `marks` and `price_history` (large, written only by INSERT OR REPLACE and DELETE: a new
+# rowid or a count moves) by their count and highest rowid, plus `marks`' settle dates (the
+# one in-place UPDATE, Bloomberg's contract dates moving a future's mark keys); the small
+# tables (`instruments`, OIS curves and quotes, vol quotes, contract dates) by the total of
+# every column. In process only: the first press after a start always exports.
+SNAPSHOT_UNCHANGED = "marks snapshot: nothing new, snapshot not rewritten"
+_LARGE_MARKET_TABLES = {"marks": "COUNT(*), MAX(rowid), TOTAL(julianday(settle_date))",
+                        "price_history": "COUNT(*), MAX(rowid)"}
+_exported_fp: Dict[str, tuple] = {}     # db -> `_market_fingerprint` at this process's last export
+
+
+def _market_fingerprint(db_path) -> Optional[tuple]:
+    """What the snapshot carries, as one comparable tuple (see above); None when it cannot be
+    read (the export then runs). A read only: no schema pass, nothing written."""
+    try:
+        from data.bloomberg.snapshot import MARKET_TABLES
+        from data.ingest.schema import BUSY_TIMEOUT_SECONDS
+        conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_SECONDS)
+        try:
+            conn.execute("BEGIN")              # every table read at the same moment
+            parts = []
+            for table in ("instruments",) + tuple(MARKET_TABLES):
+                info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+                if not info:
+                    parts.append((table, None))
+                    continue
+                aggregate = _LARGE_MARKET_TABLES.get(table)
+                if aggregate is None:
+                    cols = ["COUNT(*)"]
+                    for col in info:
+                        name, decl = f'"{col[1]}"', str(col[2] or "").upper()
+                        if any(t in decl for t in ("INT", "REAL", "NUM", "FLOA", "DOUB")):
+                            cols.append(f"TOTAL({name})")
+                        else:
+                            cols.append(f"TOTAL(length({name}))")
+                            if col[1].lower().endswith(("date", "_at")):
+                                cols.append(f"TOTAL(julianday({name}))")
+                    aggregate = ", ".join(cols)
+                parts.append((table, tuple(conn.execute(f'SELECT {aggregate} FROM "{table}"').fetchone())))
+            return tuple(parts)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 -- unknown: the export runs
+        return None
 
 
 def failure_sentence(report: dict) -> str:
@@ -3861,6 +3991,15 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
               `risk_history_step`'s block: securities asked, rows written, failures by ticker,
               values not a number, the unrequestable needs with their reasons, "error"); its
               failures are its own, never in "errors" or "reason".
+      "seconds": where the press's backfill time went (2026-10-01, read off the Data tab's
+              diagnosis report): {"listing" (the past days and what each lacks), "past_closes"
+              (the backfill() call: closes, forwards, futures, LME, option inputs and past-close
+              pricing; absent when no day was due), "closing" (the closing ledger step, or its
+              skip check), "bookkeeping" (each worked day's outcome), "risk_history" and
+              "snapshot" (a real pull only), "total"}, seconds rounded to 0.01.
+      "snapshot": the export's one line; since 2026-10-01 SNAPSHOT_UNCHANGED ("marks snapshot:
+              nothing new, snapshot not rewritten") when nothing the snapshot carries changed
+              since this process's last export (`_market_fingerprint`), and no export ran.
     "days" holds the header's reference dates and the newest days that are not DONE (a
     day lacking a smile or a curve its FX options need counts as not DONE), so
     the header can say WHY a period is n/a. A "reason" of a run that raised contains the
@@ -3910,12 +4049,24 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         # Only after a REAL pull (a test's fake fetches must never write the repository's own
         # snapshot), and whether or not the backfill itself got through: today's marks are on
         # file either way, and the pull's own marks must never go unsaved over a history error.
+        # 2026-10-01: not at all when nothing the snapshot carries changed since this process's
+        # last export (`_market_fingerprint`): said as SNAPSHOT_UNCHANGED.
         if not real_pull:
             return
         try:
             from data.bloomberg import snapshot
-            _publish({"snapshot": snapshot.save_after_pull(db_path)["message"]})
+            fp = None if os.environ.get("RISK_SNAPSHOT", "1") == "0" else _market_fingerprint(db_path)
+            if fp is not None and _exported_fp.get(key) == fp:
+                _publish({"snapshot": SNAPSHOT_UNCHANGED})
+                return
+            out = snapshot.save_after_pull(db_path)
+            if fp is not None and out.get("exported"):
+                _exported_fp[key] = fp
+            else:
+                _exported_fp.pop(key, None)
+            _publish({"snapshot": out["message"]})
         except Exception as exc:  # noqa: BLE001 -- said in the status, never raised into the thread
+            _exported_fp.pop(key, None)
             _publish({"snapshot": f"marks snapshot failed: {exc!r}"})
 
     progress = _BackfillProgress(db_path)
@@ -3928,6 +4079,9 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
         crashed = ""
         results: List[dict] = []
         risk_ran = False
+        run_started = _perf()
+        seconds: Dict[str, float] = {}       # where this press's backfill time went (2026-10-01)
+        _step_seconds.pop(key, None)
         try:
             try:
                 _publish({"running": True, "reason": ""})
@@ -3941,20 +4095,26 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
             except Exception as exc:  # never let a background thread take the process down
                 crashed = f"auto-backfill failed: {exc!r}"
                 _publish({"running": False, "reason": crashed})
+            seconds.update(_step_seconds.get(key) or {})
             if real_pull:
                 # The Risk tab's daily history (2026-09-30), after the closes and the closing
                 # ledger step, before the snapshot: a real pull only, on the lent session when
                 # there is one; reported in its own block, never a failure of the backfill.
                 progress.stage("the risk history")
                 risk_ran = True
+                started = _perf()
                 try:
                     risk_history_step(db_path, session=session, log=_QuietLog(), host=host, port=port)
                 except Exception as exc:  # noqa: BLE001 -- the step never raises; belt and braces
                     _risk_blocks[key] = {"error": f"the risk history step stopped: {_plain_error(exc)}"}
+                seconds["risk_history"] = round(_perf() - started, 2)
                 progress.stage("saving the marks snapshot")
-            _save()
+                started = _perf()
+                _save()
+                seconds["snapshot"] = round(_perf() - started, 2)
         finally:
             try:
+                seconds["total"] = round(_perf() - run_started, 2)
                 report = dict(_run_reports.get(key) or _empty_run_report())
                 patch = {"running": False, "remaining": 0, "days": _days_block.get(key, {}),
                          "note": _notes.get(key, ""), "points_scale": _scale_reports.get(key, {}),
@@ -3968,6 +4128,8 @@ def start_auto_backfill(db_path, host: str = "localhost", port: int = 8194,
                          "risk_history": _risk_blocks.get(key, {}),
                          # 2026-09-30: what is stored, and what this press asked against what it left alone
                          "cache": _cache_block(db_path, report, _risk_blocks.get(key, {}) if risk_ran else {}),
+                         # 2026-10-01: seconds per step of this press (`_run`'s docstring)
+                         "seconds": dict(seconds),
                          "last_run": datetime.now().astimezone().isoformat(timespec="seconds")}
                 if not crashed:
                     patch["reason"] = failure_sentence(report)

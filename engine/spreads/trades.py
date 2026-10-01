@@ -945,6 +945,29 @@ def _price_level(rows: List[dict], blank: dict) -> dict:
                  if is_estimate(r["prev_mark_source"]) else "")})
 
 
+def _open_side_level(book, part: _Part, rows: List[dict], pleg_by_cid: Dict[str, st.PLeg], prev_day: str,
+                     prev_rows: Dict[str, dict]) -> dict:
+    """The level of a cross part whose other side is flat now (``part.closed_roots``; SILARB1:
+    COMEX silver bought and sold, SHFE silver still short): the open side's own level, by the
+    rule for its shape. One open contract: its price (``_price_level``, entry the open lots'
+    average fill, now its mark). Several months of the one root, long and short: the calendar
+    level. Anything else: blank. The part's note (which side is flat) rides along as ``note``.
+    A level only: nothing here enters a P&L figure."""
+    why = part.note or "no open pair of legs to read a level from"
+    cids = set(part.legs)
+    if len(cids) == 1:
+        own = [r for r in rows if r["contract_id"] in cids]
+        level = _price_level(own, _blank_level(why))
+    elif (len({pleg_by_cid[c].root_id for c in cids if c in pleg_by_cid}) == 1 and all(c in pleg_by_cid for c in cids)
+          and len({_sign(v) for v in part.legs.values()}) == 2):
+        level = _calendar_level(book, part, pleg_by_cid, prev_day, prev_rows)
+    else:
+        return _blank_level(why)
+    if level.get("entry") is None and level.get("now") is None and not level.get("mode"):
+        return _blank_level(_join([level.get("reason", ""), why]))
+    return {**level, "note": _join([level.get("note", ""), part.note])}
+
+
 def _premium_level(book, rows: List[dict]) -> Optional[dict]:
     """A trade holding options only (WTIRR1's call against put, EURVOL1's EURUSD options): its net
     premium per unit, None when it holds anything else open. The legs are the open non-hedge rows
@@ -1523,6 +1546,8 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
                 part_levels.append(covered)
             elif len(fit) == 1:
                 part_levels.append(_pair_level(book, fit[0]))
+            elif not fit and part.closed_roots:
+                part_levels.append(_open_side_level(book, part, rows, pleg_by_cid, prev_day, prev_rows))
             elif not fit:
                 part_levels.append(_blank_level(part.note or "no open pair of legs to read a level from"))
             else:
