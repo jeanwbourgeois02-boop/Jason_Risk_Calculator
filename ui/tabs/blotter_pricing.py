@@ -387,8 +387,35 @@ def shared_trade_book(conn: sqlite3.Connection, as_of: str) -> dict:
         from engine.spreads.trades import trade_book
         spreads = shared_spreads(conn, as_of, filled=True)
         with pricing_snapshot(conn, "Trade book"):
-            return trade_book(conn, as_of, spreads=spreads, value_fn=priced_value_book)
+            return titled_trade_book(trade_book(conn, as_of, spreads=spreads, value_fn=priced_value_book))
     return screen_memo("trade-book", conn, as_of, compute, extra=config_inputs_key())
+
+
+def titled_trade_book(book: dict) -> dict:
+    """The engine's trade book with its names in Title Case (user, 2026-10-01: "can the spreads be
+    capitalised"; `formatting.title_name`): each trade's and part's `what_it_is`, each leg's `name`
+    and `commodity`, the next event's leg. Edited in place on the fresh result, before it is
+    memoised; names only, never a figure, an id or a key."""
+    from ui.tabs.formatting import title_name
+
+    def legs(items):
+        for leg in items or []:
+            if isinstance(leg, dict):
+                for key in ("name", "commodity"):
+                    if isinstance(leg.get(key), str):
+                        leg[key] = title_name(leg[key])
+    for t in (book or {}).get("trades") or []:
+        if isinstance(t.get("what_it_is"), str):
+            t["what_it_is"] = title_name(t["what_it_is"])
+        legs(t.get("legs"))
+        for sub in t.get("sub_spreads") or []:
+            if isinstance(sub.get("what_it_is"), str):
+                sub["what_it_is"] = title_name(sub["what_it_is"])
+            legs(sub.get("legs"))
+        nxt = t.get("next")
+        if isinstance(nxt, dict) and isinstance(nxt.get("leg"), str):
+            nxt["leg"] = title_name(nxt["leg"])
+    return book
 
 
 def _trade_risk_compute(conn: sqlite3.Connection, as_of: str):

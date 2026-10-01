@@ -47,7 +47,7 @@ from ui.tabs.book import empty_state, trades_on_file
 from ui.tabs.formatting import (
     cap, tidy,
     MINUS, MISSING, about, compact, format_cell, issues_drawer, km_cell, km_text, marker, missing_cell, pct_text,
-    plain_words, row_info, z_text,
+    plain_words, row_info, title_name, z_text,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 from ui.tabs.risk_limits import plain_reason  # noqa: F401 -- re-exported: the Risk tab's plain-words pass
@@ -491,7 +491,7 @@ def _hedged_td(t: dict, r: Optional[dict], ready: bool) -> html.Td:
         hover = "One leg: nothing hedges it"
     else:
         hover = _lines(f"Hedge %: {pct_text(hp / 100.0)}" if hp is not None else "",
-                       f"Bigger leg: {r.get('hedge_leg')}" if r.get("hedge_leg") else "",
+                       f"Bigger leg: {title_name(str(r.get('hedge_leg')))}" if r.get("hedge_leg") else "",
                        f"Legs' correlation {corr:.2f}".replace("-", MINUS) if corr is not None else "",
                        plain_reason(r.get("hedge_reason")) or "", HEDGE_METHOD)
     return html.Td(html.Span(word, className="cell-amber" if amber else None, title=plain_words(hover) or None),
@@ -589,7 +589,7 @@ def panel_facts(data: dict, t: dict, r: Optional[dict]) -> List[Tuple[str, Any, 
     if his is not None or fit is not None:
         text = (f"{_ratio_text(his) if his is not None else MISSING} held · "
                 f"{_ratio_text(fit) if fit is not None else MISSING} best fit")
-        legs = (r or {}).get("ratio_legs") or []
+        legs = [title_name(str(x)) for x in (r or {}).get("ratio_legs") or []]
         hover = _lines(f"Lots of {legs[1]} per lot of {legs[0]}" if len(legs) == 2 else "",
                        "More than 20 % apart" if apart else "",
                        "The best fit: the lots that would have minimised the pair's daily P&L swings over the last "

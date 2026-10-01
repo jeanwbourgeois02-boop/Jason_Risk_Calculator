@@ -35,7 +35,7 @@ from dash import ALL, Input, Output, State, dcc, html
 from ui.tabs import book as bk
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
-    MISSING, day_text, full_signed, marker, missing_cell, plain_words, price_text, row_info, sign_class,
+    MISSING, day_text, full_signed, marker, missing_cell, plain_words, price_text, row_info, sign_class, title_name,
 )
 
 log = logging.getLogger(__name__)
@@ -139,13 +139,13 @@ def _family(data: dict, leg: dict) -> str:
         fam = METAL_FAMILIES.get(str(leg.get("instrument_id") or "")[:3], "fx")
     if not fam:
         return "Other"
-    return "FX" if fam.lower() == "fx" else fam[0].upper() + fam[1:]
+    return "FX" if fam.lower() == "fx" else title_name(fam)
 
 
 def _pseudo_legs(data: dict, t: dict, info: dict) -> List[dict]:
     """The fills on no trade name as legs of the engine's shape (they carry no legs of their own):
     grouped under the engine's contract key, their position the open fills' quantities added."""
-    from engine.spreads.trades import leg_name
+    from ui.tabs.formatting import plain_leg_name as leg_name
     df = bk._df_rows(data, t.get("trade_ids") or [])
     by = {str(r["trade_id"]): r for r in df.to_dict("records")} if not df.empty else {}
     fills = data.get("fills") or {}

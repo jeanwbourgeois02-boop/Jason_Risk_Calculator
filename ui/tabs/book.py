@@ -63,7 +63,7 @@ from ui.tabs.formatting import (
     EN_DASH, MINUS, MISSING, about, compact, contract_name, day_text, format_cell, full_signed, fx_name, is_fx_pair,
     issues_drawer, km_cell, km_text, marker, missing_cell, month_label, parse_contract_id, pct_text,
     plain_words, price_decimals, price_text, quoted_unit, row_info, short_date, short_root_name, sign_class, size_words, strike_text,
-    sum_known, z_text,
+    sum_known, title_name, z_text,
 )
 from ui.tabs.header import AS_OF_STORE_ID
 
@@ -786,17 +786,12 @@ def _count_words(v: float) -> str:
 
 
 def _commodity_words(root: Any, root_id: str, exchange: str) -> str:
-    """'copper', 'WTI', 'Brent', 'heating oil', 'NBP gas': the root's short name without its exchange
-    word, in lower case where the contract list itself writes it so (never 'wti' or 'brent')."""
+    """'Copper', 'WTI', 'Brent', 'Heating Oil', 'NBP Gas': the root's short name without its exchange
+    word, in Title Case (user, 2026-10-01: "can the spreads be capitalised"; `title_name`)."""
     words = short_root_name(root, root_id).split()
     if exchange and len(words) > 1 and words[0].upper() == exchange.upper():
         words = words[1:]
-    text = " ".join(words)
-    first = words[0] if words else ""
-    csv_name = str(getattr(root, "name", "") or "")
-    if first[:1].isupper() and first[1:].islower() and re.search(rf"\b{re.escape(first.lower())}\b", csv_name):
-        text = text[:1].lower() + text[1:]
-    return text
+    return title_name(" ".join(words))
 
 
 def _leg_month(leg: dict) -> Optional[Tuple[int, int]]:
@@ -1387,7 +1382,7 @@ def size_hover(t: dict, r: Optional[dict]) -> str:
             continue                            # an outright's empty side: nothing to say
         fill, mark = _num(s.get("value_fill_usd")), _num(s.get("value_mark_usd"))
         metal = _num(s.get("physical"))
-        lines.append(f"{s.get('label')}: {format_cell(abs(fill)) + ' USD at the fill' if fill is not None else 'value at the fill not known'}"
+        lines.append(f"{title_name(str(s.get('label') or ''))}: {format_cell(abs(fill)) + ' USD at the fill' if fill is not None else 'value at the fill not known'}"
                      + (f", {format_cell(abs(mark))} USD at the mark" if mark is not None else "")
                      + (f"; {abs(metal):,.0f} {s.get('physical_unit') or ''}" if metal else ""))
     gap = _num(size.get("value_gap"))
@@ -2109,8 +2104,9 @@ def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequen
     own level when the trade has none of its own, and its legs' P&L summed (display)."""
     ids = [str(i) for leg in legs for i in leg.get("trade_ids") or []]
     what = str(sub.get("what_it_is") or "")
-    kind = tf.type_label(sub.get("type") or "").lower() if sub.get("type") else ""
-    text = what if not kind or kind.split("-")[0] in what.lower() else f"{what} · {kind}"
+    what = title_name(what)
+    kind = tf.type_label(sub.get("type") or "") if sub.get("type") else ""
+    text = what if not kind or kind.split("-")[0].lower() in what.lower() else f"{what} · {kind}"
     level = sub.get("level") if parts_count(t) else None
     cells: Dict[str, Any] = {
         "trade": html.Td(cap(text), colSpan=2, className="l tk-part-name"),
@@ -2667,7 +2663,7 @@ def commodity_label(t: dict) -> str:
     names = sorted(set(names))
     if not names:
         return "Not recognised" if unknown else "Other"
-    return cap(" / ".join(names))
+    return title_name(" / ".join(names))
 
 
 def summary_group(t: dict, by: str) -> str:

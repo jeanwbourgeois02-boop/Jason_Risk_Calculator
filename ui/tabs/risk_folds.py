@@ -31,7 +31,7 @@ from dash import dcc, html
 from ui.tabs import trade_filter as tf
 from ui.tabs.formatting import (
     cap, plain_ids, MINUS, MISSING, about, format_cell, km_cell, km_text, marker, missing_cell, pct_text, plain_words,
-    short_date, sum_known, count_text,
+    short_date, sum_known, count_text, title_name,
 )
 
 log = logging.getLogger(__name__)
@@ -129,7 +129,7 @@ def units_text(v: Optional[float], unit: str) -> str:
 def exchange_name(root, root_id: str) -> str:
     """'SHFE Zinc', 'COMEX Copper': the exchange and the commodity."""
     try:
-        from engine.spreads.trades import leg_name
+        from ui.tabs.formatting import plain_leg_name as leg_name
         return leg_name(root, "") or root_id
     except Exception:  # noqa: BLE001 -- the id stands for the name
         return root_id
@@ -221,7 +221,7 @@ def _leftover_by_sub(ctx: dict) -> Dict[str, dict]:
             usd = _num(leg.get("usd_per_1pct"))
             slot["parts"].append((usd, f"{t.get('trade')}: {leg.get('reason') or 'no USD figure'}"))
             phys = _num(leg.get("physical"))
-            slot["lines"].append(f"{t.get('trade')}: {leg.get('name')} {lots_text(_num(leg.get('lots')))} lots"
+            slot["lines"].append(f"{t.get('trade')}: {title_name(str(leg.get('name') or ''))} {lots_text(_num(leg.get('lots')))} lots"
                                  + (f", {units_text(phys, str(leg.get('physical_unit') or ''))}" if phys is not None else "")
                                  + (f", {km_text(usd)} USD per 1 %" if usd is not None else ""))
     return out
@@ -282,7 +282,7 @@ def commodity_lines(ctx: dict) -> Tuple[List[dict], List[Tuple[dict, str]]]:
         if not rows:
             continue
         sub = subs.get(key) or {}
-        line = {"key": key, "name": str(sub.get("name") or key), "sector": str(sub.get("sector") or ""),
+        line = {"key": key, "name": title_name(str(sub.get("name") or key)), "sector": str(sub.get("sector") or ""),
                 "rows": rows, **_side_sums(rows),
                 "long_lines": _physical_lines(rows, roots, 1), "short_lines": _physical_lines(rows, roots, -1),
                 "trades": sorted({n for r in rows for n in names_of(r.get("trade_ids"), ctx["name_of_fill"])})}
@@ -457,7 +457,7 @@ def month_grid(ctx: dict, sub_key: str, unit: str) -> html.Div:
     lines, near, later = grid_cells(ctx, sub_key, unit)
     switch = dcc.RadioItems(id={"type": UNIT_TYPE, "idx": "grid"}, className="book-switch",
                             options=[{"label": lb, "value": v} for v, lb in UNITS], value=unit, inline=True)
-    name = str(((ctx.get("curve") or {}).get("by_subsector") or {}).get(sub_key, {}).get("name") or sub_key)
+    name = title_name(str(((ctx.get("curve") or {}).get("by_subsector") or {}).get(sub_key, {}).get("name") or sub_key))
     head_cells = [html.Th("Exchange", className="l")] + [html.Th(month_words(m)) for m in near]
     if later:
         head_cells.append(html.Th("Later", title=plain_words(f"Months more than 12 months out: "

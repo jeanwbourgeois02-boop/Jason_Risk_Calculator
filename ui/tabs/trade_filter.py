@@ -35,7 +35,7 @@ import dash
 from dash import ALL, Input, Output, State, dcc, html
 
 from ui.revision import DATA_REVISION_ID
-from ui.tabs.formatting import plain_words
+from ui.tabs.formatting import plain_words, title_name
 from ui.tabs.header import AS_OF_STORE_ID
 
 STORE_ID = "trade-filter-store"             # the shared state, session: {search, type, commodity, trade, group, cols}
@@ -211,7 +211,7 @@ def family_label(trade: dict) -> str:
         return "Cross-product"
     if fam.lower() == "fx":
         return "FX"
-    return fam[0].upper() + fam[1:]
+    return title_name(fam)
 
 
 def _search_blob(trade: dict) -> str:

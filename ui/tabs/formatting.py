@@ -898,21 +898,47 @@ def price_text(value, unit: str = "", fill=None, decimals: Optional[int] = None)
 
 
 # --- plain names
+# Names in Title Case (user, 2026-10-01: "can the spreads be capitalised"): every commodity word and
+# spread-type word of a name starts with a capital ("CME Feeder Cattle Oct26", "SGX Iron Ore Oct/Nov26
+# Calendar", "SHFE Zinc vs LME Zinc"); the joining words stay lower case mid-name (vs, and, long,
+# short, call, put, forward ...), acronyms and figures as they are, a hyphenated word capitalised on
+# its first part only ("Cross-exchange", "Hot-rolled Coil"). Display only: the engine's names are
+# passed through `title_name` where the screens draw them.
+_NAME_LOWER = frozenset({
+    "vs", "v", "and", "or", "of", "per", "to", "in", "on", "at", "by", "the", "a", "an", "with", "for", "from",
+    "into", "long", "short", "call", "put", "calls", "puts", "forward", "forwards", "spot", "option", "options",
+    "lot", "lots", "t", "oz", "bbl", "gal", "more", "leg", "legs", "closed", "hedged", "hedge", "spread",
+    "spreads", "part", "parts", "not", "recognised", "nothing", "open", "contract", "contracts", "est",
+    "left", "no", "is", "are", "than", "under", "over", "each", "only", "one", "two", "fill", "fills"})
+_NAME_WORD = re.compile(r"(?<![\w\-’'.])([a-z]+)(?![\w'’])")
+
+
+def title_name(text):
+    """A name in Title Case: 'CME feeder cattle Oct26' -> 'CME Feeder Cattle Oct26', 'SHFE zinc vs
+    LME zinc, Oct26' -> 'SHFE Zinc vs LME Zinc, Oct26', 'NYMEX crude oil Dec26 75 call' -> 'NYMEX
+    Crude Oil Dec26 75 call'. Only an all-lower-case word changes; the first letter of the name is a
+    capital (`cap`). None, '' and a non-string pass through unchanged."""
+    if not isinstance(text, str) or not text:
+        return text
+    return cap(_NAME_WORD.sub(lambda m: m.group(1) if m.group(1) in _NAME_LOWER
+                              else m.group(1)[0].upper() + m.group(1)[1:], text))
+
+
 # Short names for the contract roots the screens show most (the CSV names are Bloomberg-long:
-# "NYMEX WTI light sweet crude"); anything else is `_short_from_name`. Display only.
+# "NYMEX WTI light sweet crude"); anything else is `_short_from_name`. Display only, Title Case.
 SHORT_ROOT_NAMES = {
-    "NYMEX:CL": "WTI", "ICE:B": "Brent", "NYMEX:RB": "RBOB", "NYMEX:HO": "Heating oil", "NYMEX:NG": "Henry Hub gas",
-    "ICE:G": "Gasoil", "ICE:TFM": "TTF gas", "ICE:M": "NBP gas",
-    "COMEX:HG": "COMEX copper", "COMEX:GC": "Gold", "COMEX:SI": "COMEX silver", "COMEX:ALI": "COMEX aluminium",
-    "SHFE:CU": "SHFE copper", "OSE:JAU": "OSE gold", "OSE:JPL": "OSE platinum",
-    "LME:CA": "LME copper", "LME:AH": "LME aluminium", "LME:ZS": "LME zinc", "LME:PB": "LME lead",
-    "LME:NI": "LME nickel", "LME:SN": "LME tin",
-    "CBOT:ZC": "Corn", "CBOT:ZS": "Soybeans", "CBOT:ZM": "Soybean meal", "CBOT:ZL": "Soybean oil",
-    "CBOT:ZW": "Wheat", "CBOT:ZO": "Oats", "CBOT:ZR": "Rough rice", "MGEX:MWE": "Spring wheat",
-    "DCE:I": "DCE iron ore", "SGX:FEF": "SGX iron ore", "SGX:M65F": "SGX 65% iron ore", "DCE:J": "DCE coke",
+    "NYMEX:CL": "WTI", "ICE:B": "Brent", "NYMEX:RB": "RBOB", "NYMEX:HO": "Heating Oil", "NYMEX:NG": "Henry Hub Gas",
+    "ICE:G": "Gasoil", "ICE:TFM": "TTF Gas", "ICE:M": "NBP Gas",
+    "COMEX:HG": "COMEX Copper", "COMEX:GC": "Gold", "COMEX:SI": "COMEX Silver", "COMEX:ALI": "COMEX Aluminium",
+    "SHFE:CU": "SHFE Copper", "OSE:JAU": "OSE Gold", "OSE:JPL": "OSE Platinum",
+    "LME:CA": "LME Copper", "LME:AH": "LME Aluminium", "LME:ZS": "LME Zinc", "LME:PB": "LME Lead",
+    "LME:NI": "LME Nickel", "LME:SN": "LME Tin",
+    "CBOT:ZC": "Corn", "CBOT:ZS": "Soybeans", "CBOT:ZM": "Soybean Meal", "CBOT:ZL": "Soybean Oil",
+    "CBOT:ZW": "Wheat", "CBOT:ZO": "Oats", "CBOT:ZR": "Rough Rice", "MGEX:MWE": "Spring Wheat",
+    "DCE:I": "DCE Iron Ore", "SGX:FEF": "SGX Iron Ore", "SGX:M65F": "SGX 65% Iron Ore", "DCE:J": "DCE Coke",
     "ICE:RC": "Robusta", "SGX:TF": "Rubber",
-    "CME:GF": "Feeder cattle", "CME:LE": "Live cattle", "CME:HRC": "HRC", "SHFE:ZN": "SHFE zinc",
-    "SHFE:AG": "SHFE silver", "SGX:XUC": "USD/CNH",
+    "CME:GF": "Feeder Cattle", "CME:LE": "Live Cattle", "CME:HRC": "HRC", "SHFE:ZN": "SHFE Zinc",
+    "SHFE:AG": "SHFE Silver", "SGX:XUC": "USD/CNH",
 }
 _KEEP_EXCHANGE = {"SHFE", "DCE", "ZCE", "INE", "GFEX", "LME", "SGX", "OSE", "COMEX"}
 
@@ -927,7 +953,7 @@ def _short_from_name(root) -> str:
     if words and exchange and words[0].upper() == exchange.upper() and exchange.upper() not in _KEEP_EXCHANGE:
         words = words[1:]
     text = " ".join(words[:3])
-    return text[:1].upper() + text[1:] if text else str(getattr(root, "root_id", "") or "")
+    return title_name(text) if text else str(getattr(root, "root_id", "") or "")
 
 
 def short_root_name(root, root_id: str = "") -> str:
@@ -1006,11 +1032,12 @@ SHORT_TEMPLATE_NAMES = {
 
 
 def short_template_name(template_id: str, name: str = "") -> str:
-    """'3-2-1 crack' for proc.us.crack_321; else the template's name up to its first parenthesis."""
+    """'3-2-1 Crack' for proc.us.crack_321; else the template's name up to its first parenthesis,
+    in Title Case (`title_name`)."""
     if template_id in SHORT_TEMPLATE_NAMES:
-        return SHORT_TEMPLATE_NAMES[template_id]
+        return title_name(SHORT_TEMPLATE_NAMES[template_id])
     text = str(name or template_id or "").split(" (")[0].strip()
-    return text or str(template_id or "spread")
+    return title_name(text) or str(template_id or "Spread")
 
 
 def spread_name(position: dict, roots: Optional[dict] = None) -> str:
@@ -1041,7 +1068,7 @@ def spread_name(position: dict, roots: Optional[dict] = None) -> str:
         first = parsed[0][1]
         month = f" {month_label(first['month'], first['year'])}" if first else ""
         return EN_DASH.join(seen) + month
-    return str(position.get("name") or position.get("position_id") or "spread")
+    return title_name(str(position.get("name") or position.get("position_id") or "Spread"))
 
 
 def short_date(iso: Optional[str]) -> str:
@@ -1063,6 +1090,13 @@ def fx_name(pair: str, product: str, settle_date: Optional[str] = None, option_t
     if product == "FX_SPOT":
         return f"{pair} spot"
     return f"{pair} {short_date(settle_date)} forward".strip()
+
+
+def plain_leg_name(root, month: str, prompt: str = "", instrument_id: str = "", **kw) -> str:
+    """`engine.spreads.trades.leg_name` in Title Case ('COMEX Copper Dec26', 'LME Zinc 18 Nov26',
+    'NYMEX Crude Oil Dec26 62 put'): the one way the screens call it."""
+    from engine.spreads.trades import leg_name
+    return title_name(leg_name(root, month, prompt, instrument_id, **kw))
 
 
 def lme_name(root, root_id: str, prompt: Optional[str]) -> str:

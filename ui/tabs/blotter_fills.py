@@ -246,7 +246,7 @@ def _contract_words(r: dict, root, leg_names: Dict[str, str]) -> str:
     if tid in leg_names and product != "CMDTY_OPTION":
         return leg_names[tid]
     try:
-        from engine.spreads.trades import leg_name
+        from ui.tabs.formatting import plain_leg_name as leg_name
     except Exception:  # noqa: BLE001 -- the id as it is
         return leg_names.get(tid) or inst
     if product == "LME_FWD":

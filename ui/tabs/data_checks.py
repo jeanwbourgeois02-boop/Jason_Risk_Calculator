@@ -33,6 +33,7 @@ from ui.tabs import data_kit as kit
 from ui.tabs.formatting import (
     cap, cap_parts, tidy,
     MINUS, MISSING, is_fx_pair, missing_cell, parse_contract_id, plain_ids, plain_words, price_text, short_date,
+    title_name,
 )
 
 # CLOSED (2026-10-01, `inventory.CHECK_CLOSED`): a past day the contract's exchange was shut, so no
@@ -73,7 +74,7 @@ def _commodity(root) -> str:
         words = commodity_words(root)
     except Exception:  # noqa: BLE001
         words = str(getattr(root, "subsector", "") or "")
-    return words[:1].upper() + words[1:] if words else ""
+    return title_name(words) if words else ""
 
 
 def price_name(instrument_id: str, mark_type: str, settle_date: str, root_id: str, roots: dict) -> str:
@@ -86,7 +87,7 @@ def price_name(instrument_id: str, mark_type: str, settle_date: str, root_id: st
     if root is None:
         return iid
     try:
-        from engine.spreads.trades import leg_name
+        from ui.tabs.formatting import plain_leg_name as leg_name
     except Exception:  # noqa: BLE001
         return iid
     if str(getattr(root, "exchange", "")) == "LME" or root_id.startswith("LME:"):
