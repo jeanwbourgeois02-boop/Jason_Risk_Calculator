@@ -1264,23 +1264,6 @@ PHYSICAL_UNIT_WORDS = {"t": "tonnes", "bbl": "barrels", "oz": "ounces", "lb": "p
                        "bu": "bushels", "st": "short tons", "mmbtu": "MMBtu", "mwh": "MWh"}
 
 
-def basis_words(sides: dict) -> str:
-    """'Sized in lots', 'Sized by tonnes', 'Sized by dollar value at the fill'."""
-    basis = str(sides.get("basis") or "")
-    if basis == "physical":
-        unit = str(sides.get("unit") or "")
-        return f"Sized by {PHYSICAL_UNIT_WORDS.get(unit.lower(), unit) or 'physical quantity'}"
-    return SIZE_BASIS_WORDS.get(basis, "")
-
-
-def sides_hover(sides: dict) -> str:
-    """The legs of each side and the basis: 'Long: CME Feeder Cattle', 'Short: CME Live Cattle', 'Sized
-    by dollar value at the fill'."""
-    return _lines(f"Long: {title_name(str(sides.get('long_label')))}" if sides.get("long_label") else "",
-                  f"Short: {title_name(str(sides.get('short_label')))}" if sides.get("short_label") else "",
-                  basis_words(sides))
-
-
 def sides_text(item: dict) -> Tuple[str, str]:
     """(the Quantity text of a trade or a spread, why when blank): `size_sides.text` as the engine
     wrote it."""
@@ -1288,100 +1271,38 @@ def sides_text(item: dict) -> Tuple[str, str]:
     return str(sides.get("text") or ""), str(sides.get("reason") or "")
 
 
-# Size (user, 2026-10-01): from the engine's `size_sides` (the size of each side in the spread's own unit),
-# said once when the sides match: "200 lots a side"; "≈ 8,175 t a side" (their average) when they are within
-# 10 % of each other, the exact sides on hover; "Long 386 t / short 350 t" in amber beyond that, the Action
-# column then saying "Sides off by 10 %". One side only: the engine's own words ("Short 2 lots").
-SIDES_TOLERANCE = 0.10
-
-
-def _side_amount(x: float, sides: dict) -> str:
-    """'200 lots', '1 lot', '8,175 t', '$34,657,881': one side's size in the spread's own unit, money in full."""
-    basis, unit = str(sides.get("basis") or ""), str(sides.get("unit") or "")
-    if basis == "value":
-        return f"${x:,.0f}"
-    if basis == "lots" or unit == "lots":
-        body = f"{x:,.2f}".rstrip("0").rstrip(".") if abs(x - round(x)) > 1e-6 else f"{x:,.0f}"
-        return f"{body} {'lot' if body == '1' else 'lots'}"
-    unit = {"mwh": "MWh", "mmbtu": "MMBtu"}.get(unit.lower(), unit)
-    return f"{x:,.0f} {unit}".strip()
-
-
-def sides_gap(sides: Optional[dict]) -> Optional[float]:
-    """How far apart the two sides are, as a share of the smaller one (0.10 = 10 %); None with one side
-    or no figures. Display only, on the engine's sizes."""
-    lo, sh = _num((sides or {}).get("long")), _num((sides or {}).get("short"))
-    if lo is None or sh is None or lo <= 1e-9 or sh <= 1e-9:
-        return None
-    return abs(lo - sh) / min(lo, sh)
-
-
-def size_display(sides: Optional[dict]) -> Tuple[str, bool, str]:
-    """(the Size text, amber, the exact sides for the hover) of a trade or a spread from its `size_sides`."""
-    sides = sides or {}
-    text = str(sides.get("text") or "")
-    gap = sides_gap(sides)
+# The balance of a trade's two sides (user, 2026-10-01: "yes to that"): the engine's own figure on
+# dollar value, never a gap worked out here from lots or tonnes.
+def balance_words(size: dict) -> Tuple[str, str]:
+    """('Sides 12 % apart by value', hover) from the engine's balance of a trade's two sides (`size`:
+    `value_gap`, |A + B| over the larger side's USD value at the fill, and `unbalanced`, beyond its
+    `tolerance` of 10 %; CLAUDE.md: the unbalanced flag stays on dollar value). The chip and the opened
+    trade's Balance fact both read it, so they never disagree. ('', '') when the engine gives no balance."""
+    gap = _num((size or {}).get("value_gap"))
     if gap is None:
-        lo, sh = _num(sides.get("long")), _num(sides.get("short"))
-        if text and (lo or sh) and not (lo and sh):
-            # one side only: "Short 1 lot", "Long 100 t" (the engine's text in the same words, the unit singular at 1)
-            return ("Long " if lo else "Short ") + _side_amount(float(lo or sh), sides), False, ""
-        return text, False, ""
-    lo, sh = float(sides["long"]), float(sides["short"])
-    exact = _lines(f"Long {_side_amount(lo, sides)}" + (f": {title_name(str(sides.get('long_label')))}"
-                                                         if sides.get("long_label") else ""),
-                   f"Short {_side_amount(sh, sides)}" + (f": {title_name(str(sides.get('short_label')))}"
-                                                           if sides.get("short_label") else ""))
-    if _side_amount(lo, sides) == _side_amount(sh, sides):
-        return f"{_side_amount(lo, sides)} a side", False, exact
-    if gap <= SIDES_TOLERANCE + 1e-12:
-        return f"≈ {_side_amount((lo + sh) / 2.0, sides)} a side", False, _lines(
-            exact, f"The sides are {pct_text(gap)} apart: the average shown")
-    return (f"Long {_side_amount(lo, sides)} / short {_side_amount(sh, sides)}", True,
-            _lines(exact, f"The sides are {pct_text(gap)} apart, more than {pct_text(SIDES_TOLERANCE)}"))
+        return "", ""
+    tol = pct_text((size or {}).get("tolerance") or 0.1)
+    lines = []
+    for side in (size or {}).get("sides") or []:
+        v = _num(side.get("value_fill_usd"))
+        if v is not None:
+            lines.append(f"{title_name(str(side.get('label') or ''))}: {format_cell(abs(v))} USD at the fill")
+    verdict = "more than" if size.get("unbalanced") else "within"
+    return (f"Sides {pct_text(gap)} apart by value",
+            _lines(f"The two sides' values at the fill differ by {pct_text(gap)} of the larger one, {verdict} "
+                   f"the {tol} limit", *lines))
 
 
-def size_td(item: dict, hover_more: str = "") -> html.Td:
-    """A Size cell from `size_sides` (`size_display`), the basis and `hover_more` on hover; an em dash
-    with the engine's reason when there is no size."""
-    sides = item.get("size_sides")
-    text, amber, exact = size_display(sides)
-    if not text:
-        legs = _open_legs(item) if "legs" in item else []
-        if len(legs) == 1:
-            # one open leg the engine gives no sides for (an FX forward, an option): that leg's own size
-            words = leg_qty_words(legs[0])
-            if words:
-                return html.Td(html.Span(words, className="tk-clip", title=plain_words(hover_more) or None),
-                               className="l tk-qty")
-        why = str((sides or {}).get("reason") or "") or "no size read"
-        if legs and why == "nothing open":
-            why = "No size per side for this kind of trade: each leg's size is on its row under the caret"
-        return html.Td(missing_cell(why), className="l tk-qty")
-    hover = _lines(exact or sides_hover(sides or {}), basis_words(sides or {}) if exact else "", hover_more)
-    return html.Td(html.Span(text, className="tk-clip" + (" cell-amber" if amber else ""),
-                             title=plain_words(hover) or None), className="l tk-qty")
-
-
-def sub_qty_td(sub: dict) -> html.Td:
-    """A spread's Size on its own row: its own `size_sides`."""
-    if not sub.get("size_sides"):
-        return html.Td("", className="l tk-qty")
-    return size_td(sub)
-
-
-def sides_off(t: dict) -> Optional[Tuple[float, str]]:
-    """(the largest gap between two sides beyond 10 %, which spread) of an open trade: the trade's own
-    sides for a trade of one spread, each spread's for a trade of several; None when every one is within."""
+def sides_off(t: dict) -> Optional[Tuple[str, str]]:
+    """(the chip's words, its hover) when the engine flags the open trade unbalanced by dollar value
+    (`size.unbalanced`); None otherwise: a cross sized by tonnage that the engine calls balanced gets no chip."""
     if t.get("status") != "open" or t.get("pseudo"):
         return None
-    items = [(x, part_name(x)) for x in spread_subs(t)] if is_multi(t) else [(t, "")]
-    worst: Optional[Tuple[float, str]] = None
-    for item, name in items:
-        gap = sides_gap(item.get("size_sides"))
-        if gap is not None and gap > SIDES_TOLERANCE + 1e-12 and (worst is None or gap > worst[0]):
-            worst = (gap, name)
-    return worst
+    size = t.get("size") or {}
+    if not size.get("unbalanced"):
+        return None
+    words, hover = balance_words(size)
+    return (words, hover) if words else None
 
 
 LOT_PRODUCTS = {"FUTURE", "CMDTY_OPTION", "EQ_OPTION", "LME_FWD"}      # sized in lots
@@ -1447,63 +1368,6 @@ def sub_sides(t: dict, sub: dict) -> Tuple[float, float]:
 def _open_legs(t: dict) -> List[dict]:
     return [leg for leg in t.get("legs") or [] if leg.get("status") == "open" and not leg.get("hedge")
             and not leg.get("unrecognised") and (_num(leg.get("lots")) or 0.0)]
-
-
-def size_parts(t: dict) -> Tuple[str, str, int, str]:
-    """(figure, unit, other parts, why when blank) of the Size cell, one form on every open row:
-    a spread's signed lots per side, side A first ('+30 / −4' lots); an outright future or option
-    its signed lots ('+2' lots); an FX or precious-metal forward or FX option its signed notional
-    in its unit ('−100' oz, '+10.0m' EUR). A trade of several parts shows its largest and counts
-    the rest (on hover). Display only: the engine's sides, or the legs' lots added."""
-    size = t.get("size") or {}
-    sides = size.get("sides") or []
-    subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
-    if len(subs) > 1:
-        best = max(subs, key=lambda x: sum(abs(_num(leg.get("lots")) or 0.0) for leg in x.get("legs") or []))
-        a, b = sub_sides(t, best)
-        if a or b:
-            return _pair_figure(a, b), _lots_word(*(x for x in (a, b) if x)), len(subs) - 1, ""
-    if len(sides) >= 2:
-        a, b = (_num(s.get("lots")) or 0.0 for s in sides[:2])
-        if a or b:
-            return _pair_figure(a, b), _lots_word(*(x for x in (a, b) if x)), 0, ""
-    legs = _open_legs(t)
-    if legs and all(str(leg.get("product") or "") in LOT_PRODUCTS for leg in legs):
-        qs = [_num(leg.get("lots")) or 0.0 for leg in legs]
-        a, b = sum(q for q in qs if q > 0), sum(q for q in qs if q < 0)
-        return _pair_figure(a, b), _lots_word(*(x for x in (a, b) if x)), 0, ""
-    if legs and all(str(leg.get("product") or "") in NOTIONAL_PRODUCTS for leg in legs):
-        by: Dict[Tuple[str, bool], List[float]] = {}
-        for leg in legs:
-            by.setdefault(_base_unit(leg), []).append(_num(leg.get("lots")) or 0.0)
-        (unit, money), qs = max(by.items(), key=lambda kv: sum(abs(q) for q in kv[1]))
-        a, b = sum(q for q in qs if q > 0), sum(q for q in qs if q < 0)
-        others = sum(1 for leg in legs if _base_unit(leg) != (unit, money))
-        return _pair_figure(a, b, money), unit, others, ""
-    if legs:
-        leg = max(legs, key=lambda x: abs(_num(x.get("lots")) or 0.0))
-        fig, unit = leg_size(leg)
-        return fig, unit, len(legs) - 1, ""
-    unknown = [leg for leg in t.get("legs") or [] if leg.get("unrecognised")]
-    if unknown and t.get("status") != "closed":
-        return "", "", 0, ("contract not recognised: no size until it is mapped ("
-                           + "; ".join(f"{leg.get('name')}: {signed_count(_num(leg.get('lots')) or 0.0)} in the file"
-                                       for leg in unknown) + ")")
-    return "", "", 0, str(size.get("reason") or "nothing open")
-
-
-def size_text(t: dict) -> Tuple[str, str]:
-    """(the Quantity as one string, why when blank): the engine's `size_sides.text` ('2,521 v 2,521
-    lots', '$15,094,650 v $14,928,200'), else '+30 / −4 lots', '+2 lots', '−100 oz'; the CSV's Size
-    column."""
-    if t.get("size_sides") is not None and t.get("status") != "closed":
-        text, why = sides_text(t)
-        if text or why:
-            return text, why
-    fig, unit, more, why = size_parts(t)
-    if not fig:
-        return "", why
-    return " ".join(x for x in (fig, unit, f"+{more} more" if more else "") if x), ""
 
 
 def size_hover(t: dict, r: Optional[dict]) -> str:
@@ -1679,23 +1543,6 @@ def level_words(level: dict, legs: Sequence[dict] = ()) -> str:
     return cap("".join(words) + (f", in {unit}" if unit else ""))
 
 
-def _now_td(t: dict, check: Sequence[str] = (), data: Optional[dict] = None, r: Optional[dict] = None,
-            ready: bool = True) -> html.Td:
-    level = t.get("level") or {}
-    carry = ""
-    if tf.type_code(t) == "CALENDAR" or level.get("source") == "calendar":
-        c = _num(t.get("carry_per_month"))
-        carry = (f"Carry per month: {full_signed(c)} USD (the legs' roll-down on one curve)"
-                 if c is not None else f"Carry per month: not summed ({t.get('carry_reason') or 'not given'})")
-    hover = _lines(level_words(level, t.get("legs") or ()), *leg_price_lines(data, t, "mark"),
-                   (level.get("sources") or {}).get("now", ""), level.get("note") or "", carry,
-                   *estimate_words(level, "now"), *(f"Price to check: {x}" for x in check))
-    estimated = bool(level.get("now_estimated")) or _estimated_level(t) or bool(check)
-    return html.Td(_level_cell(level.get("now"), level, str(level.get("now_reason") or level.get("reason") or ""),
-                               hover, estimated=estimated, with_unit=True, legs=t.get("legs") or ()),
-                   className="tk-level tk-now")
-
-
 def sigma_words(r: Optional[dict], ready: bool, level: dict, legs: Sequence[dict] = ()) -> str:
     """'Move in σ: +1.4 (a daily σ of 0.21 $/bbl over 251 changes)' from
     `trade_risk`'s move_sigma / level_sd, or the engine's reason."""
@@ -1861,7 +1708,7 @@ def date_action(t: dict, as_of: str) -> Optional[Tuple[str, int, str, bool]]:
 def action_items(t: dict, as_of: str) -> List[Tuple[str, int, str]]:
     """(short text, severity, sentence) of everything to do on the trade, most pressing first: the checks
     (a contract not recognised red, the rest amber), a key date (red, amber or grey when estimated) and
-    sides more than 10 % apart (amber)."""
+    sides more than 10 % apart by dollar value, the engine's flag (amber)."""
     out: List[Tuple[str, int, str]] = [(name, SEV_RED if red else SEV_AMBER, sentence)
                                        for name, red, sentence in check_items(t)]
     when = date_action(t, as_of)
@@ -1869,10 +1716,7 @@ def action_items(t: dict, as_of: str) -> List[Tuple[str, int, str]]:
         out.append((when[0], when[1], when[2]))
     off = sides_off(t)
     if off:
-        gap, where = off
-        out.append((f"Sides off by {pct_text(gap)}", SEV_AMBER,
-                    f"The two sides are {pct_text(gap)} apart, more than {pct_text(SIDES_TOLERANCE)}"
-                    + (f": {where}" if where else "")))
+        out.append((off[0], SEV_AMBER, off[1]))
     return sorted(out, key=lambda x: x[1])
 
 
@@ -2679,32 +2523,6 @@ def value_hover(data: dict, leg: dict, rows: pd.DataFrame) -> str:
     return _lines(*lines)
 
 
-def _split_sum_td(legs: Sequence[dict], kind: str) -> html.Td:
-    """The Open or Locked in cell of a part row: its legs' own figures summed (display), "excl. N"
-    with the reasons when a leg has none; the dash when none has."""
-    total, n, reasons = sum_known(split_value(leg, kind) for leg in legs)
-    if total is None:
-        return html.Td(missing_cell(_lines(*list(dict.fromkeys(reasons))[:4]) or SPLIT_MISSING))
-    return html.Td([km_cell(_cents(total), hover=SPLIT_WORDS[kind]),
-                    marker(f"excl. {n}", _lines(*list(dict.fromkeys(reasons))[:4]), "marker--small") if n else None])
-
-
-def _part_level_td(level: Optional[dict], end: str, legs: Sequence[dict] = (), data: Optional[dict] = None,
-                   t: Optional[dict] = None) -> html.Td:
-    """A spread's own level at `end` ('entry' | 'now') from the engine, with its unit like the trade row's;
-    how it is built, each of its legs' average fill (entry) or mark (now) and the move on hover."""
-    if level is None:
-        return html.Td("")
-    ch = _num(level.get("change"))
-    prices = leg_price_lines(data, dict(t or {}, legs=list(legs), level=level), "avg_fill" if end == "entry" else "mark")
-    hover = _lines(level_words(level, legs) or level_unit_line(level), *prices,
-                   f"Move since the previous close: {level_text(ch, level, signed=True, legs=legs)}"
-                   if ch is not None and end == "now" else "",
-                   level.get("note") or "")
-    return html.Td(_level_cell(level.get(end), level, str(level.get(end + "_reason") or level.get("reason") or ""),
-                               hover, with_unit=True, legs=legs), className="tk-level")
-
-
 UNMATCHED = "UNMATCHED"           # spreads-engine's part of legs no equal-size rule pairs (2026-10-01)
 
 
@@ -2718,42 +2536,6 @@ def part_name(sub: dict) -> str:
         return f"Unmatched legs: {rest}" if rest else "Unmatched legs"
     kind = tf.type_label(sub.get("type") or "") if sub.get("type") else ""
     return cap(what if not kind or kind.split("-")[0].lower() in what.lower() else f"{what} · {kind}")
-
-
-def part_z_cells(t: dict, sub: dict, zd: Optional[dict], ready: bool, legs: Sequence[dict] = ()) -> Dict[str, html.Td]:
-    """A spread's head row z entry and z now (z exit once the trade is closed): its own `spreads`
-    entry of risk-metrics' `spread_z`, matched by its place among the trade's sub_spreads."""
-    subs = list(t.get("sub_spreads") or [])
-    idx = next((n for n, x in enumerate(subs) if x is sub), None)
-    if idx is None and sub in subs:
-        idx = subs.index(sub)
-    one = next((x for x in (zd or {}).get("spreads") or [] if x.get("spread") == idx), None) if idx is not None else None
-    why = (str((sub.get("level") or {}).get("reason") or "") or "no z-score for this spread") if one is None else ""
-    closed = t.get("status") == "closed"
-    level = sub.get("level") or None
-    return {"z_entry": z_cell(one, "entry", ready, why, level=level, legs=legs),
-            "z_now": z_cell(one, "exit" if closed else "now", ready, why, level=level, legs=legs)}
-
-
-def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequence[str] = (),
-            zd: Optional[dict] = None, ready: bool = True) -> html.Tr:
-    """A spread's head row under a trade of several spreads (its legs follow it): its name, its size
-    per side, its own level and z (user, 2026-10-01: each spread's z on its own row) and its legs'
-    P&L summed (display). "Other legs" (legs in no spread) carries the P&L only."""
-    other = "level" not in sub and not sub.get("type")
-    level = None if other else (sub.get("level") or {})
-    z_cells = {} if other else part_z_cells(t, sub, zd, ready, legs)
-    cells: Dict[str, Any] = {
-        "trade": html.Td(part_name(sub), colSpan=2, className="l tk-part-name"),
-        "qty": html.Td("") if other else sub_qty_td(sub),
-        "entry": _part_level_td(level, "entry", legs, data, t), "now": _part_level_td(level, "now", legs, data, t),
-        "z_entry": z_cells.get("z_entry"), "z_now": z_cells.get("z_now"),
-        "daily": money_td(*legs_fig(data, legs, "daily"), row=True),
-        "open": _split_sum_td(legs, "open"), "locked": _split_sum_td(legs, "locked"),
-        "ltd": money_td(*legs_fig(data, legs, "ltd"), row=True),
-    }
-    return html.Tr([cells.get(key) or html.Td("") for key, *_ in columns(hidden) if key != "what"],
-                   className="tk-part-row")
 
 
 def leg_sequence(t: dict) -> List[Tuple[str, dict, List[dict]]]:
@@ -2853,98 +2635,6 @@ def leg_qty_words(leg: dict) -> str:
     return size_words(q, "lots")
 
 
-def _leg_split_td(data: dict, t: dict, leg: dict, kind: str, check: Sequence[str]) -> html.Td:
-    """A leg row's Open / Locked in, the engine's per-leg split; a closed trade's legs carry no Open
-    (nothing held), as its own row."""
-    if kind == "open" and t.get("status") == "closed":
-        return html.Td("")
-    v, why = split_value(leg, kind)
-    if v is None:
-        return html.Td(missing_cell(why))
-    hover = _lines(SPLIT_WORDS[kind], NON_USD_LOCKED if kind == "locked" and non_usd(leg) else "")
-    return html.Td([check_mark(check), km_cell(_cents(v), hover=hover, colour=not check,
-                                               className="cell-estimated" if check else "")])
-
-
-def leg_row(data: dict, t: dict, leg: dict, hidden: Sequence[str] = (), last: bool = False,
-            top: bool = False) -> html.Tr:
-    """One leg under its trade, in the trade table's own columns: the leg's name with its exchange, its
-    size in words, its average fill and its mark at tick precision, then P&L today and since entry (its
-    fills' own figures summed, as the trade row's, so the legs add up to it) and the engine's Open and
-    Locked in; z, Next date and Check are the trade's."""
-    ids = [str(i) for i in leg.get("trade_ids") or []]
-    hedge = bool(leg.get("hedge"))
-    unrec = bool(leg.get("unrecognised"))
-    flat = not unrec and leg.get("status") != "open"
-    check = leg_check_lines(data, leg)
-    unit = "" if unrec else _leg_unit(data, leg)
-    name = str(leg.get("name") or contract_name(str(leg.get("contract_id") or "")) or leg.get("contract_id") or "")
-    lots_hover, fill_hover = _fills_hover(data, leg)
-    tag = ("Not recognised" if unrec else "FX hedge" if hedge else "Closed" if flat else "")
-    tag_hover = (leg.get("unrecognised_reason") or "Contract not recognised") if unrec else (
-        "A currency hedge of the whole trade, never of one spread" if hedge
-        else "Nothing held on this contract any more")
-    name_td = html.Td([html.Span(name, title=plain_words(_lines(shared_words(leg), _leg_hover(data, leg))) or None),
-                       html.Span(tag, className="tk-leg-tag" + (" tk-leg-tag--red" if unrec else ""),
-                                 title=plain_words(tag_hover)) if tag else None],
-                      colSpan=2, className="l tk-leg-name")
-    qty = leg_qty_words(leg)
-    qty_td = html.Td(html.Span(qty, title=plain_words(_lines(shared_words(leg), lots_hover,
-                                                             "As in the file" if unrec else "")) or None)
-                     if qty else missing_cell("no size read"), className="l tk-qty")
-    fill = _num(leg.get("avg_fill"))
-    entry_td = html.Td(html.Span(price_text(fill, unit, fill), title=plain_words(_lines("Average fill", fill_hover)))
-                       if fill is not None else missing_cell(leg.get("avg_fill_reason") or "no open lots"),
-                       className="tk-level")
-    mark = _num(leg.get("mark"))
-    est = is_estimated_mark(leg.get("mark_source"))
-    note = "" if is_multi(t) else str((t.get("level") or {}).get("note") or "")   # the trade level is not shown
-    m_hover = _lines(mark_hover(data, leg, unit, fill, note), *(f"Price to check: {x}" for x in check))
-    now_td = html.Td(html.Span(("≈ " if est or check else "") + price_text(mark, unit, fill), title=plain_words(m_hover),
-                               className=("cell-estimated" if est else "") + (" cell-amber" if check else "") or None)
-                     if mark is not None else missing_cell(_lines(leg.get("mark_reason") or "no mark",
-                                                                  "" if unrec else m_hover)),
-                     className="tk-level")
-    rows = _df_rows(data, ids)
-    local = None
-    if not rows.empty and leg.get("currency") not in ("", "USD") and "pnl_local" in rows:
-        local = sum_known((_num(v), "") for v in rows["pnl_local"])[0]
-    realised = (sum_known((_num(v), "") for v, s in zip(rows.get("pnl_usd", []), rows.get("status", []))
-                          if s == "SETTLED")[0] if not rows.empty else None)
-    ltd_hover = _lines(f"Local: {leg.get('currency')} {full_signed(local)}" if local is not None else "",
-                       f"Realised: {full_signed(realised)} USD" if realised is not None else "")
-    cells: Dict[str, Any] = {
-        "trade": name_td, "qty": qty_td, "entry": entry_td, "now": now_td,
-        "daily": money_td(*leg_fig(data, leg, "daily"), hover=shared_words(leg), check=check, row=True),
-        "open": _leg_split_td(data, t, leg, "open", check), "locked": _leg_split_td(data, t, leg, "locked", check),
-        "ltd": money_td(*leg_fig(data, leg, "ltd"), hover=_lines(shared_words(leg), "" if leg.get("shared") else ltd_hover),
-                        check=check, row=True),
-    }
-    return html.Tr([cells.get(key) or html.Td("") for key, *_ in columns(hidden) if key != "what"],
-                   className="tk-leg-row" + (" tk-leg-row--hedge" if hedge else "") + (" tk-leg-row--flat" if flat else "")
-                   + (" tk-leg-row--unrec" if unrec else "") + (" tk-leg-row--last" if last else "")
-                   + (" tk-leg-row--top" if top else ""), **{"data-legs-of": str(t.get("trade") or "")})
-
-
-def leg_rows(data: dict, t: dict, hidden: Sequence[str] = (), zd: Optional[dict] = None,
-             ready: bool = True) -> List[html.Tr]:
-    """Every row under a trade (user, 2026-10-01): each spread's row of a trade of several spreads, always
-    showing, and the legs, hidden until the trade's caret is clicked (`ui/assets/book_filters.js` shows the
-    rows marked with the trade's name); hedges last, at the spreads' level, never under one spread. None
-    for the fills on no trade (their opened row lists each fill)."""
-    if t.get("pseudo"):
-        return []
-    seq = leg_sequence(t)
-    multi = any(kind == "part" for kind, _i, _l in seq)
-    out = []
-    for n, (kind, item, legs) in enumerate(seq):
-        if kind == "part":
-            out.append(part_tr(data, t, item, legs, hidden, zd, ready))
-        else:
-            out.append(leg_row(data, t, item, hidden, last=n == len(seq) - 1, top=multi and bool(item.get("hedge"))))
-    return out
-
-
 def _leg_order(t: dict) -> List[dict]:
     """Non-hedge legs first (side A then B, each by month, flat legs after), hedges last."""
     sides = (t.get("size") or {}).get("sides") or []
@@ -3042,13 +2732,10 @@ def panel_facts(t: dict, data: Optional[dict] = None, r: Optional[dict] = None, 
     usd, words = _usd_per_move(level)
     move_key = words[:1].upper() + words[1:] if usd is not None else "USD per move of the level"
     rows.append((move_key, format_cell(usd) if usd is not None else missing_cell(words)))
-    gap = _num(size.get("value_gap"))
-    if gap is not None:
-        tol = pct_text(size.get("tolerance") or 0.1)
-        rows.append(("Balance", html.Span(f"Sides {pct_text(gap)} apart",
-                                          className="cell-amber" if size.get("unbalanced") else None,
-                                          title=f"{'Unbalanced' if size.get('unbalanced') else 'Balanced'}: the sides' "
-                                                f"values differ by {pct_text(gap)} (the limit is {tol})")))
+    words, hover = balance_words(size)
+    if words:
+        rows.append(("Balance", html.Span(words, className="cell-amber" if size.get("unbalanced") else None,
+                                          title=plain_words(hover) or None)))
     return html.Table(html.Tbody([html.Tr([html.Td(k, className="tk-kv-k"), html.Td(v)]) for k, v in rows]),
                       className="tk-table tk-kv")
 

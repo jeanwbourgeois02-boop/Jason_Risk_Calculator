@@ -22,6 +22,10 @@ in the same currency - always usd - with the chinese [leg] as numerator".
   words); multi = `spreads_summary`; closed = `what_text`.
 - Open / Locked in only on P&L since entry hover (`_split_line`) and in panel_facts. `action_chip` replaces the
   Action column; total row "N to act on" in the Trade cell. Funnel only on Trade ("trade", "type").
+- Sides chip (user yes 2026-10-01): only when the engine flags `size.unbalanced` (dollar value at the fill,
+  `size.value_gap`), worded "Sides N % apart by value" by `balance_words`, which the panel's Balance fact also
+  reads; never a gap from lots/tonnes (`sides_gap` and the whole Size kit are deleted). SILARB1 (one side flat)
+  reads 100 % by the engine's rule.
 - CSV: one row per trade/spread/leg (Row column), plain numbers, + Open / Locked in.
 - The caret JS left book_filters.js; dead helpers removed by an AST "unused" sweep (see recipe in session).
 - Proof: scratch `sums.py <db> <as_of>` checks legs+spreads = trade (0 mismatches), totals = header, CSV, every
