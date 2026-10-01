@@ -250,6 +250,7 @@ def _row(data: dict, info: dict, key: str, holds: List[Tuple[dict, dict]]) -> di
         "key": key, "name": str(first.get("name") or first.get("contract_id") or key),
         "instrument_id": str(first.get("instrument_id") or ""), "product": str(first.get("product") or ""),
         "root_id": str(first.get("root_id") or ""), "family": _family(data, first),
+        "sector": tf.leg_sector(first, data.get("roots"))[0],
         "commodity": str(first.get("commodity") or ""), "exchange": str(first.get("exchange") or ""),
         "month": str(first.get("month") or str(first.get("prompt") or "")[:7]), "prompt": str(first.get("prompt") or ""),
         "legs": holds, "trade_ids": trade_ids, "open_ids": open_ids, "status": status, "net": net, "gross": gross,
@@ -301,14 +302,13 @@ def _next(data: dict, info: dict, r: dict) -> Tuple[Optional[dict], str]:
 
 # --------------------------------------------------------------------------- order, filters
 def default_order(rows: Sequence[dict]) -> List[dict]:
-    """Commodity family (the trade view's family order: FX and Other last), then commodity, exchange,
-    month, futures before options: SHFE and COMEX copper sit together."""
-    rank = {f: n for n, f in enumerate(tf.group_order([r["family"] for r in rows], tf.GROUP_BY_COMMODITY))}
-
+    """Sector in its fixed order (the trade view's, `trade_filter.SECTOR_ORDER`; user, 2026-10-01),
+    then commodity, exchange, month, futures before options: SHFE and COMEX copper sit together."""
     def key(r):
         fx = r["product"] in bk.NOTIONAL_PRODUCTS           # an FX trade: by pair, then its date
         when = str((r.get("next") or {}).get("date") or r["key"].rpartition(" ")[2])
-        return (rank.get(r["family"], 99), (r["instrument_id"][:6] if fx else r["commodity"]).lower(), r["exchange"],
+        return (tf.sector_rank(r.get("sector") or "Other"), (r["instrument_id"][:6] if fx else r["commodity"]).lower(),
+                r["exchange"],
                 r["month"] if not fx else when, r["prompt"], "OPTION" in r["product"], r["name"])
     return sorted(rows, key=key)
 

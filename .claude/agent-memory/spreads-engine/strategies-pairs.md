@@ -18,7 +18,7 @@ Choices I took (low stakes unless the user objects):
   nearest whole lot (min 1); an LME leg (tonnes, lots fractional) pairs exact tonnes. The pair's
   `residual_units` is that tail (COPAR3: 31 HG lots vs 350 t leaves +1.5 t); whole lots left are
   the strategy's `residuals`.
-- Greedy by (months apart, earlier month, contract ids); every other possible partner named in
+- (2026-10-01: term structures now take equal lots first, [[equal-size-spreads]].) Greedy by (months apart, earlier month, contract ids); every other possible partner named in
   `note`. SCO1's iron ore decomposes as Nov/Feb 1000, Oct/Feb 1521, Oct/Mar 1000 (not the trader's
   own Oct/Feb 2521 + Nov/Mar 1000): economically the same, said in the note.
 - Trade ids: a contract's trades are listed once, on the first pair using it (else its residual);

@@ -34,7 +34,8 @@ What is read, never recomputed:
     reader `priced_value_book`), summed per trade and per leg (display), so the total row is the
     header's figure;
   - `engine.risk.trades.trade_risk` (`blotter_pricing.shared_trade_risk`, computed on its own
-    thread; the z column fills in a moment after the table): z, percentile, z at entry, the
+    thread; the z columns fill in a moment after the table): `spread_z`, z at entry, now and exit
+    per trade and per spread (2026-10-01), the
     Quantity hover's hedge % and correlation, from the book database's own Bloomberg price history
     (`price_history`); before the first pull the drawer says why once;
   - `engine.spreads.trades.level_history` for the panel's chart (at most 60 closes).
@@ -103,20 +104,26 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
                             "rows under it (hedges last, in italics); click a trade for its hedge, facts, level since "
                             "entry and links."),
     ("what", "What it is", "l", "The position in plain words, the long side first, the exchange only where it "
-                                "tells the sides apart, a cross's months after a comma, and \"+ 1 more spread\" when "
-                                "the trade holds more than one. The value per side, the balance and the USD per 1-unit "
+                                "tells the sides apart, a cross's months after a comma, \"2 calendars\" when it holds "
+                                "several spreads on the same contracts and \"+ 1 more spread\" for each on other "
+                                "contracts (each spread on its own row under the trade). The value per side, the balance and the USD per 1-unit "
                                 "move of the level on hover; the currency hedge and the type are in the opened "
                                 "trade (the funnel filters by commodity family or type)."),
-    ("qty", "Quantity", "l", "The size per side, the long side first: lots of a future or option ('4 v 30 lots'), "
-                             "tonnes of an LME forward, the notional of an FX forward or option."),
+    ("qty", "Quantity", "l", "The size of each side, the long side first, in the unit the spread is matched in: "
+                             "lots on one exchange ('2,521 v 2,521 lots'), the physical quantity for one commodity "
+                             "across exchanges or a crack ('3,135 t v 3,135 t'), dollar value at the fill between two "
+                             "commodities ('$15,094,650 v $14,928,200'). The legs of each side on hover."),
     ("entry", "Entry level", "", "The level at entry: the fills' size-weighted level (a calendar near minus far in "
                                  "its unit, a China-against-West pair the converted ratio China over foreign); each "
                                  "leg's average fill on hover. A trade of several spreads says how many, each one's "
                                  "level in the opened trade."),
     ("now", "Level now", "", "The same level at the latest official marks; each leg's mark on hover."),
-    ("z", "z", "", "Where Level now sits in one year of this exact level: (now minus the mean) over the standard "
-                   "deviation of the last 252 daily closes (Bloomberg price history); bold at 2 or more either way. "
-                   "The percentile and z at entry on hover."),
+    ("z_entry", "z entry", "", "Where the level stood on the spread's first fill against its own daily closes in "
+                               "the calendar year to that day: (level minus their mean) over their standard "
+                               "deviation (Bloomberg price history); bold at 2 or more either way. The percentile "
+                               "and the window on hover. A trade of several spreads gives each one's on its row."),
+    ("z_now", "z now", "", "The same for the level today, against the calendar year to today; on a closed trade "
+                           "(the Closed fold) the z at exit, the day it went flat."),
     ("daily", "P&L today", "", "Today's P&L in USD, every fill of the trade including its hedge."),
     ("open", "Open", "", "P&L on the lots you still hold, at today's price against their average entry."),
     ("locked", "Locked in", "", "P&L already made or lost on lots unwound, hedges matured or options expired."),
@@ -1048,45 +1055,99 @@ def _closed_side_words(t: dict, open_legs: Sequence[dict]) -> str:
     return f"{' and '.join(gone)} {'leg' if len(gone) == 1 else 'legs'} closed"
 
 
+def _is_unmatched(sub: dict) -> bool:
+    return str(sub.get("type") or "") == "UNMATCHED" or bool(sub.get("unmatched"))
+
+
+def _spread_count_words(subs: Sequence[dict]) -> str:
+    """'2 calendars', '2 month pairs', '2 spreads': several spreads on the same contracts, said once."""
+    kinds = {str(x.get("type") or "") for x in subs}
+    word = "calendars" if kinds == {"CALENDAR"} else "month pairs" if kinds <= {"CROSS_EXCHANGE", "CROSS_PRODUCT"} \
+        else "spreads"
+    return f"{len(subs)} {word}"
+
+
+# line 2's parts that are counts, said after a " · " on the one-line What it is (never a cross's months)
+_COUNT_PART = re.compile(r"^(\+ .*|\d+ (calendars|month pairs|spreads)|Unmatched legs)$")
+
+
 def what_parts(t: dict, roots: Optional[Dict[str, Any]] = None) -> Tuple[str, List[str], List[str]]:
     """(line 1, line 2's parts, the other parts in words for the hover) of What it is. The trade's
-    open legs (hedges apart); a trade of several spreads says its largest and "+ N more spread(s)"
-    (one commodity pair over several months is one position, ZNA1); an open leg the contract list
-    does not know is counted ("+ 1 not recognised"). A closed trade, a row of fills on no trade or
-    one with nothing recognised keeps the engine's words (`what_text`) and no second line."""
+    open legs (hedges apart). A trade of several spreads (spreads-engine's `sub_spreads`, a part of
+    three legs or more cut into its equal-size spreads since 2026-10-01) says the spreads on its
+    largest set of contracts, "2 calendars" when there are several there (STEEL's two HRC calendars,
+    ZNA1's month pairs), and "+ N more spread(s)" for the spreads on other contracts only (SCO1: the
+    iron ore calendars, + 1 more spread, the HRC calendar); legs no rule pairs (an UNMATCHED part) are
+    "+ unmatched legs"; an open leg the contract list does not know is counted ("+ 1 not recognised").
+    A closed trade, a row of fills on no trade or one with nothing recognised keeps the engine's
+    words (`what_text`) and no second line."""
     roots = roots if roots is not None else _roots()
     by_id = {str(leg.get("contract_id")): leg for leg in t.get("legs") or []}
     open_legs = _open_legs(t)
     legs = [(leg, _num(leg.get("lots")) or 0.0) for leg in open_legs]
     unknown = [leg for leg in t.get("legs") or [] if leg.get("unrecognised") and leg.get("status") != "closed"]
     subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
+    real = [x for x in subs if not _is_unmatched(x)]
+    unmatched = [x for x in subs if _is_unmatched(x)]
     others: List[str] = []
+    counts: List[str] = []
     n_more, word_more = 0, "spread"
-    if len(subs) > 1 and not t.get("pseudo") and len({tuple(sorted(x.get("root_ids") or [])) for x in subs}) > 1:
-        def sub_legs(sub):
-            return [(by_id[str(x.get("contract_id"))], _num(x.get("lots")) or 0.0) for x in sub.get("legs") or []
-                    if str(x.get("contract_id")) in by_id and (_num(x.get("lots")) or 0.0)
-                    and by_id[str(x.get("contract_id"))].get("status") == "open"
-                    and not by_id[str(x.get("contract_id"))].get("hedge")]
-        ranked = sorted(subs, key=lambda x: -sum(abs(q) for _l, q in sub_legs(x)))
+
+    def roots_of(sub):
+        return tuple(sorted(str(r) for r in sub.get("root_ids") or []))
+
+    def sub_legs(sub):
+        return [(by_id[str(x.get("contract_id"))], _num(x.get("lots")) or 0.0) for x in sub.get("legs") or []
+                if str(x.get("contract_id")) in by_id and (_num(x.get("lots")) or 0.0)
+                and by_id[str(x.get("contract_id"))].get("status") == "open"
+                and not by_id[str(x.get("contract_id"))].get("hedge")]
+
+    groups: List[Tuple[bool, List[dict]]] = []           # (unmatched, its spreads)
+    by_roots: Dict[tuple, List[dict]] = {}
+    for x in real:
+        by_roots.setdefault(roots_of(x), []).append(x)
+    groups += [(False, g) for g in by_roots.values()] + [(True, [x]) for x in unmatched]
+    head_unmatched = False
+    if not t.get("pseudo") and len(groups) > 1:
+        # the headline is the largest set of contracts, legs no rule pairs included (an UNMATCHED part
+        # bigger than the spreads beside it leads, said "unmatched legs"); the rest are counted
+        ranked = sorted(groups, key=lambda g: -sum(abs(q) for x in g[1] for _l, q in sub_legs(x)))
+        head_unmatched, head = ranked[0]
+        legs = [lq for x in head for lq in sub_legs(x)]
+        if head_unmatched:
+            counts.append("Unmatched legs")
+        elif len(head) > 1:
+            counts.append(_spread_count_words(head))
         in_subs = {str(x.get("contract_id")) for sub in subs for x in sub.get("legs") or []}
-        legs = sub_legs(ranked[0])
-        rest = [sub_legs(x) for x in ranked[1:]]
-        rest += [[(leg, _num(leg.get("lots")) or 0.0)] for leg in open_legs if str(leg.get("contract_id")) not in in_subs]
-        for part in rest:
+        rest_subs = [x for un, g in ranked[1:] if not un for x in g]
+        rest = [sub_legs(x) for x in rest_subs]
+        loose = [[(leg, _num(leg.get("lots")) or 0.0)] for leg in open_legs if str(leg.get("contract_id")) not in in_subs]
+        for part in rest + loose:
             a, b = _position_lines(t, part, roots)
             if a:
                 others.append(f"{a} ({' · '.join(b)})" if b else a)
-        n_more = len(others)
-        if any(x.get("type") == "OUTRIGHT" for x in ranked[1:]) or len(rest) > len(ranked) - 1:
+        n_more = len(rest_subs) + len(loose)
+        if any(x.get("type") == "OUTRIGHT" for x in rest_subs) or loose:
             word_more = "part"
+        others += [part_name(x) for un, g in ranked[1:] if un for x in g]
+        more_unmatched = any(un for un, _g in ranked[1:])
+    else:
+        more_unmatched = False
+        if len(real) > 1 and not t.get("pseudo"):
+            counts.append(_spread_count_words(real))      # several spreads on the same contracts
+        elif unmatched and not real and not t.get("pseudo"):
+            counts.append("Unmatched legs")
+            others += [part_name(x) for x in unmatched]
     line1, line2 = ("", []) if t.get("pseudo") or t.get("status") == "closed" else _position_lines(t, legs, roots)
     if not line1:
         return what_text(t), [], []
     # line 2 keeps only the sizes, the months, the counts and the hedge coverage (user, 2026-09-30);
     # a flat side ("COMEX leg closed") is said on the cell's hover (`_with_words`: what_closed)
+    line2 += counts
     if n_more:
         line2.append(f"+ {n_more} more {word_more}{'s' if n_more > 1 else ''}")
+    if more_unmatched:
+        line2.append("+ unmatched legs")
     if unknown:
         line2.append(f"+ {len(unknown)} not recognised")
         others += [f"Not recognised: {leg.get('name')} ({signed_count(_num(leg.get('lots')) or 0.0)} in the file)"
@@ -1102,8 +1163,8 @@ def _with_words(t: dict, roots: Dict[str, Any]) -> dict:
     # "+ N more spread(s)"; Quantity = the sizes (line 2's first part); "+ N not recognised" is a Check chip
     qty = line2[0] if line2 else ""
     rest = line2[1:]
-    months = [x for x in rest if not x.startswith("+ ")]
-    counts = [x for x in rest if x.startswith("+ ") and "not recognised" not in x]
+    months = [x for x in rest if not _COUNT_PART.match(x)]
+    counts = [x for x in rest if _COUNT_PART.match(x) and "not recognised" not in x]
     one = line1 + (", " + " ".join(months) if months else "") + "".join(f" · {c}" for c in counts)
     return dict(t, what_words=" · ".join(x for x in (line1, sub, closed) if x), what_title=line1, what_sub=sub,
                 what_others=others, what_closed=cap(closed), what_one=one, what_qty=qty)
@@ -1236,16 +1297,59 @@ def _what_one_td(t: dict) -> html.Td:
                    className="l tk-what tk-what--one")
 
 
+# Quantity (user, 2026-10-01): the engine's `size_sides` of the trade and of each spread, the size of each
+# side in the unit the spread is matched in ('2,521 v 2,521 lots', '3,135 t v 3,135 t', '$15,094,650 v
+# $14,928,200', 'Short 2 lots'), money in full; the legs of each side and the basis in words on hover.
+SIZE_BASIS_WORDS = {"lots": "Sized in lots", "value": "Sized by dollar value at the fill"}
+PHYSICAL_UNIT_WORDS = {"t": "tonnes", "bbl": "barrels", "oz": "ounces", "lb": "pounds", "gal": "gallons",
+                       "bu": "bushels", "st": "short tons", "mmbtu": "MMBtu", "mwh": "MWh"}
+
+
+def basis_words(sides: dict) -> str:
+    """'Sized in lots', 'Sized by tonnes', 'Sized by dollar value at the fill'."""
+    basis = str(sides.get("basis") or "")
+    if basis == "physical":
+        unit = str(sides.get("unit") or "")
+        return f"Sized by {PHYSICAL_UNIT_WORDS.get(unit.lower(), unit) or 'physical quantity'}"
+    return SIZE_BASIS_WORDS.get(basis, "")
+
+
+def sides_hover(sides: dict) -> str:
+    """The legs of each side and the basis: 'Long: CME Feeder Cattle', 'Short: CME Live Cattle', 'Sized
+    by dollar value at the fill'."""
+    return _lines(f"Long: {title_name(str(sides.get('long_label')))}" if sides.get("long_label") else "",
+                  f"Short: {title_name(str(sides.get('short_label')))}" if sides.get("short_label") else "",
+                  basis_words(sides))
+
+
+def sides_text(item: dict) -> Tuple[str, str]:
+    """(the Quantity text of a trade or a spread, why when blank): `size_sides.text` as the engine
+    wrote it."""
+    sides = item.get("size_sides") or {}
+    return str(sides.get("text") or ""), str(sides.get("reason") or "")
+
+
 def _qty_td(t: dict, r: Optional[dict]) -> html.Td:
-    """Quantity: the sizes per side, long side first ("4 v 30 lots", "100 t", "10,000,000 EUR"), the
-    lots per leg, the value per side, the balance and the USD per move on hover (`size_hover`)."""
-    qty = str(t.get("what_qty") or "")
-    if not qty:
+    """Quantity: `size_sides.text` (the size of each side, long side first), the legs of each side, the
+    basis, each spread's sizes, the value per side, the balance and the USD per move on hover."""
+    sides = t.get("size_sides")
+    qty, why = sides_text(t) if sides is not None else (str(t.get("what_qty") or ""), "")
+    if not qty or t.get("status") == "closed" or t.get("pseudo"):
         why = ("closed: nothing held" if t.get("status") == "closed"
                else "fills on no trade: each fill's size is in the opened row" if t.get("pseudo")
-               else "no open lots read")
+               else why or "no open lots read")
         return html.Td(missing_cell(why), className="l")
-    return html.Td(html.Span(qty, className="tk-clip", title=plain_words(size_hover(t, r)) or None), className="l tk-qty")
+    hover = _lines(sides_hover(sides or {}), size_hover(t, r))
+    return html.Td(html.Span(qty, className="tk-clip", title=plain_words(hover) or None), className="l tk-qty")
+
+
+def sub_qty_td(sub: dict) -> html.Td:
+    """A spread's Quantity on its head row: its own `size_sides`."""
+    qty, why = sides_text(sub)
+    if not qty:
+        return html.Td(missing_cell(why or "no size read") if sub.get("size_sides") else "", className="l tk-qty")
+    return html.Td(html.Span(qty, className="tk-clip", title=plain_words(sides_hover(sub.get("size_sides") or {}))
+                             or None), className="l tk-qty")
 
 
 LOT_PRODUCTS = {"FUTURE", "CMDTY_OPTION", "EQ_OPTION", "LME_FWD"}      # sized in lots
@@ -1357,8 +1461,13 @@ def size_parts(t: dict) -> Tuple[str, str, int, str]:
 
 
 def size_text(t: dict) -> Tuple[str, str]:
-    """(the Size cell as one string, why when blank): '+30 / −4 lots', '+2 lots', '−100 oz'; the
-    CSV's Size column."""
+    """(the Quantity as one string, why when blank): the engine's `size_sides.text` ('2,521 v 2,521
+    lots', '$15,094,650 v $14,928,200'), else '+30 / −4 lots', '+2 lots', '−100 oz'; the CSV's Size
+    column."""
+    if t.get("size_sides") is not None and t.get("status") != "closed":
+        text, why = sides_text(t)
+        if text or why:
+            return text, why
     fig, unit, more, why = size_parts(t)
     if not fig:
         return "", why
@@ -1371,8 +1480,11 @@ def size_hover(t: dict, r: Optional[dict]) -> str:
     subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
     if len(subs) > 1:
         for x in subs:
-            a, b = sub_sides(t, x)
-            lines.append(f"{cap(str(x.get('what_it_is') or ''))}: {_pair_figure(a, b)} lots")
+            text = sides_text(x)[0]
+            if not text:
+                a, b = sub_sides(t, x)
+                text = f"{_pair_figure(a, b)} lots"
+            lines.append(f"{part_name(x)}: {text}")
     for leg in t.get("legs") or []:
         if leg.get("status") == "open" and not leg.get("hedge"):
             fig, unit = leg_size(leg)
@@ -1427,25 +1539,79 @@ def leg_price_lines(data: Optional[dict], t: dict, key: str) -> List[str]:
     return lines
 
 
-def _z_td(r: Optional[dict], ready: bool, closed: bool = False) -> html.Td:
-    """z, narrow and bold at |z| >= 2 (user, 2026-09-30: back as its own column after Level now); the
-    percentile, z at entry and the window on hover; an em dash with its reason when there is none."""
-    if closed:
-        return html.Td(missing_cell("closed: no z"), className="tk-z")
+# z at entry, now and exit per spread (user, 2026-10-01): risk-metrics' `trade_risk(...)["spread_z"]`,
+# {position_id: {trade, status, entry_date, exit_date, trade_level, spreads [one per sub_spread]}}, each
+# a `_spread_z` {z_entry / percentile_entry / z_entry_reason, z_now ..., z_exit ..., entry / now / exit
+# {date, close_date, level, z, percentile, window {start, end, closes, full_year}, reason, note}}. Shown as
+# the engine gives it: nothing is recomputed here.
+Z_KEYS = ("z_entry", "z_now")                 # the two z columns
+Z_POINT_WORDS = {"entry": "z at entry", "now": "z today", "exit": "z at exit"}
+
+
+def _z_hover(zd: dict, point: str, z: float, level: Optional[dict] = None, legs: Sequence[dict] = ()) -> str:
+    """The hover of a z cell: z and percentile, the level on the day read, the spread's first fill or
+    exit, the window of closes, the engine's note. `level` / `legs`: the row's level and legs, so the
+    level reads at its legs' precision (`level_text`)."""
+    d = zd.get(point) or {}
+    win = d.get("window") or {}
+    pct = _num(zd.get(f"percentile_{point}"))
+    day = d.get("close_date") or d.get("date") or (zd.get("entry_date") if point == "entry" else "")
+    ratio = zd.get("level_kind") == "ratio"
+    lv = dict(level or {}) if level and level.get("unit") else {
+        "unit": "ratio" if ratio else str(zd.get("level_unit") or ""), "mode": "ratio" if ratio else ""}
+    unit = "" if ratio else unit_words(lv.get("unit"))
+    return _lines(f"{Z_POINT_WORDS[point]}: {z_text(z)}" + (f" · percentile {pct_text(pct / 100.0)}" if pct is not None else ""),
+                  f"Level {level_text(d.get('level'), lv, legs=legs)}{' ' + unit if unit else ''} on {day_text(day)}"
+                  if _num(d.get("level")) is not None and day else "",
+                  f"First fill of the spread: {day_text(zd.get('entry_date'))}" if point == "entry" and zd.get("entry_date")
+                  else "",
+                  f"Exit: the day it went flat, {day_text(zd.get('exit_date'))}" if point == "exit" and zd.get("exit_date")
+                  else "",
+                  (f"Window: {win.get('closes')} daily closes from {day_text(win.get('start'))} to {day_text(win.get('end'))}"
+                   " (the calendar year to that day, Bloomberg price history)") if win.get("closes") else "",
+                  cap(str(d.get("note") or "")))
+
+
+def z_cell(zd: Optional[dict], point: str, ready: bool, why: str = "", extra: str = "",
+           level: Optional[dict] = None, legs: Sequence[dict] = ()) -> html.Td:
+    """One z cell (`point` 'entry' | 'now' | 'exit'): the figure, bold at |z| >= 2, its percentile,
+    day and window on hover; an em dash with its reason otherwise (`why` when there is no entry)."""
     if not ready:
         return html.Td(missing_cell("the risk figures are still being computed"), className="tk-z")
-    if r is None:
-        return html.Td(missing_cell("no risk row for this trade"), className="tk-z")
-    z = _num(r.get("z"))
+    if zd is None:
+        return html.Td(missing_cell(why or "no z for this trade"), className="tk-z")
+    z = _num(zd.get(f"z_{point}"))
     if z is None:
-        return html.Td(missing_cell(r.get("z_reason") or "no z"), className="tk-z")
-    pct, ze = _num(r.get("percentile")), _num(r.get("z_entry"))
-    hover = _lines(f"Percentile: {pct_text(pct / 100.0) if pct is not None else MISSING}",
-                   f"z at entry: {z_text(ze)}" if ze is not None else f"z at entry: {r.get('z_entry_reason') or 'not given'}",
-                   f"Window: {r.get('level_days') or ''} daily closes to {r.get('level_date') or ''} (Bloomberg price "
-                   "history)")
-    return html.Td(html.Span(z_text(z), className="tk-bold" if abs(z) >= 2 else None, title=plain_words(hover)),
-                   className="tk-z")
+        reason = str(zd.get(f"z_{point}_reason") or zd.get("reason") or why or "no z")
+        return html.Td(missing_cell(_lines(reason, extra)), className="tk-z")
+    return html.Td(html.Span(z_text(z), className="tk-bold" if abs(z) >= 2 else None,
+                             title=plain_words(_lines(_z_hover(zd, point, z, level, legs), extra))), className="tk-z")
+
+
+def spreads_z_lines(zd: Optional[dict], point: str) -> str:
+    """Each spread's z at `point` in a line, for the hover of a trade of several spreads."""
+    lines = []
+    for s in (zd or {}).get("spreads") or []:
+        z = _num(s.get(f"z_{point}"))
+        name = title_name(str(s.get("what_it_is") or "")) or f"Spread {int(s.get('spread') or 0) + 1}"
+        lines.append(f"{name}: {z_text(z) if z is not None else MISSING}")
+    return _lines(*lines)
+
+
+def trade_z_cells(t: dict, zd: Optional[dict], ready: bool) -> Dict[str, html.Td]:
+    """The trade row's z entry and z now cells: the trade's own level's (`trade_level`); on a closed
+    trade z now is the z at exit. A trade whose level is one of several spreads says which on hover."""
+    closed = t.get("status") == "closed"
+    tl = (zd or {}).get("trade_level")
+    note = str((t.get("level") or {}).get("note") or "")
+    many = len([x for x in t.get("sub_spreads") or [] if x.get("legs")]) > 1
+    extra_e = _lines(f"Read on {note}" if many and note else "", spreads_z_lines(zd, "entry") if many else "")
+    extra_n = _lines(f"Read on {note}" if many and note else "",
+                     spreads_z_lines(zd, "exit" if closed else "now") if many else "")
+    why = "no z-score for this trade"
+    level, legs = (None if closed else t.get("level")), t.get("legs") or ()
+    return {"z_entry": z_cell(tl, "entry", ready, why, extra_e, level, legs),
+            "z_now": z_cell(tl, "exit" if closed else "now", ready, why, extra_n, level, legs)}
 
 
 def _entry_td(t: dict, data: Optional[dict] = None) -> html.Td:
@@ -1688,20 +1854,22 @@ def part_level_words(sub: dict, legs: Sequence[dict] = ()) -> str:
             + (f" {unit}" if unit else ""))
 
 
-def _parts_td(t: dict, n: int, opened: bool) -> html.Td:
-    """Entry and Now of a trade of several spreads: one grey "2 spreads" and a chevron across both
-    columns (the row opens on click, its panel lists each part with its level); the parts on hover."""
+def _parts_td(t: dict, n: int, opened: bool, span: int = 2, zd: Optional[dict] = None) -> html.Td:
+    """Entry, Now and the z columns of a trade of several spreads: one grey "3 spreads" and a chevron
+    across them (`span`), each spread's level and z on its own row under the trade and on hover."""
     subs = [x for x in t.get("sub_spreads") or [] if x.get("legs")]
-    word = "parts" if any(str(x.get("type") or "") == "OUTRIGHT" for x in subs) else "spreads"
-    hover = _lines(f"{n} {word}, each with its own level on its row under the trade",
-                   *(part_level_words(x, t.get("legs") or ()) for x in subs))
+    word = ("parts" if any(str(x.get("type") or "") in ("OUTRIGHT", "UNMATCHED") for x in subs) else "spreads")
+    hover = _lines(f"{n} {word}, each with its own level and z on its row under the trade",
+                   *(part_level_words(x, t.get("legs") or ()) for x in subs),
+                   _lines("z now:", spreads_z_lines(zd, "now")) if (zd or {}).get("spreads") else "")
     return html.Td(html.Span(f"{n} {word} " + ("\u25be" if opened else "\u25b8"), className="tk-sub tk-parts",
-                             title=plain_words(hover)), colSpan=2, className="tk-level tk-parts-cell")
+                             title=plain_words(hover)), colSpan=span, className="tk-level tk-parts-cell")
 
 
 def trade_tr(data: dict, t: dict, r: Optional[dict], ready: bool, opened: bool,
-             hidden: Sequence[str] = ()) -> html.Tr:
-    """One trade's row, in `columns(hidden)`'s order (a hidden column's cell is left out)."""
+             hidden: Sequence[str] = (), zd: Optional[dict] = None) -> html.Tr:
+    """One trade's row, in `columns(hidden)`'s order (a hidden column's cell is left out); `zd` the
+    trade's `spread_z` entry (`spread_z_of`)."""
     ids = [str(i) for i in t.get("trade_ids") or []]
     daily = fill_sum(data, "daily", ids)
     ltd = fill_sum(data, "ltd", ids)
@@ -1715,13 +1883,17 @@ def trade_tr(data: dict, t: dict, r: Optional[dict], ready: bool, opened: bool,
     info = row_info([excl_line("P&L today", daily), excl_line("P&L since entry", ltd), excl_line("MTD", mtd),
                      excl_line("YTD", ytd)])
     n_parts = parts_count(t)
+    keys = [c[0] for c in columns(hidden)]
+    span = sum(1 for k in ("entry", "now", *Z_KEYS) if k in keys)
+    z_cells = trade_z_cells(t, zd, ready)
     cells: Dict[str, Any] = {
         "trade": html.Td([html.Span("▾ " if opened else "▸ ", className="tk-chev"),
                           html.Span(name, className="tk-name", title=name_hover or None), info], className="l"),
         "what": _what_one_td(t), "qty": _qty_td(t, r),
-        "entry": _parts_td(t, n_parts, opened) if n_parts else _entry_td(tv, data),
-        "now": None if n_parts else _now_td(tv, check, data, r, ready),      # the parts cell spans both
-        "z": _z_td(r, ready, closed),
+        "entry": _parts_td(t, n_parts, opened, span, zd) if n_parts else _entry_td(tv, data),
+        "now": None if n_parts else _now_td(tv, check, data, r, ready),      # the parts cell spans these
+        "z_entry": None if n_parts else z_cells["z_entry"],
+        "z_now": None if n_parts else z_cells["z_now"],
         "daily": money_td(*daily, hover=_split_hover(t), check=check, row=True),
         "open": split_td(data, t, "open", ltd, check),
         "locked": split_td(data, t, "locked", ltd, check),
@@ -1816,10 +1988,19 @@ def _checked_money(data: dict, shown: Sequence[dict], fig, hover: str = "") -> h
 
 
 # --------------------------------------------------------------------------- sort
-SORTABLE = {"trade", "what", "qty", "entry", "now", "z", "daily", "open", "locked", "ltd", "next", "flags"}
+SORTABLE = {"trade", "what", "qty", "entry", "now", "z_entry", "z_now", "daily", "open", "locked", "ltd", "next",
+            "flags"}
 
 
-def sort_value(data: dict, t: dict, key: str, r: Optional[dict]) -> Any:
+def trade_z(t: dict, zd: Optional[dict], key: str) -> Optional[float]:
+    """The z a trade row shows under `key` ('z_entry' | 'z_now'; a closed trade's z now is its z at
+    exit), for the sort and the filter: the trade's own level's, None for a trade of several spreads."""
+    tl = (zd or {}).get("trade_level") or {}
+    point = "entry" if key == "z_entry" else ("exit" if t.get("status") == "closed" else "now")
+    return None if parts_count(t) else _num(tl.get(f"z_{point}"))
+
+
+def sort_value(data: dict, t: dict, key: str, r: Optional[dict], zd: Optional[dict] = None) -> Any:
     level = t.get("level") or {}
     if key == "trade":
         return str(t.get("trade") or "").lower()
@@ -1830,8 +2011,8 @@ def sort_value(data: dict, t: dict, key: str, r: Optional[dict]) -> Any:
     if key == "qty":
         lots = [abs(_num(leg.get("lots")) or 0.0) for leg in _open_legs(t)]
         return sum(lots) if lots else None
-    if key == "z":
-        z = _num((r or {}).get("z"))
+    if key in Z_KEYS:
+        z = trade_z(t, zd, key)
         return abs(z) if z is not None else None
     if key in ("daily", "ltd"):
         return fill_sum(data, key, [str(i) for i in t.get("trade_ids") or []])[0]
@@ -1845,17 +2026,23 @@ def sort_value(data: dict, t: dict, key: str, r: Optional[dict]) -> Any:
     return None
 
 
-def sort_rows(data: dict, rows: Sequence[dict], sort: Optional[dict], risk: Dict[str, dict]) -> List[dict]:
-    """The rows in the default order (commodity family, then name), or by the column chosen;
-    a missing value always last."""
+def sort_rows(data: dict, rows: Sequence[dict], sort: Optional[dict], risk: Dict[str, dict],
+              zmap: Optional[Dict[str, dict]] = None) -> List[dict]:
+    """The rows in the default order (sector in its fixed order, then commodity, then name; user,
+    2026-10-01: `trade_filter.default_order`), or by the column chosen; a missing value always last.
+    `zmap`: risk-metrics' `spread_z` (the z columns' sort)."""
     base = tf.default_order(rows)
     key = (sort or {}).get("key")
     if key not in SORTABLE:
         return base
+    zmap = zmap or {}
     desc = (sort or {}).get("dir") != "asc"
-    have = [t for t in base if sort_value(data, t, key, risk.get(str(t.get("trade")))) is not None]
+
+    def value(t):
+        return sort_value(data, t, key, risk.get(str(t.get("trade"))), zmap.get(str(t.get("position_id") or "")))
+    have = [t for t in base if value(t) is not None]
     none = [t for t in base if t not in have]
-    have.sort(key=lambda t: sort_value(data, t, key, risk.get(str(t.get("trade")))), reverse=desc)
+    have.sort(key=value, reverse=desc)
     return have + none
 
 
@@ -1874,7 +2061,9 @@ def next_sort(current: Optional[dict], key: str) -> Optional[dict]:
 # comparison, the Book's own; Flags a tick list. Nothing above the table repeats a column's name.
 LIST_FUNNELS = {"trade": ("trade",), "what": ("commodity", "type")}     # the type column left (2026-09-30)
 NUMBER_FUNNELS = {"entry": "The level at entry, in the level's own unit.",
-                  "z": "The z-score; a trade whose z is still being computed does not show.",
+                  "z_entry": "The z-score at entry; a trade whose z is still being computed does not show.",
+                  "z_now": "The z-score today (at exit on a closed trade); a trade whose z is still being computed "
+                           "does not show.",
                   "now": "The level now, in the level's own unit.",
                   "daily": "Today's P&L in USD.", "open": "The P&L on the lots still held, in USD.",
                   "locked": "The P&L on lots unwound, hedges matured or options expired, in USD.", "ltd": "The P&L since the trade opened, in USD."}
@@ -1901,17 +2090,26 @@ def columns(hidden: Sequence[str] = ()) -> Tuple[Tuple[str, str, str, str], ...]
 Z_HIDDEN_NO_HISTORY = "z-score hidden: it needs Bloomberg's price history, fetched by Pull Bloomberg now"
 
 
+def any_z(risk: dict) -> bool:
+    """Any z at entry, now or exit on any trade or spread of risk-metrics' `spread_z` (or a trade row)."""
+    for zd in (risk.get("spread_z") or {}).values():
+        for one in [zd.get("trade_level") or {}, *(zd.get("spreads") or [])]:
+            if any(_num(one.get(f"z_{p}")) is not None for p in ("entry", "now", "exit")):
+                return True
+    return any(_num(r.get("z")) is not None for r in risk.get("trades") or [])
+
+
 def hidden_columns(data: dict, risk: Optional[dict]) -> Dict[str, str]:
     """{column key: why it is hidden} for z, Open / Locked in, Next date and Check."""
     trades = data.get("trades") or []
     named = [t for t in trades if not t.get("pseudo")]
     out: Dict[str, str] = {}
     if not (data.get("history") or {}).get("rows"):
-        out["z"] = Z_HIDDEN_NO_HISTORY
-    elif risk is not None and not any(_num(r.get("z")) is not None for r in risk.get("trades") or []):
+        out["z_entry"] = out["z_now"] = Z_HIDDEN_NO_HISTORY
+    elif risk is not None and not any_z(risk):
         why = (risk.get("reason") if not risk.get("available") else "") or next(
             (str(r.get("z_reason")) for r in risk.get("trades") or [] if r.get("z_reason")), "")
-        out["z"] = "z-score hidden: no trade has one" + (f" ({why})" if why else "")
+        out["z_entry"] = out["z_now"] = "z-score hidden: no trade has one" + (f" ({why})" if why else "")
     open_named = [t for t in named if t.get("status") == "open"]
     if open_named and not any(has_split(t) for t in open_named):
         reasons = [str(t.get("pnl_split_reason") or "") for t in open_named if any(k in t for k in SPLIT_KEYS.values())]
@@ -1956,12 +2154,13 @@ def head(sort: Optional[dict], state: Optional[dict] = None,
     return html.Thead(html.Tr(ths))
 
 
-def filter_value(data: dict, t: dict, col: str, rrows: Dict[str, dict]) -> Optional[float]:
+def filter_value(data: dict, t: dict, col: str, rrows: Dict[str, dict],
+                 zmap: Optional[Dict[str, dict]] = None) -> Optional[float]:
     """A trade's figure for a number column's filter, as the row shows it (never recomputed)."""
     if col in ("daily", "ltd"):
         return fill_sum(data, col, [str(i) for i in t.get("trade_ids") or []])[0]
-    if col == "z":
-        return _num((rrows.get(str(t.get("trade"))) or {}).get("z"))
+    if col in Z_KEYS:
+        return trade_z(t, (zmap or {}).get(str(t.get("position_id") or "")), col)
     if col in SPLIT_KEYS:
         return trade_split(data, t, col)[0]
     level = display_level(data, t)
@@ -2099,18 +2298,50 @@ def _part_level_td(level: Optional[dict], end: str, legs: Sequence[dict] = ()) -
                                hover, with_unit=end == "now", legs=legs), className="tk-level")
 
 
-def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequence[str] = ()) -> html.Tr:
-    """A part's head row under a trade of several spreads (its legs follow it): what the part is, its
-    own level when the trade has none of its own, and its legs' P&L summed (display)."""
-    ids = [str(i) for leg in legs for i in leg.get("trade_ids") or []]
-    what = str(sub.get("what_it_is") or "")
-    what = title_name(what)
+UNMATCHED = "UNMATCHED"           # spreads-engine's part of legs no equal-size rule pairs (2026-10-01)
+
+
+def part_name(sub: dict) -> str:
+    """A spread's name in words with its type where the name does not say it ('CME HRC Oct/Dec26
+    Calendar', 'SHFE Zinc vs LME Zinc, Oct26 · Cross-exchange'); legs no rule pairs read "Unmatched
+    legs: SGX Iron Ore Oct26 + SGX Iron Ore Nov26" (the plain words, user 2026-09-28)."""
+    what = title_name(str(sub.get("what_it_is") or ""))
+    if str(sub.get("type") or "") == UNMATCHED or sub.get("unmatched"):
+        rest = re.sub(r"^\s*unmatched( legs)?\s*:\s*", "", what, flags=re.IGNORECASE)
+        return f"Unmatched legs: {rest}" if rest else "Unmatched legs"
     kind = tf.type_label(sub.get("type") or "") if sub.get("type") else ""
-    text = what if not kind or kind.split("-")[0].lower() in what.lower() else f"{what} · {kind}"
-    level = sub.get("level") if parts_count(t) else None
+    return cap(what if not kind or kind.split("-")[0].lower() in what.lower() else f"{what} · {kind}")
+
+
+def part_z_cells(t: dict, sub: dict, zd: Optional[dict], ready: bool, legs: Sequence[dict] = ()) -> Dict[str, html.Td]:
+    """A spread's head row z entry and z now (z exit once the trade is closed): its own `spreads`
+    entry of risk-metrics' `spread_z`, matched by its place among the trade's sub_spreads."""
+    subs = list(t.get("sub_spreads") or [])
+    idx = next((n for n, x in enumerate(subs) if x is sub), None)
+    if idx is None and sub in subs:
+        idx = subs.index(sub)
+    one = next((x for x in (zd or {}).get("spreads") or [] if x.get("spread") == idx), None) if idx is not None else None
+    why = (str((sub.get("level") or {}).get("reason") or "") or "no z-score for this spread") if one is None else ""
+    closed = t.get("status") == "closed"
+    level = sub.get("level") or None
+    return {"z_entry": z_cell(one, "entry", ready, why, level=level, legs=legs),
+            "z_now": z_cell(one, "exit" if closed else "now", ready, why, level=level, legs=legs)}
+
+
+def part_tr(data: dict, t: dict, sub: dict, legs: Sequence[dict], hidden: Sequence[str] = (),
+            zd: Optional[dict] = None, ready: bool = True) -> html.Tr:
+    """A spread's head row under a trade of several spreads (its legs follow it): its name, its size
+    per side, its own level and z (user, 2026-10-01: each spread's z on its own row) and its legs'
+    P&L summed (display). "Other legs" (legs in no spread) carries the P&L only."""
+    ids = [str(i) for leg in legs for i in leg.get("trade_ids") or []]
+    other = "level" not in sub and not sub.get("type")
+    level = None if other else (sub.get("level") or {})
+    z_cells = {} if other else part_z_cells(t, sub, zd, ready, legs)
     cells: Dict[str, Any] = {
-        "trade": html.Td(cap(text), colSpan=2, className="l tk-part-name"),
+        "trade": html.Td(part_name(sub), colSpan=2, className="l tk-part-name"),
+        "qty": html.Td("") if other else sub_qty_td(sub),
         "entry": _part_level_td(level, "entry", legs), "now": _part_level_td(level, "now", legs),
+        "z_entry": z_cells.get("z_entry"), "z_now": z_cells.get("z_now"),
         "daily": money_td(*fill_sum(data, "daily", ids), row=True),
         "open": _split_sum_td(legs, "open"), "locked": _split_sum_td(legs, "locked"),
         "ltd": money_td(*fill_sum(data, "ltd", ids), row=True),
@@ -2228,7 +2459,8 @@ def leg_row(data: dict, t: dict, leg: dict, hidden: Sequence[str] = (), last: bo
                    + (" tk-leg-row--unrec" if unrec else "") + (" tk-leg-row--last" if last else ""))
 
 
-def leg_rows(data: dict, t: dict, hidden: Sequence[str] = ()) -> List[html.Tr]:
+def leg_rows(data: dict, t: dict, hidden: Sequence[str] = (), zd: Optional[dict] = None,
+             ready: bool = True) -> List[html.Tr]:
     """Every row under a trade, always showing (user, 2026-09-30: "the regular book not expanded to show
     me both legs with their pnl"): the part heads and the legs, hedges last; none for the fills on no
     trade (their opened row lists each fill)."""
@@ -2238,7 +2470,7 @@ def leg_rows(data: dict, t: dict, hidden: Sequence[str] = ()) -> List[html.Tr]:
     out = []
     for n, (kind, item, legs) in enumerate(seq):
         if kind == "part":
-            out.append(part_tr(data, t, item, legs, hidden))
+            out.append(part_tr(data, t, item, legs, hidden, zd, ready))
         else:
             out.append(leg_row(data, t, item, hidden, last=n == len(seq) - 1))
     return out
@@ -2534,8 +2766,9 @@ def visible(data: dict, state: Optional[dict], risk: Optional[dict] = None) -> L
     if not cols:
         return shown
     rrows = risk_rows(risk)
+    zmap = (risk or {}).get("spread_z") or {}
     return [t for t in shown
-            if tf.keeps_cols(t, cols, lambda t, col: filter_value(data, t, col, rrows), filter_lists)]
+            if tf.keeps_cols(t, cols, lambda t, col: filter_value(data, t, col, rrows, zmap), filter_lists)]
 
 
 def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Optional[dict], opened: Sequence[str],
@@ -2544,6 +2777,7 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
     shown = visible(data, s, risk)
     ready = risk is not None
     rrows = risk_rows(risk)
+    zmap = (risk or {}).get("spread_z") or {}
     opened_set = set(opened or [])
     folds = folds or {}
     hidden = hidden_columns(data, risk)
@@ -2559,8 +2793,9 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
     def add(t):
         name = str(t.get("trade") or "")
         is_open = name in opened_set
-        body.append(trade_tr(data, t, rrows.get(name), ready, is_open, hidden))
-        body.extend(leg_rows(data, t, hidden))          # always showing, never behind a click (2026-09-30)
+        zd = zmap.get(str(t.get("position_id") or ""))
+        body.append(trade_tr(data, t, rrows.get(name), ready, is_open, hidden, zd))
+        body.extend(leg_rows(data, t, hidden, zd, ready))   # always showing, never behind a click (2026-09-30)
         if is_open:
             try:
                 body.append(panel_tr(conn, data, t, len(cols), rrows.get(name), ready))
@@ -2571,7 +2806,7 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
 
     # one flat list (user, 2026-09-30: the Group switch left the Book's strip; the shared group, the P&L
     # tab's slice, is not read here)
-    for t in sort_rows(data, open_rows, sort, rrows):
+    for t in sort_rows(data, open_rows, sort, rrows, zmap):
         add(t)
     if closed_rows:
         year = str(data["as_of"])[:4]
@@ -2583,11 +2818,17 @@ def table(conn: sqlite3.Connection, data: dict, state: Optional[dict], sort: Opt
         ltd_closed = fill_sum(data, "ltd", ids)
         fold_cells = {"daily": money_td(*fill_sum(data, "daily", ids)), "locked": money_td(*ltd_closed),
                       "ltd": money_td(*ltd_closed)}
+        # the z columns read z entry | z exit in the fold (user, 2026-10-01): said on the fold's own row
+        z_heads = [html.Td(html.Span(word, className="tk-sub", title=tip), className="tk-z")
+                   for k, word, tip in (("z_entry", "z entry", "The z-score of the level on the spread's first fill"),
+                                        ("z_now", "z exit", "The z-score of the level on the day the trade went flat"))
+                   if k in keys]
         body.append(html.Tr([
-            html.Td([html.Span("▾ " if is_open else "▸ ", className="tk-chev"), title], className="l", colSpan=lead,
-                    title="The fully flat trades: Entry level and Level now are the entry and exit levels, P&L since "
-                          "entry the final P&L, all of it locked in")]
-            + [fold_cells.get(k) or html.Td("") for k in keys[lead:]],
+            html.Td([html.Span("▾ " if is_open else "▸ ", className="tk-chev"), title], className="l",
+                    colSpan=lead - len(z_heads),
+                    title="The fully flat trades: Entry level and Level now are the entry and exit levels, z entry "
+                          "and z exit the z-scores on those days, P&L since entry the final P&L, all of it locked in")]
+            + z_heads + [fold_cells.get(k) or html.Td("") for k in keys[lead:]],
             id=CLOSED_FOLD_ID, n_clicks=0, className="tk-fold"))
         if is_open:
             for t in sorted(closed_rows, key=lambda t: closed_on(data, t), reverse=True):
@@ -2628,16 +2869,20 @@ SUMMARY_CARD_ID = "book-summary-card"
 SUMMARY_SLOT_ID = "book-summary-slot"
 SUMMARY_COUNT_ID = "book-summary-count"
 SUMMARY_BY_ID = "book-summary-by"
-BY_TYPE, BY_FAMILY, BY_COMMODITY = "type", "family", "commodity"
-SUMMARY_OPTIONS = [{"label": "Spread type", "value": BY_TYPE}, {"label": "Commodity family", "value": BY_FAMILY},
+# Sector replaced Commodity family on 2026-10-01 (user): its value stays "family" so a session that chose
+# it keeps its choice.
+BY_TYPE, BY_SECTOR, BY_COMMODITY = "type", "family", "commodity"
+SUMMARY_OPTIONS = [{"label": "Spread type", "value": BY_TYPE}, {"label": "Sector", "value": BY_SECTOR},
                    {"label": "Commodity", "value": BY_COMMODITY}]
-SUMMARY_ABOUT = ("The whole book, never filtered (like the top bar), broken down by spread type, commodity family or "
-                 "commodity: each group's trades, open and closed, with their P&L today and since entry added up from "
-                 "the trades' own rows. The Book row equals the top bar's Daily and LTD to the cent. A trade is never "
-                 "split across groups: one holding two commodities is a group of its own.")
+SUMMARY_ABOUT = ("The whole book, never filtered (like the top bar), broken down by spread type, sector or commodity: "
+                 "each group's trades, open and closed, with their P&L today and since entry added up from the trades' "
+                 "own rows. The Book row equals the top bar's Daily and LTD to the cent. A trade is never split across "
+                 "groups: one holding two sectors is under its larger leg's, one holding two commodities is a group "
+                 "of its own.")
 SUMMARY_GROUP_TIPS = {
     BY_TYPE: "The trade's spread type, from its legs: calendar, cross-exchange, cross-product, mixed or outright.",
-    BY_FAMILY: "The trade's commodity family; a trade across two families is under Cross-product.",
+    BY_SECTOR: "The trade's sector, in a fixed order: base metals, precious metals, ferrous, energy, grains & softs, "
+               "livestock, FX; a trade holding two is under its larger leg's.",
     BY_COMMODITY: "The commodities the trade holds, its currency hedges left out; a trade of two commodities is its "
                   "own group.",
 }
@@ -2659,7 +2904,7 @@ def commodity_label(t: dict) -> str:
             base = str(leg.get("root_id") or leg.get("instrument_id") or "")[:3]
             name = METAL_NAMES.get(base, "FX")
         if name:
-            names.append(name.lower() if name != "FX" else name)
+            names.append(name if name == "FX" or name.isupper() else name.lower())
     names = sorted(set(names))
     if not names:
         return "Not recognised" if unknown else "Other"
@@ -2669,8 +2914,8 @@ def commodity_label(t: dict) -> str:
 def summary_group(t: dict, by: str) -> str:
     if t.get("pseudo"):
         return tf.UNASSIGNED
-    if by == BY_FAMILY:
-        return tf.family_label(t)
+    if by == BY_SECTOR:
+        return tf.trade_sector(t)[0]
     if by == BY_COMMODITY:
         return commodity_label(t)
     return tf.trade_type_label(t)
@@ -2706,7 +2951,15 @@ def summary_table(data: dict, by: str) -> html.Table:
         ids = ids_of(ts)
         daily, ltd = fill_sum(data, "daily", ids), fill_sum(data, "ltd", ids)
         rows.append((label, ts, daily, ltd))
-    rows.sort(key=lambda r: (r[0] == tf.UNASSIGNED, r[3][0] is None, -abs(r[3][0] or 0.0), r[0]))
+    if by == BY_TYPE:
+        rows.sort(key=lambda r: (r[0] == tf.UNASSIGNED, r[3][0] is None, -abs(r[3][0] or 0.0), r[0]))
+    else:
+        # sectors in their fixed order, commodities by their sector then A to Z (user, 2026-10-01)
+        def rank(r):
+            ts = [t for t in r[1] if not t.get("pseudo")] or r[1]
+            sector = r[0] if by == BY_SECTOR else min((tf.trade_sector(t)[0] for t in ts), key=tf.sector_rank)
+            return (r[0] == tf.UNASSIGNED, tf.sector_rank(sector), r[0].lower())
+        rows.sort(key=rank)
     body = [html.Tr([html.Td(html.Span("Book", title="Every trade on file; P&L today and since entry equal the top "
                                                      "bar's Daily and LTD to the cent"), className="l"),
                      count_td([t for t in trades if not t.get("pseudo")] or trades),
@@ -2805,8 +3058,9 @@ def issue_items(data: dict, risk: Optional[dict]) -> List[Any]:
 # --------------------------------------------------------------------------- CSV
 def csv_frame(data: dict, state: Optional[dict], sort: Optional[dict], risk: Optional[dict]) -> pd.DataFrame:
     rrows = risk_rows(risk)
+    zmap = (risk or {}).get("spread_z") or {}
     rows = []
-    for t in sort_rows(data, visible(data, state, risk), sort, rrows):
+    for t in sort_rows(data, visible(data, state, risk), sort, rrows, zmap):
         ids = [str(i) for i in t.get("trade_ids") or []]
         level = display_level(data, t)
         r = rrows.get(str(t.get("trade"))) or {}
@@ -2822,7 +3076,12 @@ def csv_frame(data: dict, state: Optional[dict], sort: Optional[dict], risk: Opt
             "Move in sigma": r.get("move_sigma"), "Level daily sd": r.get("level_sd"),
             "Closed on": (closed or {}).get("close_date"), "Exit basis": (closed or {}).get("exit_basis"),
             "USD per 1 unit of the level": level.get("usd_per_unit"),
-            "z": r.get("z"), "Percentile": r.get("percentile"), "z at entry": r.get("z_entry"),
+            "z entry": trade_z(t, zmap.get(str(t.get("position_id") or "")), "z_entry"),
+            "z now": trade_z(t, zmap.get(str(t.get("position_id") or "")), "z_now") if t.get("status") != "closed"
+            else None,
+            "z exit": trade_z(t, zmap.get(str(t.get("position_id") or "")), "z_now") if t.get("status") == "closed"
+            else None,
+            "Percentile": r.get("percentile"),
             "Hedge %": r.get("hedge_pct"), "Leg correlation": r.get("leg_correlation"),
             "Daily": fill_sum(data, "daily", ids)[0], "MTD": fill_sum(data, "mtd", ids)[0],
             "YTD": fill_sum(data, "ytd", ids)[0], "LTD": fill_sum(data, "ltd", ids)[0],

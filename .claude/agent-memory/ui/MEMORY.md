@@ -67,3 +67,4 @@
 - [Level precision 2026-10-01](level-precision-2026-10-01.md) — spread levels at their legs' precision (level_decimals, legs=); tonne prices < 1,000 get 2 dp (CNY 1) with a fill
 - [Title Case names 2026-10-01](title-case-names-2026-10-01.md) — title_name / plain_leg_name / titled_trade_book; joining words lower; engine prose left as is
 - [Marks check CLOSED status 2026-10-01](marks-check-closed-status-2026-10-01.md) — exchange shut on a past day: grey "Exchange closed", out of the Marks X of Y count and the diagnosis bad list
+- [Book z entry/now + sectors 2026-10-01](book-z-entry-now-sectors-2026-10-01.md) — spread_z z cells (z exit in fold), size_sides Quantity, sector order + Summary Sector, "2 calendars"/"Unmatched legs", 1680 CSS, proof recipe

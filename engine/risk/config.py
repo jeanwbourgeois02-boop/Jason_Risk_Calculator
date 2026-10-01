@@ -7,7 +7,8 @@ Keys (see the yaml for the meaning of each):
   stress_end, cutover}, var_window_bd, var_confidence, worst_day_start,
   shock_dates [{date, name}, ...], var_contribution_days, correlation_min_days (the risk by
   position, `positions.py`, 2026-09-29), trade_window_bd, trade_min_days, level_window_bd,
-  level_min_days, asian_close_countries (the risk by trade, `trades.py`, Phase G).
+  level_min_days, z_window_years (the z at entry, now and exit, 2026-10-01),
+  asian_close_countries (the risk by trade, `trades.py`, Phase G).
 `load_config` returns a plain dict of those, dates as ISO strings, plus `file` (the path
 read) and `loaded` (False when the defaults are in use).
 """
@@ -51,6 +52,9 @@ DEFAULTS: Dict[str, Any] = {
     "trade_min_days": 60,
     "level_window_bd": 252,
     "level_min_days": 60,
+    # the z-scores at entry, now and at exit (user, 2026-10-01): each against the level's
+    # closes in the calendar years ending that day
+    "z_window_years": 1,
     "asian_close_countries": ["CN", "SG", "JP", "HK", "MY", "IN", "KR", "TW", "AU"],
     "worst_day_start": "2008-01-01",        # dashboard.py `_worst_start`
     "shock_dates": [                        # core/risk.py STRESS_IGNORE_DATES
@@ -92,6 +96,7 @@ def _merged(file_values: Dict[str, Any]) -> Dict[str, Any]:
     cfg["correlation_min_days"] = max(3, int(cfg["correlation_min_days"]))
     for key in ("trade_window_bd", "trade_min_days", "level_window_bd", "level_min_days"):
         cfg[key] = max(3, int(cfg[key]))
+    cfg["z_window_years"] = max(1, int(cfg["z_window_years"]))
     cfg["asian_close_countries"] = [str(c).strip().upper() for c in (cfg["asian_close_countries"] or [])]
     cfg["vol_target_placeholder"] = bool(cfg["vol_target_placeholder"])
     cfg["vol_target_note"] = str(cfg["vol_target_note"] or "")

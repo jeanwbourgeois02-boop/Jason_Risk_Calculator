@@ -35,6 +35,7 @@ from engine.pnl.ledger import period_reference_dates
 from engine.pnl.reference import resolve_reference
 from engine.pnl.valuation import usd_per_quote, value_book
 from engine.spreads import grouping
+from engine.spreads import strategies as _strategies
 from engine.spreads.grouping import CALENDAR, Leg, Match, Shape
 from engine.spreads.levels import (
     LevelLeg, LevelSpec, converted, level, research_key, spec_for, spec_to_dict, usd_per_level_unit,
@@ -112,6 +113,15 @@ def _num(x) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return None if math.isnan(v) else v
+
+
+class _FillView:
+    """The fills of one leg with each price already in the spread's unit, shaped as
+    ``strategies._entry_value`` reads a book (``by_id`` rows and ``lots``), so a converted leg is
+    averaged by the very rule the Book's leg rows use, never a copy of it."""
+
+    def __init__(self, by_id: Dict[str, dict], lots: Callable[[str], Optional[float]]):
+        self.by_id, self.lots = by_id, lots
 
 
 def _priced(row) -> bool:
@@ -803,23 +813,29 @@ class _Book:
     def entry_level(self, spec: LevelSpec
                     ) -> Tuple[Optional[float], str, str, List[Optional[float]], List[str]]:
         """(level at entry, why when None, source, average fill per leg, estimates): each leg's
-        lots-weighted average fill, a cross-currency leg converted at the official SPOT of each
-        trade's date, or, when that day's is not on file, the valuation's near-marks estimate
-        (``spot_near``, hard rule 2), named in ``estimates`` (one sentence per spot estimated)."""
+        average entry by the Book's leg rule (``strategies._entry_value``, the leg rows'
+        ``avg_fill``, 2026-10-01): the open lots' average cost, day by day (an add averages in, a
+        reduction leaves the average, a day netting to zero changes nothing, a day crossing zero
+        opens the excess at its price), over the leg's open trades, or all its trades when none is
+        open (a leg held to expiry). A cross-currency leg is averaged on its fills converted at the
+        official SPOT of each trade's date, or, when that day's is not on file, the valuation's
+        near-marks estimate (``spot_near``, hard rule 2), named in ``estimates`` (one sentence per
+        spot estimated). Display only: no P&L reads it."""
         prices: List[Optional[float]] = [None] * len(spec.legs)
         conv = []
         fx_days: Dict[str, set] = defaultdict(set)
         estimates: List[str] = []
         for n, leg in enumerate(spec.legs):
-            num = qp = den = 0.0
-            for tid in leg.trade_ids:
+            ids = [t for t in leg.trade_ids if self.is_open(t)] or list(leg.trade_ids)
+            in_unit: Dict[str, dict] = {}
+            for tid in ids:
                 t = self.by_id[tid]
                 q, f = self.lots(tid), _num(t["price"])
                 if q is None or f is None:
                     return None, f"{tid}: its quantity or fill is not a number, so the entry has no level", "", prices, []
                 s_leg = s_unit = None
+                day = str(t["trade_date"])
                 if spec.needs_fx(leg):
-                    day = str(t["trade_date"])
                     s_leg, note, why = spot_near(self.conn, leg.currency, day)
                     if not s_leg:
                         return None, f"the entry of {tid}: {why}", "", prices, []
@@ -831,14 +847,15 @@ class _Book:
                     if unit_note:
                         estimates.append(unit_note)
                     fx_days[leg.currency].add(day)
-                num += q * converted(f, leg, spec, s_leg, s_unit)
-                qp += q * f
-                den += q
-            if abs(den) < 1e-12:
-                return None, f"{leg.instrument_id}: its trades net to zero lots, so it has no average fill", "", prices, []
-            prices[n] = qp / den
-            conv.append(num / den)
-        src = "the fills, each leg's lots-weighted average"
+                in_unit[tid] = {"price": converted(f, leg, spec, s_leg, s_unit), "multiplier": 1.0,
+                                "quote_ccy": "USD", "trade_date": day}
+            px, _net, why = _strategies._entry_value(self, ids, quoted=True)
+            cv, _net, _why = _strategies._entry_value(_FillView(in_unit, self.lots), ids, quoted=True)
+            if px is None or cv is None:
+                return None, f"{leg.instrument_id}: {why or _why}", "", prices, []
+            prices[n] = px
+            conv.append(cv)
+        src = "the fills, each leg's average entry of its open lots"
         if fx_days:
             src += "; " + "; ".join(f"{ccy} at the official USD spot of {', '.join(sorted(days))}"
                                     for ccy, days in sorted(fx_days.items()))

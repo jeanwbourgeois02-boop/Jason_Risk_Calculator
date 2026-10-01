@@ -58,10 +58,13 @@ Per trade (parameters in `config/risk.yaml`; W = `trade_window_bd`, 252; a figur
                    `leg_correlation` (Pearson, a and b). The hedge %'s aligned days (within
                    the last W), 2-day moves on the same rule as hedge %. Leg A is the first leg of the trade's
                    level (spreads-engine's pair), else the bigger one.
-  z / percentile   the trade's level against the last `level_window_bd` (252) closes of that
-                   same level, from each leg's own Bloomberg price history (risk-history's
-                   `commodity_history`, the book database's `price_history`, read-only): z = (now - mean) / sd, percentile = share of
-                   the window at or below now (percent). The level is spreads-engine's formula
+  z / percentile   the trade's level against that same level's closes in the `z_window_years`
+                   (1) calendar year ending the day (user, 2026-10-01), from each leg's own
+                   Bloomberg price history (risk-history's `commodity_history`, the book
+                   database's `price_history`, read-only): z = (the day's close - mean) / sd,
+                   percentile = share of the window at or below it (percent); at least
+                   `level_min_days` (60) closes, a window shorter than a year (the history
+                   starts inside it) given with a note. The level is spreads-engine's formula
                    (`engine.spreads.levels.converted`, weights and constant of the pair's
                    `level_spec`): a calendar near - far in the root's quote unit, a template or a
                    same-unit pair its difference in its unit; a China-against-West pair the
@@ -71,8 +74,15 @@ Per trade (parameters in `config/risk.yaml`; W = `trade_window_bd`, 252; a figur
                    one pair of spreads-engine's `strategies` (a one-spread trade's front pair)
                    whose legs are all open; several: None, named. "Now" is the last settlement on
                    or before as_of (`level_date`), the price history's, not our marks.
-  z_entry / percentile_entry  the same on the trade's first trade date (`entry_date`), against the
-                   window ending there.
+  z_entry / z_exit the same on the spread's first fill date (entry) and on the day it went flat
+                   (exit, a closed trade's `closed.close_date`; None while open), each against
+                   the year ending that day (the last close on or before it).
+  spreads_z        the three z-scores per SPREAD of the trade: one per `sub_spreads` entry of
+                   spreads-engine's trade_book (whatever their number: a trade split into several
+                   equal-size calendars gives each its own), each on its own level formula and its
+                   own first fill; the top-level `spread_z` holds the same for every trade of
+                   trade_book, closed ones included (their spreads as held on their last open
+                   close, their exit the day they went flat).
 
 `subset_var(conn, as_of, trade_names)`: the positions' book VaR recomputed on the chosen trades'
 summed daily P&L (VaR is not additive: never the rows summed), the chosen trades' 1-sd daily risk
@@ -166,18 +176,27 @@ def _memo_key(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, A
         return None
     params = tuple((k, repr(config.get(k))) for k in (
         "var_window_bd", "var_confidence", "var_contribution_days", "correlation_min_days", "trade_window_bd",
-        "trade_min_days", "level_window_bd", "level_min_days", "asian_close_countries"))
+        "trade_min_days", "level_window_bd", "level_min_days", "z_window_years", "asian_close_countries"))
     return (os.path.normcase(os.path.abspath(path)), st.st_mtime_ns, st.st_size, str(as_of), id(history),
             getattr(history, "path", ""), getattr(history, "last_date", None), id(fx_history),
             getattr(fx_history, "last_date", None), params)
 
 
-def _levels_key(book_levels: Optional[Dict[str, dict]]) -> tuple:
-    """The part of the memo key the Book's levels decide (their spec and the day's move)."""
-    if book_levels is None:
+def _levels_key(book_trades: Optional[Dict[str, dict]]) -> tuple:
+    """The part of the memo key the Book's trades decide: each trade's status, level (spec, the
+    day's move, mode), its spreads' level specs and entry / exit dates, its closed block."""
+    if book_trades is None:
         return ()
-    return ("trade_book",) + tuple(sorted((pid, repr((lv or {}).get("spec")), repr((lv or {}).get("change")),
-                         str((lv or {}).get("mode") or "")) for pid, lv in book_levels.items()))
+
+    def one(t: dict) -> tuple:
+        lv = t.get("level") or {}
+        closed = t.get("closed") or {}
+        return (str(t.get("status") or ""), repr(lv.get("spec")), repr(lv.get("change")), str(lv.get("mode") or ""),
+                tuple((repr((s.get("level") or {}).get("spec")), str(s.get("entry_date") or ""),
+                       str(s.get("exit_date") or s.get("close_date") or "")) for s in t.get("sub_spreads") or []),
+                (str(closed.get("close_date") or ""), str(closed.get("open_date") or ""), repr(closed.get("spec")),
+                 repr([(s.get("level") or {}).get("spec") for s in closed.get("sub_spreads") or []])))
+    return ("trade_book",) + tuple(sorted((pid, one(t or {})) for pid, t in book_trades.items()))
 
 
 def _base_block(conn: sqlite3.Connection, as_of: str, history, config: Dict[str, Any], fx_history=None
@@ -192,11 +211,12 @@ def _base_block(conn: sqlite3.Connection, as_of: str, history, config: Dict[str,
 
 
 def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve: Optional[dict], history,
-           config: Dict[str, Any], book_levels: Optional[Dict[str, dict]] = None, fx_history=None) -> dict:
+           config: Dict[str, Any], book_trades: Optional[Dict[str, dict]] = None, fx_history=None) -> dict:
     """{rows (one per trade, the full book), series {position_id: daily USD P&L}, position_risk,
-    missing}: kept in process per `_memo_key` and the Book's levels (`_levels_key`)."""
+    missing, spread_z (`_book_spread_z`)}: kept in process per `_memo_key` and the Book's trades
+    (`_levels_key`). `book_trades`: {position_id: a trade of spreads-engine's trade_book}."""
     base = _memo_key(conn, as_of, history, config, fx_history)
-    key = None if base is None else base + (_levels_key(book_levels),)
+    key = None if base is None else base + (_levels_key(book_trades),)
     if key is not None:
         with _LOCK:
             hit = _MEMO.get(key)
@@ -217,15 +237,19 @@ def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve:
     strategies = {str(s.get("name")): s for s in (spreads or {}).get("strategies") or [] if s.get("name")}
     positions = {str(p.get("position_id")): p for p in (spreads or {}).get("positions") or []}
     first_dates = _first_dates(conn)
+    z_memo: dict = {}
+    spread_z = _book_spread_z(conn, as_of, book_trades, history, roots, config, first_dates, z_memo)
     rows = []
     for p in pr.get("positions") or []:
         ctx = _Ctx(p, series.get(p["position_id"]), leg_series.get(p["position_id"], {}), by_contract, roots,
                    strategies.get(p["name"]) if p.get("kind") == "strategy" else None,
                    positions.get(p["position_id"]), config)
-        ctx.book_level = (book_levels or {}).get(p["position_id"])
-        ctx.book_given = book_levels is not None
+        book_trade = (book_trades or {}).get(p["position_id"])
+        ctx.book_level = None if book_trade is None else (book_trade.get("level") or {})
+        ctx.book_given = book_trades is not None
+        ctx.spread_z, ctx.z_memo = spread_z.get(p["position_id"]), z_memo
         rows.append(_trade_row(ctx, history, as_of, first_dates))
-    block = {"rows": rows, "series": series, "position_risk": pr, "missing": missing}
+    block = {"rows": rows, "series": series, "position_risk": pr, "missing": missing, "spread_z": spread_z}
     # kept under the key read after the build as well: a first `book_spreads` on a database
     # creates its own tables, which moves the file's mtime, so the key read before it never
     # matches again
@@ -234,7 +258,7 @@ def _block(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict], curve:
     if bases:
         with _LOCK:
             for b in bases:
-                _MEMO[b + (_levels_key(book_levels),)] = block
+                _MEMO[b + (_levels_key(book_trades),)] = block
                 _BASE[b] = block
             while len(_MEMO) > _MEMO_SLOTS:
                 _MEMO.popitem(last=False)
@@ -273,6 +297,8 @@ class _Ctx:
         self.book_level: Optional[dict] = None     # the trade's `level` of spreads-engine's trade_book, when given
         self.book_given = False                    # trade_book was passed (a row may still have no trade in it)
         self.aligned_memo: Optional[tuple] = None  # `_aligned`'s result, built once per trade
+        self.spread_z: Optional[dict] = None       # `_book_spread_z`'s entry of this trade, when in trade_book
+        self.z_memo: dict = {}                     # the level histories, shared across the block
 
     def root_of(self, cid: str) -> str:
         return str((self.by_contract.get(cid) or {}).get("root_id") or "")
@@ -803,69 +829,252 @@ def level_history(history, spec: LevelSpec, roots: Dict[str, Any], as_of: str
     return level, kind, unit, ""
 
 
-def _z_at(level: pd.Series, at: str, n: int, floor: int) -> dict:
-    s = level[level.index <= pd.Timestamp(at)]
-    out = {"z": None, "percentile": None, "level": None, "date": None, "days": 0, "reason": ""}
+def _day_text(day: Any) -> str:
+    """'14 Apr 2024'."""
+    ts = pd.Timestamp(day)
+    return f"{ts.day} {ts.strftime('%b %Y')}"
+
+
+def _span_text(years: int) -> str:
+    return "year" if years == 1 else f"{years} years"
+
+
+def _z_point(level: pd.Series, day: str, years: int, floor: int, what: str) -> dict:
+    """The level's z-score and percentile on `day` (`what`: 'the entry', 'today', 'the exit')
+    against its own closes in the `years` calendar years ending that day: the window is every
+    close dated after day - years and on or before day. z = (the last close in it - their mean)
+    / their standard deviation; percentile = the share of them at or below it (percent).
+    {date (asked), close_date (the close read), level, z, percentile, window {start, end (the
+    first and last close used), closes, from (day - years, excluded), full_year (the history
+    reaches back to the window's start, within a week)}, reason (why z is None), note (a figure
+    given with a caveat: fewer than a full year, a stale last close)}."""
+    at = pd.Timestamp(day)
+    frm = at - pd.DateOffset(years=years)
+    span = _span_text(years)
+    out = {"date": _iso(at), "close_date": None, "level": None, "z": None, "percentile": None,
+           "window": {"start": None, "end": None, "closes": 0, "from": _iso(frm), "full_year": False},
+           "reason": "", "note": ""}
+    first = level.index[0]
+    s = level[level.index <= at]
     if s.empty:
-        out["reason"] = f"no level on or before {at} (the history starts {_iso(level.index[0])})"
+        out["reason"] = f"the history starts {_day_text(first)}, after {what} ({_day_text(at)})"
         return out
-    w = s.iloc[-n:]
-    out.update(level=_num(w.iloc[-1]), date=_iso(w.index[-1]), days=int(len(w)))
+    w = s[s.index > frm]
+    if w.empty:
+        out["reason"] = (f"no close of the level in the {span} to {_day_text(at)} "
+                         f"(the last is {_day_text(s.index[-1])})")
+        return out
+    full = bool(first <= frm + pd.Timedelta(days=7))
+    out.update(close_date=_iso(w.index[-1]), level=_num(w.iloc[-1]))
+    out["window"].update(start=_iso(w.index[0]), end=_iso(w.index[-1]), closes=int(len(w)), full_year=full)
     if len(w) < floor:
-        out["reason"] = f"needs {floor} settlements of the level to {out['date']}: {len(w)}"
+        out["reason"] = (f"the history starts {_day_text(first)}, after the start of the {span} to "
+                         f"{_day_text(at)}: {len(w)} closes, needs {floor}" if not full else
+                         f"{len(w)} closes of the level in the {span} to {_day_text(at)}, needs {floor}")
         return out
     sd = _std(w)
     if not sd:
-        out["reason"] = "the level did not move over the window"
+        out["reason"] = f"the level did not move over the {span} to {_day_text(at)}"
         return out
     v = float(w.iloc[-1])
     out["z"] = (v - float(w.mean())) / sd
     out["percentile"] = float((w <= v).mean()) * 100.0
+    notes = []
+    if not full:
+        notes.append(f"the history starts {_day_text(first)}: {len(w)} closes, less than a full {span}")
+    if (at - w.index[-1]).days > 7:
+        notes.append(f"the last close is {_day_text(w.index[-1])}, more than a week before {what} "
+                     f"({_day_text(at)})")
+    out["note"] = "; ".join(notes)
+    return out
+
+
+def _level_of(history, spec: LevelSpec, roots: Dict[str, Any], end: str, memo: dict
+              ) -> Tuple[Optional[pd.Series], str, str, str, dict]:
+    """`level_history` to `end`, kept in `memo` per (spec, end) for the block: (level with no
+    attrs, kind, unit, why None, its attrs)."""
+    key = (repr(spec), str(end))
+    if key not in memo:
+        level, kind, unit, why = level_history(history, spec, roots, end)
+        attrs = dict(level.attrs) if level is not None else {}
+        if level is not None:
+            level.attrs = {}
+        memo[key] = (level, kind, unit, why, attrs)
+    return memo[key]
+
+
+def _spread_entry_date(spec: Optional[LevelSpec], legs: Sequence[dict], first_dates: Dict[str, str],
+                       contract_ids: Sequence[str] = ()) -> Optional[str]:
+    """A spread's first fill date: the earliest trade date of the fills on its legs (the
+    trade_book legs matching the level's legs, else the contract ids given), None when none."""
+    tids: List[str] = []
+    for lg in legs or []:
+        cid = str(lg.get("contract_id") or "")
+        hit = (any(_same_contract(cid, x) or str(lg.get("instrument_id") or "") == x.instrument_id
+                   for x in spec.legs) if spec is not None and spec.legs else cid in set(contract_ids))
+        if hit and not lg.get("hedge"):
+            tids += [str(t) for t in lg.get("trade_ids") or []]
+    days = sorted(d for d in (first_dates.get(t, "") for t in tids) if d)
+    return days[0][:10] if days else None
+
+
+Z_POINTS = ("entry", "now", "exit")
+
+
+def _spread_z(history, spec: Optional[LevelSpec], spec_why: str, roots: Dict[str, Any], config: Dict[str, Any],
+              as_of: str, entry_date: Optional[str], exit_date: Optional[str], memo: dict) -> dict:
+    """One spread's three z-scores (module docstring): {status ('open' | 'closed'), entry_date,
+    exit_date, level_kind, level_unit, level_legs, level_own_from, level_note, reason (no level at
+    all), z_entry / percentile_entry / z_entry_reason, z_now / ..., z_exit / ..., and entry / now /
+    exit: `_z_point`'s dict, None where it does not apply}."""
+    out: Dict[str, Any] = {"status": "closed" if exit_date else "open", "entry_date": entry_date,
+                           "exit_date": exit_date, "level_kind": None, "level_unit": "", "level_legs": [],
+                           "level_own_from": None, "level_note": "", "reason": ""}
+    for p in Z_POINTS:
+        out.update({f"z_{p}": None, f"percentile_{p}": None, f"z_{p}_reason": "", p: None})
+
+    def every(why: str) -> dict:
+        out["reason"] = why
+        for p in Z_POINTS:
+            out[f"z_{p}_reason"] = why
+        if not exit_date:
+            out["z_exit_reason"] = "still open: no exit"
+        return out
+
+    if spec is None:
+        return every(spec_why or "no level formula for this spread")
+    out["level_legs"] = [lg.instrument_id + (f" {lg.month_key}" if lg.instrument_id == lg.root_id else "")
+                         for lg in spec.legs]
+    if not getattr(history, "available", False):
+        return every(f"no settlement history: {getattr(history, 'reason', '')}")
+    end = exit_date or as_of
+    level, kind, unit, why, attrs = _level_of(history, spec, roots, end, memo)
+    out.update(level_kind=kind, level_unit=unit)
+    if level is None:
+        return every(why)
+    years, floor = int(config.get("z_window_years") or 1), int(config["level_min_days"])
+    own = attrs.get("own_from")
+    out["level_own_from"] = own
+    points = {"entry": (entry_date, "the entry"), "now": (None if exit_date else as_of, "today"),
+              "exit": (exit_date, "the exit")}
+    for p, (day, what) in points.items():
+        if not day:
+            out[f"z_{p}_reason"] = {"entry": "the spread's first fill date is not on file",
+                                    "now": f"closed on {_day_text(exit_date)}: no z now" if exit_date else "",
+                                    "exit": "still open: no exit"}[p]
+            continue
+        pt = _z_point(level, day, years, floor, what)
+        out[p] = pt
+        out[f"z_{p}"], out[f"percentile_{p}"], out[f"z_{p}_reason"] = pt["z"], pt["percentile"], pt["reason"]
+    starts = [out[p]["window"]["start"] for p in Z_POINTS if out[p] and out[p]["window"]["start"]]
+    if own and starts and own > min(starts):
+        out["level_note"] = (f"before {own} the level reads the contracts at the same place on the curve "
+                             f"(the P&L history's rule)")
+    return out
+
+
+def _book_spread_z(conn: sqlite3.Connection, as_of: str, book_trades: Optional[Dict[str, dict]], history,
+                   roots: Dict[str, Any], config: Dict[str, Any], first_dates: Dict[str, str], memo: dict
+                   ) -> Dict[str, dict]:
+    """{position_id: {trade, status, entry_date, exit_date, trade_level (the trade's own level's
+    `_spread_z`), spreads [one per spread]}} for every trade of spreads-engine's trade_book, open
+    and closed. A trade's spreads are its `sub_spreads` as trade_book gives them (each its own
+    level formula, whatever their number), each with its own first fill (entry). A closed trade's
+    spreads are those it held on its last open close: trade_book's `closed.spec` /
+    `closed.sub_spreads` when it gives them, else trade_book's own reading of that day; its exit
+    is `closed.close_date`, the day it went flat."""
+    out: Dict[str, dict] = {}
+    if not book_trades:
+        return out
+    then: Dict[str, Optional[dict]] = {}      # trade_book of a closed trade's last open day, by day
+
+    def was(name: str, day: str) -> Tuple[Optional[dict], str]:
+        if day not in then:
+            try:
+                from engine.spreads.trades import trade_book
+                then[day] = {str(t.get("trade")): t for t in trade_book(conn, day).get("trades") or []}
+            except Exception as exc:  # noqa: BLE001 -- a reason on the closed trade, never a failure
+                then[day] = None
+                return None, f"its spreads on {day} could not be read ({type(exc).__name__}: {exc})"
+        got = (then[day] or {}).get(name)
+        return got, ("" if got is not None else f"not a trade of the book on {day}")
+
+    for pid, t in book_trades.items():
+        name = str(t.get("trade") or pid)
+        legs = list(t.get("legs") or [])
+        closed = t.get("closed") if str(t.get("status") or "") == "closed" else None
+        exit_date = str((closed or {}).get("close_date") or "")[:10] or None
+        level, subs, why = dict(t.get("level") or {}), list(t.get("sub_spreads") or []), ""
+        if closed is not None:
+            if closed.get("spec") or closed.get("sub_spreads"):
+                level = {"spec": closed.get("spec"), "reason": closed.get("reason") or ""}
+                subs = list(closed.get("sub_spreads") or [])
+            elif closed.get("open_date"):
+                old, why = was(name, str(closed["open_date"]))
+                level = dict((old or {}).get("level") or {"spec": None, "reason": why})
+                subs = list((old or {}).get("sub_spreads") or [])
+            else:
+                why = closed.get("reason") or "no close on which it was open, so no level"
+                level, subs = {"spec": None, "reason": why}, []
+        trade_spec = spec_from_dict(level.get("spec")) if level.get("spec") else None
+        trade_why = "" if trade_spec else str(level.get("reason") or level.get("now_reason") or why
+                                              or "the trade has no single level")
+        spreads = []
+        for i, sub in enumerate(subs):
+            lv = sub.get("level") or {}
+            spec = spec_from_dict(lv.get("spec")) if lv.get("spec") else None
+            sub_exit = str(sub.get("exit_date") or sub.get("close_date") or "")[:10] or exit_date
+            entry = (str(sub.get("entry_date"))[:10] if sub.get("entry_date") else
+                     _spread_entry_date(spec, legs, first_dates, [x.get("contract_id") for x in sub.get("legs") or []]))
+            z = _spread_z(history, spec, str(lv.get("reason") or lv.get("now_reason") or "this spread has no level"),
+                          roots, config, as_of, entry, sub_exit, memo)
+            z.update(spread=i, what_it_is=sub.get("what_it_is") or "", type=sub.get("type") or "",
+                     legs=[x.get("contract_id") for x in sub.get("legs") or []],
+                     trade_level=bool(trade_spec is not None and lv.get("spec") == level.get("spec")))
+            spreads.append(z)
+        entry = (_spread_entry_date(trade_spec, legs, first_dates) if trade_spec is not None else None) or (
+            str(t.get("first_trade_date") or "")[:10] or None)
+        tl = _spread_z(history, trade_spec, trade_why, roots, config, as_of, entry, exit_date, memo)
+        out[pid] = {"trade": name, "status": "closed" if closed is not None else "open",
+                    "entry_date": str(t.get("first_trade_date") or "")[:10] or None, "exit_date": exit_date,
+                    "trade_level": tl, "spreads": spreads}
     return out
 
 
 def _z_block(history, spec: Optional[LevelSpec], spec_why: str, as_of: str, entry_date: Optional[str],
              ctx: _Ctx) -> dict:
-    out = {"z": None, "percentile": None, "level_now": None, "level_date": None, "level_days": 0,
-           "level_kind": None, "level_unit": "", "level_legs": [], "z_reason": spec_why,
-           "z_entry": None, "percentile_entry": None, "level_at_entry": None, "z_entry_reason": spec_why,
-           "level_own_from": None, "level_note": "",
-           "level_sd": None, "level_sd_reason": spec_why, "level_sd_days": 0,
-           "level_move": None, "move_sigma": None, "move_sigma_reason": spec_why}
-    if spec is None:
+    """The trade row's z keys: its level's three z-scores (`_spread_z`; the trade_book's when the
+    trade is in it, else its own level from its first trade date), level_sd and move_sigma."""
+    one = (ctx.spread_z or {}).get("trade_level")
+    if one is None:
+        one = _spread_z(history, spec, spec_why, ctx.roots, ctx.config, as_of, entry_date, None, ctx.z_memo)
+    now, ent, ext = one.get("now") or {}, one.get("entry") or {}, one.get("exit") or {}
+    out = {"z": one["z_now"], "percentile": one["percentile_now"], "level_now": now.get("level"),
+           "level_date": now.get("close_date"), "level_days": (now.get("window") or {}).get("closes") or 0,
+           "level_kind": one["level_kind"], "level_unit": one["level_unit"], "level_legs": one["level_legs"],
+           "z_reason": one["z_now_reason"], "z_window": now.get("window"),
+           "z_note": now.get("note") or "",
+           "z_entry": one["z_entry"], "percentile_entry": one["percentile_entry"], "level_at_entry": ent.get("level"),
+           "z_entry_reason": one["z_entry_reason"], "z_entry_date": one["entry_date"],
+           "z_entry_window": ent.get("window"), "z_entry_note": ent.get("note") or "",
+           "z_exit": one["z_exit"], "percentile_exit": one["percentile_exit"], "level_at_exit": ext.get("level"),
+           "z_exit_reason": one["z_exit_reason"], "z_exit_date": one["exit_date"],
+           "z_exit_window": ext.get("window"), "z_exit_note": ext.get("note") or "",
+           "level_own_from": one["level_own_from"], "level_note": one["level_note"],
+           "spreads_z": list((ctx.spread_z or {}).get("spreads") or []),
+           "level_sd": None, "level_sd_reason": one["reason"] or spec_why, "level_sd_days": 0,
+           "level_move": None, "move_sigma": None, "move_sigma_reason": one["reason"] or spec_why}
+    if not out["spreads_z"] and spec is not None:
+        out["spreads_z"] = [{**one, "spread": 0, "what_it_is": "", "type": "", "legs": [], "trade_level": True}]
+    if spec is None or not getattr(history, "available", False):
         return out
-    out["level_legs"] = [lg.instrument_id + (f" {lg.month_key}" if lg.instrument_id == lg.root_id else "")
-                         for lg in spec.legs]
-    if not getattr(history, "available", False):
-        out["z_reason"] = out["z_entry_reason"] = out["level_sd_reason"] = out["move_sigma_reason"] = (
-            f"no settlement history: {getattr(history, 'reason', '')}")
-        return out
-    level, kind, unit, why = level_history(history, spec, ctx.roots, as_of)
-    attrs = dict(level.attrs) if level is not None else {}
-    if level is not None:
-        level.attrs = {}
-    out.update(level_kind=kind, level_unit=unit)
+    level, kind, _unit, why, attrs = _level_of(history, spec, ctx.roots, as_of, ctx.z_memo)
     if level is None:
-        out["z_reason"] = out["z_entry_reason"] = out["level_sd_reason"] = out["move_sigma_reason"] = why
+        out["level_sd_reason"] = out["move_sigma_reason"] = why
         return out
-    n, floor = int(ctx.config["level_window_bd"]), int(ctx.config["level_min_days"])
-    now = _z_at(level, as_of, n, floor)
-    own = attrs.get("own_from")
-    first_in_window = _iso(level[level.index <= pd.Timestamp(as_of)].index[-now["days"]]) if now["days"] else None
-    out.update(z=now["z"], percentile=now["percentile"], level_now=now["level"], level_date=now["date"],
-               level_days=now["days"], z_reason=now["reason"], level_own_from=own,
-               level_note=(f"before {own} the level reads the contracts at the same place on the curve (the P&L "
-                           f"history's rule)" if own and first_in_window and own > first_in_window else ""))
-    if now["date"] and (pd.Timestamp(as_of) - pd.Timestamp(now["date"])).days > 7 and not now["reason"]:
-        out["z_reason"] = f"the settlements end {now['date']}, before {as_of}"
-    out.update(_level_sd(level, as_of, n, floor, attrs.get("switch")))
+    out.update(_level_sd(level, as_of, int(ctx.config["level_window_bd"]), int(ctx.config["level_min_days"]),
+                         attrs.get("switch")))
     out.update(_move_sigma(ctx.book_level, kind, out["level_sd"], out["level_sd_reason"], ctx.book_given))
-    if not entry_date:
-        out["z_entry_reason"] = "the trade's first trade date is not on file"
-        return out
-    ent = _z_at(level, entry_date, n, floor)
-    out.update(z_entry=ent["z"], percentile_entry=ent["percentile"], level_at_entry=ent["level"],
-               z_entry_reason=ent["reason"])
     return out
 
 
@@ -1068,9 +1277,15 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
                 hedge_pct (percent), hedge_reason, hedge_leg, hedge_moves ('1-day' | '2-day'), hedge_days,
                 best_fit_ratio, lot_ratio, leg_correlation, best_fit_reason, ratio_legs [A, B],
                 lots_a, lots_b, best_fit_moves, best_fit_days,
-                z, percentile (percent), level_now, level_date, level_days, level_kind ('ratio' |
-                'difference'), level_unit, level_legs, z_reason,
-                z_entry, percentile_entry, level_at_entry, z_entry_reason, level_own_from,
+                z, percentile (percent), level_now, level_date, level_days (closes in the
+                window), level_kind ('ratio' | 'difference'), level_unit, level_legs, z_reason,
+                z_window {start, end, closes, from, full_year}, z_note,
+                z_entry, percentile_entry, level_at_entry, z_entry_reason, z_entry_date,
+                z_entry_window, z_entry_note, z_exit, percentile_exit, level_at_exit,
+                z_exit_reason, z_exit_date, z_exit_window, z_exit_note (None for an open
+                trade: "still open: no exit"), spreads_z [one `_spread_z` per spread, plus
+                spread (index), what_it_is, type, legs (contract ids), trade_level (its level
+                is the trade's)], level_own_from,
                 level_note, level_sd (sd of the level's daily changes over the z window, rolls and
                 the splice left out, in level_unit), level_sd_reason, level_sd_days, level_move
                 (the Book's level.change, our marks; None without trade_book), move_sigma
@@ -1081,12 +1296,20 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
                 legs besides its hedges), corr_reason, days, moves}]}]
               (position_risk's order: the included by contribution, largest first, then the
               left out),
-      excluded_count, partial_note, missing, subset (only with trade_names), not_found}.
+      excluded_count, partial_note, missing, subset (only with trade_names), not_found,
+      spread_z {position_id: {trade, status ('open' | 'closed'), entry_date, exit_date,
+                trade_level (`_spread_z` of the trade's own level), spreads [as spreads_z]}}:
+                every trade of trade_book, closed included ({} without trade_book)}.
+    A `_spread_z`: {status, entry_date, exit_date, level_kind, level_unit, level_legs,
+      level_own_from, level_note, reason, z_entry / percentile_entry / z_entry_reason, z_now /
+      percentile_now / z_now_reason, z_exit / percentile_exit / z_exit_reason, entry / now / exit
+      (None where it does not apply, else {date, close_date, level, z, percentile, window {start,
+      end, closes, from, full_year}, reason, note})}.
     Every figure a number or None with its reason."""
     history, config, fx_history = _defaults(conn, history, config, fx_history)
-    book_levels = ({str(t.get("position_id")): (t.get("level") or {}) for t in (trade_book or {}).get("trades") or []
+    book_trades = ({str(t.get("position_id")): t for t in (trade_book or {}).get("trades") or []
                     if t.get("position_id")} if trade_book is not None else None)
-    block = _block(conn, as_of, spreads, curve, history, config, book_levels, fx_history)
+    block = _block(conn, as_of, spreads, curve, history, config, book_trades, fx_history)
     pr = block["position_risk"] or {}
     rows, not_found = _select(block["rows"], trade_names)
     out = {
@@ -1094,6 +1317,7 @@ def trade_risk(conn: sqlite3.Connection, as_of: str, *, spreads: Optional[dict] 
         "book_var": _num(pr.get("book_var")), "book_var_reason": pr.get("book_var_reason") or "",
         "method": METHOD, "trades": rows, "excluded_count": sum(1 for r in rows if not r["included"]),
         "partial_note": pr.get("partial_note") or "", "missing": list(block["missing"]), "not_found": not_found,
+        "spread_z": dict(block.get("spread_z") or {}),
     }
     if trade_names is not None:
         out["subset"] = _subset(block, trade_names, config)
@@ -1111,6 +1335,7 @@ METHOD = {
              "apart (China against the West) on 2-day moves.",
     "best_fit": "The lots of one leg per lot of the other that minimise the pair's variance (a regression "
                 "of their P&L per lot), beside the lots held; two-leg trades only.",
-    "z": "The trade's level (a calendar's near - far, a China-West pair's converted ratio China / "
-         "foreign) against its own last 252 daily closes (Bloomberg price history), context only.",
+    "z": "Each spread's level (a calendar's near - far, a China-West pair's converted ratio China / "
+         "foreign) against its own daily closes over the year ending that day (Bloomberg price history): "
+         "at entry (its first fill), now, and at exit (the day it went flat); context only.",
 }

@@ -43,13 +43,18 @@ correlation_min_days: 60
 # Risk by trade (Phase G, 2026-09-29, engine/risk/trades.py). Daily risk (1 standard deviation of
 # the trade's daily P&L), hedge % and the best-fit lot ratio are measured over the last
 # trade_window_bd days of the trade's history (at least trade_min_days, else no figure). The
-# z-score and percentile of the trade's level are against the last level_window_bd settlements of
-# that level (at least level_min_days). A leg on an exchange of asian_close_countries against a
+# z-score and percentile of a spread's level are against that level's closes over z_window_years
+# (below; at least level_min_days closes). A leg on an exchange of asian_close_countries against a
 # leg elsewhere closes hours apart, so hedge % and the best-fit ratio use 2-day moves there.
 trade_window_bd: 252
 trade_min_days: 60
 level_window_bd: 252
 level_min_days: 60
+# The z-scores at entry, now and at exit (user, 2026-10-01): each spread's level against its own
+# closes in the z_window_years calendar years ending that day (entry: the spread's first fill,
+# exit: the day it went flat), at least level_min_days of them. level_window_bd above stays the
+# window of the level's daily-move standard deviation (move in sigma).
+z_window_years: 1
 asian_close_countries: [CN, SG, JP, HK, MY, IN, KR, TW, AU]
 
 # The worst day ex shocks is the minimum daily P&L from this date to the lag-2 date

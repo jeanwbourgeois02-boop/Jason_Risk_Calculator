@@ -113,7 +113,7 @@ import pandas as pd
 
 from data.contracts import ContractRoot, quantity_factor
 from engine.pnl.valuation import usd_per_quote
-from engine.spreads.grouping import LEFTOVER_FLOOR, Leg, calendar_shape, template_shape
+from engine.spreads.grouping import LEFTOVER_FLOOR, TOLERANCE, Leg, calendar_shape, template_shape
 from engine.spreads.hedges import FX_HEDGE_PRODUCTS, fx_non_hedge_why, is_hedge
 from engine.spreads.levels import LevelLeg, LevelSpec, spec_for, spec_to_dict, usd_per_level_unit
 from engine.spreads.templates import Template, lot_in_quote_units, quote_quantity_unit
@@ -321,6 +321,17 @@ def _allowed(rule: str, a: PLeg, b: PLeg, book=None, need_template: bool = False
     return a.root.sector == b.root.sector     # CROSS_PRODUCT: two roots of one sector, one month
 
 
+def _lots_gap(x: float, y: float) -> float:
+    """How far apart two sizes are, as a share of the larger."""
+    big = max(abs(x), abs(y))
+    return abs(abs(x) - abs(y)) / big if big > _EPS else 0.0
+
+
+def _equal_lots(x: float, y: float) -> bool:
+    """Two legs' open lots agree within 5 % (``grouping.TOLERANCE``): a calendar put on as one."""
+    return _lots_gap(x, y) <= TOLERANCE + 1e-12
+
+
 def _months_apart(a: PLeg, b: PLeg) -> int:
     try:
         ya, ma = (int(x) for x in a.month.split("-")[:2])
@@ -462,7 +473,13 @@ def _pair_all(book, legs: List[PLeg], labelled: str, need_template: bool = False
                     and _sign(rem[a.contract_id]) != _sign(rem[b.contract_id])]
             if not live:
                 break
-            a, b = live[0]
+            # a term structure pairs legs of equal lots first (user, 2026-10-01: SCO1's iron ore
+            # Oct/Feb 2,521 and Nov/Mar 1,000, as it was put on), then the nearest months
+            equal = ([ab for ab in live if _equal_lots(rem[ab[0].contract_id], rem[ab[1].contract_id])]
+                     if rule == TERM_STRUCTURE else [])
+            by_size = bool(equal)
+            a, b = (min(equal, key=lambda ab: _lots_gap(rem[ab[0].contract_id], rem[ab[1].contract_id]))
+                    if equal else live[0])
             level_unit, lupl_a, lupl_b, template, also, level_why = _level_basis(book, a, b)
             sizing, unit, upl_a, upl_b, sizing_note = _sizing(a, b, template, level_unit, lupl_a, lupl_b, level_why)
             if unit is None:
@@ -478,7 +495,8 @@ def _pair_all(book, legs: List[PLeg], labelled: str, need_template: bool = False
                 partners = sorted({(q if p is x else p).contract_id for p, q in live if x in (p, q)} - {other.contract_id})
                 if partners:
                     note_parts.append(f"{x.contract_id} could also pair with {', '.join(partners)}: paired with "
-                                      f"{other.contract_id} (nearest month, then contract order)")
+                                      f"{other.contract_id} ("
+                                      + ("equal lots, " if by_size else "") + "nearest month, then contract order)")
             la, lb = _pair_lots(rem[a.contract_id], rem[b.contract_id], a, b, upl_a, upl_b)
             rem[a.contract_id] -= la
             rem[b.contract_id] -= lb

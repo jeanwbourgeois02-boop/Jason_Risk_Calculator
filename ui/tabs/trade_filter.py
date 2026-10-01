@@ -60,9 +60,10 @@ FLAGS_ON = "on"
 # The trade's type as engine.spreads.trades gives it, in words (long, short) and in the fixed order
 # the groups and the Type list follow.
 TYPE_WORDS = {"CALENDAR": "Calendar", "CROSS_EXCHANGE": "Cross-exchange", "CROSS_PRODUCT": "Cross-product",
-              "MIXED": "Mixed", "OUTRIGHT": "Outright", "": "Hedges only"}
+              "MIXED": "Mixed", "OUTRIGHT": "Outright", "": "Hedges only",
+              "UNMATCHED": "Unmatched legs"}          # a spread's part only, never a trade's type (2026-10-01)
 TYPE_SHORT = {"CALENDAR": "Calendar", "CROSS_EXCHANGE": "Cross-exch", "CROSS_PRODUCT": "Cross-prod",
-              "MIXED": "Mixed", "OUTRIGHT": "Outright", "": "Hedges"}
+              "MIXED": "Mixed", "OUTRIGHT": "Outright", "": "Hedges", "UNMATCHED": "Unmatched"}
 TYPE_ORDER = ("CALENDAR", "CROSS_EXCHANGE", "CROSS_PRODUCT", "MIXED", "OUTRIGHT", "")
 UNASSIGNED = "No trade name"                # the Book's pseudo-trade of the fills with no PBRoot name
 _LAST_FAMILIES = ("Cross-product", "FX", "Other")
@@ -274,10 +275,104 @@ def group_order(labels: Iterable[str], group: str) -> List[str]:
     return sorted(labels, key=lambda x: (x in _LAST_FAMILIES, _LAST_FAMILIES.index(x) if x in _LAST_FAMILIES else 0, x))
 
 
+# The sectors in their fixed order (user, 2026-10-01): the Book's default order (both views) and its
+# Summary's Sector breakdown. From config/contracts.csv's `sector` / `subsector` (contract-master's
+# roots): metals split into precious (silver, gold, platinum, palladium) and base, agriculture into
+# livestock (cattle, hogs) and grains & softs. Chemicals and freight, which the user's list does not
+# name, sit after Energy and after Livestock; a contract not recognised is Other, last.
+SECTOR_ORDER = ("Base metals", "Precious metals", "Ferrous", "Energy", "Chemicals", "Grains & softs", "Livestock",
+                "Freight", "FX", "Other")
+_PRECIOUS = frozenset({"silver", "gold", "platinum", "palladium"})
+_PRECIOUS_PAIRS = {"XAU": "gold", "XAG": "silver", "XPT": "platinum", "XPD": "palladium"}
+_FX_PRODUCTS = frozenset({"FX_SPOT", "FX_FWD", "FX_SWAP", "FX_OPTION"})
+
+
+def _contract_roots() -> Dict[str, Any]:
+    try:
+        from data.contracts import load_roots       # read once and cached by contract-master
+        return dict(load_roots())
+    except Exception:  # noqa: BLE001 -- no roots: every leg is Other
+        return {}
+
+
+def root_sector(root: Any) -> str:
+    """A contract root's sector in words (`SECTOR_ORDER`)."""
+    sector = str(getattr(root, "sector", "") or "").lower()
+    sub = str(getattr(root, "subsector", "") or "").lower()
+    if sector == "metals":
+        return "Precious metals" if sub in _PRECIOUS else "Base metals"
+    if sector == "agriculture":
+        return "Livestock" if ("cattle" in sub or "hog" in sub) else "Grains & softs"
+    return {"ferrous": "Ferrous", "energy": "Energy", "chemicals": "Chemicals", "freight": "Freight",
+            "fx": "FX"}.get(sector, "Other")
+
+
+def leg_sector(leg: dict, roots: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    """(sector, commodity) of one leg: its root's, a precious-metal pair's metal, another currency
+    pair FX; ('Other', '') for a contract not recognised."""
+    roots = roots if roots is not None else _contract_roots()
+    if leg.get("unrecognised"):
+        return "Other", ""
+    root = roots.get(str(leg.get("root_id") or ""))
+    if root is not None:
+        return root_sector(root), str(getattr(root, "subsector", "") or "").replace("_", " ")
+    if str(leg.get("product") or "") in _FX_PRODUCTS:
+        base = str(leg.get("root_id") or leg.get("instrument_id") or "")[:3]
+        if base in _PRECIOUS_PAIRS:
+            return "Precious metals", _PRECIOUS_PAIRS[base]
+        return "FX", str(leg.get("root_id") or leg.get("instrument_id") or "")[:6]
+    return "Other", str(leg.get("commodity") or "")
+
+
+def _leg_weight(leg: dict) -> float:
+    """A leg's size for picking a trade's sector: its USD value, else its lots."""
+    for key in ("value_usd", "lots", "quantity"):
+        try:
+            v = abs(float(leg.get(key)))
+        except (TypeError, ValueError):
+            continue
+        if v == v and v > 0:
+            return v
+    return 0.0
+
+
+def trade_sector(trade: dict, roots: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    """(sector, commodity) a trade sorts under: its larger leg's (by USD value; user, 2026-10-01: a
+    trade holding two sectors sorts by its larger leg), hedges left out unless it holds nothing
+    else; the open legs first, a closed trade's legs as they were."""
+    roots = roots if roots is not None else _contract_roots()
+    legs = list(trade.get("legs") or [])
+    core = [leg for leg in legs if not leg.get("hedge")] or legs
+    live = [leg for leg in core if leg.get("status") == "open"] or core
+    if not live:
+        return "Other", ""
+    weight: Dict[str, float] = {}
+    best: Dict[str, Tuple[float, str]] = {}
+    for leg in live:
+        sector, commodity = leg_sector(leg, roots)
+        w = _leg_weight(leg)
+        weight[sector] = weight.get(sector, 0.0) + w
+        if sector not in best or w > best[sector][0]:
+            best[sector] = (w, commodity)
+    rank = {s: n for n, s in enumerate(SECTOR_ORDER)}
+    sector = max(weight, key=lambda s: (weight[s], -rank.get(s, 99)))
+    return sector, best[sector][1]
+
+
+def sector_rank(sector: str) -> int:
+    return SECTOR_ORDER.index(sector) if sector in SECTOR_ORDER else len(SECTOR_ORDER)
+
+
 def default_order(trades: Sequence[dict]) -> List[dict]:
-    """The stable default order: commodity family, then trade name A to Z."""
-    rank = {f: n for n, f in enumerate(group_order([family_label(t) for t in trades], GROUP_BY_COMMODITY))}
-    return sorted(trades, key=lambda t: (rank.get(family_label(t), 99), str(t.get("trade") or "")))
+    """The stable default order (user, 2026-10-01): sector in its fixed order (`SECTOR_ORDER`), then
+    commodity, then trade name A to Z; the fills on no trade last."""
+    roots = _contract_roots()
+
+    def key(t):
+        sector, commodity = trade_sector(t, roots)
+        return (bool(t.get("pseudo")) or str(t.get("trade") or "") == UNASSIGNED, sector_rank(sector), commodity.lower(),
+                str(t.get("trade") or ""))
+    return sorted(trades, key=key)
 
 
 def options_for(trades: Sequence[dict]) -> Dict[str, List[dict]]:

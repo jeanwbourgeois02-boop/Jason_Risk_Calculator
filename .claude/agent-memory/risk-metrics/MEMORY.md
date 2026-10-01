@@ -6,4 +6,5 @@
 - [Trade risk, Phase G](trade_risk_2026_09_29.md) — trades.py choices (sides, 2-day, best-fit sign, level pick, CM splice for z), memo mtime pitfall; hedge % = variance reduction on aligned days since 2026-09-30.
 - [Never kill all python](feedback_never_kill_all_python.md) — no kills; never `py -3 -`/`python -` in ANY form (hung again 2026-09-30); scripts via Write; own scratch subfolder.
 - [Bloomberg price history 2026-09-30](bloomberg_price_history_2026_09_30.md) — commodity AND FX history = book DB price_history, pass conn; no source_kind/price_check; LME prompt ids; 2-year depth vs 500-day vol.
+- [z at entry, now, exit 2026-10-01](z_entry_now_exit_2026_10_01.md) — per spread from trade_book sub_spreads, 1 calendar year window, closed trades via trade_book(open_date).
 - [FX trades in trade risk 2026-09-30](fx_trades_in_trade_risk_2026_09_30.md) — subset_var(all) = book_risk VaR: FX trades + settled cash as legs, attribution by PBRoot name, CNH hedge % side effect.

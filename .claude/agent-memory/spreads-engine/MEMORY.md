@@ -12,3 +12,4 @@
 - [Trade book](trade-book.md) — 2026-09-29 Phase G: type rule (roll-aware day calendars), converted CN/West ratio, no-marks hedge fallback
 - [Level gaps filled](level-gaps.md) — 2026-09-30: near-marks entry spot with estimated flags, 3-leg template levels, options net premium level
 - [Locked in / open split](locked-open-split.md) — 2026-09-30: LTD split per trade and leg, the per-leg avg rule, the linearity check, non-USD locked moves with spot
+- [Equal-size spreads](equal-size-spreads.md) — 2026-10-01: parts cut into equal-size spreads, UNMATCHED, size_sides units, Title Case, closed spec; entry level = leg avg rule (fixed)

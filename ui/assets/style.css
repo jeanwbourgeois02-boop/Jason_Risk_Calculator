@@ -1483,3 +1483,11 @@ p { margin: 8px 0; }
 .book-main .tk-panel-legs .tk-table.tk-legs { max-width: 760px; }
 /* the P&L strip's Download CSV: a plain link at the right end, so the strip stays on one line at 1680 px */
 .tk-strip .pnl-csv-link { margin-left: auto; }
+/* z entry | z now and Quantity in the spread's own unit ('$15,094,650 v $14,928,200'; 2026-10-01): What it is
+   gives back the room so the Book still fits 1680 px with no sideways scroll */
+.tk-table.tk-trades td.tk-qty .tk-clip { max-width: 185px; }
+@media (min-width: 1401px) and (max-width: 1999px) {
+  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 230px; }
+  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 220px; }
+  .book-main .book-table.book-grid.tk-trades td, .book-main .book-table.book-grid.tk-trades th { padding-left: 6px; padding-right: 6px; }
+}
