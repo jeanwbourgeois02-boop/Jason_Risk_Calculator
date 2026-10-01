@@ -73,3 +73,44 @@
     }
   });
 })();
+/* The Book's legs behind each trade's caret (2026-10-01, user: the legs hidden until the trade's caret is
+   clicked; a click elsewhere on the row still opens its panel). ui/tabs/book.py marks each leg row with
+   data-legs-of="<trade>" and each caret with data-caret-of="<trade>"; the CSS hides the leg rows. A click
+   on a caret is taken here, in the capture phase, so Dash never sees it (the row's own click, which opens
+   the panel, does not fire), and the trades whose legs are open are kept for the session in one <style>
+   of their own: a re-render of the table keeps them open with nothing to re-apply. DOM only. */
+(function () {
+  var KEY = 'book-legs-open';
+  var open = {};
+  try { open = JSON.parse(window.sessionStorage.getItem(KEY) || '{}') || {}; } catch (e) { open = {}; }
+
+  function esc(name) {
+    return (window.CSS && window.CSS.escape) ? window.CSS.escape(name) : String(name).split('\\').join('\\\\').split('"').join('\\"');
+  }
+  function apply() {
+    var style = document.getElementById('book-legs-style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'book-legs-style';
+      (document.head || document.documentElement).appendChild(style);
+    }
+    var css = '';
+    Object.keys(open).forEach(function (name) {
+      var v = esc(name);
+      css += '#book-table tr.tk-leg-row[data-legs-of="' + v + '"] { display: table-row; }\n';
+      css += '#book-table .tk-legs-caret[data-caret-of="' + v + '"] { transform: rotate(90deg); }\n';
+    });
+    style.textContent = css;
+  }
+  document.addEventListener('click', function (e) {
+    var caret = e.target && e.target.closest ? e.target.closest('.tk-legs-caret') : null;
+    if (!caret) { return; }
+    e.stopPropagation();
+    e.preventDefault();
+    var name = caret.getAttribute('data-caret-of') || '';
+    if (open[name]) { delete open[name]; } else { open[name] = 1; }
+    try { window.sessionStorage.setItem(KEY, JSON.stringify(open)); } catch (err) { /* private mode: this page only */ }
+    apply();
+  }, true);
+  if (document.head) { apply(); } else { document.addEventListener('DOMContentLoaded', apply); }
+})();

@@ -979,7 +979,9 @@ p { margin: 8px 0; }
 .tk-strip .tk-title { font-weight: 700; color: var(--navy); margin-right: auto; }
 .tk-strip .book-download { margin-left: 0; }   /* the strip's tools sit together at the right, after the title */
 .tk-strip--controls { background: var(--card); border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; }
-.tk-strip .tk-k, .tk-facts .tk-k { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); }
+/* the strip's small labels ("Break down by", "View", "Open trades") in sentence case, as written (user,
+   2026-10-01: no all-caps labels; every tab's strip) */
+.tk-strip .tk-k, .tk-facts .tk-k { font-size: 12px; font-weight: 700; letter-spacing: 0; text-transform: none; color: var(--ink-2); }
 .tk-table td.l, .tk-table th.l { text-align: left; }
 .tk-table th.tk-sortable { cursor: pointer; user-select: none; }
 .tk-table th.tk-sortable:hover { background: var(--navy-2); }
@@ -1259,8 +1261,9 @@ p { margin: 8px 0; }
 .tab-header .tab-title .about-mark { font-size: 14px; vertical-align: 5px; }
 .market-data .tab-header .data-status-line { margin: 0; font-size: 13px; }
 
-/* the section heading of a card (the reference's h4 "CASH LADDER: ..."): uppercase, bold, ink */
-.tk-strip .tk-title, .book-section-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+/* the section heading of a card ("Summary", "Trades"): bold, ink, in sentence case as written (user, 2026-10-01:
+   no all-caps titles; every tab's card titles, so the app stays one) */
+.tk-strip .tk-title, .book-section-title { font-size: 15px; font-weight: 700; text-transform: none; letter-spacing: 0;
   color: var(--text); }
 .tk-strip .tk-title .about-mark, .book-section-title .about-mark { text-transform: none; }
 .tk-strip { padding: 10px 16px; gap: 8px 14px; min-height: 54px; }
@@ -1490,4 +1493,26 @@ p { margin: 8px 0; }
   .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 230px; }
   .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 220px; }
   .book-main .book-table.book-grid.tk-trades td, .book-main .book-table.book-grid.tk-trades th { padding-left: 6px; padding-right: 6px; }
+}
+/* The Book's trade table of 2026-10-01 (user: "lets make these improvements straight away"): a trade of several
+   spreads with a row per spread, always showing; every leg hidden until the trade's caret is clicked
+   (ui/assets/book_filters.js writes the rule that shows a trade's legs); hedges at the spreads' level, never
+   under one spread; the narrow Action column; What it is takes the room Next date and Check gave back. */
+#book-table tr.tk-leg-row { display: none; }
+.tk-table.tk-trades .tk-legs-caret { cursor: pointer; color: var(--navy); font-size: 13px; width: 16px; text-align: center;
+  transition: transform .12s ease; transform-origin: 50% 55%; }
+.tk-table.tk-trades .tk-legs-caret:hover { color: var(--gold); }
+.tk-table.tk-trades .tk-chev--none { width: 14px; }
+.book-table.tk-trades tr.tk-leg-row--top td.tk-leg-name { padding-left: 22px; }
+.book-table.tk-trades tr.tk-part-row td.tk-part-name { padding-left: 24px; }
+.book-table.tk-trades tr.tk-leg-row td.tk-leg-name { padding-left: 36px; }
+.book-table.tk-trades tr.tk-row--multi + tr.tk-part-row td,
+.book-table.tk-trades tr.tk-part-row td { border-bottom-color: #eceef3; }
+.tk-table.tk-trades td.tk-action-cell { white-space: nowrap; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+.tk-table.tk-trades td.tk-action-cell .tk-action-more { color: var(--muted); font-size: 11.5px; }
+.tk-table.tk-trades td.tk-level { white-space: nowrap; }
+.tk-table.tk-trades td.tk-qty .tk-clip { max-width: 240px; }
+@media (min-width: 1401px) and (max-width: 1999px) {
+  .tk-table.tk-trades td.tk-what.tk-what--one { max-width: 390px; }
+  .tk-table.tk-trades td.tk-what.tk-what--one .tk-clip { max-width: 380px; }
 }

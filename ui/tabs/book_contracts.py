@@ -77,8 +77,9 @@ COLUMNS: Tuple[Tuple[str, str, str, str], ...] = (
 )
 N_BEFORE_MONEY = 6                             # the columns before Daily (the fold and total rows' spans)
 SORTABLE = {k for k, *_ in COLUMNS}
-NUMBER_FUNNELS = {"net": "The net position (lots; tonnes for LME; the base currency for FX).",
-                  "gross": "The gross position.", "daily": "Today's P&L in USD.", "ltd": "The P&L since the first fill, in USD."}
+# The funnels sit on the text columns only (user, 2026-10-01, as the trade view): Contract (its commodity),
+# Clearer and Trades; every heading still sorts on its title.
+LIST_FILTERS = ("family", "clearer")           # this view's own tick lists ('c-' keys); Trades is a shared part
 CLEARERS = {"BOCF": "BOC", "GSIL": "Goldman"}  # the account's prefix -> the clearer's name
 NO_CLEARER = "Not recorded"
 METAL_FAMILIES = {"XAU": "gold", "XAG": "silver", "XPT": "platinum", "XPD": "palladium"}
@@ -347,8 +348,10 @@ def sort_rows(data: dict, rows: Sequence[dict], sort: Optional[dict]) -> List[di
 
 
 def own_filters(state: Optional[dict]) -> Dict[str, Any]:
-    """This view's column filters: {column: comparison | [ticked]}, read from the Book's 'c-' keys."""
-    return {k[len(COL):]: v for k, v in tf.tab_filters(state, TAB).items() if k.startswith(COL)}
+    """This view's column filters: {column: [ticked]}, read from the Book's 'c-' keys (a number column's
+    old comparison is set aside: those funnels left on 2026-10-01)."""
+    return {k[len(COL):]: v for k, v in tf.tab_filters(state, TAB).items()
+            if k.startswith(COL) and k[len(COL):] in LIST_FILTERS}
 
 
 def _lists(r: dict, col: str) -> List[str]:
@@ -409,8 +412,6 @@ def head(sort: Optional[dict], state: Optional[dict], rows: Sequence[dict], trad
             pop = _list_funnel(state, "clearer", "Clearer", opts["clearer"])
         elif key == "trades":
             pop = tf.trade_funnel(TAB, state, tf.options_for(trades), ("trade",), COL + "trades")
-        elif key in NUMBER_FUNNELS:
-            pop = tf.number_funnel(TAB, state, COL + key, hint=f"{NUMBER_FUNNELS[key]} {tf.NUMBER_HINT}")
         ths.append(tf.head_th(title, cls, tip, sort_id={"type": SORT_TYPE, "idx": key}, arrow=tf.arrow_of(sort, key),
                               pop=pop, right=i > half))
     return html.Thead(html.Tr(ths))
