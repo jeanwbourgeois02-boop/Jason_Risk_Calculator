@@ -17,16 +17,15 @@ arguments as the tabs, so each tab's first render is a memo hit:
   7. header     `header._build_figures(conn, as_of)` inside the header's own `pricing_snapshot`,
                 `header.needed_marks(conn, as_of)`
   8. series     `engine.pnl.series.daily_series(conn, as_of, value_fn=raw_value_book)` (P&L, header chart)
-  9. pnl        `pnl.base(conn, as_of)`, `pnl.period(conn, as_of, pnl.DEFAULT_PERIOD)`
+  9. pnl        `pnl.base(conn, as_of)`, `pnl.periods(conn, as_of)` (the table's five period columns)
  10. curve      `shared_spreads(conn, as_of)` (the engine's own reader), `shared_curve(conn, as_of)`
  11. risk       `risk.gather(conn, as_of)`, `shared_trade_risk(conn, as_of, wait=True)`
  12. risk_folds `risk_folds.book_positions(conn, as_of)`, `risk.stress_result(conn, as_of)` (the
                 currency and stress folds, computed when opened)
- 13. pnl_periods `pnl.period(conn, as_of, choice)` for every choice but Custom
- 14. book_panels `book.history(conn, data, trade)` for every open trade (a row's panel chart)
- 15. data       `market_data.warm(conn, as_of)`: the Data tab's own memos
+ 13. book_panels `book.history(conn, data, trade)` for every open trade (a row's panel chart)
+ 14. data       `market_data.warm(conn, as_of)`: the Data tab's own memos
 Since 2026-09-29 (S6) the daily series, the curve positions and the book positions read the one
-shared valuation per date (`blotter_pricing.raw_value_book`), so steps 8 to 14 price no date twice.
+shared valuation per date (`blotter_pricing.raw_value_book`), so steps 8 to 13 price no date twice.
 
 The memos that also read the risk config carry those files' (mtime_ns, size) in their key
 (`blotter_pricing.config_inputs_key`); the price history is in the book database itself, so
@@ -392,7 +391,7 @@ def _screens(conn, as_of: str, step) -> None:
     def pnl():
         from ui.tabs import pnl as pnl_tab
         pnl_tab.base(conn, as_of)
-        pnl_tab.period(conn, as_of, pnl_tab.DEFAULT_PERIOD)
+        pnl_tab.periods(conn, as_of)          # every column of the table: Today, 5d, MTD, YTD, All
     step("pnl", pnl)
 
     def curve():
@@ -422,14 +421,6 @@ def _screens(conn, as_of: str, step) -> None:
         rows = [(t, r) for t, r in risk_tab.rows_of(data, risk) if r]
         risk_tab.subset(conn, as_of, [str(r.get("trade")) for _t, r in rows])
     step("risk_subsets", risk_subsets)
-
-    def pnl_periods():
-        # every period of the P&L switch but Custom (MTD is warmed above)
-        from ui.tabs import pnl as pnl_tab
-        for choice, _label in pnl_tab.PERIOD_CHOICES:
-            if choice not in ("custom", pnl_tab.DEFAULT_PERIOD):
-                pnl_tab.period(conn, as_of, choice)
-    step("pnl_periods", pnl_periods)
 
     def book_panels():
         # each open trade's level since its first fill (a row's panel), read on the shared valuation
