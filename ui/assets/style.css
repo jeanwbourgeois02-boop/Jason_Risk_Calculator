@@ -1516,3 +1516,16 @@ p { margin: 8px 0; }
 .tk-table.tk-trades td.tk-level, .tk-table.tk-trades td.tk-qty { white-space: nowrap; }
 .tk-table.tk-trades td.tk-level .tk-unit-slot { display: inline-block; min-width: 40px; margin-left: 3px; text-align: left; }
 .book-main .book-table.book-grid.tk-trades td, .book-main .book-table.book-grid.tk-trades th { padding-left: 6px; padding-right: 6px; }
+/* The spreads found from the fills (2026-10-02): a spread's type as a small grey tag after its name, its lots
+   and a leg's physical quantity as grey figures after the size, a leg's USD per the spread's unit after its own
+   price, a box's two arbs lighter and further in than the box. */
+.tk-table.tk-trades .tk-type-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border: 1px solid #e3e6ee;
+  border-radius: 3px; font-size: 10.5px; font-weight: 600; line-height: 15px; color: var(--muted); font-style: normal;
+  white-space: nowrap; vertical-align: 1px; }
+.tk-table.tk-trades td.tk-qty .tk-phys { margin-left: 6px; }
+.tk-table.tk-trades td.tk-level .tk-usd-alt { margin-left: 6px; }
+.book-table.tk-trades tr.tk-comp-row td { font-weight: 400; color: var(--muted); background: #fdfdfe; }
+.book-table.tk-trades tr.tk-comp-row td.tk-comp-name { padding-left: 36px; color: var(--ink-2); }
+.book-table.tk-trades tr.tk-comp-row .tk-leg-tag { margin-left: 8px; font-size: 10.5px; font-weight: 600; color: var(--muted); }
+.book-table.tk-trades tr.tk-leg-row--deep td.tk-leg-name { padding-left: 44px; }
+.book-table.tk-trades tr.tk-part-row--closed td { color: var(--muted); }

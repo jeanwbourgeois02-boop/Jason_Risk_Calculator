@@ -279,9 +279,13 @@ def _next(data: dict, info: dict, r: dict) -> Tuple[Optional[dict], str]:
     s = sched.get(r["key"]) or sched.get(r["instrument_id"])
     base = {"contract_id": r["key"], "leg": r["name"], "business_days": None, "level": "", "alert_date": ""}
     if s:
+        # the event's own words and date (expiry-monitor, 2026-10-02: 'Last trading day', 'Lots to a multiple
+        # of 5', no first notice on SHFE), so the cell names the contract, the event and the date
+        extra = {k: s.get(k) for k in ("event_label", "event_estimated", "event_business_days", "first_notice_applies",
+                                       "delivery_lot_multiple", "delivery_lot_deadline", "delivery_lot_ok") if k in s}
         return {**base, "event": s.get("next_event"), "date": s.get("next_event_date"),
                 "alert_date": s.get("alert_date"), "business_days": s.get("business_days"), "level": s.get("level"),
-                "estimated": bool(s.get("estimated")), "reason": s.get("reason", "")}, ""
+                "estimated": bool(s.get("estimated")), "reason": s.get("reason", ""), **extra}, ""
     product = r["product"]
     expiry = (info.get("instruments") or {}).get(r["instrument_id"], ("", ""))[1]
     expiry = "" if expiry.startswith("9999") else expiry

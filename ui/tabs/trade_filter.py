@@ -58,13 +58,16 @@ DEFAULT_STATE: Dict[str, Any] = {"search": "", "type": [], "commodity": [], "tra
 FLAGS_ON = "on"
 
 # The trade's type as engine.spreads.trades gives it, in words (long, short) and in the fixed order
-# the groups and the Type list follow.
-TYPE_WORDS = {"CALENDAR": "Calendar", "CROSS_EXCHANGE": "Cross-exchange", "CROSS_PRODUCT": "Cross-product",
-              "MIXED": "Mixed", "OUTRIGHT": "Outright", "": "Hedges only",
+# the groups and the Type list follow. 2026-10-02: a calendar reads "Term structure" (the user's word and
+# the PBRoot's .5, the same as each spread's tag on the Book), a box "Box" (spreads-engine's new type).
+TYPE_WORDS = {"CALENDAR": "Term structure", "TERM_STRUCTURE": "Term structure", "CROSS_EXCHANGE": "Cross-exchange",
+              "CROSS_PRODUCT": "Cross-product", "BOX": "Box", "MIXED": "Mixed", "OUTRIGHT": "Outright",
+              "": "Hedges only",
               "UNMATCHED": "Unmatched legs"}          # a spread's part only, never a trade's type (2026-10-01)
-TYPE_SHORT = {"CALENDAR": "Calendar", "CROSS_EXCHANGE": "Cross-exch", "CROSS_PRODUCT": "Cross-prod",
-              "MIXED": "Mixed", "OUTRIGHT": "Outright", "": "Hedges", "UNMATCHED": "Unmatched"}
-TYPE_ORDER = ("CALENDAR", "CROSS_EXCHANGE", "CROSS_PRODUCT", "MIXED", "OUTRIGHT", "")
+TYPE_SHORT = {"CALENDAR": "Term", "TERM_STRUCTURE": "Term", "CROSS_EXCHANGE": "Cross-exch",
+              "CROSS_PRODUCT": "Cross-prod", "BOX": "Box", "MIXED": "Mixed", "OUTRIGHT": "Outright", "": "Hedges",
+              "UNMATCHED": "Unmatched"}
+TYPE_ORDER = ("CALENDAR", "CROSS_EXCHANGE", "CROSS_PRODUCT", "BOX", "MIXED", "OUTRIGHT", "")
 UNASSIGNED = "No trade name"                # the Book's pseudo-trade of the fills with no PBRoot name
 _LAST_FAMILIES = ("Cross-product", "FX", "Other")
 

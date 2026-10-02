@@ -412,6 +412,11 @@ def titled_trade_book(book: dict) -> dict:
             if isinstance(sub.get("what_it_is"), str):
                 sub["what_it_is"] = title_name(sub["what_it_is"])
             legs(sub.get("legs"))
+            legs(sub.get("hedge_legs"))          # the spreads found from the fills (2026-10-02)
+            legs(sub.get("closed_legs"))
+            for comp in sub.get("components") or []:
+                if isinstance(comp, dict) and isinstance(comp.get("what_it_is"), str):
+                    comp["what_it_is"] = title_name(comp["what_it_is"])
         nxt = t.get("next")
         if isinstance(nxt, dict) and isinstance(nxt.get("leg"), str):
             nxt["leg"] = title_name(nxt["leg"])

@@ -1290,13 +1290,110 @@ def _library_tickers(conn: sqlite3.Connection, as_of: str) -> Optional[int]:
         return None
 
 
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+# the near-marks rule's source along one day's curve ('INTERP: between LME:CA 2026-11-18 and 2026-12-16
+# marks of 2026-09-18'); any other INTERP source names the closes it read in time
+_CURVE_DAY = re.compile(r"marks? of (\d{4}-\d{2}-\d{2})")
+
+
+def _short_day(iso: str) -> str:
+    try:
+        d = dt.date.fromisoformat(str(iso)[:10])
+    except ValueError:
+        return str(iso or "")
+    return f"{d:%a} {d.day} {d:%b}"
+
+
+def marks_updated(conn: sqlite3.Connection, as_of: str) -> Optional[dict]:
+    """How many of the book's open contracts have a price of `as_of` itself (2026-10-02, user: the chip
+    said "live, complete" while every LME and SHFE leg showed 0 P&L today). Read from the Book's own
+    legs (`blotter_pricing.shared_trade_book`, the per-revision memo): a contract is updated when its
+    official mark on `as_of` is a price of that day, not one the near-marks rule carried or estimated
+    (`mark_source` 'INTERP:'), not the fill's earlier close (`mark_as_of` before `as_of`) and not
+    missing. Also counted: the contracts whose previous close is an estimate (their P&L today compares
+    with it). {total, updated, stale: [(oldest close used, name, why)], prev_estimated: [names]}; None
+    when the book cannot be read. Nothing is queried here: the engine's own fields."""
+    try:
+        from ui.tabs.blotter_pricing import shared_trade_book
+        book = shared_trade_book(conn, as_of)
+    except Exception:  # noqa: BLE001 -- the chip falls back to the missing count
+        logging.getLogger(__name__).exception("header marks: the book could not be read for %s", as_of)
+        return None
+    seen: dict = {}
+    for t in book.get("trades") or []:
+        for leg in t.get("legs") or []:
+            if leg.get("status") != "open" or leg.get("unrecognised") or not leg.get("lots"):
+                continue
+            seen.setdefault(str(leg.get("contract_id") or leg.get("instrument_id") or ""), leg)
+    stale, prev_est = [], []
+    updated = 0
+    for leg in seen.values():
+        name = str(leg.get("name") or leg.get("contract_id") or "")
+        src = str(leg.get("mark_source") or "")
+        mark_day = str(leg.get("mark_as_of") or as_of)
+        curve_day = _CURVE_DAY.search(src) if src.startswith("INTERP") else None
+        if leg.get("mark") is None:
+            stale.append(("", name, "no price on file"))
+        elif curve_day and curve_day.group(1) == as_of and mark_day >= as_of:
+            updated += 1                    # read along the day's own curve (an LME prompt, a forward date)
+        elif src.startswith("INTERP"):
+            found = [curve_day.group(1)] if curve_day else _ISO_DAY.findall(src)
+            days = sorted(d for d in found if d <= as_of) or sorted(found)
+            used = days[0] if days else ""
+            stale.append((used, name, f"no price of its own: the {_short_day(used)} close carried" if used
+                          else "no price of its own: estimated from the near closes"))
+        elif mark_day < as_of:
+            stale.append((mark_day, name, f"the {_short_day(mark_day)} close carried"))
+        else:
+            updated += 1
+        psrc = str(leg.get("prev_mark_source") or "")
+        prev_curve = _CURVE_DAY.search(psrc)
+        on_prev_curve = bool(prev_curve) and prev_curve.group(1) == str(leg.get("prev_mark_date") or "")
+        if (psrc.startswith("INTERP") and not on_prev_curve) or (leg.get("prev_mark") is None
+                                                                  and leg.get("mark") is not None):
+            prev_est.append(name)
+    stale.sort(key=lambda x: (x[0] == "", x[0], x[1]))
+    return {"total": len(seen), "updated": updated, "stale": stale, "prev_estimated": sorted(prev_est)}
+
+
+def _updated_chip(conn: sqlite3.Connection, as_of: str, when: str, missing_n: int) -> Optional[html.Div]:
+    """'Marks: 10 of 12 updated today' (amber while any is not, the oldest first on hover, a link to the
+    Data tab); a count of estimated previous closes after it when there are some; green only when every
+    contract has a price of the day and a close of its own the day before. None when not countable."""
+    info = marks_updated(conn, as_of)
+    if not info or not info["total"]:
+        return None
+    n, m = info["updated"], info["total"]
+    day = "today" if as_of == today_ny() else f"on {_short_day(as_of)}"
+    prev = info["prev_estimated"]
+    text = f"Marks: {n:,} of {m:,} updated {day}"
+    if prev:
+        text += f" · {len(prev):,} previous {'close' if len(prev) == 1 else 'closes'} estimated"
+    lines = [f"Latest official close the book uses: {when}.",
+             f"{n:,} of the {m:,} contracts held have a price of {as_of} itself."]
+    if info["stale"]:
+        lines.append("Not updated (oldest first):")
+        lines += [f"{name}: {why}" for _d, name, why in info["stale"][:10]]
+        if len(info["stale"]) > 10:
+            lines.append(f"And {len(info['stale']) - 10} more")
+    if prev:
+        lines.append(f"Previous close estimated from the near closes, so P&L today compares with an estimate "
+                     f"({len(prev)}): " + ", ".join(prev[:8]) + (f" and {len(prev) - 8} more" if len(prev) > 8 else ""))
+    if missing_n:
+        lines.append(f"{missing_n:,} {'price' if missing_n == 1 else 'prices'} missing: see the Data tab.")
+    hover = "\n".join(lines)
+    if n == m and not prev and not missing_n:
+        return _chip(text, "green", hover)
+    return _data_link(_chip(text, "amber", hover), "header-marks", hover)
+
+
 def marks_chip(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple], n_total: int) -> html.Div:
     """The header's marks chip (2026-09-28): 'Marks: Sat 26 Sep 05:00 HK · 2 missing', the time
     the latest official close the book uses was stamped (`latest_mark_time`, shown in Hong Kong
     time by `mark_time_words` since 2026-09-30; 'live'
     within the hour) and the count of marks the book needs on `as_of` with no official mark
     (`needed_marks`, the Data tab's own list, memoised on the database revision). Amber while any
-    is missing, green when complete ('· complete'), red with no official mark for the book at all
+    is missing, green when complete, red with no official mark for the book at all
     ('No marks yet: press Pull Bloomberg · N tickers needed', N from the Bloomberg library), grey
     'No book loaded' without trades. The missing marks are listed on hover."""
     if not n_total:
@@ -1316,10 +1413,16 @@ def marks_chip(conn: sqlite3.Connection, as_of: str, needs: Optional[tuple], n_t
             return _chip(f"Marks: {when} \u00b7 missing count unknown", "amber",
                          _failure_reason(f"the marks the book needs on {as_of} could not be listed", exc, conn))
     needed, missing = needs
+    # 2026-10-02: the chip counts the contracts with a price of the day itself, never "complete" while a
+    # price carried from an earlier close (an exchange shut, a pull before the close) stands in
+    counted = _updated_chip(conn, as_of, when, len(missing))
+    if counted is not None:
+        return counted
     if not missing:
-        return _chip(f"Marks: {when} \u00b7 complete", "green",
+        return _chip(f"Marks: {when} \u00b7 all on file", "green",
                      f"Latest official close the book uses: {when}. Every one of the "
-                     f"{needed:,} prices the book needs on {as_of} is on file.")
+                     f"{needed:,} prices the book needs on {as_of} is on file (some may be carried from an "
+                     "earlier close).")
     # 2026-09-30 (user: the Bloomberg problems "all in one place"): the count and a link to the
     # Data tab, which lists each missing price; never the list here.
     n = len(missing)
