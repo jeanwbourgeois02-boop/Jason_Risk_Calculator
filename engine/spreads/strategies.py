@@ -708,7 +708,19 @@ def _event_of(book, leg: PLeg) -> Optional[dict]:
                            f"for it: its stored {'prompt' if leg.prompt else 'expiry date'} stands in")}
     return {"contract_id": leg.contract_id, "event": row.get("next_event"), "date": row.get("next_event_date"),
             "alert_date": row.get("alert_date"), "business_days": row.get("business_days"),
-            "level": row.get("level"), "estimated": bool(row.get("estimated")), "reason": row.get("reason", "")}
+            "level": row.get("level"), "estimated": bool(row.get("estimated")), "reason": row.get("reason", ""),
+            **event_extras(row)}
+
+
+# the expiry schedule's own words for the event, passed through as they stand (expiry-monitor, 2026-10-02):
+# the screens write "SHFE Zinc Oct26: last trading day 15 Oct (9 business days)" from them
+EVENT_EXTRA_KEYS = ("event_label", "event_estimated", "event_business_days", "first_notice_applies",
+                    "delivery_lot_multiple", "delivery_lot_deadline", "delivery_lot_ok")
+
+
+def event_extras(row: dict) -> dict:
+    """The expiry schedule row's extra event keys (``EVENT_EXTRA_KEYS``), those it carries."""
+    return {k: row.get(k) for k in EVENT_EXTRA_KEYS if k in (row or {})}
 
 
 def _next_event(book, a: PLeg, b: PLeg) -> dict:

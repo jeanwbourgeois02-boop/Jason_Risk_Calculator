@@ -20,3 +20,5 @@ plus `pnl_split_reason`, `unwound`. The ui lane built against these exact names.
 - Settled FX spot / forward hedges and expired options count as locked in and set `unwound` True.
 - Verified on the sample (in-memory `tests.golden_book.build_book`) plus injected half-reductions on USD, CNY, JPY, GBP,
   LME and FX-forward legs: locked = reduced lots x (exit - avg) x mult x S to the cent.
+
+**2026-10-02** ([[trade-structures]]): the average is now the spec's 7.1 (`structures.avg_cost`, trade date then trade id) per (structure, contract); `_split_leg` only for legs with a fill outside every structure.

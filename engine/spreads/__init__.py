@@ -125,6 +125,13 @@ and value balance, its level (a China-against-the-West pair the converted ratio,
 carry, hedge, leftover, rolls, next key date, P&L (the strategy position's, ``value_book`` rows
 summed) and flags. ``level_history`` gives its level and LTD on past closes, rolls marked.
 
+Structures (2026-10-02; ``structures.py``): the spreads Jason put on inside one trade, found from
+the fills (calendars dealt as one, boxes of two such calendars on two exchanges, the pooled fills
+read by the open-lots rule, hedges linked to the China legs they cover; ``spread_overrides`` the
+only correction). They are ``trade_book``'s ``sub_spreads``: each its own fills, its own average
+cost per contract (``avg_cost``, so open / locked in are per structure; LTD never moves), its quote
+in USD per unit with size, balance and hedge cover.
+
 Tables: ``spread_overrides`` (``overrides.py``), created defensively here. Its read is wired into
 the rule; nothing writes it yet.
 """
@@ -144,6 +151,7 @@ from engine.spreads.rolls import rolls
 from engine.spreads.scorecard import scorecard
 from engine.spreads.overrides import PIN, SPLIT, ensure_overrides_table, override_problems, read_overrides
 from engine.spreads.strategies import strategies_from, strategy_entry
+from engine.spreads.structures import BOX, STRUCTURE_WORDS, avg_cost, find_structures
 from engine.spreads.templates import Template, TemplateLeg, load_templates
 from engine.spreads.trades import level_history, trade_book
 from engine.spreads.trade_type import (
@@ -159,5 +167,6 @@ __all__ = [
     "TERM_STRUCTURE", "TOLERANCE", "TRADE_TYPES", "Template", "TemplateLeg", "TypeLeg", "book_spreads", "classify",
     "daily_split", "ensure_overrides_table", "history_dates", "infer", "load_templates", "outright_fields",
     "override_problems", "period_explain", "position_history", "positions_from", "read_overrides", "research_key", "strategies_from",
-    "strategy_entry", "type_fields", "level_history", "trade_book",
+    "strategy_entry", "type_fields", "level_history", "trade_book", "BOX", "STRUCTURE_WORDS", "avg_cost",
+    "find_structures",
 ]

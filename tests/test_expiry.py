@@ -385,7 +385,10 @@ def test_futures_rows_carry_no_phase_5_keys(conn):
         "product", "root_id", "name", "sector", "exchange", "calendar", "delivery", "delivery_assumed",
         "contract_id", "lots", "last_trade_date", "first_notice_date", "dates_source", "estimated",
         "next_event", "next_event_date", "alert_date", "alert_basis", "business_days", "level", "reason",
-        "beyond_calendar_coverage"}
+        "beyond_calendar_coverage",
+        # 2026-10-02: what a screen needs to name the alert, on every row
+        "event_label", "event_estimated", "event_business_days", "first_notice_applies",
+        "delivery_lot_multiple", "delivery_lot_deadline", "delivery_lot_ok"}
 
 
 def test_a_first_notice_after_the_last_trade_date_leaves_last_trade_as_the_event(conn):

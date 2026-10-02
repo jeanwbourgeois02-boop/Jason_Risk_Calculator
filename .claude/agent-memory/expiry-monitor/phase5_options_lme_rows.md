@@ -14,7 +14,7 @@ Built 2026-09-24 (housekeeper brief, Phase 5):
 - LME_FWD: one instrument ('LME:CA') holds many prompts; positions are split by the legs' date
   (`_SPLIT_BY_LEG_DATE`). Row contract_id 'LME:CA 2026-12-16', dates_source 'TICKET', lots =
   tonnes / lot_tonnes, alert = prompt less `LME_CASH_DAYS` (2) on the LME calendar.
-- Futures rows keep exactly their old key set: the golden book pins `expiry_schedule`, so new
+- Futures rows kept their old key set until 2026-10-02 (naming keys added on every row, golden re-pin pending the user): new
   keys go only on option / LME rows.
 
 - Option dates_source can also be 'SYMBOL' (contract-master, 2026-09-24): `option_for(..., conn)`

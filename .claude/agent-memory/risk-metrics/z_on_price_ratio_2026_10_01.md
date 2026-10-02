@@ -24,6 +24,15 @@ dict carries `mean` / `sd`.
   0.000 % with USDCNH set equal to USDCNY; an LME-vs-LME pair differed 0.02 % (history reads the
   month's third-Wednesday prompt, the Book the ticket's own prompt).
 
+- 2026-10-02 (user approved, ZNA1 on the Bloomberg PC: Ratio now above Usual but Z now -0.9): on the
+  ratio basis z_entry / z_now are now the BOOK's own `ratio_entry` / `ratio_now` (passed as
+  `book_ratio`, open trades only, `_book_ratio`) against the window's mean / sd, point `source`
+  'book'; the exit and a missing Book figure read the last close (note says so). Cause was: z read
+  the history's last close (to yesterday; SHFE shut for Golden Week so 30 Sep), Ratio now read
+  today's marks. Rule: sign(z now) = sign(ratio now - usual), |gap| / |z| = window sd. Scratch
+  check: rm_setup.py real + rm_perturb.py (history ends 30 Sep, SHFE zinc -15 %) + rm_zcmp.py
+  (old module from `git show HEAD:` as rm_trades_old.py vs new).
+
 **Why:** user decision relayed by the housekeeper 2026-10-01.
 **How to apply:** a new spread shape needs only a `ratio_spec` from spreads-engine; see
 [[z-entry-now-exit-2026-10-01]] for the window and entry / exit dates.

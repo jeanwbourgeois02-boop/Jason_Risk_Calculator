@@ -1,3 +1,4 @@
 - [Estimated dates understate risk](estimated_dates_understate_risk.md) — estimated physical rows alert from the 1st business day of month M-1; never hard-code delivery
 - [Settled contracts leave the schedule](settled_contracts_leave_schedule.md) — fully frozen by the ledger -> settled_expired list, no alert; partly frozen stays EXPIRED
 - [Phase 5 option and LME rows](phase5_options_lme_rows.md) — estimated options always held early (lead-aware); LME alert = prompt less 2 LME bd; futures rows unchanged for golden
+- [No first notice, SHFE lot rule](no_first_notice_and_lot_rule.md) — CN exchanges + OSE key on last trade; SHFE CU/AL/ZN/PB 5-lot rule is a row event; naming keys

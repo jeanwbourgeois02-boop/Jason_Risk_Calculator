@@ -7,6 +7,11 @@ contract's own exchange calendar (``engine.calendars.business_days_between``):
 - ``RED``: the event is at most ``RED_MAX_BUSINESS_DAYS`` business days away (today counts as 0);
 - ``AMBER``: at most ``AMBER_MAX_BUSINESS_DAYS`` business days away;
 - ``GREEN``: further out.
+
+The exchange rules the alerts follow sit here too, so the user changes them in the same place:
+``NO_FIRST_NOTICE_EXCHANGES`` (exchanges with no first notice day, keyed on the last trading
+day whatever date Bloomberg gives) and ``DELIVERY_LOT_MULTIPLES`` (a position held into the
+delivery month must be a whole multiple of this many lots).
 """
 from __future__ import annotations
 
@@ -14,6 +19,17 @@ from typing import Optional
 
 RED_MAX_BUSINESS_DAYS = 3
 AMBER_MAX_BUSINESS_DAYS = 10
+
+# Exchanges with no first notice day (user, 2026-10-02): the Chinese exchanges and Japan's OSE
+# deliver after the last trading day, with no notice period before it. A physical contract of
+# theirs is keyed on its last trading day, never first notice, even when Bloomberg stores a
+# first notice date for it (``config/contracts.csv`` column ``exchange``).
+NO_FIRST_NOTICE_EXCHANGES = frozenset({"SHFE", "INE", "DCE", "ZCE", "GFEX", "OSE"})
+
+# Delivery-month lot multiples (user, 2026-10-02): on SHFE copper, aluminium, zinc and lead a
+# position held into the delivery month must be a whole multiple of the delivery unit (25 t,
+# 5 lots) by the close of the last trading day of the month before. Root id -> lots.
+DELIVERY_LOT_MULTIPLES = {"SHFE:CU": 5, "SHFE:AL": 5, "SHFE:ZN": 5, "SHFE:PB": 5}
 
 EXPIRED = "EXPIRED"
 RED = "RED"

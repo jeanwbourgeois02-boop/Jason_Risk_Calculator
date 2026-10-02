@@ -36,6 +36,17 @@ Next event of a future.
   last trade date comes first and is the event, since a position still open when trading
   stops goes to delivery.
 - Cash settled: the last trade date.
+- An exchange with no first notice day (``levels.NO_FIRST_NOTICE_EXCHANGES``: SHFE, INE, DCE,
+  ZCE, GFEX, OSE; user, 2026-10-02): the last trade date, whatever first notice date Bloomberg
+  stores for the contract, and the reason says so.
+- The delivery-month lot rule (``levels.DELIVERY_LOT_MULTIPLES``: SHFE copper, aluminium, zinc,
+  lead, 5 lots; user, 2026-10-02): a position not a whole multiple must be trimmed by the last
+  trading day of the month before the contract month. While that deadline comes before the
+  row's own alert date, or once it is past with the event still ahead, the row's event is
+  ``LOT_MULTIPLE`` at that deadline (an exact calendar date, ``event_estimated`` False); the
+  first notice or last trade it stands in front of is named in the reason. A missed deadline
+  with the position still open is RED, a breach to fix, never EXPIRED (EXPIRED stays for a
+  contract past its last trade).
 
 Alert date (user yes via the housekeeper, 2026-09-24). An ESTIMATED date is only "no later
 than", and the real event of a physical contract comes weeks earlier (CL stops trading about
@@ -88,6 +99,17 @@ FIRST_NOTICE = "first notice"
 LAST_TRADE = "last trade"
 OPTION_EXPIRY = "option expiry"
 LME_PROMPT = "LME prompt"
+LOT_MULTIPLE = "lot multiple"   # an SHFE base metal held into delivery not in whole delivery units
+
+# Each event in words, for a screen to name it (``event_label``; 2026-10-02). The lot rule's label
+# names its multiple: ``_event_label``.
+EVENT_LABELS = {
+    FIRST_NOTICE: "First notice day",
+    LAST_TRADE: "Last trading day",
+    OPTION_EXPIRY: "Option expiry",
+    LME_PROMPT: "Prompt date",
+    LOT_MULTIPLE: "Lots to a multiple of {multiple}",
+}
 
 # The prompt becomes the cash date this many LME business days before it (cash = T+2).
 LME_CASH_DAYS = 2
@@ -218,6 +240,54 @@ def _in_days(days: Optional[int], what: str, when: dt.date, cal: str) -> str:
     return f"{what} in {days} business day{'s' if days != 1 else ''} on the {cal} calendar"
 
 
+def _event_label(event: Optional[str], multiple: Optional[int] = None) -> str:
+    """The event in words: 'Last trading day', 'Lots to a multiple of 5'; '' with no event."""
+    if not event:
+        return ""
+    return EVENT_LABELS.get(event, event[:1].upper() + event[1:]).format(multiple=multiple or "")
+
+
+def _event_days(cal: str, as_of: dt.date, event_date: Optional[dt.date], alert_date: Optional[dt.date],
+                business_days: Optional[int]) -> Optional[int]:
+    """Business days from ``as_of`` to the event date itself (``business_days`` counts to the alert
+    date, which an estimated or LME row holds earlier); None when not countable."""
+    if event_date is None:
+        return None
+    if event_date == alert_date:
+        return business_days
+    try:
+        return calendars.business_days_between(cal, as_of, event_date)
+    except ValueError:
+        return None
+
+
+def has_first_notice(exchange: str) -> bool:
+    """Whether the exchange has a first notice day (``levels.NO_FIRST_NOTICE_EXCHANGES``)."""
+    return str(exchange or "").strip().upper() not in levels.NO_FIRST_NOTICE_EXCHANGES
+
+
+def _future_event(root, ltd: dt.date, fnd: Optional[dt.date], physical: bool) -> tuple[str, dt.date, list[str]]:
+    """(event, date, notes) of a future: first notice when it applies and comes first, else the
+    last trade date. An exchange with no first notice day is keyed on its last trading day even
+    when Bloomberg stores a first notice date for the contract."""
+    notes: list[str] = []
+    if physical and fnd is not None and not has_first_notice(root.exchange):
+        notes.append(f"{root.exchange} has no first notice day: Bloomberg's first notice date "
+                     f"{fnd.isoformat()} is not used, the last trading day is the key date")
+        return LAST_TRADE, ltd, notes
+    if physical and fnd is not None and fnd <= ltd:
+        return FIRST_NOTICE, fnd, notes
+    if physical and fnd is not None:
+        notes.append(f"first notice {fnd.isoformat()} follows the last trade date, "
+                     "so the last trade date is the event")
+    return LAST_TRADE, ltd, notes
+
+
+def _is_multiple(lots: float, multiple: int) -> bool:
+    q = abs(float(lots)) / multiple
+    return abs(q - round(q)) <= _ZERO_LOTS
+
+
 def _sentence(head: str, notes: list[str]) -> str:
     tail = "; ".join(notes)
     return head[0].upper() + head[1:] + (". " + tail[0].upper() + tail[1:] if tail else "") + "."
@@ -245,6 +315,9 @@ def _unresolved_row(pos: Position, root_id: str, why: str) -> dict:
         "reason": f"{_lots_text(pos.lots)} held, but its dates are unknown: {why}. "
                   "Treated as close to delivery until the contract is in config/contracts.csv.",
         "beyond_calendar_coverage": False,
+        "event_label": "", "event_estimated": True, "event_business_days": None,
+        "first_notice_applies": has_first_notice(root_id.split(":")[0]),
+        "delivery_lot_multiple": None, "delivery_lot_deadline": None, "delivery_lot_ok": None,
     }
 
 
@@ -261,15 +334,9 @@ def _future_row(conn: sqlite3.Connection, pos: Position, as_of: dt.date) -> Opti
     ltd = contract.last_trade_date
     fnd = contract.first_notice_date
     physical = root.delivery != "cash"
-    notes: list[str] = []
-
-    if physical and fnd is not None and fnd <= ltd:
-        event, event_date = FIRST_NOTICE, fnd
-    else:
-        event, event_date = LAST_TRADE, ltd
-        if physical and fnd is not None:
-            notes.append(f"first notice {fnd.isoformat()} follows the last trade date, "
-                         "so the last trade date is the event")
+    notices = has_first_notice(root.exchange)
+    event, event_date, notes = _future_event(root, ltd, fnd, physical)
+    main_event, main_date = event, event_date
 
     cal = root.calendar
     held = _lots_text(pos.lots)
@@ -281,27 +348,61 @@ def _future_row(conn: sqlite3.Connection, pos: Position, as_of: dt.date) -> Opti
     else:
         alert_date, alert_basis = event_date, event
 
+    # The delivery-month lot rule (levels.DELIVERY_LOT_MULTIPLES): a position not in whole delivery
+    # units must be trimmed by the last trading day of the month before the contract month. While
+    # that deadline comes before the row's own alert date it is the row's event (an exact date,
+    # from the calendar, even when the contract's dates are estimated).
+    multiple = levels.DELIVERY_LOT_MULTIPLES.get(root.root_id)
+    lot_deadline: Optional[dt.date] = None
+    lot_ok: Optional[bool] = None
+    lot_rule = False
+    if multiple:
+        lot_deadline = _month_before_last_business_day(cal, contract.year, contract.month)
+        lot_ok = _is_multiple(pos.lots, multiple)
+        # it wins while its deadline comes first, and once past it (a breach, not an estimate)
+        lot_rule = (not lot_ok and not main_date < as_of
+                    and (lot_deadline < alert_date or lot_deadline < as_of))
+        if lot_rule:
+            event, event_date = LOT_MULTIPLE, lot_deadline
+            alert_date, alert_basis = lot_deadline, _event_label(LOT_MULTIPLE, multiple)
+            early = False
+            notes.append(f"its {_event_label(main_event).lower()} is {main_date.isoformat()}"
+                         + (" (estimated)" if contract.estimated else ""))
+        elif not lot_ok and not main_date < as_of:
+            notes.append(f"{held} is not a multiple of {multiple} lots: to be held into the delivery month "
+                         f"it must be by the close of {lot_deadline.isoformat()}")
+
     business_days, beyond = _count(cal, as_of, alert_date, notes)
 
     event_past = event_date < as_of
     alert_past = alert_date < as_of
     level = _level(business_days, event_past, early and alert_past)
+    if lot_rule and event_past:
+        level = levels.RED  # a missed lot deadline is a breach to fix, not an expiry (2026-10-02)
+    real ="the real first notice or last trade" if notices else "the real last trade"
 
     def _in(days: Optional[int], what: str, when: dt.date) -> str:
         return _in_days(days, what, when, cal)
 
-    if event_past:
+    if lot_rule and event_past:
+        head = (f"the delivery month began with {held} held, not a multiple of {multiple} lots (deadline "
+                f"{lot_deadline.isoformat()}, the last trading day before it): trim or close now")
+    elif lot_rule:
+        head = (f"{_in(business_days, f'the {multiple}-lot deadline', lot_deadline)}, {held} held: a position "
+                f"held into the delivery month must be a whole multiple of {multiple} lots by then, "
+                "trim or close it")
+    elif event_past:
         head = (f"{event} was {event_date.isoformat()}"
                 + (" (estimated)" if contract.estimated else "")
                 + f", and {held} are still held: "
                 + ("delivery risk, close now" if physical else "close or check the cash settlement"))
     elif early and alert_past:
         head = (f"alert held early from {alert_date.isoformat()} ({alert_basis}), now past, {held} held: "
-                "the real first notice or last trade may already have passed")
+                f"{real} may already have passed")
     elif early:
         head = (f"alert held early: {_in(business_days, 'the alert date', alert_date)} "
-                f"({alert_basis}, {alert_date.isoformat()}), {held} held; the real first notice or "
-                f"last trade date is not on file, estimated {event} {event_date.isoformat()} is the latest "
+                f"({alert_basis}, {alert_date.isoformat()}), {held} held; {real} "
+                f"date is not on file, estimated {event} {event_date.isoformat()} is the latest "
                 "it can be")
     else:
         head = f"{_in(business_days, event, event_date)}, {held} held"
@@ -311,11 +412,12 @@ def _future_row(conn: sqlite3.Connection, pos: Position, as_of: dt.date) -> Opti
     if contract.estimated:
         text = ("dates estimated (last weekday of the contract month), not Bloomberg's: "
                 "the real last trade date may be earlier")
-        if physical:
+        if physical and notices:
             text += ", and with no first notice date on file delivery notices may start earlier still"
         notes.insert(0, text)
     elif physical and fnd is None:
-        notes.insert(0, "Bloomberg gives no first notice date: the last trade date is used")
+        notes.insert(0, "Bloomberg gives no first notice date: the last trade date is used" if notices
+                     else f"{root.exchange} has no first notice day: the last trading day is the event")
 
     reason = _sentence(head, notes)
     return {
@@ -329,7 +431,28 @@ def _future_row(conn: sqlite3.Connection, pos: Position, as_of: dt.date) -> Opti
         "next_event": event, "next_event_date": _iso(event_date),
         "alert_date": _iso(alert_date), "alert_basis": alert_basis, "business_days": business_days,
         "level": level, "reason": reason, "beyond_calendar_coverage": beyond,
+        "event_label": _event_label(event, multiple),
+        "event_estimated": False if lot_rule else contract.estimated,
+        "event_business_days": _event_days(cal, as_of, event_date, alert_date, business_days),
+        "first_notice_applies": bool(physical and notices),
+        "delivery_lot_multiple": multiple,
+        "delivery_lot_deadline": _iso(lot_deadline),
+        "delivery_lot_ok": lot_ok,
     }
+
+
+def _month_before_last_business_day(cal: str, year: int, month: int) -> dt.date:
+    """The last business day, on ``cal``, of the month before contract month ``year``-``month``
+    (the last weekday when the calendar is not on file)."""
+    m0 = year * 12 + month - 2
+    y, m = m0 // 12, m0 % 12 + 1
+    try:
+        return calendars.last_business_day_of_month(cal, y, m)
+    except ValueError:
+        d = dt.date(y + (m == 12), m % 12 + 1, 1) - dt.timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= dt.timedelta(days=1)
+        return d
 
 
 def _option_months_before(root) -> int:
@@ -381,11 +504,9 @@ def _option_row(conn: sqlite3.Connection, pos: Position, as_of: dt.date) -> dict
     else:
         head = f"{_in_days(business_days, OPTION_EXPIRY, expiry, cal)}, {held} held"
 
-    und_fnd = und.first_notice_date
-    if und_fnd is not None and und_fnd <= und.last_trade_date:
-        und_event, und_date = FIRST_NOTICE, und_fnd
-    else:
-        und_event, und_date = LAST_TRADE, und.last_trade_date
+    # the underlying's event as before (first notice when on file and first), except on an
+    # exchange with no first notice day (levels.NO_FIRST_NOTICE_EXCHANGES): its last trading day
+    und_event, und_date, _ = _future_event(und.root, und.last_trade_date, und.first_notice_date, True)
     if physical:
         text = (f"exercised, it becomes the future {und.contract_id}, physically delivered"
                 + (" (delivery method not on file: treated as physical)" if root.delivery == "" else "")
@@ -411,6 +532,10 @@ def _option_row(conn: sqlite3.Connection, pos: Position, as_of: dt.date) -> dict
         "option_type": option.option_type, "strike": option.strike, "style": option.style,
         "underlying_id": und.contract_id, "underlying_event": und_event,
         "underlying_event_date": _iso(und_date), "underlying_estimated": und.estimated,
+        "event_label": _event_label(OPTION_EXPIRY), "event_estimated": option.estimated,
+        "event_business_days": _event_days(cal, as_of, expiry, alert_date, business_days),
+        "first_notice_applies": False,
+        "delivery_lot_multiple": None, "delivery_lot_deadline": None, "delivery_lot_ok": None,
     }
 
 
@@ -485,6 +610,10 @@ def _lme_row(conn: sqlite3.Connection, pos: Position, as_of: dt.date) -> dict:
         "alert_date": _iso(alert_date), "alert_basis": alert_basis, "business_days": business_days,
         "level": level, "reason": _sentence(head, notes), "beyond_calendar_coverage": beyond,
         "tonnes": tonnes, "prompt_date": _iso(prompt), "instrument_id": root_id,
+        "event_label": _event_label(LME_PROMPT), "event_estimated": False,
+        "event_business_days": _event_days(cal, as_of, prompt, alert_date, business_days),
+        "first_notice_applies": False,
+        "delivery_lot_multiple": None, "delivery_lot_deadline": None, "delivery_lot_ok": None,
     }
 
 
@@ -549,7 +678,7 @@ def expiry_schedule(conn: sqlite3.Connection, as_of: Union[dt.date, str]) -> dic
       ``dates_source`` ('BLOOMBERG' | 'ESTIMATED' | 'SYMBOL' for an option's own expiry as booked,
       earlier than the estimate | 'TICKET' for an LME prompt, the ticket's own date; '' when
       unresolved), ``estimated`` (the one test of "not a real date"), ``next_event`` ('first notice' | 'last trade' |
-      'option expiry' | 'LME prompt'), ``next_event_date``, ``alert_date`` (ISO: the date the
+      'option expiry' | 'LME prompt' | 'lot multiple'), ``next_event_date``, ``alert_date`` (ISO: the date the
       level is counted to), ``alert_basis`` ('estimated: first business day of <Mon YYYY>', 'cash
       date: prompt less 2 LME business days', or the event name), ``business_days`` (to
       ``alert_date``, negative once past; None when not countable), ``level`` ('EXPIRED' | 'RED'
@@ -557,7 +686,19 @@ def expiry_schedule(conn: sqlite3.Connection, as_of: Union[dt.date, str]) -> dic
       Option rows add ``option_type`` ('CALL' | 'PUT'), ``strike``, ``style``, ``underlying_id``,
       ``underlying_event`` ('first notice' | 'last trade'), ``underlying_event_date``,
       ``underlying_estimated``; LME rows add ``tonnes`` (signed net), ``prompt_date``,
-      ``instrument_id`` ('LME:CA'). Futures rows carry no extra key;
+      ``instrument_id`` ('LME:CA'). Every row (2026-10-02) also carries what a screen needs to
+      name the alert: ``event_label`` ('First notice day' | 'Last trading day' | 'Option expiry'
+      | 'Prompt date' | 'Lots to a multiple of 5'; '' when unresolved), ``event_estimated``
+      (whether ``next_event_date`` is an estimate: ``estimated``, except False on the lot rule,
+      an exact calendar date), ``event_business_days`` (business days to ``next_event_date``
+      itself on the row's calendar; ``business_days`` counts to ``alert_date``, which an
+      estimated or LME row holds earlier; None when not countable), ``first_notice_applies``
+      (the contract is physical, or treated so, on an exchange that has a first notice day),
+      ``delivery_lot_multiple`` (5 on an SHFE base metal, else None), ``delivery_lot_deadline``
+      (ISO: the last trading day before the contract month, or None), ``delivery_lot_ok``
+      (whether the net lots are a whole multiple; None without the rule). The contract is
+      named on screen from ``contract_id`` (``formatting.contract_name``) or, for an LME
+      prompt, ``root_id`` and ``prompt_date``;
     - ``counts``: rows per level, every level present (settled contracts not counted);
     - ``thresholds``: ``levels.thresholds()``;
     - ``note``: '' or why ``rows`` is empty;

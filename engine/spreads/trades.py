@@ -36,6 +36,13 @@ for the type) are read per contract root on their OPEN lots.
    product, .5 term structure, ``trades.trade_type``) disagrees with the rule (a MIXED trade whose
    label names one of its parts does not disagree).
 
+**The spreads inside a trade** (2026-10-02, user yes): ``structures.find_structures`` finds them from
+the fills (a calendar dealt as one, a box of two such calendars on two exchanges, the other fills
+pooled and read by the rule above, hedges linked to the China legs they cover); each is one
+``sub_spreads`` entry with its own fills, its own average cost per contract and its quote. The type
+rule above then reads the open structures: one kind, or ``MIXED``; a box (``BOX``) is a kind of
+its own.
+
 **The level** is the level of the trade's one spread: its cross part's (``strategies``' pair:
 two quote units that agree read A - B, a template its unit; a China-against-the-West pair the
 CONVERTED ratio, China on top, user 2026-09-29), else its one calendar's (near - far of the
@@ -66,11 +73,13 @@ from data.contracts.tickers import format_strike, month_from_code, parse_option_
 
 from engine.pnl.valuation import value_book
 from engine.spreads import strategies as st
+from engine.spreads import structures as sx
 from engine.spreads.book import ValueFn, is_estimate, level_on
 from engine.spreads.grouping import CALENDAR, LEFTOVER_FLOOR, TOLERANCE, Leg, calendar_shape
 from engine.spreads.hedges import FX_SECTOR, is_hedge
 from engine.spreads.levels import spec_for, spec_from_dict, spec_to_dict, usd_per_level_unit
 from engine.spreads.ratio import spread_ratio, trade_ratio
+from engine.spreads.structures import component_ratio
 from engine.spreads.templates import lot_in_quote_units
 from engine.spreads.trade_type import CROSS_EXCHANGE, CROSS_PRODUCT, TERM_STRUCTURE
 
@@ -81,7 +90,8 @@ TYPE_MIXED = "MIXED"
 TYPE_OUTRIGHT = "OUTRIGHT"           # one commodity held one way: not a spread
 TYPE_NONE = ""                       # hedges only
 TYPE_UNMATCHED = "UNMATCHED"         # a part's legs no equal-size rule pairs: listed, no level (2026-10-01)
-TRADE_TYPES = (TYPE_CALENDAR, TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT, TYPE_MIXED, TYPE_OUTRIGHT)
+TYPE_BOX = sx.BOX                    # one commodity on two exchanges over two months: two arbs (user, 2026-10-02)
+TRADE_TYPES = (TYPE_CALENDAR, TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT, TYPE_BOX, TYPE_MIXED, TYPE_OUTRIGHT)
 LABEL_TYPE = {CROSS_EXCHANGE: TYPE_CROSS_EXCHANGE, CROSS_PRODUCT: TYPE_CROSS_PRODUCT, TERM_STRUCTURE: TYPE_CALENDAR}
 LABEL_DECIMAL = {CROSS_EXCHANGE: ".3", CROSS_PRODUCT: ".4", TERM_STRUCTURE: ".5"}
 FAMILY_CROSS = "cross-product"
@@ -101,7 +111,7 @@ _PRECIOUS_FAMILY = {"XAU": "gold", "XAG": "silver", "XPT": "platinum", "XPD": "p
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _WORDS = {TYPE_CALENDAR: "calendar", TYPE_CROSS_EXCHANGE: "cross exchange", TYPE_CROSS_PRODUCT: "cross product",
           TYPE_MIXED: "mixed", TYPE_OUTRIGHT: "an outright", TYPE_NONE: "hedges only",
-          TYPE_UNMATCHED: "unmatched legs"}
+          TYPE_UNMATCHED: "unmatched legs", TYPE_BOX: "box"}
 _ACRONYMS = frozenset({"hrc", "lpg", "pta", "meg", "pvc", "lldpe", "dap", "uan", "psf"})
 # the link words a name keeps in lower case (user, 2026-10-01: Title Case in the engine's names): the
 # same set as the screens' ``formatting.title_name``, so a name written here reads the same after it
@@ -720,7 +730,13 @@ def _mismatch(kind: str, part_kinds: Sequence[str], labels: Sequence[str], pb_ro
     wanted = sorted({LABEL_TYPE[x] for x in labels if x in LABEL_TYPE})
     if not wanted or kind == TYPE_NONE:
         return ""
-    off = [w for w in wanted if w not in part_kinds] if kind == TYPE_MIXED else [w for w in wanted if w != kind]
+    # a box is a calendar on each exchange and an arb in each month: a .3 or a .5 label fits it
+    box_fits = (TYPE_CROSS_EXCHANGE, TYPE_CALENDAR)
+    kinds = set(part_kinds) | (set(box_fits) if TYPE_BOX in part_kinds else set())
+    if kind == TYPE_MIXED:
+        off = [w for w in wanted if w not in kinds]
+    else:
+        off = [w for w in wanted if w != kind and not (kind == TYPE_BOX and w in box_fits)]
     if not off:
         return ""
     said = " and ".join(f"{LABEL_DECIMAL[x]} {_WORDS[LABEL_TYPE[x]]}" for x in labels if x in LABEL_TYPE)
@@ -1023,9 +1039,10 @@ def _leg_rows(book, entry: dict, tids: Sequence[str], symbols: Dict[str, str], p
             "status": status, "currency": str(t["quote_ccy"] or ""),
             "trade_ids": list(ids), "open_trade_ids": list(open_ids),
         }
-        # the average entry of the open lots, in the fills' quoted price
+        # the average cost of the open lots, in the fills' quoted price (``structures.avg_cost``, the
+        # spec's 7.1, 2026-10-02; each structure's own leg has its own, ``structures.leg_portion``)
         if status == "open":
-            px, _net, why = st._entry_value(book, open_ids, quoted=True)
+            px, _net, _locked, why = sx.avg_cost(book, open_ids)
             row.update(avg_fill=px, avg_fill_reason=why if px is None else "")
         else:
             row.update(avg_fill=None, avg_fill_reason="no open lots")
@@ -1657,7 +1674,8 @@ def _next_block(book, rows: List[dict], pleg_by_cid: Dict[str, st.PLeg]) -> Tupl
             e = None if s is None else {"contract_id": r["contract_id"], "event": s.get("next_event"),
                                         "date": s.get("next_event_date"), "alert_date": s.get("alert_date"),
                                         "business_days": s.get("business_days"), "level": s.get("level"),
-                                        "estimated": bool(s.get("estimated")), "reason": s.get("reason", "")}
+                                        "estimated": bool(s.get("estimated")), "reason": s.get("reason", ""),
+                                        **st.event_extras(s)}
         if e and e.get("date"):
             events.append({**e, "leg": r["name"], "hedge": r["hedge"]})
     if not events:
@@ -1700,6 +1718,8 @@ def _what_it_is(book, kind: str, parts: List[_Part], rows: List[dict], hedge: di
         text = " + ".join(_part_what(book, p, {r["contract_id"]: r for r in rows}) for p in parts)
     elif kind == TYPE_CALENDAR and roots:
         text += f" Calendar, {months}" if months else " Calendar"
+    elif kind == TYPE_BOX and roots:
+        text += f", {months} Box" if months else " Box"
     elif roots and open_rows and all(r["product"] in st.OPTION_PRODUCTS for r in open_rows):
         text += " Options (" + ", ".join(r["name"] for r in open_rows) + ")"
     elif months:
@@ -1713,13 +1733,18 @@ def _part_what(book, part: _Part, rows_by_cid: Dict[str, dict]) -> str:
     """'SGX Iron Ore Oct26/Feb27 Calendar', 'SHFE Copper vs COMEX Copper, Nov/Dec26', 'Unmatched:
     SGX Iron Ore Oct/Nov26 & Feb/Mar27' (Title Case, user 2026-10-01)."""
     roots = [book.roots[r] for r in part.roots if r in book.roots]
-    months = _months_text(rows_by_cid[c]["month"] for c in part.legs if c in rows_by_cid)
+    # a structure with nothing open is named by the contracts it traded
+    cids = list(part.legs) or list(getattr(getattr(part, "struct", None), "fills", None) or {})
+    months = _months_text(rows_by_cid[c]["month"] for c in cids if c in rows_by_cid)
     if part.kind == TYPE_UNMATCHED:
         named = " + ".join(rows_by_cid.get(c, {}).get("name", c) for c in sorted(
-            part.legs, key=lambda c: (rows_by_cid.get(c, {}).get("month", ""), c)))
+            cids, key=lambda c: (rows_by_cid.get(c, {}).get("month", ""), c)))
         return f"Unmatched: {named}"
     if part.kind == TYPE_CALENDAR and roots:
-        return f"{roots[0].exchange} {commodity_words(roots[0])} {months} Calendar"
+        return " ".join(x for x in (roots[0].exchange, commodity_words(roots[0]), months, "Calendar") if x)
+    if part.kind == TYPE_BOX and roots:
+        roots.sort(key=lambda r: r.country != st.CHINA)
+        return " vs ".join(f"{r.exchange} {commodity_words(r)}" for r in roots) + f", {months} Box"
     if roots:
         roots.sort(key=lambda r: r.country != st.CHINA)
         return " vs ".join(f"{r.exchange} {commodity_words(r)}" for r in roots) + (f", {months}" if months else "")
@@ -1857,70 +1882,6 @@ def _row_sides(book, rows: Sequence[dict]) -> dict:
     return out
 
 
-_PORTION_FIGS = ("daily", "ltd", "open", "locked", "quantity", "value_local", "value_usd", "roll_down_usd_per_month")
-
-
-def _shares(total: Optional[float], weights: Sequence[float], cents: bool = True) -> List[Optional[float]]:
-    """``total`` cut by ``weights`` (shares summing to 1): each portion but the last rounded to the
-    cent, the last the rest, so the portions add up to ``total`` exactly (None stays None)."""
-    if total is None:
-        return [None] * len(weights)
-    out: List[Optional[float]] = []
-    for w in weights[:-1]:
-        x = float(total) * w
-        out.append(round(x, 2) if cents else x)
-    out.append(float(total) - sum(out))
-    return out
-
-
-def _leg_portions(subs: List[dict], rows: Sequence[dict]) -> List[dict]:
-    """Each spread's legs carry their own portion of the leg (user, 2026-10-01): a leg two spreads
-    share (STEEL's HRC Dec26 short 200: 175 in Oct/Dec, 25 in Nov/Dec) is cut by the lots each
-    spread holds of it, so each spread's row is the sum of its own legs. A portion is the trade's
-    leg row with ``lots`` (the lots this spread holds, as before), ``share`` (its part of the leg:
-    its lots / the lots every spread holding the leg holds, so a leg in one spread is whole, share
-    1, as before), ``shared`` (another spread holds part of it too), ``leg_lots`` (the whole leg's
-    open lots) and quantity, value_local, value_usd, roll_down_usd_per_month, pnl_usd {daily, ltd},
-    pnl_open and pnl_locked times the share; fill, mark and reasons unchanged. Each portion but the
-    last rounded to the cent and the last the rest, so a leg's portions add up to the leg exactly
-    (pnl_locked of a portion = its ltd - its open, the last the leg's rest). A split for display:
-    no trade's, leg's or ``value_book`` figure changes."""
-    by_cid = {r["contract_id"]: r for r in rows}
-    holders: Dict[str, List[Tuple[int, int, float]]] = defaultdict(list)
-    for i, sub in enumerate(subs):
-        for j, leg in enumerate(sub.get("legs") or []):
-            if leg.get("contract_id") in by_cid:
-                holders[leg["contract_id"]].append((i, j, abs(float(_num(leg.get("lots")) or 0.0))))
-    new_legs = [list(sub.get("legs") or []) for sub in subs]
-    for cid, held in holders.items():
-        row = by_cid[cid]
-        tot = sum(w for _i, _j, w in held)
-        weights = [w / tot for _i, _j, w in held] if tot > _EPS else [1.0 / len(held)] * len(held)
-        figs = {
-            "daily": (row.get("pnl_usd") or {}).get("daily"), "ltd": (row.get("pnl_usd") or {}).get("ltd"),
-            "open": row.get("pnl_open"), "locked": row.get("pnl_locked"),
-            "quantity": _num(row.get("quantity")), "value_local": _num(row.get("value_local")),
-            "value_usd": _num(row.get("value_usd")),
-            "roll_down_usd_per_month": _num(row.get("roll_down_usd_per_month")),
-        }
-        cut = {k: _shares(v, weights, cents=k not in ("quantity",)) for k, v in figs.items()}
-        if figs["ltd"] is not None and figs["open"] is not None and figs["locked"] is not None:
-            # locked in = the portion's ltd - its open, the last the leg's rest (open + locked = ltd)
-            lk = [cut["ltd"][n] - cut["open"][n] for n in range(len(held) - 1)]
-            cut["locked"] = lk + [float(figs["locked"]) - sum(lk)]
-        for n, (i, j, _w) in enumerate(held):
-            leg = new_legs[i][j]
-            portion = {**row, **leg}
-            portion.update(share=weights[n], shared=len(held) > 1, leg_lots=_num(row.get("lots")),
-                           quantity=cut["quantity"][n], value_local=cut["value_local"][n],
-                           value_usd=cut["value_usd"][n], roll_down_usd_per_month=cut["roll_down_usd_per_month"][n],
-                           pnl_usd={**(row.get("pnl_usd") or {}), "daily": cut["daily"][n], "ltd": cut["ltd"][n]},
-                           pnl_reasons=dict(row.get("pnl_reasons") or {}),
-                           pnl_open=cut["open"][n], pnl_locked=cut["locked"][n])
-            new_legs[i][j] = portion
-    return [{**sub, "legs": legs} for sub, legs in zip(subs, new_legs)]
-
-
 def _level_meta(book, level: dict, legs: Dict[str, float], rows_by_cid: Dict[str, dict]) -> dict:
     """``level`` with the spread it is read on (2026-10-01, so each spread's level stands alone):
     ``legs`` [{contract_id, instrument_id, root_id, name, month, prompt, lots}] and ``entry_date``
@@ -1951,6 +1912,126 @@ def _part_row(book, part: _Part, rows_by_cid: Dict[str, dict], level: dict,
             "size_sides": _size_sides(book, items, names, one_here)}
 
 
+def _structure_parts(book, structs: Sequence[sx.Structure]) -> List[_Part]:
+    """Each structure as a ``_Part`` (its open lots per contract, signed; a contract two
+    structures share at its share), with the structure and its own legs (``strategies.PLeg`` on
+    the structure's fills only, so every level reads its own fills) on it."""
+    parts: List[_Part] = []
+    for s in structs:
+        ids = sorted({t for v in s.fills.values() for t in v})
+        plegs = st._build_legs(book, ids)[0] if ids else []
+        pbc = {p.contract_id: p for p in plegs}
+        legs: Dict[str, float] = {}
+        for cid in s.fills:
+            p = pbc.get(cid)
+            if p is not None and abs(p.lots * s.share.get(cid, 1.0)) > LEFTOVER_FLOOR:
+                legs[cid] = p.lots * s.share.get(cid, 1.0)
+        roots = list(dict.fromkeys([pbc[c].root_id for c in legs] + list(s.closed_roots)))
+        if not roots:
+            roots = list(dict.fromkeys(str(book.by_id[t]["base_ccy"] or "") for t in ids))
+        part = _Part(s.kind, roots, legs, s.note)
+        part.closed_roots, part.of_kind, part.split = list(s.closed_roots), s.of_kind, s.split
+        part.struct, part.plegs = s, pbc
+        parts.append(part)
+    return parts
+
+
+def _structure_splits(rows: List[dict], portions: Sequence[Tuple[List[dict], List[dict]]], ids: Sequence[str]) -> None:
+    """The trade's leg rows' open / locked in from its structures' legs (user yes under hard rule 7,
+    2026-10-02: the average cost is per structure and contract): a contract every fill of which is
+    in the trade's structures takes open = its structure legs' open summed and locked in = its LTD -
+    that, so the LTD never moves; a contract with a fill outside them keeps its own split
+    (``_split_leg``). Each structure leg gets ``share`` (its lots / the lots of every structure
+    holding the contract) and ``shared``; each row ``structure_ids``."""
+    held: Dict[str, List[Tuple[str, dict]]] = defaultdict(list)
+    covered: set = set()
+    for sid, (mine, hedges) in zip(ids, portions):
+        for p in mine + hedges:
+            held[p["contract_id"]].append((sid, p))
+            covered |= set(p.get("trade_ids") or [])
+    for row in rows:
+        ps = held.get(row["contract_id"]) or []
+        row["structure_ids"] = list(dict.fromkeys(sid for sid, _p in ps))
+        tot = sum(abs(_num(p.get("lots")) or 0.0) for _s, p in ps)
+        for _s, p in ps:
+            p["share"] = (abs(_num(p.get("lots")) or 0.0) / tot) if tot > _EPS else 1.0 / len(ps)
+            p["shared"] = len(ps) > 1
+        if not ps or row.get("unrecognised") or not set(row["trade_ids"]) <= covered:
+            continue
+        ltd = (row.get("pnl_usd") or {}).get("ltd")
+        if ltd is None:
+            continue
+        bad = [p for _s, p in ps if p.get("pnl_open") is None]
+        if bad:
+            row.update(pnl_open=None, pnl_locked=None,
+                       pnl_split_reason=_join(str(p.get("pnl_split_reason") or "") for p in bad) or "not split")
+            continue
+        locked = float(ltd) - float(sum(float(p["pnl_open"]) for _s, p in ps))
+        if abs(locked) < 0.005:
+            locked = 0.0           # float dust of the structures' sum: nothing locked in
+        row.update(pnl_open=float(ltd) - locked, pnl_locked=locked, pnl_split_reason="")
+
+
+def _sum_figure(rows: Sequence[dict], get) -> Tuple[Optional[float], str]:
+    vals, whys = [], []
+    for r in rows:
+        v, why = get(r)
+        if v is None:
+            whys.append(f"{r.get('name')}: {why or 'no figure'}")
+        else:
+            vals.append(float(v))
+    return (None, _join(whys)) if whys else (float(sum(vals)), "")
+
+
+def _structure_pnl(legs: Sequence[dict]) -> dict:
+    """A structure's P&L: its legs' (and hedges') figures summed, None with the reasons when any is."""
+    out = {}
+    for key, get in (("ltd", lambda r: ((r.get("pnl_usd") or {}).get("ltd"), (r.get("pnl_reasons") or {}).get("ltd"))),
+                     ("daily", lambda r: ((r.get("pnl_usd") or {}).get("daily"),
+                                          (r.get("pnl_reasons") or {}).get("daily"))),
+                     ("open", lambda r: (r.get("pnl_open"), r.get("pnl_split_reason"))),
+                     ("locked", lambda r: (r.get("pnl_locked"), r.get("pnl_split_reason")))):
+        v, why = _sum_figure(legs, get)
+        out[key], out[f"{key}_reason"] = v, why
+    return out
+
+
+def _quote_level(q: dict, prev_day: str, label: str) -> dict:
+    """A structure's quote as a level dict (a box's level: no spec, so no z history)."""
+    out = _blank_level(q.get("reason") or "")
+    out.update(unit=q.get("unit", ""), entry=q.get("entry"), prev=q.get("prev"), now=q.get("now"),
+               change=q.get("change"), prev_date=prev_day, entry_reason=q.get("entry_reason", ""),
+               prev_reason=q.get("prev_reason", ""), now_reason=q.get("now_reason", ""),
+               change_reason=q.get("change_reason", ""), usd_per_unit=q.get("usd_per_unit"),
+               usd_per_unit_reason=q.get("size_reason", ""), label=label, mode="difference", source="structure",
+               note="the far month's arb minus the near month's, each China leg at its USD/CNH hedge's fill and mark",
+               sources={"entry": "each leg's average cost", "now": "each leg's mark", "prev": "each leg's previous close"},
+               reason=q.get("reason", "") if q.get("entry") is None and q.get("now") is None else "")
+    return _set_estimates(out, {"now": q.get("estimate_note", "")})
+
+
+def _component(book, comp: dict, part: _Part, by_cid: Dict[str, dict], prev_day: str, prev_rows: Dict[str, dict]
+               ) -> dict:
+    """A box's arb (one month, the two exchanges): its quote figures, what it is, its own legs, its
+    level by the pairs' one level rule (with its spec, for its z) and its ratio keys."""
+    cids = [c for c in comp["contract_ids"] if c in by_cid]
+    legs = [by_cid[c] for c in cids]
+    out = dict(comp)
+    roots = [book.roots[r["root_id"]] for r in legs if r.get("root_id") in book.roots]
+    roots.sort(key=lambda r: r.country != st.CHINA)
+    out["what_it_is"] = (" vs ".join(f"{r.exchange} {commodity_words(r)}" for r in roots)
+                         + f", {month_label(comp['month'])}")
+    out["legs"] = legs
+    live = {c: part.legs[c] for c in cids if c in part.legs}
+    if len(live) == 2 and all(c in part.plegs for c in live):
+        sub = _Part(TYPE_CROSS_EXCHANGE, [part.plegs[c].root_id for c in live], live)
+        out["level"] = _level_meta(book, _month_pair_level(book, sub, part.plegs, prev_day, prev_rows), live, by_cid)
+    else:
+        out["level"] = _blank_level("a leg of this arb is flat")
+    out.update(component_ratio(book, [r for r in legs if r.get("status") == "open"]))
+    return out
+
+
 def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str], history,
            memo: Optional[dict] = None) -> dict:
     tids = list(entry["trade_ids"])
@@ -1963,65 +2044,123 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         prev_rows = {}
     rows = _leg_rows(book, entry, tids, symbols, prev_day, prev_rows)
     rows_by_cid = {r["contract_id"]: r for r in rows}
-    parts, _left, type_note = _decompose(book, tids, legs, _roll_trade_ids(roll_data, name))
+    names = {c: r["name"] for c, r in rows_by_cid.items()}
+    carry, carry_why, carry_date = _roll_downs(book, rows, pleg_by_cid, history, memo)
     one = next((p for p in entry.get("pairs") or [] if p.get("rule") == st.RULE_ONE_SPREAD), None)
     one_roots = {r for s in (one or {}).get("sides") or [] for r in s.get("root_ids") or []}
-    parts = _split_parts(book, parts, pleg_by_cid, one_roots, {c: r["name"] for c, r in rows_by_cid.items()})
-    kinds = [p.of_kind for p in parts]
+    # the spreads Jason put on, from the fills (engine.spreads.structures, user 2026-10-02)
+    structs, unplaced, s_notes = sx.find_structures(book, name, tids, _roll_trade_ids(roll_data, name), one_roots,
+                                                    names)
+    parts = _structure_parts(book, structs)
+    split = entry.get("daily") or {}
+    by_trade = split.get("by_trade") or {}
+    split_ok = not split.get("reason") and (entry.get("pnl_usd") or {}).get("daily") is not None
+    daily_why = split.get("reason") or (entry.get("pnl_reasons") or {}).get("daily") or "no Daily P&L"
+    portions: List[Tuple[List[dict], List[dict]]] = []
+    for part in parts:
+        s = part.struct
+        mine = [sx.leg_portion(book, rows_by_cid[c], ids, s.share.get(c, 1.0), split_ok, by_trade, daily_why)
+                for c, ids in s.fills.items() if c in rows_by_cid and ids]
+        hedges = [sx.leg_portion(book, rows_by_cid[c], ids, 1.0, split_ok, by_trade, daily_why)
+                  for c, ids in s.hedge_fills.items() if c in rows_by_cid and ids]
+        mine.sort(key=lambda r: (r["status"] != "open", r["month"], r["prompt"], r["root_id"], r["contract_id"]))
+        hedges.sort(key=lambda r: (r["status"] != "open", r["month"], r["prompt"], r["contract_id"]))
+        portions.append((mine, hedges))
+    # the order the structures are listed in: open ones by their first month, unmatched legs last
+    order = sorted(range(len(parts)), key=lambda n: (
+        not parts[n].legs, parts[n].kind == TYPE_UNMATCHED,
+        min((pleg.month for c, pleg in parts[n].plegs.items() if c in parts[n].legs), default="9999"),
+        min((sx.fill_key(book, t) for t in parts[n].struct.ids()), default=("", (0, 0, "")))))
+    parts = [parts[n] for n in order]
+    portions = [portions[n] for n in order]
+    sids = [f"{name}/{n + 1}" for n in range(len(parts))]
+    _structure_splits(rows, portions, sids)
+    open_n = [n for n, p in enumerate(parts) if p.legs]
+    kinds = [parts[n].of_kind for n in open_n if parts[n].of_kind]
+    if open_n and not kinds:
+        # only legs no spread takes: one commodity held one way, else the commodities' cross kind
+        live = [book.roots[r] for n in open_n for r in parts[n].roots if r in book.roots]
+        kinds = [TYPE_OUTRIGHT if len({r.root_id for r in live}) <= 1 else _cross_kind(live)]
+    type_note = s_notes[0] if s_notes else ""
     unknown = [r for r in rows if r["unrecognised"]]
-    if not parts and unknown and all(r["unrecognised"] or r["hedge"] for r in rows):
+    if not open_n and unknown and all(r["unrecognised"] or r["hedge"] for r in rows):
         kind, type_note = TYPE_NONE, ("only contracts the app does not recognise: not typed until they are mapped "
                                       f"({', '.join(r['name'] for r in unknown)})")
-    elif not parts:
+    elif not open_n:
         kind, type_note = _type_other(book, tids, rows)
     else:
         kind = kinds[0] if len(set(kinds)) == 1 else TYPE_MIXED
-    # the levels: one per part; the trade's is its one spread's
+    # the levels: one per structure; the trade's is its one spread's
     cross_pairs = [p for p in entry.get("pairs") or [] if p.get("type") in (CROSS_EXCHANGE, CROSS_PRODUCT)]
     part_levels: List[dict] = []
-    n_cross = sum(1 for p in parts if p.kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT))
-    for part in parts:
-        if part.kind == TYPE_UNMATCHED:
+    quotes: List[dict] = []
+    for part, (mine, hedges) in zip(parts, portions):
+        quote = sx.structure_quote(book, part.kind, mine, hedges, part.struct.components, prev_rows)
+        quotes.append(quote)
+        if not part.legs:
+            part_levels.append(_blank_level("nothing open in this spread: its lots were all taken off"))
+        elif part.kind == TYPE_UNMATCHED:
             part_levels.append(_blank_level(part.note))
+        elif part.kind == TYPE_BOX:
+            part_levels.append(_quote_level(quote, prev_day, _part_what(book, part, rows_by_cid)))
         elif part.kind == TYPE_CALENDAR:
-            part_levels.append(_calendar_level(book, part, pleg_by_cid, prev_day, prev_rows))
-        elif part.kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT) and part.split and len(part.legs) == 2:
-            # a spread cut out of a bigger part (equal size): its own level, by the pairs' one level rule
-            part_levels.append(_month_pair_level(book, part, pleg_by_cid, prev_day, prev_rows))
-        elif part.kind == TYPE_CROSS_EXCHANGE and n_cross > 1 and len(part.legs) == 2:
-            # one of several month pairs: its own level, by the pairs' one level rule
-            part_levels.append(_month_pair_level(book, part, pleg_by_cid, prev_day, prev_rows))
+            part_levels.append(_calendar_level(book, part, part.plegs, prev_day, prev_rows))
+        elif part.kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT) and len(part.legs) == 2 \
+                and all(c in part.plegs for c in part.legs) and not (set(part.roots) <= one_roots and one):
+            # a two-leg spread: its own level, by the pairs' one level rule on its own fills
+            part_levels.append(_month_pair_level(book, part, part.plegs, prev_day, prev_rows))
         elif part.kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT):
             fit = [p for p in cross_pairs if {x["root_id"] for x in p["legs"]} <= set(part.roots)]
-            covered = _template_level(book, part, pleg_by_cid, prev_day, prev_rows) if len(part.legs) >= 3 else None
+            covered = _template_level(book, part, part.plegs, prev_day, prev_rows) if len(part.legs) >= 3 else None
             if covered is not None:
                 part_levels.append(covered)
             elif len(fit) == 1:
                 part_levels.append(_pair_level(book, fit[0]))
-            elif not fit and part.closed_roots:
-                part_levels.append(_open_side_level(book, part, rows, pleg_by_cid, prev_day, prev_rows))
+            elif part.closed_roots:
+                part_levels.append(_open_side_level(book, part, mine, part.plegs, prev_day, prev_rows))
             elif not fit:
                 part_levels.append(_blank_level(part.note or "no open pair of legs to read a level from"))
             else:
                 part_levels.append(_blank_level(f"{len(fit)} pairs in this part: each has its own level"))
         else:
             part_levels.append(_blank_level("an outright has no spread level"))
-    subs = [_part_row(book, p, rows_by_cid, lv, pleg_by_cid, one) for p, lv in zip(parts, part_levels)]
-    real = [n for n, p in enumerate(parts) if p.kind != TYPE_UNMATCHED]
-    cross_idx = [n for n in real if parts[n].kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT)]
+    subs = []
+    for n, (part, lv) in enumerate(zip(parts, part_levels)):
+        mine, hedges = portions[n]
+        sub = _part_row(book, part, rows_by_cid, lv, part.plegs, one)
+        by_cid = {r["contract_id"]: r for r in mine}
+        live = [r for r in mine if r["status"] == "open"]
+        s = part.struct
+        quote = quotes[n]
+        stype = sx.structure_type(part.kind)
+        sub.update(
+            structure_id=sids[n], structure_type=stype, structure_type_words=sx.STRUCTURE_WORDS.get(stype, stype),
+            origin=s.origin, status="open" if part.legs else "closed", fill_ids=s.ids(),
+            legs=live, closed_legs=[r for r in mine if r["status"] != "open"], hedge_legs=hedges,
+            quote=quote, flags=sx.structure_flags(quote), pnl=_structure_pnl(mine + hedges),
+            components=[_component(book, c, part, by_cid, prev_day, prev_rows) for c in quote.get("components") or []],
+        )
+        # the price ratio of each two-leg spread, both legs in USD, China on top (user, 2026-10-01): display only
+        sub.update(spread_ratio(book, [{"contract_id": r["contract_id"], "lots": r["lots"]} for r in live],
+                                by_cid, sub.get("type", ""), sub.get("level")))
+        subs.append(sub)
+    real = [n for n in open_n if parts[n].kind != TYPE_UNMATCHED]
+    # a box counts with the cross spreads here: a trade holding a box beside an arb has no one level
+    cross_idx = [n for n in real if parts[n].kind in (TYPE_CROSS_EXCHANGE, TYPE_CROSS_PRODUCT, TYPE_BOX)]
     cal_idx = [n for n in real if parts[n].kind == TYPE_CALENDAR]
     src: Optional[int] = None            # the part the trade's level is read from
-    if len(parts) == 1 and parts[0].kind == TYPE_OUTRIGHT:
-        level = _price_level(rows, part_levels[0])
-        src = None if level is not part_levels[0] else 0
-    elif not parts:
+    if len(open_n) == 1 and parts[open_n[0]].kind == TYPE_OUTRIGHT:
+        n0 = open_n[0]
+        level = _price_level(portions[n0][0], part_levels[n0])
+        src = None if level is not part_levels[n0] else n0
+    elif not open_n:
         blank = _open_blank(book, rows)
         level = _price_level(rows, blank)
         if level is blank:
             level = _premium_level(book, rows) or blank
     elif not real:
-        level = _blank_level(parts[0].note)
-    elif len(real) < len(parts):
+        level = _blank_level(parts[open_n[0]].note)
+    elif len(real) < len(open_n):
         # unmatched legs beside the spreads: no one spread speaks for the trade (never guessed)
         level = _blank_level(f"{name} holds {len(real)} spread{'s' if len(real) > 1 else ''} and legs no rule "
                              f"pairs: each spread's level, and why the rest have none, is under sub_spreads")
@@ -2035,8 +2174,7 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         src = cal_idx[0]
         level = part_levels[src]
     elif len({parts[n].kind for n in real}) == 1 and len({tuple(sorted(parts[n].roots)) for n in real}) == 1:
-        # spreads of one kind on the same contracts (ZNA1's month pairs, STEEL's two HRC calendars):
-        # the largest spread's level
+        # spreads of one kind on the same contracts (STEEL's two HRC calendars): the largest spread's level
         src = max(real, key=lambda n: (max(abs(v) for v in parts[n].legs.values()), -n))
         many = "month pairs" if parts[src].kind != TYPE_CALENDAR else "calendars"
         level = {**part_levels[src], "note": _join([part_levels[src].get("note", ""),
@@ -2045,27 +2183,24 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         level = _blank_level(f"{name} holds {len(real)} spreads ({', '.join(_WORDS[parts[n].kind] for n in real)}): "
                              f"each has its level under sub_spreads")
     if src is not None:
-        level = _level_meta(book, level, parts[src].legs, rows_by_cid)
+        level = _level_meta(book, level, parts[src].legs, {r["contract_id"]: r for r in portions[src][0]})
     else:
         live = [r for r in rows if r["status"] == "open" and not r["unrecognised"]]
         core = [r for r in live if not r["hedge"]] or live
         level = _level_meta(book, level, {r["contract_id"]: float(r["lots"]) for r in core}, rows_by_cid)
-    names = {c: r["name"] for c, r in rows_by_cid.items()}
     size_sides = _size_sides(book, [(leg, leg.lots) for leg in legs], names, one)
     if not any(abs(leg.lots) > LEFTOVER_FLOOR for leg in legs):
         # no open futures or LME leg: its FX, FX option or option-on-future legs in their own unit
         size_sides = _row_sides(book, rows)
-    carry, carry_why, carry_date = _roll_downs(book, rows, pleg_by_cid, history, memo)
     hedge = _hedge_block(book, entry, legs)
     size = _size_block(book, entry, legs)
     if kind == TYPE_OUTRIGHT:
         size.update(value_gap=None, unbalanced=None, reason="an outright: not a spread, so no balance")
     leftover = _leftover_block(book, entry, rows_by_cid, pleg_by_cid)
     nxt, nxt_why = _next_block(book, rows, pleg_by_cid)
-    split = entry.get("daily") or {}
-    split_ok = not split.get("reason") and (entry.get("pnl_usd") or {}).get("daily") is not None
-    mismatch = _mismatch(kind, kinds, entry.get("type_labels") or [], entry.get("pb_roots") or [],
-                         "; ".join(s["what_it_is"] for s in subs) or type_note)
+    open_kinds = [parts[n].of_kind for n in open_n]
+    mismatch = _mismatch(kind, open_kinds, entry.get("type_labels") or [], entry.get("pb_roots") or [],
+                         "; ".join(subs[n]["what_it_is"] for n in open_n) or type_note)
     families = sorted({family_of(book.roots[r["root_id"]]) for r in rows
                        if not r["hedge"] and r["root_id"] in book.roots} - {""})
     if not families:
@@ -2100,11 +2235,7 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
                 r.update(hedge=False, roll_down_reason="a currency trade: no roll-down")
         if nxt is not None:
             nxt = {**nxt, "hedge": False}
-    subs = _leg_portions(subs, rows)
-    # the price ratio of each two-leg spread, both legs in USD, China on top (user, 2026-10-01): display only
-    subs = [{**sub, **spread_ratio(book, sub.get("legs") or [], rows_by_cid, sub.get("type", ""), sub.get("level"))}
-            for sub in subs]
-    ratio = trade_ratio(subs, name)
+    ratio = trade_ratio([sub for sub in subs if sub["status"] == "open"], name)
     pnl = entry.get("pnl_usd") or {}
     pnl_open, pnl_locked, pnl_split_reason = _split_trade(rows, pnl.get("ltd"),
                                                           (entry.get("pnl_reasons") or {}).get("ltd"))
@@ -2114,8 +2245,9 @@ def _trade(book, name: str, entry: dict, roll_data: dict, symbols: Dict[str, str
         "first_trade_date": min(str(book.by_id[t]["trade_date"]) for t in tids),
         "pb_roots": list(entry.get("pb_roots") or []), "type_labels": list(entry.get("type_labels") or []),
         "type": kind, "type_note": type_note, "type_mismatch": mismatch, "sub_spreads": subs,
+        "outside_structures": [{"trade_id": t, "reason": why} for t, why in sorted(unplaced.items())],
         "commodity_family": families[0] if len(families) == 1 else (FAMILY_CROSS if families else ""),
-        "what_it_is": _what_it_is(book, kind, parts, rows, hedge),
+        "what_it_is": _what_it_is(book, kind, [parts[n] for n in open_n], rows, hedge),
         "legs": rows, "size": size, "size_sides": size_sides, "level": level, **ratio,
         "carry_per_month": carry, "carry_reason": carry_why, "carry_history_date": carry_date,
         "hedge": hedge, "leftover": leftover,
@@ -2237,7 +2369,7 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
     - ``trade`` (the name), ``trade_ids`` (every fill), ``position_id``
       ('POSITION-STRATEGY-<name>', the Book's and the P&L tab's row id), ``status``,
       ``first_trade_date``, ``pb_roots``, ``type_labels`` (the PBRoot decimals' codes).
-    - ``type`` (``CALENDAR`` | ``CROSS_EXCHANGE`` | ``CROSS_PRODUCT`` | ``MIXED`` | ``OUTRIGHT`` |
+    - ``type`` (``CALENDAR`` | ``CROSS_EXCHANGE`` | ``CROSS_PRODUCT`` | ``BOX`` | ``MIXED`` | ``OUTRIGHT`` |
       '' for hedges only), ``type_note``, ``type_mismatch`` ('' or the sentence),
       ``sub_spreads`` ([{type, what_it_is, root_ids, closed_root_ids, legs, lots (a calendar's
       size), level (as ``level``), note, unmatched (bool), size_sides (as below)}], one per spread:
@@ -2248,6 +2380,29 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
       with ``lots`` the lots this spread holds, ``share``, ``shared``, ``leg_lots``, and quantity,
       value_local, value_usd, roll_down_usd_per_month, pnl_usd {daily, ltd}, pnl_open, pnl_locked
       times the share, so each spread is the sum of its legs and a leg's portions add up to it.
+      Since 2026-10-02 each entry is a **structure** (``structures.py``: the spreads found from the
+      fills) and also carries: ``structure_id`` ('ZNA1/2'), ``structure_type`` (``TERM_STRUCTURE`` |
+      ``CROSS_EXCHANGE`` | ``CROSS_PRODUCT`` | ``BOX`` | ``OUTRIGHT`` | ``UNMATCHED``),
+      ``structure_type_words`` ('Term structure', 'Box' ...), ``origin`` ('ticket' | 'box' | 'pooled' |
+      'pinned' | 'leftover'), ``status`` ('open' | 'closed': nothing open in it; listed after the
+      open ones, with ``legs`` []), ``fill_ids`` (every fill in it, hedges included); ``legs`` its
+      OPEN legs, ``closed_legs`` its legs now flat or expired, ``hedge_legs`` its linked hedges, each
+      the structure's own fills of the contract (``structures.leg_portion``: lots, quantity,
+      ``avg_fill`` the average cost of those fills, ``pnl_usd`` {daily, ltd} their rows summed,
+      ``pnl_open`` / ``pnl_locked`` on that average, ``pnl_open_local`` / ``pnl_locked_local`` the
+      same in the contract's currency, ``fill_share`` (1, or the share of fills two pooled spreads
+      split), ``share`` / ``shared`` / ``leg_lots`` as before); ``pnl`` {ltd, daily, open, locked,
+      each with ``<key>_reason``} over legs, closed legs and hedges; ``quote`` (``structures.
+      structure_quote``: unit, qty_unit, entry, prev, now, change, size, size_lots, size_text,
+      usd_per_unit, balance, balance_leg, hedge_cover, fx_unhedged, fx_note, leftover_legs, legs
+      [converted prices per leg], components, estimate_note, reason); ``components`` (a box: its two
+      arbs, far month first, each {month, contract_ids, what_it_is, unit, entry, prev, now, change,
+      legs (portion rows), level (with its spec), ratio_* / spread_usd_* keys}); ``flags``
+      ([{code ('leftover_legs' | 'leg_off_balance' | 'hedge_wrong_way' | 'hedge_cover_off' |
+      'fx_unhedged'), label, severity, sentence}]).
+    - ``outside_structures`` ([{trade_id, reason}], 2026-10-02): the fills in no structure (an
+      option, an FX position of its own, a contract not recognised, a hedge no single spread
+      takes); with them the structures add up to the trade's LTD.
     - ``size_sides`` (trade and each sub, 2026-10-01): {basis ('lots' | 'physical' | 'value' |
       'notional'), unit ('lots', 't', 'bbl', 'oz' ..., 'USD'; a currency for 'notional'), long,
       short (sizes >= 0; None with ``reason`` when the value at the fill is not known), long_label,
@@ -2317,7 +2472,12 @@ def trade_book(conn: sqlite3.Connection, as_of: str, spreads: Optional[dict] = N
       off (``_split_leg``, ``_split_trade``): open + locked = ``pnl['ltd']`` exactly; both None
       with the reason when a leg cannot be split; a closed trade is all locked in. ``unwound``
       (bool): some lots were taken off (a reduction, a roll, a close, an expiry). Each leg carries
-      the same four keys (``pnl_open`` + ``pnl_locked`` = its ``pnl_usd['ltd']``).
+      the same four keys (``pnl_open`` + ``pnl_locked`` = its ``pnl_usd['ltd']``). Since 2026-10-02 a
+      leg whose fills are all in the trade's structures takes open = its structure legs' open summed
+      (each on its own structure's average cost, user yes under hard rule 7), locked in = its LTD -
+      that; its ``avg_fill`` is ``structures.avg_cost`` over the trade's open fills of it (the net
+      view: with the contract in two structures, open is not lots x (mark - avg_fill)), and it
+      carries ``structure_ids``.
     - ``flags``: [{code ('unbalanced' | 'hedge_oversized' | 'type_mismatch' |
       'leg_without_price' | 'unrecognised'), label, sentence, severity ('red' on 'unrecognised', else 'amber')}].
     - A row the parser could not identify (product UNRECOGNISED, hard rule 6) stays in its trade as

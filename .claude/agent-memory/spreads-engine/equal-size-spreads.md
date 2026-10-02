@@ -40,3 +40,5 @@ User decisions 2026-10-01 ("yes to those decisions"), built in engine/spreads/tr
 
 **How to apply:** verify on the real export loaded into a scratch DB with made-up marks (load.py / marks.py /
 run.py pattern); force UNMATCHED by making a root net to zero with 2 unequal legs each way.
+
+**Superseded in part 2026-10-02** ([[trade-structures]]): STEEL and SCO1 now split by their same-day tickets; `_split_parts` only runs on the pooled fills.

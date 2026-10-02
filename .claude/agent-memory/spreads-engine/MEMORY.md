@@ -14,3 +14,4 @@
 - [Locked in / open split](locked-open-split.md) — 2026-09-30: LTD split per trade and leg, the per-leg avg rule, the linearity check, non-USD locked moves with spot
 - [Equal-size spreads](equal-size-spreads.md) — 2026-10-01: equal-size parts, UNMATCHED, size_sides units (+ notional for FX/options), shared-leg portions, Title Case
 - [Price ratio](price-ratio.md) — 2026-10-01: ratio + USD spread of two-leg spreads, China on top, USD and unit rules, entry spot on or before first fill, choices
+- [Trade structures](trade-structures.md) — 2026-10-02: spreads found from the fills (tickets, boxes, pooled, hedge links), 7.1 avg per structure, choices, $/st not ours
