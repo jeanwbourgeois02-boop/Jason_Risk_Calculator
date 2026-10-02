@@ -12,3 +12,4 @@ Older notes on these files (live.py, pull_marks.py, pull_report.py) are in `.cla
 - [One close, 17:00 New York (2026-09-28)](one_close_1700_2026_09_28.md) — CLOSE_HOUR_NY 17 for every instrument, intraday helpers gone, build_future_rows `snapped`, daily_close probe, leftovers for other lanes
 - [Hung Terminal and one ledger call (2026-10-01)](hung_terminal_one_ledger_2026_10_01.md) — contract dates / LME in _NetLog, skipped once gave_up; ledger left to backfill, LiveFeed fallback
 - [Pull speed, second pass (2026-10-01)](pull_speed_2026_10_01.md) — status["seconds"] per step, apply kept every press, spot+futures one PX_LAST request, timeout findings
+- [Price dates, not traded (2026-10-02)](price_dates_not_traded_2026_10_02.md) — date fields beside PX_LAST, earlier-day price not written, CARRIED item, status["not_traded"]

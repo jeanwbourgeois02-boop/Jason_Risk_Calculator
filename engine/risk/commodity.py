@@ -70,6 +70,10 @@ def _isnan(v: float) -> bool:
     return v != v
 
 
+def _norm_ccy(ccy: Any) -> str:
+    return str(ccy or "").strip().upper()
+
+
 def _join(*parts: str) -> str:
     return "; ".join(p for p in parts if p)
 
@@ -82,9 +86,38 @@ def _sum_series(series: List[pd.Series]) -> Optional[pd.Series]:
     return out if len(out) else None
 
 
+def fx_future_pair(root_id: str) -> Optional[str]:
+    """The currency pair an FX future moves with ('USDCNH' for the SGX USD/CNH future), from
+    contract-master's root: its size unit (the currency a lot is sized in, USD) then its quote
+    currency (CNH); None for a root that is not in the ``fx`` sector (spreads-engine's
+    `engine.spreads.hedges.is_hedge`, the book's one hedge test, called, never copied) or whose
+    units are not two currencies. Never a ticker or id match: the root decides."""
+    try:
+        from data.contracts import load_roots
+        from engine.spreads.hedges import is_hedge
+        root = load_roots().get(str(root_id or "").replace(" ", "").upper())
+    except Exception:  # noqa: BLE001 -- no universe: not an FX future
+        return None
+    if root is None or not is_hedge(root, _FUTURE):
+        return None
+    base, quote = str(root.size_unit or "").strip().upper(), str(root.currency or "").strip().upper()
+    if len(base) != 3 or len(quote) != 3 or not base.isalpha() or not quote.isalpha() or base == quote:
+        return None
+    return f"{base}{quote}"
+
+
 class _PerLot:
     """Per-lot USD P&L series per (root, contract, multiplier, currency), cut at as_of, memoised
-    for one `book_risk` call."""
+    for one `book_risk` call.
+
+    An FX future (a root of contract-master's ``fx`` sector: the SGX USD/CNH future) moves on its
+    own contract's closes when the price history has them; otherwise (none pulled yet, or a
+    contract id stored under an older Bloomberg root, 'UCV26 Curncy' for root XUC) on its pair's
+    daily close in the same history ('USDCNH', CNH per USD, `fx_future_pair`): the close change x
+    our multiplier (100,000 USD a lot) x lots x USD per quote unit that day, the formula of a
+    contract's own closes (`CommodityHistory.daily_pnl_series_for_position`), so its P&L is in CNH
+    converted at the day's USDCNH, as the valuation converts it. A risk input only: nothing is
+    written, no mark is read."""
 
     def __init__(self, history, as_of: str):
         self.history = history
@@ -108,7 +141,53 @@ class _PerLot:
                                                     f"{self.as_of} in the Bloomberg price history")
                 else:
                     self._memo[key] = (s.astype(float), attrs, "")
+            if self._memo[key][0] is None:
+                pair = fx_future_pair(root_id)
+                if pair is not None:
+                    self._memo[key] = self._pair_per_lot(pair, contract_id, multiplier, currency, self._memo[key][2])
         return self._memo[key]
+
+    def _pair_per_lot(self, pair: str, contract_id: str, multiplier: float, currency: str, own_why: str
+                      ) -> Tuple[Optional[pd.Series], dict, str]:
+        """(per-lot USD P&L of an FX future on its pair's close, attrs, why None): see the class."""
+        from engine.risk.commodity_history import FX_TOLERANCE_DAYS
+        h = self.history
+        if not getattr(h, "available", False):
+            return None, {}, own_why or getattr(h, "reason", "") or "no price history"
+        close = h.fx_series(pair)
+        if close.empty:
+            return None, {}, (f"{own_why}; and no {pair} closes to move it on "
+                              f"({close.attrs.get('reason') or 'none on file'})")
+        close = close.astype(float).sort_index()
+        close.index = pd.to_datetime(close.index)
+        change = close.diff().iloc[1:]
+        change = change[change.index <= self.cut]
+        local = change * float(multiplier)
+        fx_pair, missing = "", 0
+        if _norm_ccy(currency) != "USD":
+            conv = h.usd_per_unit(currency)
+            fx_pair = conv.attrs.get("pair", "")
+            if conv.empty:
+                return None, {}, f"{own_why}; and no USD conversion for {currency} ({conv.attrs.get('reason', '')})"
+            conv = conv.astype(float).sort_index()
+            conv.index = pd.to_datetime(conv.index)
+            merged = pd.merge_asof(pd.DataFrame({"date": local.index, "pnl": local.to_numpy()}),
+                                   pd.DataFrame({"date": conv.index, "usd": conv.to_numpy()}),
+                                   on="date", direction="backward", tolerance=pd.Timedelta(days=FX_TOLERANCE_DAYS))
+            missing = int(merged["usd"].isna().sum())
+            usd = pd.Series((merged["pnl"] * merged["usd"]).to_numpy(), index=local.index)
+        else:
+            usd = local
+        usd = usd.dropna().astype(float)
+        usd.index.name = "date"
+        if usd.empty:
+            return None, {}, f"{own_why}; and no {pair} close change on or before {self.as_of}"
+        attrs = {"reason": "", "research_contract_id": pair, "months_ahead": None, "own_from": None,
+                 "fallback_days": int(len(usd)), "fx_pair": fx_pair, "fx_missing_days": missing,
+                 "note": (f"{contract_id}: an FX future with no closes of its own in the price history, so it moves "
+                          f"with the {pair} close ({pair[3:]} per {pair[:3]}) x {float(multiplier):,.0f} a lot, "
+                          f"converted at the day's {fx_pair or pair}")}
+        return usd.rename(contract_id), attrs, ""
 
 
 def lme_history_contract(history, root_id: str, year: Optional[int], month: Optional[int],
@@ -178,6 +257,8 @@ def contract_series(row: dict, per_lot: _PerLot, as_of: str) -> Tuple[dict, Opti
     unit, attrs, why = per_lot.get(root_id, hist_id, mult, d["currency"])
     if attrs.get("research_contract_id"):          # the id the history read (risk-history's attr name)
         d["history_contract"] = str(attrs["research_contract_id"])
+    if attrs.get("note") and not d["note"]:        # an FX future on its pair's closes (`_PerLot`)
+        d["note"] = str(attrs["note"])
     for k in ("months_ahead", "own_from", "fallback_days", "fx_pair", "fx_missing_days"):
         if k in attrs:
             v = attrs[k]

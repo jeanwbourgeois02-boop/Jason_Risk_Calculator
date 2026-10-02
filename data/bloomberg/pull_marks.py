@@ -138,6 +138,28 @@ SRC_SPOT_FWD = "BBG_BFXFORWARD"
 SRC_FUTURE = "BBG_BDH"
 SRC_INTERP = "BBG_INTERP"
 
+# The date of a live price (2026-10-02, user: SHFE shut for Golden Week, 1-8 Oct, and a press on
+# the 2nd wrote its 30 Sep price as a fresh mark of the 2nd). Asked beside PX_LAST / PX_MID on a
+# live press, in this order: TRADING_DT_REALTIME, the exchange's trading date of the price (no
+# time zone: a Globex or SHFE night-session price already carries the next trading day), then
+# LAST_UPDATE_DT, the date of the security's last update (in the Terminal's own time zone; what
+# data/bloomberg/ticker_check.py's staleness check reads). When both come back the LATER rules, so
+# a price either field calls today's is never held back. Neither verified on a Terminal yet.
+LIVE_PRICE_DATE_FIELDS = ("TRADING_DT_REALTIME", "LAST_UPDATE_DT")
+
+
+def live_price_date(got: Optional[Dict[str, object]]) -> Tuple[Optional[date], str]:
+    """(the date of a live price, the field that gave it) from one ticker's ReferenceData
+    answer: the later of LIVE_PRICE_DATE_FIELDS that came back as a date; (None, '') when
+    Bloomberg gave neither."""
+    best: Optional[date] = None
+    field = ""
+    for name in LIVE_PRICE_DATE_FIELDS:
+        day = _to_date((got or {}).get(name))
+        if day is not None and (best is None or day > best):
+            best, field = day, name
+    return best, field
+
 _NY_ZONE: Optional[ZoneInfo] = None
 
 
@@ -642,7 +664,8 @@ def fetch_reference(session, service, tickers: Sequence[str], fields: Sequence[s
 
 def fetch_historical(session, service, tickers: Sequence[str], field: str, as_of: date,
                       diag: Optional[Diagnostics] = None, tag: Optional[dict] = None,
-                      start: Optional[date] = None) -> Dict[str, Optional[float]]:
+                      start: Optional[date] = None,
+                      dates: Optional[Dict[str, Optional[date]]] = None) -> Dict[str, Optional[float]]:
     """Thin network layer: HistoricalDataRequest for [start, as_of] (default start=as_of,
     i.e. a single date, unchanged from before `start` existed). Returns {ticker: value or
     None} -- the MOST RECENT point on or before `as_of` when the range covers more than
@@ -651,7 +674,10 @@ def fetch_historical(session, service, tickers: Sequence[str], field: str, as_of
     returns fieldData points in ascending date order, so the last element is the latest --
     for a single-day range there is only one point, so this is exactly the old behaviour
     when `start` is not given). Same diagnostics/TIMEOUT/correlation-id behaviour as
-    fetch_reference (see its docstring)."""
+    fetch_reference (see its docstring).
+
+    `dates` (2026-10-02): a dict filled with {ticker: the date of the point used, or None when
+    the point carried none}, so a caller can tell a value of `as_of` from an earlier day's."""
     request = service.createRequest("HistoricalDataRequest")
     for t in tickers:
         request.getElement("securities").appendValue(t)
@@ -693,6 +719,7 @@ def fetch_historical(session, service, tickers: Sequence[str], field: str, as_of
             sec_data = msg.getElement("securityData")
             ticker = sec_data.getElementAsString("security")
             value = None
+            point_day: Optional[date] = None
             field_data_repr: Dict[str, object] = {}
             if sec_data.hasElement("fieldData"):
                 fd = sec_data.getElement("fieldData")
@@ -706,7 +733,11 @@ def fetch_historical(session, service, tickers: Sequence[str], field: str, as_of
                     if point.hasElement(field):
                         value = point.getElement(field).getValue()
                         field_data_repr = {field: value}
+                    if dates is not None and point.hasElement("date"):
+                        point_day = _to_date(point.getElement("date").getValue())
             out[ticker] = value
+            if dates is not None:
+                dates[ticker] = point_day
             raw_secs.append({
                 "security": ticker, "fieldData": field_data_repr,
                 "fieldExceptions": _parse_field_exceptions(sec_data),
@@ -1066,6 +1097,7 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
                        lookback_days: int = 7, mid_first=(),
                        snapped: Optional[str] = None,
                        prefetched: Optional[Dict[str, Dict[str, object]]] = None,
+                       price_dates: Optional[List[dict]] = None,
                        ) -> Tuple[List[dict], List[str], List[dict]]:
     """FUTURE_PX. Default (`live=False`, the historical/backfill CLI path): unchanged --
     HistoricalDataRequest PX_SETTLE for `as_of` alone.
@@ -1105,7 +1137,18 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
 
     A value that is not a finite number (Bloomberg's 'N.A.', a NaN; 2026-09-29, Phase G
     "Smooth and contained") is never written and never stops the other rows: live, it counts
-    as no PX_LAST (the PX_SETTLE fallback is tried); otherwise the row fails with its reason."""
+    as no PX_LAST (the PX_SETTLE fallback is tried); otherwise the row fails with its reason.
+
+    `price_dates` (live only, 2026-10-02, user: SHFE shut for Golden Week and its 30 Sep price
+    written as a fresh mark of 2 Oct): a list, given by the live pull, that turns on the price's
+    own date. The live request then also asks LIVE_PRICE_DATE_FIELDS, and the PX_SETTLE fallback
+    reads its point's date. A price whose date (`live_price_date`, the later field) is before
+    `as_of` -- the exchange has not traded since -- is NOT written: nothing is ever written under a
+    date Bloomberg did not give it, and the valuation's near-marks rule carries the last close
+    and names it (hard rule 2). It is appended to `price_dates` as {instrument_id, settle_date,
+    ticker, kind "carried", price_date (ISO), field, value}, and is neither a row, a warning nor
+    a failure. A price that came with no date is written as before and appended with kind
+    "undated" (price_date ''). Not given: the request and the rows are exactly as before."""
     rows = [r for r in requests if r.mark_type == "FUTURE_PX"]
     if not rows:
         return [], [], []
@@ -1114,12 +1157,14 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
     out, warnings, failures = [], [], []
     if live:
         mid_first = set(mid_first or ())
+        dated = price_dates is not None
         if prefetched is not None and not mid_first:
             # copies: the mid substitution below never writes into the shared answer
             live_data = {t: dict(prefetched[t]) for t in tickers if t in prefetched}
         else:
             live_data = fetch_reference(session, service, tickers,
-                                        ["PX_LAST"] + (["PX_MID"] if mid_first else []),
+                                        ["PX_LAST"] + (["PX_MID"] if mid_first else [])
+                                        + (list(LIVE_PRICE_DATE_FIELDS) if dated else []),
                                         diag=diag, tag={"purpose": "FUTURE_PX_LIVE"})
         for ticker in mid_first:       # a listed option: Bloomberg's mid stands in for the last trade
             got = live_data.get(ticker) or {}
@@ -1128,26 +1173,54 @@ def build_future_rows(session, service, requests: Sequence[RequestRow], as_of: d
         missing = sorted({r.bbg_ticker for r in rows
                           if _plain_number((live_data.get(r.bbg_ticker) or {}).get("PX_LAST")) is None})
         settle_data: Dict[str, Optional[float]] = {}
+        settle_dates: Optional[Dict[str, Optional[date]]] = {} if dated else None
         if missing:
             settle_data = fetch_historical(session, service, missing, "PX_SETTLE", as_of, diag,
                                            {"purpose": "FUTURE_PX_FALLBACK"},
-                                           start=as_of - timedelta(days=lookback_days))
+                                           start=as_of - timedelta(days=lookback_days), dates=settle_dates)
+
+        def _dated(r, value: float, day: Optional[date], field: str, detail: str) -> bool:
+            """True when the row may be written: no date check asked, a date on or after
+            `as_of`, or no date at all (noted); False for an earlier day's price (carried)."""
+            if not dated:
+                return True
+            entry = {"instrument_id": r.instrument_id, "settle_date": r.settle_date, "ticker": r.bbg_ticker,
+                     "price_date": day.isoformat() if day else "", "field": field, "value": value,
+                     "detail": detail}
+            if day is None:
+                price_dates.append({**entry, "kind": "undated"})
+                return True
+            if day < as_of:
+                price_dates.append({**entry, "kind": "carried"})
+                return False
+            return True
+
         for r in rows:
-            raw_live = (live_data.get(r.bbg_ticker) or {}).get("PX_LAST")
+            got = live_data.get(r.bbg_ticker) or {}
+            raw_live = got.get("PX_LAST")
             live_val = _plain_number(raw_live)
             if live_val is not None:
-                out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
-                           "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": live_val,
-                           "source": SRC_FUTURE, "snapped_at": snapped,
-                           "detail": f"live {live_data[r.bbg_ticker].get('_field', 'PX_LAST')}"})
+                field = got.get("_field", "PX_LAST")
+                day, day_field = live_price_date(got) if dated else (None, "")
+                detail = f"live {field}"
+                if dated and day is None:
+                    detail += " (Bloomberg gave no date for it: written as today's)"
+                if _dated(r, live_val, day, day_field, detail):
+                    out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
+                               "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": live_val,
+                               "source": SRC_FUTURE, "snapped_at": snapped, "detail": detail})
                 continue
             raw_settle = settle_data.get(r.bbg_ticker)
             settle_val = _plain_number(raw_settle)
             if settle_val is not None:
-                out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
-                           "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": settle_val,
-                           "source": SRC_FUTURE, "snapped_at": snapped,
-                           "detail": f"no live PX_LAST; used the latest PX_SETTLE on or before {as_of.isoformat()}"})
+                day = (settle_dates or {}).get(r.bbg_ticker)
+                detail = f"no live PX_LAST; used the latest PX_SETTLE on or before {as_of.isoformat()}"
+                if dated and day is None:
+                    detail += " (Bloomberg gave no date for it: written as today's)"
+                if _dated(r, settle_val, day, "PX_SETTLE" if day else "", detail):
+                    out.append({"as_of_date": as_of.isoformat(), "instrument_id": r.instrument_id,
+                               "settle_date": r.settle_date, "mark_type": "FUTURE_PX", "value": settle_val,
+                               "source": SRC_FUTURE, "snapped_at": snapped, "detail": detail})
                 continue
             detail = (f"no live PX_LAST and no PX_SETTLE in the {lookback_days} day(s) up to and "
                      f"including {as_of.isoformat()}")

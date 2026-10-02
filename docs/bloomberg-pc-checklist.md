@@ -27,6 +27,7 @@ checks marked **auto** and writes a report and a fixes worksheet under `reports/
 | 12 | LME curve tickers and prompt dates (cash, 3M, monthlies) | The LME forwards' marks | auto: `--lme` |
 | 15 | Each exchange's close / settlement time (`close_time` in `config/contracts.csv`, `data.contracts.EXCHANGE_CLOSE`): LME, SGX incl. the USD/CNH future, CME HRC and TIO, ICE Europe per product, HKEX, EEX, GME are best estimates | The "legs closed Nh apart" note and hedge % (2-day moves for legs closing hours apart) read them | **manual**: each exchange's contract specification; the time of PX_LAST's last update |
 | 14 | FX forward points divisor and broken-date forwards (`docs/open-questions.md` 27, 28, 71) | Only if Jason books FX forwards (none in his export yet) | auto: `py 2_launcher.py doctor --bloomberg` |
+| 15 | A live price's own date: `TRADING_DT_REALTIME` and `LAST_UPDATE_DT` on an SHFE contract during Golden Week (to 8 Oct) and on a CME future in the evening session | A pull holds back a price dated before the book's day (last close carried); if `TRADING_DT_REALTIME` jumps ahead to the next session during a holiday, a stale SHFE price still gets through | **manual**: `FLDS` / BDP both fields on ZNAX6 Comdty and CLZ6 Comdty, then press Pull Bloomberg now and read the Data tab's "not traded since" line |
 
 After the fixes are applied: one **Pull Bloomberg now**, then the Data tab's status line
 should read marks complete, reference closes complete and contract dates from Bloomberg.

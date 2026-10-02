@@ -1215,7 +1215,8 @@ class _CombinedPxLast:
     and from then on None, so the spot step's per-ticker retry and the futures' own request
     go to Bloomberg as before: a failed combined request never fails the futures unasked.
     Tagged purpose LIVE_SPOT in the diagnostics, which is what the spot rows' "Bloomberg
-    said" reads; nothing reads the futures' FUTURE_PX_LIVE tag."""
+    said" reads; nothing reads the futures' FUTURE_PX_LIVE tag. Since 2026-10-02 it also asks
+    pull_marks.LIVE_PRICE_DATE_FIELDS, the futures' price dates (the spots ignore them)."""
 
     def __init__(self, tickers, get_session: Callable, diag=None):
         self.tickers = sorted(set(tickers))
@@ -1231,7 +1232,10 @@ class _CombinedPxLast:
             from data.bloomberg import pull_marks as pm
             session, service = self._get_session()          # SessionUnavailable raised on
             try:
-                self.data = pm.fetch_reference(session, service, self.tickers, ["PX_LAST"], diag=self._diag,
+                # The futures' price dates ride along (2026-10-02, LIVE_PRICE_DATE_FIELDS): the
+                # spots ignore them, and a security without one answers the others as ever.
+                self.data = pm.fetch_reference(session, service, self.tickers,
+                                               ["PX_LAST", *pm.LIVE_PRICE_DATE_FIELDS], diag=self._diag,
                                                tag={"purpose": "LIVE_SPOT", "combined": "LIVE_SPOT+FUTURE_PX_LIVE"}
                                                ) or {}
             except Exception as exc:  # noqa: BLE001 -- raised once below, then asked as before
@@ -1386,6 +1390,114 @@ def _step_outcome(name: str, block, failed_items: int = 0, asked: int = 0) -> Tu
         realised = len(realised) if isinstance(realised, (list, tuple)) else realised
         return "ok", block.get("refrozen_summary") or (f"{realised} realised" if realised is not None else "")
     return "ok", ""
+
+
+# --------------------------------------------------------------------------- price dates
+# A live price of an earlier day (2026-10-02, user: "do that"): SHFE shut for Golden Week, 1-8 Oct,
+# and a press on the 2nd wrote SHFE's 30 Sep price as a fresh FUTURE_PX of the 2nd, which every
+# screen then read as today's price. The futures step asks each price's own date
+# (pull_marks.LIVE_PRICE_DATE_FIELDS); a price dated before the book's day is not written (the
+# valuation's near-marks rule carries the last close and names it, hard rule 2) and is reported
+# here, under its own head, never as a failure. A price Bloomberg gave no date for is written as
+# before and said here too.
+NOT_TRADED_LISTED = 12          # the summary sentence names at most this many contracts
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _day_words(iso: str) -> str:
+    """'30 Sep' from '2026-09-30'; the text itself when it is not a date."""
+    try:
+        d = date.fromisoformat(str(iso))
+    except ValueError:
+        return str(iso or "")
+    return f"{d.day} {_MONTH_ABBR[d.month - 1]}"
+
+
+def _contract_words(conn: Optional[sqlite3.Connection], instrument_id: str, roots: Optional[dict] = None) -> str:
+    """'SHFE zinc Nov26' for a future, 'SHFE zinc Nov26 25000 call' for an option on one: the
+    root's name in config/contracts.csv and the month of the canonical id; the id without its
+    yellow key when either cannot be read."""
+    text = str(instrument_id or "")
+    plain = text.rsplit(" ", 1)[0] if text.endswith((" Comdty", " Index", " Curncy")) else text
+    try:
+        from data.contracts.tickers import month_from_code, parse_bbg_ticker, parse_option_ticker
+        root_id = ""
+        if conn is not None:
+            row = conn.execute("SELECT base_ccy FROM instruments WHERE instrument_id = ?", (text,)).fetchone()
+            root_id = str(row[0]) if row else ""
+        root = (roots or {}).get(root_id)
+        if root is None:
+            return plain
+        opt = parse_option_ticker(text)
+        parts = opt[:3] if opt else parse_bbg_ticker(text)
+        if not parts:
+            return plain
+        _, code, year = parts[:3]
+        words = f"{root.name} {_MONTH_ABBR[month_from_code(code) - 1]}{int(year) % 100:02d}"
+        if opt:
+            words += f" {opt[4]} {'call' if opt[3] == 'C' else 'put'}"
+        return words
+    except Exception:  # noqa: BLE001 -- a name is display only
+        return plain
+
+
+def not_traded_block(conn: Optional[sqlite3.Connection], entries: List[dict], as_of: str) -> dict:
+    """status["not_traded"]: the futures and listed options of this press whose live price was
+    of an earlier day (kind "carried": not written, the last close carried) or came with no date
+    (kind "undated": written as today's), from build_future_rows' `price_dates`.
+    {as_of, fields, count, contracts: [{instrument_id, name, ticker, settle_date, price_date,
+    field, value, sentence}], undated_count, undated: [same, price_date ''], summary}."""
+    from data.bloomberg.pull_marks import LIVE_PRICE_DATE_FIELDS
+    try:
+        from data.contracts import load_roots
+        roots = load_roots()
+    except Exception:  # noqa: BLE001 -- names fall back to the ids
+        roots = {}
+    contracts, undated, seen = [], [], set()
+    for e in entries or []:
+        key = (e.get("instrument_id"), e.get("settle_date"), e.get("kind"))
+        if key in seen:
+            continue
+        seen.add(key)
+        name = _contract_words(conn, str(e.get("instrument_id") or ""), roots)
+        out = {"instrument_id": e.get("instrument_id", ""), "name": name, "ticker": e.get("ticker", ""),
+               "settle_date": e.get("settle_date", ""), "price_date": e.get("price_date", ""),
+               "field": e.get("field", ""), "value": e.get("value")}
+        if e.get("kind") == "carried":
+            out["sentence"] = f"{name}: no trade since {_day_words(out['price_date'])}, last close carried"
+            contracts.append(out)
+        else:
+            out["sentence"] = f"{name}: Bloomberg gave no date for its price, written as today's"
+            undated.append(out)
+    contracts.sort(key=lambda x: (x["price_date"], x["name"]))
+    undated.sort(key=lambda x: x["name"])
+    block = {"as_of": as_of, "fields": list(LIVE_PRICE_DATE_FIELDS), "count": len(contracts),
+             "contracts": contracts, "undated_count": len(undated), "undated": undated}
+    block["summary"] = not_traded_summary(block)
+    return block
+
+
+def not_traded_summary(block: Optional[dict]) -> str:
+    """One sentence for status["not_traded"]; '' when there is nothing to say."""
+    if not isinstance(block, dict):
+        return ""
+    parts = []
+    contracts = block.get("contracts") or []
+    if contracts:
+        n = len(contracts)
+        named = ", ".join(f"{c.get('name', '')} (no trade since {_day_words(c.get('price_date', ''))})"
+                          for c in contracts[:NOT_TRADED_LISTED])
+        more = f" and {n - NOT_TRADED_LISTED} more" if n > NOT_TRADED_LISTED else ""
+        parts.append(f"{n} contract{'' if n == 1 else 's'} not traded since an earlier day, "
+                     f"last close carried: {named}{more}")
+    undated = block.get("undated") or []
+    if undated:
+        n = len(undated)
+        parts.append(f"{n} price{'' if n == 1 else 's'} came with no date from Bloomberg and "
+                     f"{'was' if n == 1 else 'were'} written as today's: "
+                     + ", ".join(u.get("name", "") for u in undated[:NOT_TRADED_LISTED])
+                     + (f" and {n - NOT_TRADED_LISTED} more" if n > NOT_TRADED_LISTED else ""))
+    return ". ".join(parts) + ("." if parts else "")
 
 
 # --------------------------------------------------------------------------- one pull
@@ -2296,7 +2408,15 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
     empty, plus "skipped" and "deferred": True); `LiveFeed` runs the call itself when no
     backfill run starts. A press with no session, and every other caller (the default
     False: the command line, the tests), runs the ledger here as before. A crash of the
-    cycle and a press with no Bloomberg at all are unchanged."""
+    cycle and a press with no Bloomberg at all are unchanged.
+
+    Price dates (2026-10-02, user: SHFE shut for Golden Week, its 30 Sep price written as a
+    fresh mark of 2 Oct): the futures and listed options are asked their price's own date
+    (pull_marks.LIVE_PRICE_DATE_FIELDS, the later of the two). A price dated before `today` is
+    not written (the valuation's near-marks rule carries the last close, hard rule 2): its item
+    is status "CARRIED" with the sentence, never FAILED, counted in status["carried"], and the
+    contracts are listed in status["not_traded"] (`not_traded_block`), with the prices that came
+    with no date (written as before). The closing sentence and the futures step's detail say so."""
     from data.ingest.schema import connect
     clock_started = time.perf_counter()
     started = _now_iso()
@@ -2385,6 +2505,8 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             sentence = f"Pull finished: {status.get('written', 0)} of {status.get('requested', 0)} marks written"
             if status.get("failed"):
                 sentence += f", {status['failed']} failed"
+            if status.get("carried"):
+                sentence += f", {status['carried']} not traded since an earlier day (last close carried)"
             if bad:
                 sentence += f"; problems in {', '.join(bad)}"
         status["progress"] = progress.final(outcome, sentence)
@@ -2562,14 +2684,26 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             # (fut_reqs and listed are read above, before the spots.) When the spots' request
             # carried the futures too, its answer stands in for their own PX_LAST request.
 
+            # A price of an earlier day (2026-10-02: SHFE shut for Golden Week) is not written:
+            # build_future_rows reports it in `price_dates`, gathered into status["not_traded"].
             def _ask_futures(chunk):
                 prefetched = combined.for_chunk({r.bbg_ticker for r in chunk}) if combined is not None else None
                 session, service = shared.get()
+                price_dates: List[dict] = []
                 rows, warns, failures = pm.build_future_rows(
                     session, service, chunk, today, diag, live=True,
                     mid_first={r.bbg_ticker for r in chunk if r.instrument_id in listed}, snapped=snapped,
-                    prefetched=prefetched)
-                return {"rows": rows, "warnings": warns, "failures": failures}
+                    prefetched=prefetched, price_dates=price_dates)
+                return {"rows": rows, "warnings": warns, "failures": failures, "price_dates": price_dates}
+
+            def _futures_judge(got):
+                outcome, detail = _step_outcome("", None, failed_items=len(got.get("failures") or []),
+                                                asked=len(fut_reqs))
+                carried = sum(1 for e in got.get("price_dates") or [] if e.get("kind") == "carried")
+                if carried:
+                    detail += (f"; {carried} not traded since an earlier day, not written "
+                               "(the last close carried)")
+                return outcome, detail
 
             futures = empty
             if no_session:
@@ -2579,13 +2713,20 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                 try:
                     done, futures = _run("futures", timings, "futures", _ask_in_chunks, "futures", fut_reqs,
                                          REQUEST_CHUNK["futures"], _ask_futures, net, progress,
-                                         judge=_marks_judge(len(fut_reqs)), quiet=not fut_reqs)
+                                         judge=_futures_judge, quiet=not fut_reqs)
                     futures = futures if done else _all_failed(fut_reqs, futures)
                 except SessionUnavailable:
                     no_session = True
                     futures = _not_asked(fut_reqs)
             progress.add_done(len(requests))             # every row is settled now, asked or not
             warnings.extend(forwards["warnings"] + futures["warnings"])
+            try:
+                status["not_traded"] = not_traded_block(conn, futures.get("price_dates") or [], today.isoformat())
+            except Exception as exc:  # noqa: BLE001 -- the words only; the marks are unaffected
+                status["not_traded"] = {"as_of": today.isoformat(), "count": 0, "contracts": [], "undated_count": 0,
+                                        "undated": [], "summary": "", "error": _plain_error(exc)}
+            carried_keys = {(c["instrument_id"], c["settle_date"]): c
+                            for c in status["not_traded"].get("contracts") or []}
 
             # The marks, in one short write each: the requested rows, then Bloomberg's own
             # FWD_CURVE tenor points at their own dates as official forwards -- kept out of
@@ -2732,6 +2873,12 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
                                   "detail": f"settle date already past on {today}: settled, nothing to price"})
                     continue
                 hit = ok_keys.get((r.instrument_id, r.mark_type, settle))
+                carried = carried_keys.get((r.instrument_id, r.settle_date)) if r.mark_type == "FUTURE_PX" else None
+                if carried is not None and not hit:
+                    items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
+                                  "status": "CARRIED", "value": None, "source": "",
+                                  "detail": carried["sentence"] + " (not written as today's price)"})
+                    continue
                 if hit:
                     items.append({"instrument_id": r.instrument_id, "mark_type": r.mark_type, "settle_date": settle,
                                   "status": "OK", "value": hit["value"], "source": hit["source"],
@@ -2746,6 +2893,7 @@ def pull_once(db_path, as_of_date: Optional[str] = None, host: str = "localhost"
             status["items"] = items
             status["failed"] = sum(1 for i in items if i["status"] == "FAILED")
             status["skipped"] = sum(1 for i in items if i["status"] == "SKIPPED")
+            status["carried"] = sum(1 for i in items if i["status"] == "CARRIED")
 
             # Connected or not: no session is no Bloomberg for this press; a session whose
             # every request raised with nothing landed is a failed pull; anything landed is

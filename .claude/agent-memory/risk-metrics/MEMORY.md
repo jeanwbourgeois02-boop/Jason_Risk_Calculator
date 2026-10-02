@@ -9,3 +9,4 @@
 - [z at entry, now, exit 2026-10-01](z_entry_now_exit_2026_10_01.md) — per spread from trade_book sub_spreads, 1 calendar year window, closed trades via trade_book(open_date).
 - [FX trades in trade risk 2026-09-30](fx_trades_in_trade_risk_2026_09_30.md) — subset_var(all) = book_risk VaR: FX trades + settled cash as legs, attribution by PBRoot name, CNH hedge % side effect.
 - [z on the price ratio 2026-10-01](z_on_price_ratio_2026_10_01.md) — z on spreads-engine ratio_spec, ratio_usual window mean, level fallback; since 10-02 z entry/now on the Book's own ratio.
+- [USD/CNH future risk 2026-10-02](usdcnh_future_risk_2026_10_02.md) — fx-sector future on own closes else USDCNH by root; stale UC ids pre-09-30; synthetic history misleads hedge %.

@@ -139,6 +139,7 @@ from engine.ladder.positions import book_positions
 from engine.pnl import stress as stress_scenarios
 from engine.risk.commodity import (KIND_COMMODITY, KIND_SECTOR, KIND_SPREAD, ROLE_PART, ROLE_VIEW, _PerLot,
                                    commodity_underlyers)
+from engine.risk.commodity import _num as _num_or_nan
 from engine.risk.commodity_history import CommodityHistory, load_commodity_history
 from engine.risk.config import load_config
 from engine.risk.history import YIELDS_FILE, History, load_history
@@ -514,7 +515,12 @@ def _commodity_positions(conn: sqlite3.Connection, as_of: str) -> Tuple[Optional
         curve = curve_positions(conn, as_of, spreads=spreads)
     except Exception as exc:  # noqa: BLE001
         return None, None, [f"commodity positions could not be computed ({type(exc).__name__}: {exc})"]
-    missing.extend(f"commodity positions: {r}" for r in (curve.get("reasons") or []))
+    # a row's own note that still carries a delta (an FX future stored under an older Bloomberg
+    # root: no contract month, lots and delta known) is not left out of the risk: not listed here;
+    # a contract the risk cannot count is listed by `commodity_underlyers` with its own reason
+    counted = {f"{r.get('contract_id')}: {r.get('reason')}" for r in (curve.get("rows") or [])
+               if r.get("reason") and not math.isnan(_num_or_nan(r.get("delta_lots")))}
+    missing.extend(f"commodity positions: {r}" for r in (curve.get("reasons") or []) if r not in counted)
     if not (curve.get("rows") or curve.get("flat_contracts")):
         return curve, None, missing
     if spreads is None:
